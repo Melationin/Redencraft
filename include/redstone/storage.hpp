@@ -17,9 +17,14 @@ struct LoadedWorld {
   std::vector<std::pair<int, int>> chunks;
   std::vector<SavedTickData> ticks;
   std::vector<nbt::Tag> blockEntities;
+  std::vector<nbt::Tag> entities;
+  std::int64_t seed = 0;
 };
-// regionDir is the selected dimension's region directory; worldDir contains
-// level.dat.
+// 26.1's namespaced overworld path takes precedence over legacy world/region.
+std::filesystem::path defaultRegionDirectory(const std::filesystem::path &worldDir);
+// regionDir is the selected dimension's region directory; its sibling entities
+// directory is read without generating/loading additional terrain chunks.
+// worldDir contains level.dat and namespaced data/minecraft saved data.
 LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
                            const std::filesystem::path &regionDir,
                            int minY = -64, int maxY = 320);

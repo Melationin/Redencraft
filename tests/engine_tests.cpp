@@ -1,16 +1,103 @@
 #include "redstone/engine.hpp"
+#include "redstone/entity.hpp"
 #include <algorithm>
 #include <cassert>
 #include <tuple>
 #include <vector>
 using namespace redstone;
+void addedBlockTicks() {
+  World lamp;
+  lamp.loadChunk(0, 0);
+  Pos p{4, 65, 4}, power{5, 65, 4};
+  lamp.setBlock(p, defaultState("redstone_lamp"));
+  lamp.setBlock(power, defaultState("redstone_block"));
+  assert(lamp.getBlock(p).get("lit") == "true");
+  assert(!lamp.hasScheduledTick(p, "redstone_lamp"));
+  lamp.setBlock(power, defaultState("air"));
+  assert(lamp.hasScheduledTick(p, "redstone_lamp"));
+  for (int i = 0; i < 3; ++i) lamp.tick();
+  assert(lamp.getBlock(p).get("lit") == "true");
+  // The callback rechecks power rather than unconditionally toggling LIT.
+  lamp.setBlock(power, defaultState("redstone_block"));
+  lamp.tick();
+  assert(lamp.getBlock(p).get("lit") == "true");
+  assert(!lamp.hasScheduledTick(p, "redstone_lamp"));
+  lamp.setBlock(power, defaultState("air"));
+  for (int i = 0; i < 3; ++i) lamp.tick();
+  assert(lamp.getBlock(p).get("lit") == "true");
+  lamp.tick();
+  assert(lamp.getBlock(p).get("lit") == "false");
+  assert(blockMetadata(defaultState("redstone_lamp")).conductor);
+  assert(blockMetadata(defaultState("stone_brick_wall")).explosionResistance == 6);
+  assert(blockMetadata(defaultState("stone_brick_wall")).hardness == 1.5f);
+
+  World flicker;
+  flicker.loadChunk(0, 0);
+  flicker.rawSetBlock(p, defaultState("redstone_lamp").with("lit", "true"));
+  flicker.neighborChanged(p, "redstone_block"); // First off edge is due at 4.
+  flicker.tick();
+  flicker.setBlock(power, defaultState("redstone_block"));
+  flicker.tick();
+  flicker.setBlock(power, defaultState("air")); // Does not restart the 4-tick delay.
+  assert(flicker.scheduledTickCount() == 1 &&
+         flicker.scheduledTicks()[0].trigger == 4);
+  flicker.tick();
+  assert(flicker.getBlock(p).get("lit") == "true");
+  flicker.tick();
+  assert(flicker.getBlock(p).get("lit") == "false");
+
+  World sand;
+  sand.loadChunk(0, 0);
+  sand.rawSetBlock({4, 60, 4}, defaultState("smooth_stone"));
+  sand.setBlock(p, defaultState("sand"));
+  assert(sand.hasScheduledTick(p, "sand"));
+  sand.tick();
+  assert(sand.getBlock(p).name() == "minecraft:sand" && sand.entities.empty());
+  sand.tick();
+  assert(sand.getBlock(p).name() == "minecraft:air");
+  assert(sand.entities.size() == 1);
+  auto *falling = dynamic_cast<FallingBlockEntity *>(sand.entities[0].get());
+  assert(falling && falling->blockState.name() == "minecraft:sand");
+  assert(falling->time == 1); // Scheduled spawn precedes this tick's entity phase.
+  for (int i = 0; i < 30; ++i) sand.tick();
+  assert(sand.getBlock({4, 61, 4}).name() == "minecraft:sand");
+  assert(sand.entities.empty());
+
+  World supported;
+  supported.loadChunk(0, 0);
+  supported.rawSetBlock(p, defaultState("sand"));
+  supported.rawSetBlock(p.relative(Direction::Down), defaultState("glass"));
+  // Lateral shape updates schedule even while supported; neighborChanged alone
+  // does not substitute for FallingBlock.updateShape.
+  supported.neighborChanged(p, "smooth_stone");
+  assert(!supported.hasScheduledTick(p, "sand"));
+  supported.setBlock(p.relative(Direction::East), defaultState("smooth_stone"), 2);
+  assert(supported.hasScheduledTick(p, "sand"));
+  supported.tick(); supported.tick();
+  assert(supported.entities.empty() && supported.getBlock(p).name() == "minecraft:sand");
+  supported.setBlock(p.relative(Direction::Down), defaultState("air"), 2);
+  supported.tick();
+  assert(supported.entities.empty());
+  supported.tick();
+  assert(supported.entities.size() == 1);
+
+  World suppressed;
+  suppressed.loadChunk(0, 0);
+  suppressed.setBlock(p, defaultState("sand"), 2 | 16 | 512);
+  assert(!suppressed.hasScheduledTick(p, "sand"));
+  suppressed.scheduleTick(p, "sand", 2);
+  suppressed.setBlock(p, defaultState("smooth_stone"), 2 | 16);
+  suppressed.tick(); suppressed.tick();
+  assert(suppressed.entities.empty()); // Stale callbacks check current block type.
+}
 int main() {
+  addedBlockTicks();
   World w;
   w.loadChunk(-1, -1);
   w.loadChunk(0, 0);
   w.loadChunk(1, 0);
   w.rawSetBlock({-1, -1, -1}, defaultState("bedrock"));
-  assert(w.getBlock({-1, -1, -1}).name == "minecraft:bedrock");
+  assert(w.getBlock({-1, -1, -1}).name() == "minecraft:bedrock");
   assert(w.allBlocks().contains(Pos{-1, -1, -1}));
   auto observer = defaultState("observer").with("facing", "east");
   w.rawSetBlock({1, 0, 0}, observer);
@@ -41,7 +128,7 @@ int main() {
   coral.rawSetBlock({0, 0, 0}, defaultState("smooth_stone"));
   coral.rawSetBlock({0, 1, 0}, defaultState("dead_tube_coral_fan"));
   coral.setBlock({0, 0, 0}, defaultState("air"));
-  assert(coral.getBlock({0, 1, 0}).name == "minecraft:air");
+  assert(coral.getBlock({0, 1, 0}).name() == "minecraft:air");
   World events;
   events.loadChunk(0, 0);
   events.rawSetBlock({0, 0, 0}, defaultState("note_block"));
@@ -84,10 +171,10 @@ int main() {
   full.rawSetBlock({0, 0, 0}, defaultState("grass_block"));
   full.rawSetBlock({1, 0, 0}, defaultState("redstone_block"));
   full.neighborChanged({0, 0, 0}, "redstone_block");
-  assert(full.getBlock({0, 0, 0}).name == "minecraft:grass_block");
+  assert(full.getBlock({0, 0, 0}).name() == "minecraft:grass_block");
   full.neighborChanged(defaultState("note_block"), {0, 0, 0}, "redstone_block",
                        true);
-  assert(full.getBlock({0, 0, 0}).name == "minecraft:note_block");
+  assert(full.getBlock({0, 0, 0}).name() == "minecraft:note_block");
   assert(full.getBlock({0, 0, 0}).get("powered") == "true");
   World derived;
   derived.loadChunk(0, 0);
@@ -105,7 +192,7 @@ int main() {
     const auto name = std::string(color) + "_carpet";
     auto carpet = defaultState(name);
     assert(isSupportedBlock(name) && isWoolCarpet(carpet));
-    assert(carpet.properties.empty());
+    assert(carpet.properties().empty());
     assert(blockMetadata(carpet).pushReaction == "normal");
     assert(!blockMetadata(carpet).conductor);
     World carpetWorld;
@@ -116,7 +203,7 @@ int main() {
                                      defaultState("air"), 2, 512);
     assert(carpetWorld.getBlock({0, 1, 0}) == carpet);
     carpetWorld.setBlock({0, 0, 0}, defaultState("air"), 2);
-    assert(carpetWorld.getBlock({0, 1, 0}).name == "minecraft:air");
+    assert(carpetWorld.getBlock({0, 1, 0}).name() == "minecraft:air");
     bool dropped = false;
     for (const auto &entry : carpetWorld.log)
       dropped |= entry.kind == "entity_spawn" &&
@@ -129,7 +216,7 @@ int main() {
   suppressed.rawSetBlock({0, 1, 0}, white);
   suppressed.neighborShapeChanged({0, 1, 0}, Direction::Up, {0, 2, 0},
                                   defaultState("air"), 32, 512);
-  assert(suppressed.getBlock({0, 1, 0}).name == "minecraft:air");
+  assert(suppressed.getBlock({0, 1, 0}).name() == "minecraft:air");
   for (const auto &entry : suppressed.log)
     assert(entry.kind != "entity_spawn");
   for (const auto *type : {"tube", "brain", "bubble", "fire", "horn"}) {
@@ -148,13 +235,13 @@ int main() {
       assert(placed->get("waterlogged") == "false");
       world.rawSetBlock(pos, *placed);
       world.setBlock(support, defaultState("air"));
-      assert(world.getBlock(pos).name == "minecraft:air");
+      assert(world.getBlock(pos).name() == "minecraft:air");
     }
     World world;
     world.loadChunk(0, 0);
     world.rawSetBlock({2, 1, 2}, defaultState("glass"));
     auto placed = world.coralPlacementState({2, 2, 2}, floor, Direction::Up);
-    assert(placed && placed->name == floor.name &&
+    assert(placed && placed->name() == floor.name() &&
            placed->get("waterlogged") == "false");
     assert(!world.coralPlacementState({2, 2, 2}, floor, Direction::Down));
   }
@@ -163,7 +250,7 @@ int main() {
   stale.rawSetBlock({0, 0, 0}, defaultState("red_carpet"));
   stale.updateOrDestroy({0, 0, 0}, defaultState("white_carpet"),
                         defaultState("air"), 0, 512);
-  assert(stale.getBlock({0, 0, 0}).name == "minecraft:air");
+  assert(stale.getBlock({0, 0, 0}).name() == "minecraft:air");
   assert(stale.log.size() == 1 &&
          stale.log[0].detail == "minecraft:item:minecraft:red_carpet");
   // The multi-update pauses after west; nested removal work drains before east.
@@ -314,9 +401,11 @@ int main() {
   signedOrder.loadChunk(1, 0);
   signedOrder.traceUpdates = true;
   signedOrder.setGameTime(9);
-  signedOrder.scheduledTicks = {
-      {{16, 82, 5}, "minecraft:smooth_stone", 10, 0, 0},
-      {{-1, 82, 5}, "minecraft:smooth_stone", 10, 0, -2}};
+  // LevelTicks.schedule with explicit subTickOrders, as saved-tick unpack does.
+  signedOrder.scheduleTick(
+      ScheduledTick{{16, 82, 5}, "minecraft:smooth_stone", 10, 0, 0});
+  signedOrder.scheduleTick(
+      ScheduledTick{{-1, 82, 5}, "minecraft:smooth_stone", 10, 0, -2});
   signedOrder.tick();
   std::vector<Pos> signedExecution;
   for (const auto &entry : signedOrder.log)

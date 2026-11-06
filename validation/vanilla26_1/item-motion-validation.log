@@ -1,0 +1,102 @@
+Starting net.minecraft.server.Main
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.sun.jna.Native in an unnamed module (file:/F:/source/minecraft-merged-07da9a845a-26.1-sources/redstone-cpp/validation/vanilla26_1/libraries/net/java/dev/jna/jna/5.17.0/jna-5.17.0.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/F:/source/minecraft-merged-07da9a845a-26.1-sources/redstone-cpp/validation/vanilla26_1/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)
+WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+[14:33:10] [ServerMain/INFO]: Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]
+[14:33:12] [ServerMain/INFO]: Loaded 1515 recipes
+[14:33:12] [ServerMain/INFO]: Loaded 1617 advancements
+[14:33:12] [Server thread/INFO]: Starting minecraft server version 26.1
+[14:33:12] [Server thread/INFO]: Loading properties
+[14:33:12] [Server thread/INFO]: Default game type: SURVIVAL
+[14:33:12] [Server thread/INFO]: Generating keypair
+[14:33:12] [Server thread/INFO]: Starting Minecraft server on 127.0.0.1:25597
+[14:33:12] [Server thread/INFO]: Preparing level "carpet-validation-world"
+[14:33:13] [Server thread/INFO]: Loading 36 persistent chunks...
+[14:33:13] [Server thread/INFO]: Preparing spawn area: 21%
+[14:33:13] [Server thread/INFO]: Preparing spawn area: 21%
+[14:33:14] [Server thread/INFO]: Time elapsed: 759 ms
+[14:33:14] [Server thread/INFO]: Done (1.131s)! For help, type "help"
+COMMAND: tick freeze
+[14:33:14] [Server thread/INFO]: Saving chunks for level 'ServerLevel[carpet-validation-world]'/minecraft:overworld
+COMMAND: forceload add -16 -16 15 15
+[14:33:14] [Server thread/INFO]: Saving chunks for level 'ServerLevel[carpet-validation-world]'/minecraft:the_nether
+[14:33:14] [Server thread/INFO]: Saving chunks for level 'ServerLevel[carpet-validation-world]'/minecraft:the_end
+[14:33:14] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[14:33:14] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[14:33:14] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[14:33:14] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[14:33:14] [Server thread/INFO]: The game is frozen
+[14:33:14] [Server thread/INFO]: No chunks were marked for force loading
+COMMAND: fill -3 99 -3 5 104 3 minecraft:air replace
+[14:33:14] [Server thread/INFO]: Successfully filled 3 block(s)
+COMMAND: kill @e[type=minecraft:item]
+[14:33:15] [Server thread/INFO]: Killed 2 entities
+COMMAND: setblock 0 100 0 minecraft:sticky_piston[facing=east,extended=false]
+[14:33:15] [Server thread/INFO]: Changed the block at 0, 100, 0
+COMMAND: setblock 1 100 0 minecraft:slime_block
+[14:33:16] [Server thread/INFO]: Changed the block at 1, 100, 0
+COMMAND: setblock 1 101 0 minecraft:slime_block
+[14:33:16] [Server thread/INFO]: Changed the block at 1, 101, 0
+COMMAND: setblock -1 100 0 minecraft:redstone_block
+[14:33:16] [Server thread/INFO]: Changed the block at -1, 100, 0
+COMMAND: tick step 3
+[14:33:17] [Server thread/INFO]: Stepping 3 tick(s)
+COMMAND: setblock 1 101 0 minecraft:white_carpet
+[14:33:18] [Server thread/INFO]: Changed the block at 1, 101, 0
+COMMAND: setblock -1 100 0 minecraft:air
+[14:33:18] [Server thread/INFO]: Changed the block at -1, 100, 0
+COMMAND: tick step 1
+[14:33:18] [Server thread/INFO]: Stepping 1 tick(s)
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Pos
+[14:33:19] [Server thread/INFO]: White Carpet has the following entity data: [1.1977364448156347d, 101.44830365662864d, 0.3699893860203993d]
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Motion
+[14:33:20] [Server thread/INFO]: White Carpet has the following entity data: [-0.0916547910082377d, 0.1568d, 0.004203934417419391d]
+ITEM_TICK1 [14:33:19] [Server thread/INFO]: White Carpet has the following entity data: [1.1977364448156347d, 101.44830365662864d, 0.3699893860203993d] | [14:33:20] [Server thread/INFO]: White Carpet has the following entity data: [-0.0916547910082377d, 0.1568d, 0.004203934417419391d]
+COMMAND: tick step 1
+[14:33:20] [Server thread/INFO]: Stepping 1 tick(s)
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Pos
+[14:33:21] [Server thread/INFO]: White Carpet has the following entity data: [0.865d, 101.56510365662864d, 0.3741933204378187d]
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Motion
+[14:33:22] [Server thread/INFO]: White Carpet has the following entity data: [-1.0d, 0.11446399999999998d, 0.004119855809254689d]
+ITEM_TICK2 [14:33:21] [Server thread/INFO]: White Carpet has the following entity data: [0.865d, 101.56510365662864d, 0.3741933204378187d] | [14:33:22] [Server thread/INFO]: White Carpet has the following entity data: [-1.0d, 0.11446399999999998d, 0.004119855809254689d]
+COMMAND: tick step 1
+[14:33:23] [Server thread/INFO]: Stepping 1 tick(s)
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Pos
+[14:33:23] [Server thread/INFO]: White Carpet has the following entity data: [-0.135d, 101.63956765662864d, 0.3783131762470734d]
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Motion
+[14:33:24] [Server thread/INFO]: White Carpet has the following entity data: [-0.9800000190734863d, 0.07297471999999998d, 0.004037458771649609d]
+ITEM_TICK3 [14:33:23] [Server thread/INFO]: White Carpet has the following entity data: [-0.135d, 101.63956765662864d, 0.3783131762470734d] | [14:33:24] [Server thread/INFO]: White Carpet has the following entity data: [-0.9800000190734863d, 0.07297471999999998d, 0.004037458771649609d]
+COMMAND: tick step 1
+[14:33:25] [Server thread/INFO]: Stepping 1 tick(s)
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Pos
+[14:33:26] [Server thread/INFO]: White Carpet has the following entity data: [-1.1150000190734863d, 101.67254237662864d, 0.382350635018723d]
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Motion
+[14:33:26] [Server thread/INFO]: White Carpet has the following entity data: [-0.9604000373840336d, 0.032315225599999976d, 0.003956709673225031d]
+ITEM_TICK4 [14:33:26] [Server thread/INFO]: White Carpet has the following entity data: [-1.1150000190734863d, 101.67254237662864d, 0.382350635018723d] | [14:33:26] [Server thread/INFO]: White Carpet has the following entity data: [-0.9604000373840336d, 0.032315225599999976d, 0.003956709673225031d]
+COMMAND: tick step 1
+[14:33:27] [Server thread/INFO]: Stepping 1 tick(s)
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Pos
+[14:33:28] [Server thread/INFO]: White Carpet has the following entity data: [-2.0754000564575197d, 101.66485760222864d, 0.38630734469194805d]
+COMMAND: data get entity @e[type=minecraft:item,limit=1] Motion
+[14:33:28] [Server thread/INFO]: White Carpet has the following entity data: [-0.9411920549545298d, -0.007531078912000024d, 0.0038775755552287786d]
+ITEM_TICK5 [14:33:28] [Server thread/INFO]: White Carpet has the following entity data: [-2.0754000564575197d, 101.66485760222864d, 0.38630734469194805d] | [14:33:28] [Server thread/INFO]: White Carpet has the following entity data: [-0.9411920549545298d, -0.007531078912000024d, 0.0038775755552287786d]
+COMMAND: say ITEM_MOTION_VALIDATION_END
+[14:33:29] [Server thread/INFO]: [Not Secure] [Server] ITEM_MOTION_VALIDATION_END
+COMMAND: stop
+[14:33:29] [Server thread/INFO]: Stopping the server
+[14:33:29] [Server thread/INFO]: Stopping server
+[14:33:29] [Server thread/INFO]: Saving players
+[14:33:29] [Server thread/INFO]: Saving worlds
+[14:33:29] [Server thread/INFO]: Saving chunks for level 'ServerLevel[carpet-validation-world]'/minecraft:overworld
+[14:33:30] [Server thread/INFO]: Saving chunks for level 'ServerLevel[carpet-validation-world]'/minecraft:the_nether
+[14:33:30] [Server thread/INFO]: Saving chunks for level 'ServerLevel[carpet-validation-world]'/minecraft:the_end
+[14:33:30] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[14:33:30] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[14:33:30] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[14:33:30] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved

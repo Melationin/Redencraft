@@ -1,0 +1,60 @@
+{
+  "source_sha256": "7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52",
+  "imported": {
+    "regions": "410",
+    "blocks": "70111",
+    "anvils_replaced": "28764",
+    "signs_skipped": "1",
+    "sign_block_entities_skipped": "1",
+    "entities": "133",
+    "independent_entity_uuids": "133",
+    "source_data_version": "20060210",
+    "forced_chunks": "2916",
+    "offset": "0,64,0",
+    "spawn": "8.5,151,8.5"
+  },
+  "configuration_packets": 30,
+  "play_packets": 48,
+  "chunks_received": 8,
+  "chunks_forgotten": 6,
+  "far_corner_chunk_received": true,
+  "tick_chat_samples": [
+    {
+      "tick": 1,
+      "milliseconds": 5.517
+    },
+    {
+      "tick": 2,
+      "milliseconds": 5.31
+    },
+    {
+      "tick": 3,
+      "milliseconds": 219.361
+    },
+    {
+      "tick": 4,
+      "milliseconds": 5.255
+    },
+    {
+      "tick": 5,
+      "milliseconds": 218.755
+    },
+    {
+      "tick": 6,
+      "milliseconds": 5.414
+    },
+    {
+      "tick": 7,
+      "milliseconds": 221.968
+    }
+  ],
+  "server_log": [
+    "SCHEMATIC regions=410 blocks=70111 anvils_replaced=28764 signs_skipped=1 sign_block_entities_skipped=1 entities=133 independent_entity_uuids=133 source_data_version=20060210 forced_chunks=2916 offset=0,64,0 spawn=8.5,151,8.5",
+    "LISTENING 127.0.0.1:12365 protocol=775 allocator=jemalloc",
+    "TICK tick=1 ms=5.517 entities=133 scheduled=0 moving_pistons=0",
+    "TICK tick=100 ms=12.617 entities=133 scheduled=0 moving_pistons=0",
+    "STOPPED ticks=100 mean_ms=19.277 max_ms=224.023"
+  ],
+  "stderr": "",
+  "scope": "Native C++ headless TCP test; no Minecraft client, desktop or vanilla mechanism differential."
+}

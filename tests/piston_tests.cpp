@@ -1,4 +1,6 @@
+#include "redstone/entity.hpp"
 #include "redstone/piston.hpp"
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
@@ -7,6 +9,7 @@ void require(bool condition, const char *message) {
   if (!condition)
     throw std::runtime_error(message);
 }
+bool close(double a, double b) { return std::abs(a - b) < 1.0e-6; }
 void setup(World &w) {
   for (int x = -1; x <= 1; ++x)
     for (int z = -1; z <= 1; ++z)
@@ -17,7 +20,7 @@ BlockState piston(bool sticky = false) {
   return block(sticky ? "sticky_piston" : "piston").with("facing", "east");
 }
 bool is(World &w, Pos p, const char *n) {
-  return w.getBlock(p).name == std::string("minecraft:") + n;
+  return w.getBlock(p).name() == std::string("minecraft:") + n;
 }
 void put(World &w, Pos p, const BlockState &s) { w.rawSetBlock(p, s); }
 void run(World &w, int n) {
@@ -59,6 +62,70 @@ void carpetDuplicator() {
         entry.detail == "minecraft:item:minecraft:white_carpet")
       ++drops;
   require(drops == 1, "duper also emits one carpet item");
+  int entities = 0;
+  ItemEntity *carpetItem = nullptr;
+  for (const auto &entity : w.entities)
+    if (auto *item = dynamic_cast<ItemEntity *>(entity.get());
+        item && item->item.id == "minecraft:white_carpet" &&
+        item->item.count == 1) {
+      ++entities;
+      carpetItem = item;
+    }
+  require(entities == 1, "duper carpet drop is a real item entity");
+  // The real 26.1 probe recorded in validation/vanilla26_1 shows the same
+  // post-hit sequence (-1, -0.98, -0.9604, ... on X). The absolute tick index of
+  // the hit depends on when the server processes the queued retraction event,
+  // so only the direction/launch is asserted here; slimePistonBounce() covers
+  // the exact one-tick launch and the first -1.0 velocity.
+  require(carpetItem && carpetItem->deltaMovement.x < -0.8 &&
+              carpetItem->position.x < 0.0,
+          "duper carpet item is launched westward by the retracting slime");
+}
+void slimePistonBounce() {
+  World w;
+  setup(w);
+  Pos p{2, 0, 0};
+  put(w, p, block("moving_piston").with("facing", "east"));
+  auto entity =
+      std::make_shared<PistonMovingBlockEntity>(PistonMovingBlockEntity{
+          p, block("slime_block"), Direction::East, false, false});
+  w.setPistonEntity(p, entity);
+  auto item = std::make_shared<ItemEntity>(
+      w, Vec3{2.5, 0.5, 0.5}, itemStack("minecraft:white_carpet", 1),
+      Vec3{0, 0, 0});
+  w.addEntity(item);
+  pistonTickBlockEntities(w);
+  require(close(item->deltaMovement.x, -1.0),
+          "retracting slime block launches an item to the west");
+  require(item->position.x < 2.5 && item->position.x > 1.9,
+          "item is pushed by the moving slime block");
+  w.tick();
+  require(item->position.x < 1.99,
+          "item keeps the slime velocity on the next entity tick");
+}
+void movingPistonStageOrder() {
+  World w;
+  setup(w);
+  Pos p{2, 0, 0};
+  put(w, p, block("moving_piston").with("facing", "east"));
+  auto entity =
+      std::make_shared<PistonMovingBlockEntity>(PistonMovingBlockEntity{
+          p, block("slime_block"), Direction::East, false, false});
+  w.setPistonEntity(p, entity);
+  auto item = std::make_shared<ItemEntity>(
+      w, Vec3{2.5, 0.5, 0.5}, itemStack("minecraft:white_carpet", 1),
+      Vec3{0, 0, 0});
+  w.addEntity(item);
+  // If the block entity ran before the entity phase, the item would already
+  // have velocity -1 when its own tick executed and would end near x=0.99.
+  // The correct order updates the item's gravity first, then pushes it once.
+  w.tick();
+  require(close(item->deltaMovement.x, -1.0),
+          "slime launch velocity is assigned in the block-entity stage");
+  require(item->position.x > 2.3 && item->position.x < 2.4,
+          "entity tick precedes the moving-piston block-entity tick");
+  require(item->position.y < 0.5,
+          "item gravity ticked before the moving-piston push");
 }
 void extension() {
   World w;
@@ -91,7 +158,8 @@ void pulse() {
   pistonNeighborChanged(w, {0, 0, 0}, w.getBlock({0, 0, 0}));
   run(w, 1);
   w.setBlock({0, 0, -1}, block("air"));
-  require(!w.blockEvents.empty() && w.blockEvents.back().type == 2,
+  auto pendingEvents = w.pendingBlockEvents();
+  require(!pendingEvents.empty() && pendingEvents.back().type == 2,
           "short pulse chooses drop event");
   run(w, 4);
   require(is(w, {1, 0, 0}, "air") && is(w, {2, 0, 0}, "smooth_stone"),
@@ -128,7 +196,8 @@ void quasi() {
   put(w, {0, 0, 0}, piston());
   put(w, {0, 2, 0}, block("redstone_block"));
   pistonNeighborChanged(w, {0, 0, 0}, w.getBlock({0, 0, 0}));
-  require(!w.blockEvents.empty() && w.blockEvents[0].type == 0,
+  auto pendingEvents = w.pendingBlockEvents();
+  require(!pendingEvents.empty() && pendingEvents[0].type == 0,
           "quasi-connectivity powers piston");
 }
 void head() {
@@ -308,10 +377,32 @@ void tickerRebindingAndPending() {
   require(afterRemoval->progress == 0.5f && newlyAdded->progress == 0.5f,
           "pending tickers advance on next pass");
 }
+void importedFractionalProgressSweep() {
+  World w;
+  setup(w);
+  Pos p{4, 0, 0};
+  put(w, p, block("moving_piston"));
+  auto moving = std::make_shared<PistonMovingBlockEntity>(
+      PistonMovingBlockEntity{p, block("smooth_stone"), Direction::East,
+                              true, false});
+  moving->progress = 0.75f;
+  w.setPistonEntity(p, moving);
+  auto item = std::make_shared<ItemEntity>(
+      w, Vec3{5.0, 0.25, 0.5}, itemStack("white_carpet"), Vec3{});
+  w.addEntity(item);
+  pistonTickBlockEntities(w);
+  require(std::abs(item->position.x - 5.385) < 1.0e-6,
+          "fractional imported progress sweeps a full half block before clamp");
+  require(moving->progressO == 0.75f && moving->progress == 1.0f &&
+              w.pistonEntities.contains(p),
+          "fractional progress is clamped only after pushing and finalizes later");
+}
 int main() {
   try {
     carpet();
     carpetDuplicator();
+    slimePistonBounce();
+    movingPistonStageOrder();
     extension();
     pulse();
     limits();
@@ -324,6 +415,7 @@ int main() {
     moveNotificationOrder();
     completionStages();
     tickerRebindingAndPending();
+    importedFractionalProgressSweep();
     std::cout << "piston tests passed\n";
     return 0;
   } catch (const std::exception &e) {

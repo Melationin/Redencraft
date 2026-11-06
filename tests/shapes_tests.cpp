@@ -13,12 +13,32 @@ int main() {
       for (int z = -1; z <= 1; ++z)
         w.loadChunk(x, z);
     auto wall = defaultState("cobblestone_wall");
+    auto stoneWall = defaultState("stone_brick_wall");
+    require(isWallBlock(stoneWall) && stoneWall.get("waterlogged") == "false",
+            "stone brick wall shares wall defaults");
     Pos p{0, 0, 0};
     w.rawSetBlock(p, wall);
     w.rawSetBlock({0, 0, -1}, defaultState("smooth_stone"));
     auto s = wallUpdateShape(w, p, wall, Direction::North);
     require(s.get("north") == "low" && s.get("up") == "true",
             "wall connects to full block");
+    auto stoneConnected = wallUpdateShape(w, p, stoneWall, Direction::North);
+    require(stoneConnected.properties() == s.properties(),
+            "stone brick wall has the same connection properties as cobblestone");
+    w.rawSetBlock({1, 0, 0}, stoneWall);
+    auto crossConnected = wallUpdateShape(w, p, wall, Direction::East);
+    require(crossConnected.get("east") == "low",
+            "cobblestone connects to stone brick wall tag member");
+    w.rawSetBlock({1, 0, 0}, defaultState("air"));
+    auto stoneShape = collisionShape(stoneConnected);
+    auto cobbleShape = collisionShape(s);
+    require(stoneShape.size() == cobbleShape.size(), "wall collision part counts");
+    for (size_t i = 0; i < stoneShape.size(); ++i) {
+      auto a = stoneShape[i], b = cobbleShape[i];
+      require(a.x0 == b.x0 && a.y0 == b.y0 && a.z0 == b.z0 &&
+                  a.x1 == b.x1 && a.y1 == b.y1 && a.z1 == b.z1,
+              "stone wall collision matches original wall including 24/16 height");
+    }
     w.rawSetBlock({0, 0, 1}, defaultState("slime_block"));
     s = wallUpdateShape(w, p, s, Direction::South);
     require(s.get("south") == "low" && s.get("up") == "false",

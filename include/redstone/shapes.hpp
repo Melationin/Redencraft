@@ -2,11 +2,9 @@
 #include "redstone/engine.hpp"
 #include <vector>
 namespace redstone {
-struct ShapeBox {
-  double x0, y0, z0, x1, y1, z1;
-};
-using VoxelShape = std::vector<ShapeBox>;
-VoxelShape collisionShape(const BlockState &);
+// Per-state collision shapes are immutable, so they are cached: the returned
+// reference stays valid for the life of the process (like BlockStateBase).
+const VoxelShape &collisionShape(const BlockState &);
 VoxelShape collisionShape(World &, Pos, const BlockState &);
 bool faceSturdy(const BlockState &, Direction);
 bool faceSturdy(World &, Pos, const BlockState &, Direction);

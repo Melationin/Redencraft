@@ -1,8 +1,12 @@
 #include "redstone/piston.hpp"
+#include "redstone/entity.hpp"
 #include "redstone/storage.hpp"
 #include <cassert>
+#include <bit>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <lz4.h>
 #include <xxhash.h>
 #include <zlib.h>
@@ -78,6 +82,223 @@ static Bytes lz4(const Bytes &input, bool raw) {
   b.insert(b.end(), packed.begin(), packed.end());
   header(0x10, 0, 0, 0);
   return b;
+}
+static void u64(Bytes &b, uint64_t value) {
+  for (int i = 7; i >= 0; --i)
+    b.push_back(uint8_t(value >> (8 * i)));
+}
+static void longtag(Bytes &b, const std::string &name, int64_t value) {
+  tag(b, 4, name);
+  u64(b, uint64_t(value));
+}
+static void doubles(Bytes &b, const std::string &name,
+                    std::initializer_list<double> values) {
+  tag(b, 9, name);
+  b.push_back(6);
+  u32(b, uint32_t(values.size()));
+  for (auto value : values)
+    u64(b, std::bit_cast<uint64_t>(value));
+}
+static Bytes itemTag(int uuid, int count, bool motion = false) {
+  Bytes b;
+  stringtag(b, "id", "minecraft:item");
+  doubles(b, "Pos", {-8.5, 64, -8.5});
+  tag(b, 11, "UUID");
+  u32(b, 4);
+  for (int value : {0, 0, 0, uuid})
+    u32(b, value);
+  tag(b, 10, "Item");
+  stringtag(b, "id", "minecraft:white_carpet");
+  integer(b, "count", count);
+  b.push_back(0);
+  if (motion)
+    doubles(b, "Motion", {11, -11, 0.3});
+  b.push_back(0);
+  return b;
+}
+static void entities(Bytes &b, const std::string &name,
+                     const std::vector<Bytes> &values) {
+  tag(b, 9, name);
+  b.push_back(10);
+  u32(b, uint32_t(values.size()));
+  for (const auto &value : values)
+    b.insert(b.end(), value.begin(), value.end());
+}
+static Bytes terrain(const std::vector<Bytes> &legacy = {},
+                      const std::vector<Bytes> &alias = {}) {
+  auto b = root();
+  integer(b, "DataVersion", 4786);
+  integer(b, "xPos", -1);
+  integer(b, "zPos", -1);
+  stringtag(b, "Status", "minecraft:full");
+  if (!legacy.empty()) entities(b, "entities", legacy);
+  if (!alias.empty()) entities(b, "Entities", alias);
+  b.push_back(0);
+  return b;
+}
+static Bytes entityChunk(const std::vector<Bytes> &values, int version = 4786,
+                         int x = -1, int z = -1) {
+  auto b = root();
+  integer(b, "DataVersion", version);
+  tag(b, 11, "Position");
+  u32(b, 2); u32(b, x); u32(b, z);
+  entities(b, "Entities", values);
+  b.push_back(0);
+  return b;
+}
+static void regionFixture(const std::filesystem::path &directory,
+                          const Bytes &nbt, int compression = 2,
+                          bool external = false, bool orphan = false) {
+  std::filesystem::create_directories(directory);
+  Bytes payload = compression == 1 ? compressed(nbt, 31)
+                   : compression == 2 ? compressed(nbt, 15)
+                   : compression == 4 ? lz4(nbt, false) : nbt;
+  assert(payload.size() < 4091);
+  Bytes region(12288);
+  const int slot = orphan ? 0 : 1023;
+  region[slot * 4 + 2] = 2;
+  region[slot * 4 + 3] = 1;
+  auto length = uint32_t(external ? 1 : payload.size() + 1);
+  region[8192] = uint8_t(length >> 24);
+  region[8193] = uint8_t(length >> 16);
+  region[8194] = uint8_t(length >> 8);
+  region[8195] = uint8_t(length);
+  region[8196] = uint8_t(compression | (external ? 128 : 0));
+  if (external)
+    write(directory / "c.-1.-1.mcc", payload);
+  else
+    std::copy(payload.begin(), payload.end(), region.begin() + 8197);
+  write(directory / (orphan ? "r.0.0.mca" : "r.-1.-1.mca"), region);
+}
+static void levelFixture(const std::filesystem::path &directory,
+                         bool embedded = true) {
+  std::filesystem::create_directories(directory);
+  auto b = root();
+  tag(b, 10, "Data");
+  integer(b, "DataVersion", 4786);
+  longtag(b, "Time", 42);
+  longtag(b, "RandomSeed", 999); // Deliberately obsolete and ignored.
+  if (embedded) {
+    tag(b, 10, "WorldGenSettings");
+    longtag(b, "seed", 77);
+    b.push_back(0);
+  }
+  b.push_back(0); b.push_back(0);
+  write(directory / "level.dat", compressed(b, 31));
+}
+static void entityStorageFixtures(const std::filesystem::path &directory) {
+  levelFixture(directory);
+  const auto canonicalRegion = directory / "dimensions" / "minecraft" / "overworld" / "region";
+  assert(defaultRegionDirectory(directory) == canonicalRegion);
+  std::filesystem::create_directories(directory / "region");
+  assert(defaultRegionDirectory(directory) == directory / "region");
+  std::filesystem::create_directories(canonicalRegion);
+  assert(defaultRegionDirectory(directory) == canonicalRegion);
+  const auto dimension = directory / "DIM-1";
+  const auto settings = directory / "data" / "minecraft";
+  std::filesystem::create_directories(settings);
+  auto seed = root();
+  integer(seed, "DataVersion", 4786);
+  tag(seed, 10, "data"); longtag(seed, "seed", -123456789012345LL);
+  seed.push_back(0); seed.push_back(0);
+  write(settings / "world_gen_settings.dat", compressed(seed, 31));
+  regionFixture(dimension / "region", terrain({itemTag(1, 2)}, {itemTag(9, 9)}));
+  Bytes unknown;
+  stringtag(unknown, "id", "example:unknown_without_position");
+  unknown.push_back(0);
+  const auto modern = entityChunk({itemTag(1, 63), itemTag(2, 3, true), unknown});
+  // Unselected entity records (and even another dimension's entity directory)
+  // must not create terrain chunks or be interpreted as this dimension.
+  regionFixture(dimension / "entities", entityChunk({}, 1, 0, 0), 3, false, true);
+  regionFixture(directory / "entities", entityChunk({}, 1));
+  for (int compression : {1, 2, 3, 4}) {
+    for (bool external : {false, true}) {
+      regionFixture(dimension / "entities", modern, compression, external);
+      auto loaded = loadAnvilWorld(directory, dimension / "region");
+      assert(loaded.seed == -123456789012345LL);
+      assert((loaded.chunks == std::vector<std::pair<int, int>>({{-1, -1}})));
+      assert(loaded.entities.size() == 4); // Raw records retain UUID duplicates.
+      World world;
+      importWorld(loaded, world);
+      assert(world.entities.size() == 2 && !world.isChunkLoaded(0, 0));
+      auto first = dynamic_cast<ItemEntity *>(world.entities[0].get());
+      auto second = dynamic_cast<ItemEntity *>(world.entities[1].get());
+      assert(first && first->item.count == 2); // First UUID wins, not modern 63.
+      assert(first->deltaMovement.lengthSqr() == 0 && first->yaw == 0);
+      assert(second && second->item.count == 3);
+      assert(second->deltaMovement.x == 0 && second->deltaMovement.y == 0 &&
+             std::abs(second->deltaMovement.z - .3) < 1.0e-9);
+    }
+  }
+  for (auto bad : {entityChunk({}, 4787), entityChunk({}, 4786, 0, -1)}) {
+    regionFixture(dimension / "entities", bad);
+    bool rejected = false;
+    try { (void)loadAnvilWorld(directory, dimension / "region"); }
+    catch (const nbt::Error &) { rejected = true; }
+    assert(rejected);
+  }
+  regionFixture(dimension / "entities", modern);
+  std::filesystem::remove(settings / "world_gen_settings.dat");
+  assert(loadAnvilWorld(directory, dimension / "region").seed == 77);
+  levelFixture(directory, false);
+  assert(loadAnvilWorld(directory, dimension / "region").seed == 0);
+}
+static void entityNumericImport() {
+  auto bytes = root();
+  auto payload = itemTag(1, 1);
+  bytes.insert(bytes.end(), payload.begin(), payload.end());
+  auto tag = nbt::parse(bytes);
+  auto rejects = [&](nbt::Tag value) {
+    LoadedWorld loaded;
+    loaded.chunks = {{-1, -1}};
+    loaded.entities = {std::move(value)};
+    World world;
+    bool rejected = false;
+    try { importWorld(loaded, world); }
+    catch (const nbt::Error &) { rejected = true; }
+    assert(rejected);
+  };
+  auto bad = tag;
+  bad.compound["Pos"].list[0].real = std::numeric_limits<double>::quiet_NaN();
+  rejects(bad);
+  bad = tag;
+  bad.compound["Motion"] = bad.compound["Pos"];
+  bad.compound["Motion"].list[1].real = std::numeric_limits<double>::quiet_NaN();
+  rejects(bad);
+  bad = tag;
+  bad.compound["Rotation"] = bad.compound["Pos"];
+  bad.compound["Rotation"].list.resize(2);
+  bad.compound["Rotation"].list[0].real = std::numeric_limits<double>::infinity();
+  rejects(bad);
+  for (bool hasTicked : {false, true}) {
+    auto cart = tag;
+    cart.compound["id"].text = "minecraft:minecart";
+    cart.compound["HasTicked"].type = 1;
+    cart.compound["HasTicked"].number = hasTicked;
+    LoadedWorld loaded;
+    loaded.chunks = {{-1, -1}};
+    loaded.entities = {cart};
+    World world;
+    importWorld(loaded, world);
+    auto minecart = dynamic_cast<Minecart *>(world.entities[0].get());
+    assert(minecart && minecart->firstTick == hasTicked);
+  }
+  for (double x : {1.0e300, -1.0e300}) {
+    auto far = tag;
+    far.compound["Pos"].list[0].real = x;
+    LoadedWorld loaded;
+    loaded.chunks = {{x > 0 ? 1875032 : -1875032, -1}};
+    loaded.entities = {far};
+    World world;
+    importWorld(loaded, world);
+    assert(world.entities.size() == 1);
+    assert(world.entities[0]->position.x == (x > 0 ? 30000512 : -30000512));
+    // A record whose position points at absent terrain is retained only as NBT.
+    loaded.chunks = {{-1, -1}};
+    World absent;
+    importWorld(loaded, absent);
+    assert(absent.entities.empty() && !absent.isChunkLoaded(1875032, -1));
+  }
 }
 int main() {
   auto p = std::filesystem::temp_directory_path() / "redstone_storage_fixture";
@@ -168,10 +389,10 @@ int main() {
   auto w = loadAnvilWorld(p, p / "region");
   assert(w.gameTime == 42);
   assert(w.chunks.size() == 1 && w.chunks[0] == std::make_pair(-1, -1));
-  assert(w.blocks.at({-16, -16, -16}).name == "example:unknown");
-  assert(w.blocks.at({-1, -1, -1}).properties.at("foo") == "bar");
-  assert(w.blocks.at({-5, 0, -16}).name == "example:block_16");
-  assert(w.blocks.at({-4, 0, -16}).name == "example:block_1");
+  assert(w.blocks.at({-16, -16, -16}).name() == "example:unknown");
+  assert(w.blocks.at({-1, -1, -1}).properties().at("foo") == "bar");
+  assert(w.blocks.at({-5, 0, -16}).name() == "example:block_16");
+  assert(w.blocks.at({-4, 0, -16}).name() == "example:block_1");
   World world;
   importWorld(w, world);
   LoadedWorld saved;
@@ -185,15 +406,24 @@ int main() {
                  {{16, 82, 5}, "minecraft:smooth_stone", 2, 0, false}};
   World restored;
   importWorld(saved, restored);
-  assert(restored.scheduledTicks.size() == 5);
-  assert(restored.scheduledTicks[0].order == -3);
-  assert(restored.scheduledTicks[1].order == -1);
-  assert(restored.scheduledTicks[2].order == -2);
-  assert(restored.scheduledTicks[3].order == -1);
-  assert(restored.scheduledTicks[4].order == -1);
-  assert(restored.scheduledTicks[0].trigger == 102);
+  assert(restored.scheduledTickCount() == 5);
+  // LevelChunkTicks.unpack gives each chunk -N..-1 in saved-list order, so the
+  // restored subTickOrders are negative and chunk 0 keeps both duplicates.
+  std::vector<std::int64_t> restoredOrders;
+  for (const auto &tick : restored.scheduledTicks()) {
+    assert(tick.trigger == 102);
+    restoredOrders.push_back(tick.order);
+  }
+  std::sort(restoredOrders.begin(), restoredOrders.end());
+  assert((restoredOrders ==
+          std::vector<std::int64_t>{-3, -2, -1, -1, -1}));
   restored.scheduleTick({17, 82, 5}, "minecraft:smooth_stone", 2, 0);
-  assert(restored.scheduledTicks.back().order == 0);
+  assert(restored.scheduledTickCount() == 6);
+  std::optional<ScheduledTick> fresh;
+  for (const auto &tick : restored.scheduledTicks())
+    if (tick.pos == Pos{17, 82, 5})
+      fresh = tick;
+  assert(fresh && fresh->order == 0);
   restored.traceUpdates = true;
   restored.tick();
   restored.tick();
@@ -206,7 +436,7 @@ int main() {
   assert((restoredOrder[1] == Pos{1, 82, 5}));
   assert((restoredOrder[5] == Pos{17, 82, 5}));
   auto moving = world.pistonEntities.at({-16, 0, -16});
-  assert(moving->movedState.name == "minecraft:stone" &&
+  assert(moving->movedState.name() == "minecraft:stone" &&
          moving->direction == Direction::East && moving->progress == 0.5f &&
          moving->extending);
   for (bool raw : {false, true}) {
@@ -224,7 +454,7 @@ int main() {
     std::copy(l.begin(), l.end(), r.begin() + 8197);
     write(p / "region" / "r.-1.-1.mca", r);
     auto loaded = loadAnvilWorld(p, p / "region");
-    assert(loaded.blocks.at({-5, 0, -16}).name == "example:block_16");
+    assert(loaded.blocks.at({-5, 0, -16}).name() == "example:block_16");
     r[8197 + 17] ^= 1;
     write(p / "region" / "r.-1.-1.mca", r);
     bool bad = false;
@@ -251,5 +481,7 @@ int main() {
     failed = true;
   }
   assert(failed);
+  entityStorageFixtures(p / "entity_world");
+  entityNumericImport();
   std::filesystem::remove_all(p);
 }

@@ -1,0 +1,24 @@
+{
+  "version": "26.1",
+  "protocol": 775,
+  "data_version": 4786,
+  "source": "Official unmodified Mojang dedicated server, vanilla pack, no experiments or external datapacks",
+  "bundler_sha1": "3872a7f07a1a595e651aef8b058dfc2bb3772f46",
+  "server_inner_sha256": "a7fed6f7d88379349e35ae0c6e9881d4484605132f6f620376a3868eea6cce52",
+  "format": "configuration.bin records: u32 big-endian byte length, VarInt packet id + payload; no TCP framing/compression",
+  "configuration": "Enabled features, all full-content synchronized registries (known packs empty), complete vanilla tags; finish_configuration sent separately",
+  "hashes_sha256": {
+    "biomes.tsv": "6f192ab1fcd70c30b4c9663f2629e462de4ad580b6df2800003a01a82233ece4",
+    "block_entity_types.tsv": "0301419f8c7011b7e25f056dcfbe4b7dcf474fb999b89375c392f7a1c8de57bc",
+    "block_states.tsv": "ee977a2009ea3d6257a0b5511768ebae4112efe4e699bbb62ef2df6fc20c4f83",
+    "blocks.tsv": "8dfb9392ea34e1700d81cfcb937a477c7bd49081fcea79cd755ea6a97972e710",
+    "configuration.bin": "3e3413d72bfaa98166b451e857cc10c8237b39d768b555c9c149173d4cdcd15b",
+    "empty_section.bin": "6a339ff6defc6e73cf17dea3ea81f41e8bec092b4ced841a6c10732c0402a727",
+    "entities.tsv": "e9e9a79cb132f9548f3af8c356ddd4439404fe7391a0391e877a31a343ecfbaf",
+    "entity_data_serializers.tsv": "8abe30ae8fc39e83c6d99a511f8ee015907a7c13dd84db61f65073e740a9eebf",
+    "items.tsv": "46d9c5bd7ac337bb62d513d269c484f9954f1664a65a05787b906686a461f86b",
+    "packet_ids.tsv": "f71bf824cbdd52f91274335a484a15f3ece3808ac0ec0e1291f7a5310dfbe47d",
+    "registry_ids.tsv": "b65e787ce91144dbd7b05e4b4e4370db29e2f950a6966f9d9cf538631223fd2f",
+    "state_flags.tsv": "e26e341eb63e3ca88684f2f91a62376b07684e48e3632f922e242bc877eab0ed"
+  }
+}

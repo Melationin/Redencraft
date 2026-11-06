@@ -1,6 +1,7 @@
 #include "redstone/engine.hpp"
 #include "redstone/piston.hpp"
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <iostream>
 #include <map>
@@ -43,9 +44,9 @@ int main() {
     for (int x : {b, b - 1, b + 1, b - 2}) {
       Pos p{x, 82, 5};
       fixture.rawSetBlock(p, defaultState("smooth_stone"));
-      fixture.scheduledTicks.push_back({p, "minecraft:smooth_stone", 2,
-                                        n % 2 == 0 ? -1 : 0,
-                                        static_cast<std::int64_t>(n * 2)});
+      fixture.scheduleTick(ScheduledTick{
+          p, "minecraft:smooth_stone", 2, n % 2 == 0 ? -1 : 0,
+          static_cast<std::int64_t>(n * 2)});
       ++n;
     }
   fixture.tick();
@@ -83,14 +84,22 @@ int main() {
   dedup.scheduleTick({2, 87, 2}, "smooth_stone", 50, 1);
   dedup.scheduleTick({2, 87, 2}, "smooth_stone", 4, -1);
   dedup.scheduleTick({3, 87, 2}, "smooth_stone", 60, 0);
-  // Reproduce explicit vanilla suborders 999 and 1000 after schedule's dedup.
-  dedup.scheduledTicks[0].order = 999;
-  dedup.scheduledTicks[1].order = 1000;
-  std::sort(dedup.scheduledTicks.begin(), dedup.scheduledTicks.end(),
+  // LevelChunkTicks.schedule drops the duplicate (pos, type) entry.
+  assert(dedup.scheduledTickCount() == 2);
+  // The vanilla recording assigns explicit suborders 999 and 1000 to these two
+  // ticks; reproduce that queue through LevelTicks.schedule.
+  World ordered;
+  load(ordered);
+  ordered.scheduleTick(ScheduledTick{{2, 87, 2}, "minecraft:smooth_stone", 50,
+                                     1, 999});
+  ordered.scheduleTick(ScheduledTick{{3, 87, 2}, "minecraft:smooth_stone", 60,
+                                     0, 1000});
+  auto dedupTicks = ordered.scheduledTicks();
+  std::sort(dedupTicks.begin(), dedupTicks.end(),
             [](const auto &a, const auto &b) { return a.pos < b.pos; });
   std::cout << '[';
   first = true;
-  for (const auto &t : dedup.scheduledTicks) {
+  for (const auto &t : dedupTicks) {
     if (!first)
       std::cout << ',';
     first = false;
@@ -103,10 +112,10 @@ int main() {
   load(overdue);
   overdue.traceUpdates = true;
   overdue.setGameTime(10);
-  overdue.scheduledTicks = {{{0, 82, 5}, "minecraft:smooth_stone", 5, 2, 0},
-                            {{1, 82, 5}, "minecraft:smooth_stone", 6, -3, 1},
-                            {{16, 82, 5}, "minecraft:smooth_stone", 8, 0, 2},
-                            {{8192, 82, 5}, "minecraft:smooth_stone", 8, 0, 3}};
+  overdue.scheduleTick(ScheduledTick{{0, 82, 5}, "minecraft:smooth_stone", 5, 2, 0});
+  overdue.scheduleTick(ScheduledTick{{1, 82, 5}, "minecraft:smooth_stone", 6, -3, 1});
+  overdue.scheduleTick(ScheduledTick{{16, 82, 5}, "minecraft:smooth_stone", 8, 0, 2});
+  overdue.scheduleTick(ScheduledTick{{8192, 82, 5}, "minecraft:smooth_stone", 8, 0, 3});
   overdue.tick();
   positions(recorded(overdue, "scheduled_tick"));
   std::cout << ",\n\"negative_orders\":";
@@ -114,12 +123,12 @@ int main() {
   load(negative);
   negative.traceUpdates = true;
   negative.setGameTime(9);
-  negative.scheduledTicks = {{{16, 82, 5}, "minecraft:smooth_stone", 10, 0, 0},
-                             {{-1, 82, 5},
-                              "minecraft:smooth_stone",
-                              10,
-                              0,
-                              static_cast<std::int64_t>(-2LL)}};
+  negative.scheduleTick(ScheduledTick{{16, 82, 5}, "minecraft:smooth_stone", 10, 0, 0});
+  negative.scheduleTick(ScheduledTick{{-1, 82, 5},
+                                      "minecraft:smooth_stone",
+                                      10,
+                                      0,
+                                      static_cast<std::int64_t>(-2LL)});
   negative.tick();
   positions(recorded(negative, "scheduled_tick"));
   std::cout << ",\n\"observer_reschedule\":";
@@ -177,7 +186,7 @@ int main() {
       else
         std::cout << it->second->progress << ',' << it->second->progressO << ','
                   << it->second->lastTicked;
-      std::cout << ",\"" << moving.getBlock(p).name << "\"]";
+      std::cout << ",\"" << moving.getBlock(p).name() << "\"]";
     }
     std::cout << ']';
   }

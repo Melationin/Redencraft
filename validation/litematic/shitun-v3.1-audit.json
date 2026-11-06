@@ -1,0 +1,562 @@
+{
+  "source": "C:\\Users\\zhdds\\Downloads\\[再灰二度] 无沟V3.1双倍速防雪世吞-997.生成导出-800x83x800.litematic",
+  "sha256": "7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52",
+  "version": 6,
+  "data_version": 20060210,
+  "enclosing_size": {
+    "x": 800,
+    "y": 83,
+    "z": 800
+  },
+  "region_count": 410,
+  "declared_total_blocks": 114514,
+  "declared_total_volume": 1919810,
+  "decoded_region_volume": 5856016,
+  "decoded_non_air": 70112,
+  "overlapping_region_pairs": [],
+  "blocks": [
+    {
+      "name": "minecraft:activator_rail",
+      "count": 266,
+      "effective_name": "minecraft:activator_rail",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:air",
+      "count": 5785904,
+      "effective_name": "minecraft:air",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:anvil",
+      "count": 28764,
+      "effective_name": "minecraft:obsidian",
+      "status": "replaced"
+    },
+    {
+      "name": "minecraft:birch_wall_sign",
+      "count": 1,
+      "effective_name": "minecraft:birch_wall_sign",
+      "status": "missing"
+    },
+    {
+      "name": "minecraft:dead_fire_coral_wall_fan",
+      "count": 133,
+      "effective_name": "minecraft:dead_fire_coral_wall_fan",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:detector_rail",
+      "count": 133,
+      "effective_name": "minecraft:detector_rail",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:honey_block",
+      "count": 407,
+      "effective_name": "minecraft:honey_block",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:note_block",
+      "count": 2,
+      "effective_name": "minecraft:note_block",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:observer",
+      "count": 4047,
+      "effective_name": "minecraft:observer",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:piston",
+      "count": 3881,
+      "effective_name": "minecraft:piston",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:piston_head",
+      "count": 940,
+      "effective_name": "minecraft:piston_head",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:redstone_block",
+      "count": 2141,
+      "effective_name": "minecraft:redstone_block",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:redstone_lamp",
+      "count": 4,
+      "effective_name": "minecraft:redstone_lamp",
+      "status": "missing"
+    },
+    {
+      "name": "minecraft:sand",
+      "count": 6650,
+      "effective_name": "minecraft:sand",
+      "status": "missing"
+    },
+    {
+      "name": "minecraft:slime_block",
+      "count": 16550,
+      "effective_name": "minecraft:slime_block",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:smooth_stone",
+      "count": 2433,
+      "effective_name": "minecraft:smooth_stone",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:sticky_piston",
+      "count": 3228,
+      "effective_name": "minecraft:sticky_piston",
+      "status": "registered"
+    },
+    {
+      "name": "minecraft:stone_brick_wall",
+      "count": 399,
+      "effective_name": "minecraft:stone_brick_wall",
+      "status": "missing"
+    },
+    {
+      "name": "minecraft:tnt",
+      "count": 133,
+      "effective_name": "minecraft:tnt",
+      "status": "registered"
+    }
+  ],
+  "unused_palette_names": [],
+  "block_states": [
+    {
+      "state": {
+        "Name": "minecraft:activator_rail",
+        "Properties": {
+          "powered": "false",
+          "shape": "east_west",
+          "waterlogged": "false"
+        }
+      },
+      "count": 266
+    },
+    {
+      "state": {
+        "Name": "minecraft:air"
+      },
+      "count": 5785904
+    },
+    {
+      "state": {
+        "Name": "minecraft:anvil",
+        "Properties": {
+          "facing": "east"
+        }
+      },
+      "count": 14400
+    },
+    {
+      "state": {
+        "Name": "minecraft:anvil",
+        "Properties": {
+          "facing": "north"
+        }
+      },
+      "count": 14364
+    },
+    {
+      "state": {
+        "Name": "minecraft:birch_wall_sign",
+        "Properties": {
+          "facing": "south",
+          "waterlogged": "false"
+        }
+      },
+      "count": 1
+    },
+    {
+      "state": {
+        "Name": "minecraft:dead_fire_coral_wall_fan",
+        "Properties": {
+          "facing": "east",
+          "waterlogged": "false"
+        }
+      },
+      "count": 133
+    },
+    {
+      "state": {
+        "Name": "minecraft:detector_rail",
+        "Properties": {
+          "powered": "true",
+          "shape": "north_south",
+          "waterlogged": "false"
+        }
+      },
+      "count": 133
+    },
+    {
+      "state": {
+        "Name": "minecraft:honey_block"
+      },
+      "count": 407
+    },
+    {
+      "state": {
+        "Name": "minecraft:note_block",
+        "Properties": {
+          "instrument": "harp",
+          "note": "0",
+          "powered": "false"
+        }
+      },
+      "count": 2
+    },
+    {
+      "state": {
+        "Name": "minecraft:observer",
+        "Properties": {
+          "facing": "down",
+          "powered": "false"
+        }
+      },
+      "count": 17
+    },
+    {
+      "state": {
+        "Name": "minecraft:observer",
+        "Properties": {
+          "facing": "east",
+          "powered": "false"
+        }
+      },
+      "count": 673
+    },
+    {
+      "state": {
+        "Name": "minecraft:observer",
+        "Properties": {
+          "facing": "north",
+          "powered": "false"
+        }
+      },
+      "count": 809
+    },
+    {
+      "state": {
+        "Name": "minecraft:observer",
+        "Properties": {
+          "facing": "south",
+          "powered": "false"
+        }
+      },
+      "count": 1341
+    },
+    {
+      "state": {
+        "Name": "minecraft:observer",
+        "Properties": {
+          "facing": "up",
+          "powered": "false"
+        }
+      },
+      "count": 538
+    },
+    {
+      "state": {
+        "Name": "minecraft:observer",
+        "Properties": {
+          "facing": "west",
+          "powered": "false"
+        }
+      },
+      "count": 669
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "down"
+        }
+      },
+      "count": 3474
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "north"
+        }
+      },
+      "count": 1
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "south"
+        }
+      },
+      "count": 267
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "up"
+        }
+      },
+      "count": 133
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston",
+        "Properties": {
+          "extended": "true",
+          "facing": "east"
+        }
+      },
+      "count": 4
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston",
+        "Properties": {
+          "extended": "true",
+          "facing": "north"
+        }
+      },
+      "count": 1
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston",
+        "Properties": {
+          "extended": "true",
+          "facing": "south"
+        }
+      },
+      "count": 1
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston_head",
+        "Properties": {
+          "facing": "east",
+          "short": "false",
+          "type": "normal"
+        }
+      },
+      "count": 4
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston_head",
+        "Properties": {
+          "facing": "north",
+          "short": "false",
+          "type": "normal"
+        }
+      },
+      "count": 1
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston_head",
+        "Properties": {
+          "facing": "south",
+          "short": "false",
+          "type": "normal"
+        }
+      },
+      "count": 1
+    },
+    {
+      "state": {
+        "Name": "minecraft:piston_head",
+        "Properties": {
+          "facing": "up",
+          "short": "false",
+          "type": "sticky"
+        }
+      },
+      "count": 934
+    },
+    {
+      "state": {
+        "Name": "minecraft:redstone_block"
+      },
+      "count": 2141
+    },
+    {
+      "state": {
+        "Name": "minecraft:redstone_lamp",
+        "Properties": {
+          "lit": "false"
+        }
+      },
+      "count": 3
+    },
+    {
+      "state": {
+        "Name": "minecraft:redstone_lamp",
+        "Properties": {
+          "lit": "true"
+        }
+      },
+      "count": 1
+    },
+    {
+      "state": {
+        "Name": "minecraft:sand"
+      },
+      "count": 6650
+    },
+    {
+      "state": {
+        "Name": "minecraft:slime_block"
+      },
+      "count": 16550
+    },
+    {
+      "state": {
+        "Name": "minecraft:smooth_stone"
+      },
+      "count": 2433
+    },
+    {
+      "state": {
+        "Name": "minecraft:sticky_piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "down"
+        }
+      },
+      "count": 270
+    },
+    {
+      "state": {
+        "Name": "minecraft:sticky_piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "east"
+        }
+      },
+      "count": 2
+    },
+    {
+      "state": {
+        "Name": "minecraft:sticky_piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "north"
+        }
+      },
+      "count": 266
+    },
+    {
+      "state": {
+        "Name": "minecraft:sticky_piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "south"
+        }
+      },
+      "count": 665
+    },
+    {
+      "state": {
+        "Name": "minecraft:sticky_piston",
+        "Properties": {
+          "extended": "false",
+          "facing": "up"
+        }
+      },
+      "count": 1091
+    },
+    {
+      "state": {
+        "Name": "minecraft:sticky_piston",
+        "Properties": {
+          "extended": "true",
+          "facing": "up"
+        }
+      },
+      "count": 934
+    },
+    {
+      "state": {
+        "Name": "minecraft:stone_brick_wall",
+        "Properties": {
+          "east": "none",
+          "north": "low",
+          "south": "none",
+          "up": "true",
+          "waterlogged": "false",
+          "west": "none"
+        }
+      },
+      "count": 133
+    },
+    {
+      "state": {
+        "Name": "minecraft:stone_brick_wall",
+        "Properties": {
+          "east": "none",
+          "north": "none",
+          "south": "low",
+          "up": "true",
+          "waterlogged": "false",
+          "west": "none"
+        }
+      },
+      "count": 133
+    },
+    {
+      "state": {
+        "Name": "minecraft:stone_brick_wall",
+        "Properties": {
+          "east": "none",
+          "north": "none",
+          "south": "none",
+          "up": "true",
+          "waterlogged": "false",
+          "west": "tall"
+        }
+      },
+      "count": 133
+    },
+    {
+      "state": {
+        "Name": "minecraft:tnt",
+        "Properties": {
+          "unstable": "false"
+        }
+      },
+      "count": 133
+    }
+  ],
+  "entities": {
+    "minecraft:minecart": 133
+  },
+  "unsupported_entities": [],
+  "entity_uuid_count": 4,
+  "duplicate_entity_uuid_groups": 1,
+  "duplicate_entity_uuid_entries": 129,
+  "tile_entities": {
+    "minecraft:sign": 1
+  },
+  "pending_ticks": {
+    "PendingBlockTicks": 0,
+    "PendingFluidTicks": 0
+  },
+  "count_semantics": "Sum of decoded region cells; exact unique cells when regions do not overlap.",
+  "coverage_semantics": "Registry coverage only; registration is not proof of full vanilla parity."
+}

@@ -5,12 +5,15 @@ param(
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $names=@('bedrock','slime_block','honey_block_bottom','honey_block_side','honey_block_top',
- 'smooth_stone','white_terracotta','dead_tube_coral_fan','dead_brain_coral_fan',
+ 'smooth_stone','sand','stone_bricks','redstone_lamp','redstone_lamp_on',
+ 'white_terracotta','dead_tube_coral_fan','dead_brain_coral_fan',
  'dead_bubble_coral_fan','dead_fire_coral_fan','dead_horn_coral_fan','cobblestone',
  'obsidian','glass','piston_bottom','piston_inner','piston_side','piston_top','piston_top_sticky',
  'observer_back','observer_back_on','observer_front','observer_side','observer_top','note_block',
  'redstone_block','tnt_bottom','tnt_side','tnt_top','grass_block_top','grass_block_side',
- 'grass_block_side_overlay','grass_block_snow','dirt')
+ 'grass_block_side_overlay','grass_block_snow','dirt',
+ 'rail','rail_corner','powered_rail','powered_rail_on','detector_rail',
+ 'detector_rail_on','activator_rail','activator_rail_on')
 foreach($color in @('white','orange','magenta','light_blue','yellow','lime','pink','gray',
  'light_gray','cyan','purple','blue','brown','green','red','black')) { $names+="${color}_wool" }
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null

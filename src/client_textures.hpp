@@ -115,7 +115,7 @@ public:
 inline std::string faceTexture(const redstone::BlockState &s,
                                redstone::Direction d) {
   using namespace redstone;
-  std::string n = s.name.starts_with("minecraft:") ? s.name.substr(10) : s.name;
+  std::string n = s.name().starts_with("minecraft:") ? s.name().substr(10) : s.name();
   if (isWoolCarpet(s))
     return n.substr(0, n.size() - 7) + "_wool";
   if (isDeadCoralWallFan(s)) {
@@ -130,6 +130,10 @@ inline std::string faceTexture(const redstone::BlockState &s,
                                       : "grass_block_side";
   if (n == "cobblestone_wall")
     return "cobblestone";
+  if (n == "stone_brick_wall")
+    return "stone_bricks";
+  if (n == "redstone_lamp")
+    return s.get("lit") == "true" ? "redstone_lamp_on" : "redstone_lamp";
   if (n == "honey_block")
     return d == Direction::Up     ? "honey_block_top"
            : d == Direction::Down ? "honey_block_bottom"
@@ -138,6 +142,16 @@ inline std::string faceTexture(const redstone::BlockState &s,
     return d == Direction::Up     ? "tnt_top"
            : d == Direction::Down ? "tnt_bottom"
                                   : "tnt_side";
+  if (n == "rail" || n == "powered_rail" || n == "detector_rail" ||
+      n == "activator_rail") {
+    auto shape = s.get("shape", "north_south");
+    bool curved = shape == "south_east" || shape == "south_west" ||
+                  shape == "north_west" || shape == "north_east";
+    if (n == "rail")
+      return curved ? "rail_corner" : "rail";
+    bool powered = s.get("powered") == "true";
+    return n + (powered ? "_on" : "");
+  }
   if (n == "observer") {
     auto facing = directionFromString(s.get("facing", "south"));
     if (d == facing)

@@ -1,0 +1,13 @@
+{
+  "date": "2026-11-06",
+  "protocol": 775,
+  "source_version": "26.1",
+  "source_inner_sha256": "a7fed6f7d88379349e35ae0c6e9881d4484605132f6f620376a3868eea6cce52",
+  "play_packet_records": 182,
+  "play_record_sha256": "006f7317fd56f0416575e4333e597653c017b137a7a1933bd5315247522828f6",
+  "result": "All decoded with official GameProtocols.CLIENTBOUND codec; no trailing bytes. 4 chunks each parsed with 24 official LevelChunkSection.read calls.",
+  "configuration_packet_records": 30,
+  "actual_client_launched": false,
+  "limitations": "Codec/source validation only; not real-client rendering or connection validation.",
+  "chunk_packet_records": 4
+}

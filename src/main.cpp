@@ -1,8 +1,10 @@
 #include "redstone/allocator.hpp"
 #include "redstone/engine.hpp"
+#include "redstone/entity.hpp"
 #include "redstone/storage.hpp"
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -42,15 +44,41 @@ void snapshot(const redstone::World &world) {
       std::cout << ',';
     first = false;
     std::cout << "{\"x\":" << p.x << ",\"y\":" << p.y << ",\"z\":" << p.z
-              << ",\"name\":" << quoted(s.name) << ",\"properties\":{";
+              << ",\"name\":" << quoted(s.name()) << ",\"properties\":{";
     bool prop = true;
-    for (auto &[k, v] : s.properties) {
+    for (auto &[k, v] : s.properties()) {
       if (!prop)
         std::cout << ',';
       prop = false;
       std::cout << quoted(k) << ':' << quoted(v);
     }
     std::cout << "}}";
+  }
+  std::cout << "],\"entities\":[";
+  first = true;
+  for (auto &entity : world.entities) {
+    if (entity->isRemoved())
+      continue;
+    if (!first)
+      std::cout << ',';
+    first = false;
+    std::cout << "{\"id\":" << quoted(entity->typeName())
+              << ",\"x\":" << entity->position.x
+              << ",\"y\":" << entity->position.y
+              << ",\"z\":" << entity->position.z
+              << ",\"vx\":" << entity->deltaMovement.x
+              << ",\"vy\":" << entity->deltaMovement.y
+              << ",\"vz\":" << entity->deltaMovement.z;
+    if (auto *item = dynamic_cast<redstone::ItemEntity *>(entity.get()))
+      std::cout << ",\"item\":" << quoted(item->item.id)
+                << ",\"count\":" << item->item.count
+                << ",\"age\":" << item->age;
+    else if (auto *tnt = dynamic_cast<redstone::PrimedTnt *>(entity.get()))
+      std::cout << ",\"fuse\":" << tnt->fuse;
+    else if (auto *falling =
+                 dynamic_cast<redstone::FallingBlockEntity *>(entity.get()))
+      std::cout << ",\"block\":" << quoted(falling->blockState.name());
+    std::cout << "}";
   }
   std::cout << "]}\n";
 }
@@ -112,7 +140,7 @@ int main(int argc, char **argv) {
       world.setBlock({5, 0, 4}, redstone::defaultState("smooth_stone"));
     } else {
       if (regionDir.empty())
-        regionDir = worldDir / "region";
+        regionDir = redstone::defaultRegionDirectory(worldDir);
       auto data = redstone::loadAnvilWorld(worldDir, regionDir, minY, maxY);
       if (!forced.empty()) {
         auto wanted = [&](redstone::Pos p) {
@@ -129,11 +157,14 @@ int main(int argc, char **argv) {
                           static_cast<int>(y->number),
                           static_cast<int>(z->number)});
         });
+        // importWorld validates/clamps entity Pos and checks loaded X/Z
+        // chunks. Do not cast untrusted raw NBT doubles to int here.
       }
       redstone::importWorld(data, world);
-      std::size_t unsupported = 0, fluid = 0, otherBE = 0;
+      std::size_t unsupported = 0, fluid = 0, otherBE = 0, otherEntities = 0;
+      std::size_t importedEntities = world.entities.size();
       for (auto &[p, s] : data.blocks)
-        if (!redstone::isSupportedBlock(s.name))
+        if (!redstone::isSupportedBlock(s.name()))
           ++unsupported;
       for (auto &t : data.ticks)
         if (t.fluid)
@@ -143,11 +174,21 @@ int main(int argc, char **argv) {
         if (!id || id->text != "minecraft:piston")
           ++otherBE;
       }
+      for (auto &e : data.entities) {
+        auto id = e.get("id");
+        if (!id ||
+            (id->text != "minecraft:item" && id->text != "minecraft:tnt" &&
+             id->text != "minecraft:falling_block" &&
+             id->text != "minecraft:minecart"))
+          ++otherEntities;
+      }
       std::cerr << "loaded_chunks=" << data.chunks.size()
                 << " blocks=" << data.blocks.size()
                 << " unsupported_blocks=" << unsupported
                 << " fluid_ticks_not_simulated=" << fluid
-                << " other_block_entities_not_simulated=" << otherBE << '\n';
+                << " other_block_entities_not_simulated=" << otherBE
+                << " simple_entities_imported=" << importedEntities
+                << " other_entities_not_simulated=" << otherEntities << '\n';
     }
     if (dump)
       snapshot(world);

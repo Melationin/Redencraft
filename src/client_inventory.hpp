@@ -10,9 +10,10 @@ namespace redstone::client {
 // Item represented by a block; an empty result means there is no selectable
 // item.
 inline std::string itemForBlock(const BlockState &state) {
-  const auto &name = state.name;
+  const auto &name = state.name();
   if (name == "minecraft:air" || name == "minecraft:cave_air" ||
-      name == "minecraft:void_air" || name == "minecraft:moving_piston")
+      name == "minecraft:void_air" || name == "minecraft:moving_piston" ||
+      name == "minecraft:water" || name == "minecraft:lava")
     return {};
   if (name == "minecraft:piston_head")
     return state.get("type") == "sticky" ? "minecraft:sticky_piston"

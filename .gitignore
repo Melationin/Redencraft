@@ -1,5 +1,8 @@
+/*.obj
+__pycache__/
 /build*/
 /third_party/
+/logs/
 /validation/vanilla26_1/server.jar
 /validation/vanilla26_1/world/
 /validation/vanilla26_1/*-world/

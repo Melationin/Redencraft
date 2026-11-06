@@ -6,10 +6,7 @@
 #include <string>
 namespace redstone {
 namespace {
-bool named(const BlockState &s, const char *name) {
-  return s.name == name || s.name == std::string("minecraft:") + name;
-}
-bool wall(const BlockState &s) { return named(s, "cobblestone_wall"); }
+bool wall(const BlockState &s) { return isWallBlock(s); }
 ShapeBox orient(ShapeBox b, Direction d) {
   // Rotate north-facing shape around block center.
   switch (d) {
@@ -103,14 +100,25 @@ Rect wallTest(Direction d) {
     return {7, 7, 16, 9};
   }
 }
+// BlockStateBase exposes immutable per-state voxel shapes; cache them by the
+// interned state id so a shape is built at most once.
+std::vector<VoxelShape> &shapeCache() {
+  static std::vector<VoxelShape> cache;
+  return cache;
+}
+std::vector<bool> &shapeReady() {
+  static std::vector<bool> ready;
+  return ready;
+}
 } // namespace
-VoxelShape collisionShape(const BlockState &s) {
-  if (named(s, "air") || named(s, "cave_air") || named(s, "void_air") ||
-      isDeadCoralFan(s) || named(s, "moving_piston"))
+VoxelShape computeStateShape(const BlockState &s) {
+  if (s.isAir() ||
+      isDeadCoralFan(s) || s.is(Blocks::MOVING_PISTON) || isRailBlock(s) ||
+      isLiquidBlock(s))
     return {};
   if (isWoolCarpet(s))
     return {{0, 0, 0, 16, 1, 16}};
-  if (named(s, "honey_block"))
+  if (s.is(Blocks::HONEY_BLOCK))
     return {{1, 0, 1, 15, 15, 15}};
   if (wall(s)) {
     VoxelShape out;
@@ -121,13 +129,13 @@ VoxelShape collisionShape(const BlockState &s) {
         out.push_back(orient({5, 0, 0, 11, 24, 11}, d));
     return out;
   }
-  if (named(s, "piston") || named(s, "sticky_piston")) {
+  if (s.is(Blocks::PISTON) || s.is(Blocks::STICKY_PISTON)) {
     if (s.get("extended", "false") == "true")
       return {orient({0, 0, 4, 16, 16, 16},
                      directionFromString(s.get("facing", "north")))};
     return {{0, 0, 0, 16, 16, 16}};
   }
-  if (named(s, "piston_head")) {
+  if (s.is(Blocks::PISTON_HEAD)) {
     auto d = directionFromString(s.get("facing", "north"));
     return {orient({0, 0, 0, 16, 16, 4}, d),
             orient({6, 6, 4, 10, 10,
@@ -137,16 +145,41 @@ VoxelShape collisionShape(const BlockState &s) {
   // TODO: unknown blocks require their registered collision shapes.
   return {{0, 0, 0, 16, 16, 16}};
 }
+const VoxelShape &collisionShape(const BlockState &s) {
+  const auto id = static_cast<std::size_t>(s.id());
+  auto &cache = shapeCache();
+  auto &ready = shapeReady();
+  if (id >= cache.size()) {
+    cache.resize(id + 1);
+    ready.resize(id + 1, false);
+  }
+  if (!ready[id]) {
+    cache[id] = computeStateShape(s);
+    ready[id] = true;
+  }
+  return cache[id];
+}
 VoxelShape collisionShape(World &w, Pos p, const BlockState &s) {
-  if (!named(s, "moving_piston"))
+  if (!s.is(Blocks::MOVING_PISTON))
     return collisionShape(s);
   auto it = w.pistonEntities.find(p);
   if (it == w.pistonEntities.end())
     return {};
   auto e = it->second;
   VoxelShape result;
+  if (w.pistonNoClip && e->progress < 1.0f &&
+      e->movementDirection() == *w.pistonNoClip) {
+    // PistonMovingBlockEntity.getCollisionShape's NOCLIP branch: a piston base
+    // being retracted still exposes its extended head shape, while moved blocks
+    // expose nothing so the pushed entity can travel through the moving space.
+    if (!e->extending && e->source &&
+        (e->movedState.is(Blocks::PISTON) ||
+         e->movedState.is(Blocks::STICKY_PISTON)))
+      result = collisionShape(e->movedState.with("extended", "true"));
+    return result;
+  }
   if (!e->extending && e->source &&
-      (named(e->movedState, "piston") || named(e->movedState, "sticky_piston")))
+      (e->movedState.is(Blocks::PISTON) || e->movedState.is(Blocks::STICKY_PISTON)))
     result = collisionShape(e->movedState.with("extended", "true"));
   auto moved =
       e->source

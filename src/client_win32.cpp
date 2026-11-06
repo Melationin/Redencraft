@@ -2,6 +2,7 @@
 // Minecraft simulation logic: edits and ticks go through redstone::World.
 #include "client_inventory.hpp"
 #include "client_textures.hpp"
+#include "redstone/entity.hpp"
 #include "redstone/allocator.hpp"
 #include "redstone/engine.hpp"
 #include "redstone/piston.hpp"
@@ -301,16 +302,17 @@ void App::refresh() {
   SendMessageW(logs, EM_LINESCROLL, 0, 100000);
   std::wostringstream info;
   info << L"Tick " << world->gameTime() << L"  |  blocks " << blocks.size()
-       << L"\r\n计划刻 " << world->scheduledTicks.size() << L"  方块事件 "
-       << world->blockEvents.size();
+       << L"  |  entities " << world->entities.size()
+       << L"\r\n计划刻 " << world->scheduledTickCount() << L"  方块事件 "
+       << world->blockEventCount();
   SetWindowTextW(status, info.str().c_str());
   if (selected) {
     auto p = selected->pos;
     auto state = world->getBlock(p);
     std::wostringstream s;
     s << L"(" << p.x << L", " << p.y << L", " << p.z << L") "
-      << shortName(state.name) << L"\r\n";
-    for (auto &[k, v] : state.properties)
+      << shortName(state.name()) << L"\r\n";
+    for (auto &[k, v] : state.properties())
       s << wide(k) << L" = " << wide(v) << L"\r\n";
     if (auto it = world->pistonEntities.find(p);
         it != world->pistonEntities.end())
@@ -378,7 +380,7 @@ void App::demo() {
   refresh();
 }
 std::array<float, 3> color(const BlockState &s) {
-  const auto &n = s.name;
+  const auto &n = s.name();
   if (n.find("grass") != std::string::npos)
     return {.35f, .65f, .29f};
   if (n.find("slime") != std::string::npos)
@@ -412,6 +414,11 @@ std::array<float, 3> color(const BlockState &s) {
 }
 VoxelShape visibleShape(World &w, Pos p, const BlockState &s) {
   auto boxes = collisionShape(w, p, s);
+  if (boxes.empty() && isRailBlock(s)) {
+    boxes.push_back({0, 0, 0, 16,
+                     railShapeIsSlope(railShapeOf(s)) ? 8.0 : 2.0, 16});
+    return boxes;
+  }
   if (boxes.empty() && isDeadCoralWallFan(s)) {
     auto d = directionFromString(s.get("facing", "north"));
     if (d == Direction::North)
@@ -427,6 +434,23 @@ VoxelShape visibleShape(World &w, Pos p, const BlockState &s) {
     boxes.push_back(
         {2, 0, 2, 14, 4, 14}); // Non-colliding coral remains selectable.
   return boxes;
+}
+void entityCube(const Aabb &b, const std::array<float, 3> &c) {
+  glDisable(GL_TEXTURE_2D);
+  const V3 v[8] = {{b.minX, b.minY, b.minZ}, {b.maxX, b.minY, b.minZ},
+                   {b.maxX, b.maxY, b.minZ}, {b.minX, b.maxY, b.minZ},
+                   {b.minX, b.minY, b.maxZ}, {b.maxX, b.minY, b.maxZ},
+                   {b.maxX, b.maxY, b.maxZ}, {b.minX, b.maxY, b.maxZ}};
+  constexpr int faces[6][4] = {{0, 1, 2, 3}, {5, 4, 7, 6}, {4, 0, 3, 7},
+                               {1, 5, 6, 2}, {3, 2, 6, 7}, {4, 5, 1, 0}};
+  constexpr float shade[6] = {.65f, .85f, .72f, .9f, 1, .5f};
+  for (int f = 0; f < 6; f++) {
+    glColor3f(c[0] * shade[f], c[1] * shade[f], c[2] * shade[f]);
+    glBegin(GL_QUADS);
+    for (int i : faces[f])
+      glVertex3d(v[i].x, v[i].y, v[i].z);
+    glEnd();
+  }
 }
 void cube(const ShapeBox &b, Pos p, const std::array<float, 3> &c,
           bool outline = false, const BlockState *state = nullptr) {
@@ -475,11 +499,11 @@ void cube(const ShapeBox &b, Pos p, const std::array<float, 3> &c,
     V3 vertical = (face == Direction::Up || face == Direction::Down)
                       ? V3{0, 0, -1}
                       : V3{0, 1, 0};
-    if (state && state->properties.contains("facing")) {
+    if (state && state->hasProperty("facing")) {
       auto facing = directionFromString(state->get("facing"));
       auto fp = Pos{}.relative(facing);
       V3 front{double(fp.x), double(fp.y), double(fp.z)};
-      if (state->name.find("piston") != std::string::npos &&
+      if (state->name().find("piston") != std::string::npos &&
           std::abs(dot(front, normal)) < .5)
         vertical = front;
       else if (facing == Direction::Up || facing == Direction::Down)
@@ -490,7 +514,7 @@ void cube(const ShapeBox &b, Pos p, const std::array<float, 3> &c,
     auto horizontal = cross(vertical, normal);
     auto paint = [&](bool overlay) {
       float r = 1, g = 1, blue = 1;
-      if (state && state->name == "minecraft:grass_block" &&
+      if (state && state->is(Blocks::GRASS_BLOCK) &&
           (face == Direction::Up || overlay)) {
         r = .57f;
         g = .77f;
@@ -511,7 +535,7 @@ void cube(const ShapeBox &b, Pos p, const std::array<float, 3> &c,
       glEnd();
     };
     paint(false);
-    if (state && state->name == "minecraft:grass_block" &&
+    if (state && state->is(Blocks::GRASS_BLOCK) &&
         face != Direction::Up && face != Direction::Down &&
         state->get("snowy") != "true") {
       glBindTexture(GL_TEXTURE_2D,
@@ -719,7 +743,7 @@ void App::render() {
     for (auto &box : shapes)
       cube(box, b.pos, c, false, &display);
     // Facing marks are intentionally schematic; no textures/assets required.
-    if (b.state.properties.contains("facing")) {
+    if (b.state.hasProperty("facing")) {
       auto d = directionFromString(b.state.get("facing"));
       auto q = b.pos.relative(d);
       V3 v{double(q.x - b.pos.x), double(q.y - b.pos.y), double(q.z - b.pos.z)};
@@ -733,6 +757,28 @@ void App::render() {
       glEnd();
       glLineWidth(1);
     }
+  }
+  // TODO: entity models, item sprites, rail textures, and entity interpolation.
+  // Simple entities are drawn as their collision boxes with a debug colour.
+  for (auto &entity : world->entities) {
+    if (entity->isRemoved())
+      continue;
+    auto box = entity->boundingBox();
+    V3 offset{entity->position.x - focus.x, entity->position.y - focus.y,
+              entity->position.z - focus.z};
+    if (dot(offset, offset) > 64 * 64)
+      continue;
+    std::array<float, 3> c;
+    if (auto *item = dynamic_cast<redstone::ItemEntity *>(entity.get()))
+      c = item->item.empty() ? std::array<float, 3>{.8f, .8f, .8f}
+                             : color(defaultState(item->item.id));
+    else if (dynamic_cast<redstone::PrimedTnt *>(entity.get()))
+      c = {.94f, .33f, .23f};
+    else if (dynamic_cast<redstone::Minecart *>(entity.get()))
+      c = {.42f, .48f, .55f};
+    else
+      c = {.63f, .66f, .69f};
+    entityCube(box, c);
   }
   glDisable(GL_POLYGON_OFFSET_FILL);
   glLineWidth(2);
@@ -835,17 +881,18 @@ void App::edit(bool remove) {
     if (pos->y < world->minY() || pos->y >= world->maxY())
       return;
     auto existing=world->getBlock(*pos);
-    if(existing.name!="minecraft:air"&&existing.name!="minecraft:cave_air"&&existing.name!="minecraft:void_air")return;
+    if(existing.name()!="minecraft:air"&&existing.name()!="minecraft:cave_air"&&existing.name()!="minecraft:void_air")return;
     int cx = pos->x >= 0 ? pos->x / 16 : -1 - ((-1 - pos->x) / 16),
         cz = pos->z >= 0 ? pos->z / 16 : -1 - ((-1 - pos->z) / 16);
     world->loadChunk(cx, cz);
     auto state = defaultState(inventory.selectedItem());
     if (isDeadCoralFan(state) || isDeadCoralWallFan(state)) {
-      auto placed = world->coralPlacementState(*pos, state, target->face);
+      auto placed = world->coralPlacementState(
+          *pos, state, target ? target->face : Direction::Up);
       if (!placed)
         return;
       state = *placed;
-    } else if (state.properties.contains("facing")) {
+    } else if (state.hasProperty("facing")) {
       auto f = forward();
       Direction look;
       if (std::abs(f.y) > std::max(std::abs(f.x), std::abs(f.z)))
@@ -856,15 +903,37 @@ void App::edit(bool remove) {
         look = f.z > 0 ? Direction::South : Direction::North;
       // Observer looks with the player; piston head points toward the player.
       state =
-          state.with("facing", directionName(state.name == "minecraft:observer"
+          state.with("facing", directionName(state.is(Blocks::OBSERVER)
                                                  ? look
                                                  : opposite(look)));
+    } else if (state.hasProperty("shape")) {
+      auto f = forward();
+      Direction look;
+      if (std::abs(f.x) > std::abs(f.z))
+        look = f.x > 0 ? Direction::East : Direction::West;
+      else
+        look = f.z > 0 ? Direction::South : Direction::North;
+      state = state.with("shape",
+                         look == Direction::East || look == Direction::West
+                             ? "east_west"
+                             : "north_south");
     }
-    if (state.properties.contains("waterlogged"))
+    if (state.hasProperty("waterlogged"))
       state = state.with("waterlogged", "false");
     // TODO: port player BlockPlaceContext (replacement, head placement etc.).
     // This is an editor placement, not an emulation of player interactions.
-    state = world->updateFromNeighbourShapes(*pos, state);
+    if (isWoolCarpet(state) &&
+        isAirState(world->getBlock(pos->relative(Direction::Down))))
+      return;
+    if (isRailBlock(state) && !railCanSurvive(*world, *pos, state))
+      return;
+    // Observer.updateShape has scheduling side effects; placing a fresh
+    // observer must not generate a pulse by speculative shape queries.
+    if (isWallBlock(state) || state.is(Blocks::GRASS_BLOCK) ||
+        state.is(Blocks::NOTE_BLOCK))
+      state = world->updateFromNeighbourShapes(*pos, state);
+    if (state.is(Blocks::REDSTONE_LAMP))
+      state = state.with("lit", world->hasNeighborSignal(*pos) ? "true" : "false");
     world->setBlock(*pos, state);
   }
   selected = target;
@@ -890,7 +959,7 @@ void App::load() {
   SetCursor(LoadCursorW(nullptr, IDC_WAIT));
   try {
     auto data =
-        loadAnvilWorld(folder, std::filesystem::path(folder) / L"region");
+        loadAnvilWorld(folder, defaultRegionDirectory(folder));
     auto next = std::make_unique<World>();
     importWorld(data, *next);
     world = std::move(next);
@@ -913,11 +982,12 @@ void App::load() {
     }
     size_t unsupported = 0;
     for (auto &[p, s] : data.blocks)
-      if (!isSupportedBlock(s.name))
+      if (!isSupportedBlock(s.name()))
         unsupported++;
     history.push_back(L"读取 " + std::to_wstring(data.chunks.size()) +
                       L" chunks; 未支持方块 " + std::to_wstring(unsupported));
-    history.push_back(L"水、实体和其他方块实体未模拟。只读存档。");
+    history.push_back(
+        L"流体刻、其他实体和方块实体未模拟；简单实体与铁轨已参与。只读存档。");
     refresh();
   } catch (const std::exception &e) {
     MessageBoxW(window, wide(e.what()).c_str(), L"存档读取失败", MB_ICONERROR);
@@ -1076,7 +1146,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case Trigger: {
       Pos p{5, 0, 4};
       app->world->setBlock(
-          p, defaultState(app->world->getBlock(p).name == "minecraft:glass"
+          p, defaultState(app->world->getBlock(p).is(Blocks::GLASS)
                               ? "smooth_stone"
                               : "glass"));
       app->refresh();

@@ -1,5 +1,8 @@
 #include "redstone/piston.hpp"
+#include "redstone/entity.hpp"
+#include "redstone/shapes.hpp"
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <string>
 #include <vector>
@@ -50,27 +53,20 @@ std::string dirName(Direction d) {
     return "east";
   }
 }
-bool named(const BlockState &s, const char *n) {
-  return s.name == n || s.name == std::string("minecraft:") + n;
-}
-bool air(const BlockState &s) {
-  return s.name.empty() || named(s, "air") || named(s, "cave_air") ||
-         named(s, "void_air");
-}
+bool air(const BlockState &s) { return stateIsAir(s); }
 bool sticky(const BlockState &s) {
-  return named(s, "slime_block") || named(s, "honey_block");
+  return s.is(Blocks::SLIME_BLOCK) || s.is(Blocks::HONEY_BLOCK);
 }
 bool sticks(const BlockState &a, const BlockState &b) {
-  return !((named(a, "honey_block") && named(b, "slime_block")) ||
-           (named(a, "slime_block") && named(b, "honey_block"))) &&
+  return !((a.is(Blocks::HONEY_BLOCK) && b.is(Blocks::SLIME_BLOCK)) ||
+           (a.is(Blocks::SLIME_BLOCK) && b.is(Blocks::HONEY_BLOCK))) &&
          (sticky(a) || sticky(b));
 }
 bool base(const BlockState &s) {
-  return named(s, "piston") || named(s, "sticky_piston");
+  return s.is(Blocks::PISTON) || s.is(Blocks::STICKY_PISTON);
 }
-BlockState state(std::string n) { return defaultState(n); }
 BlockState moving(Direction d, bool stickyType = false) {
-  return state("moving_piston")
+  return Blocks::MOVING_PISTON.defaultState()
       .with("facing", dirName(d))
       .with("type", stickyType ? "sticky" : "normal");
 }
@@ -92,11 +88,11 @@ void finalTick(World &w, const Entity &e) {
     return;
   e->progress = e->progressO = 1;
   eraseEntity(w, e->pos);
-  if (named(w.getBlock(e->pos), "moving_piston")) {
-    auto s = e->source ? state("air")
+  if (w.getBlock(e->pos).is(Blocks::MOVING_PISTON)) {
+    auto s = e->source ? airState()
                        : w.updateFromNeighbourShapes(e->pos, e->movedState);
     w.setBlock(e->pos, s, 3);
-    w.neighborChanged(e->pos, s.name);
+    w.neighborChanged(e->pos, s.name());
   }
 }
 bool powered(World &w, Pos p, Direction f) {
@@ -124,10 +120,10 @@ bool pistonIsPushable(World &w, Pos p, const BlockState &s, Direction d,
   if ((d == Direction::Down && p.y == w.minY()) ||
       (d == Direction::Up && p.y == w.maxY() - 1))
     return false;
-  if (named(s, "moving_piston") || named(s, "piston_head") ||
-      named(s, "obsidian") || named(s, "crying_obsidian") ||
-      named(s, "respawn_anchor") || named(s, "reinforced_deepslate") ||
-      named(s, "bedrock"))
+  if (s.is(Blocks::MOVING_PISTON) || s.is(Blocks::PISTON_HEAD) ||
+      s.is(Blocks::OBSIDIAN) || s.is(Blocks::CRYING_OBSIDIAN) ||
+      s.is(Blocks::RESPAWN_ANCHOR) || s.is(Blocks::REINFORCED_DEEPSLATE) ||
+      s.is(Blocks::BEDROCK))
     return false;
   if (base(s))
     return s.get("extended", "false") != "true";
@@ -234,8 +230,8 @@ bool PistonStructureResolver::addBranchingBlocks(Pos p) {
 namespace {
 bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
   auto arm = p.relative(f);
-  if (!extending && named(w.getBlock(arm), "piston_head"))
-    w.setBlock(arm, state("air"), 276);
+  if (!extending && w.getBlock(arm).is(Blocks::PISTON_HEAD))
+    w.setBlock(arm, airState(), 276);
   PistonStructureResolver resolver(w, p, f, extending);
   if (!resolver.resolve())
     return false;
@@ -252,12 +248,12 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
   for (auto it = destroy.rbegin(); it != destroy.rend(); ++it) {
     auto s = w.getBlock(*it);
     updates.push_back(s);
-    // Coral fans require Silk Touch, which a piston does not provide.
-    // TODO: evaluate registered loot tables for additional destroyable blocks.
-    if (!isDeadCoralFan(s))
-      w.log.push_back({"entity_spawn", *it, "minecraft:item:" + s.name});
+    // Empty-tool loot evaluation: coral fans/glass require Silk Touch, while
+    // normal blocks pop a real item entity before the destruction callback.
+    for (const auto &drop : blockDrops(s))
+      w.spawnItem(*it, drop.id, drop.count);
     // TODO: destruction game event.
-    w.setBlock(*it, state("air"), 18);
+    w.setBlock(*it, airState(), 18);
   }
   for (int i = static_cast<int>(push.size()) - 1; i >= 0; --i) {
     auto s = w.getBlock(push[i]);
@@ -268,7 +264,7 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
     updates.push_back(s);
   }
   if (extending) {
-    auto head = state("piston_head")
+    auto head = Blocks::PISTON_HEAD.defaultState()
                     .with("facing", dirName(f))
                     .with("type", stickyBase ? "sticky" : "normal");
     std::erase_if(removed, [&](auto &pair) { return eq(pair.first, arm); });
@@ -276,21 +272,21 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
     putEntity(w, arm, head, f, true, true);
   }
   for (auto &pair : removed)
-    w.setBlock(pair.first, state("air"), 82);
+    w.setBlock(pair.first, airState(), 82);
   for (auto &pair : removed) {
     w.updateIndirectNeighbourShapes(pair.first, pair.second, 2, 512);
-    w.updateNeighbourShapes(pair.first, state("air"), 2, 512);
-    w.updateIndirectNeighbourShapes(pair.first, state("air"), 2, 512);
+    w.updateNeighbourShapes(pair.first, airState(), 2, 512);
+    w.updateIndirectNeighbourShapes(pair.first, airState(), 2, 512);
   }
   size_t index = 0;
   for (auto it = destroy.rbegin(); it != destroy.rend(); ++it) {
     auto old = updates[index++];
     w.affectNeighborsAfterRemoval(*it, old, false);
     w.updateIndirectNeighbourShapes(*it, old, 2, 512);
-    w.updateNeighborsAt(*it, old.name);
+    w.updateNeighborsAt(*it, old.name());
   }
   for (auto it = push.rbegin(); it != push.rend(); ++it)
-    w.updateNeighborsAt(*it, updates[index++].name);
+    w.updateNeighborsAt(*it, updates[index++].name());
   if (extending)
     w.updateNeighborsAt(arm, "piston_head");
   return true;
@@ -302,16 +298,16 @@ void check(World &w, Pos p, const BlockState &s) {
   if (power && !extended) {
     PistonStructureResolver resolver(w, p, f, true);
     if (resolver.resolve())
-      w.blockEvent(p, s.name, 0, static_cast<int>(f));
+      w.blockEvent(p, s.name(), 0, static_cast<int>(f));
   } else if (!power && extended) {
     auto e = entityAt(w, relative(p, f, 2));
     int event = 1;
-    if (named(w.getBlock(relative(p, f, 2)), "moving_piston") && e &&
+    if (w.getBlock(relative(p, f, 2)).is(Blocks::MOVING_PISTON) && e &&
         e->direction == f && e->extending &&
         (e->progressO < 0.5f || w.gameTime() == e->lastTicked ||
          w.isHandlingTick()))
       event = 2;
-    w.blockEvent(p, s.name, event, static_cast<int>(f));
+    w.blockEvent(p, s.name(), event, static_cast<int>(f));
   }
 }
 } // namespace
@@ -321,7 +317,7 @@ void pistonNeighborChanged(World &w, Pos p, const BlockState &s) {
 }
 void pistonOnPlace(World &w, Pos p, const BlockState &s,
                    const BlockState &old) {
-  if (base(s) && old.name != s.name && !entityAt(w, p))
+  if (base(s) && !old.sameBlock(s) && !entityAt(w, p))
     check(w, p, s);
 }
 bool pistonBlockEvent(World &w, Pos p, const BlockState &s, int type,
@@ -335,7 +331,7 @@ bool pistonBlockEvent(World &w, Pos p, const BlockState &s, int type,
   }
   if (!power && type == 0)
     return false;
-  bool isSticky = named(s, "sticky_piston");
+  bool isSticky = s.is(Blocks::STICKY_PISTON);
   if (type == 0) {
     if (!moveBlocks(w, p, f, true, isSticky))
       return false;
@@ -347,17 +343,18 @@ bool pistonBlockEvent(World &w, Pos p, const BlockState &s, int type,
     w.setBlock(p, m, 276);
     Direction saved = directions[(data & 7) % 6];
     putEntity(w, p,
-              state(isSticky ? "sticky_piston" : "piston")
+              (isSticky ? Blocks::STICKY_PISTON : Blocks::PISTON)
+                  .defaultState()
                   .with("facing", dirName(saved))
                   .with("extended", "false"),
               f, false, true);
-    w.updateNeighborsAt(p, m.name);
+    w.updateNeighborsAt(p, m.name());
     w.updateNeighbourShapes(p, m, 2, 512);
     if (isSticky) {
       auto two = relative(p, f, 2);
       auto moved = w.getBlock(two);
       auto e = entityAt(w, two);
-      bool piece = named(moved, "moving_piston") && e && e->direction == f &&
+      bool piece = moved.is(Blocks::MOVING_PISTON) && e && e->direction == f &&
                    e->extending;
       if (piece)
         finalTick(w, e);
@@ -366,15 +363,231 @@ bool pistonBlockEvent(World &w, Pos p, const BlockState &s, int type,
                (moved.get("push_reaction", blockMetadata(moved).pushReaction) !=
                     "normal" &&
                 !base(moved)))
-        w.setBlock(arm, state("air"), 3);
+        w.setBlock(arm, airState(), 3);
       else
         moveBlocks(w, p, f, false, true);
     } else
-      w.setBlock(arm, state("air"), 3);
+      w.setBlock(arm, airState(), 3);
   }
   // TODO: piston sounds and block activation/deactivation game events.
   return true;
 }
+namespace {
+Aabb boundsOf(const VoxelShape &shape) {
+  Aabb bounds{16, 16, 16, 0, 0, 0};
+  for (const auto &box : shape) {
+    bounds.minX = std::min(bounds.minX, box.x0 / 16.0);
+    bounds.minY = std::min(bounds.minY, box.y0 / 16.0);
+    bounds.minZ = std::min(bounds.minZ, box.z0 / 16.0);
+    bounds.maxX = std::max(bounds.maxX, box.x1 / 16.0);
+    bounds.maxY = std::max(bounds.maxY, box.y1 / 16.0);
+    bounds.maxZ = std::max(bounds.maxZ, box.z1 / 16.0);
+  }
+  return bounds;
+}
+std::vector<Aabb> toAabbs(const VoxelShape &shape) {
+  std::vector<Aabb> result;
+  for (const auto &box : shape)
+    result.push_back({box.x0 / 16.0, box.y0 / 16.0, box.z0 / 16.0,
+                      box.x1 / 16.0, box.y1 / 16.0, box.z1 / 16.0});
+  return result;
+}
+Aabb unionBox(const Aabb &a, const Aabb &b) {
+  return {std::min(a.minX, b.minX), std::min(a.minY, b.minY),
+          std::min(a.minZ, b.minZ), std::max(a.maxX, b.maxX),
+          std::max(a.maxY, b.maxY), std::max(a.maxZ, b.maxZ)};
+}
+// PistonMath.getMovementArea.
+Aabb movementArea(const Aabb &aabb, Direction direction, double amount) {
+  double delta = amount * (direction == Direction::Down ||
+                                   direction == Direction::West ||
+                                   direction == Direction::North
+                               ? -1.0
+                               : 1.0);
+  double min = std::min(delta, 0.0), max = std::max(delta, 0.0);
+  switch (direction) {
+  case Direction::West:
+    return {aabb.minX + min, aabb.minY, aabb.minZ, aabb.minX + max, aabb.maxY,
+            aabb.maxZ};
+  case Direction::East:
+    return {aabb.maxX + min, aabb.minY, aabb.minZ, aabb.maxX + max, aabb.maxY,
+            aabb.maxZ};
+  case Direction::Down:
+    return {aabb.minX, aabb.minY + min, aabb.minZ, aabb.maxX, aabb.minY + max,
+            aabb.maxZ};
+  case Direction::North:
+    return {aabb.minX, aabb.minY, aabb.minZ + min, aabb.maxX, aabb.maxY,
+            aabb.minZ + max};
+  case Direction::South:
+    return {aabb.minX, aabb.minY, aabb.maxZ + min, aabb.maxX, aabb.maxY,
+            aabb.maxZ + max};
+  case Direction::Up:
+  default:
+    return {aabb.minX, aabb.maxY + min, aabb.minZ, aabb.maxX, aabb.maxY + max,
+            aabb.maxZ};
+  }
+}
+Aabb byPositionAndProgress(Pos pos, const Aabb &aabb,
+                           const PistonMovingBlockEntity &entity) {
+  double progress = entity.extendedProgress();
+  return aabb.move(pos.x + progress * (entity.direction == Direction::East
+                                           ? 1.0
+                                           : entity.direction == Direction::West
+                                                 ? -1.0
+                                                 : 0.0),
+                   pos.y + progress * (entity.direction == Direction::Up
+                                           ? 1.0
+                                           : entity.direction == Direction::Down
+                                                 ? -1.0
+                                                 : 0.0),
+                   pos.z + progress * (entity.direction == Direction::South
+                                           ? 1.0
+                                           : entity.direction == Direction::North
+                                                 ? -1.0
+                                                 : 0.0));
+}
+BlockState collisionRelatedState(const PistonMovingBlockEntity &entity) {
+  if (!entity.extending && entity.source &&
+      (entity.movedState.is(Blocks::PISTON) ||
+       entity.movedState.is(Blocks::STICKY_PISTON))) {
+    auto head = Blocks::PISTON_HEAD.defaultState();
+    head = head.with(
+        "facing",
+        entity.movedState.get("facing", dirName(entity.direction)));
+    head = head.with("short", entity.progress > 0.25f ? "true" : "false");
+    head = head.with("type", entity.movedState.is(Blocks::STICKY_PISTON)
+                                 ? "sticky"
+                                 : "normal");
+    return head;
+  }
+  return entity.movedState;
+}
+double getMovement(const Aabb &moving, Direction movement,
+                   const Aabb &entity) {
+  switch (movement) {
+  case Direction::East:
+    return moving.maxX - entity.minX;
+  case Direction::West:
+    return entity.maxX - moving.minX;
+  case Direction::Down:
+    return entity.maxY - moving.minY;
+  case Direction::South:
+    return moving.maxZ - entity.minZ;
+  case Direction::North:
+    return entity.maxZ - moving.minZ;
+  case Direction::Up:
+  default:
+    return moving.maxY - entity.minY;
+  }
+}
+void moveEntityByPiston(World &world, Direction pistonDirection, redstone::Entity &entity,
+                        double delta, Direction movement) {
+  world.pistonNoClip = pistonDirection;
+  entity.move(world,
+              Vec3{delta * (movement == Direction::East
+                                ? 1.0
+                                : movement == Direction::West ? -1.0 : 0.0),
+                   delta * (movement == Direction::Up
+                                ? 1.0
+                                : movement == Direction::Down ? -1.0 : 0.0),
+                   delta * (movement == Direction::South
+                                ? 1.0
+                                : movement == Direction::North ? -1.0 : 0.0)},
+              true);
+  entity.applyEffectsFromBlocks(world);
+  world.pistonNoClip.reset();
+}
+void fixEntityWithinPistonBase(World &world, Pos pos, redstone::Entity &entity,
+                               Direction movement, double deltaProgress) {
+  Aabb entityBox = entity.boundingBox();
+  Aabb pistonBox{double(pos.x), double(pos.y), double(pos.z), pos.x + 1.0,
+                 pos.y + 1.0, pos.z + 1.0};
+  if (!entityBox.intersects(pistonBox))
+    return;
+  Direction opposite = redstone::opposite(movement);
+  double delta = getMovement(pistonBox, opposite, entityBox) + 0.01;
+  Aabb intersection{std::max(entityBox.minX, pistonBox.minX),
+                    std::max(entityBox.minY, pistonBox.minY),
+                    std::max(entityBox.minZ, pistonBox.minZ),
+                    std::min(entityBox.maxX, pistonBox.maxX),
+                    std::min(entityBox.maxY, pistonBox.maxY),
+                    std::min(entityBox.maxZ, pistonBox.maxZ)};
+  double deltaIntersected = getMovement(pistonBox, opposite, intersection) + 0.01;
+  if (std::abs(delta - deltaIntersected) < 0.01) {
+    delta = std::min(delta, deltaProgress) + 0.01;
+    moveEntityByPiston(world, movement, entity, delta, opposite);
+  }
+}
+void moveCollidedEntities(World &world, Pos pos, float newProgress,
+                          const PistonMovingBlockEntity &self) {
+  Direction movement = self.movementDirection();
+  double deltaProgress = newProgress - self.progress;
+  VoxelShape shape = collisionShape(collisionRelatedState(self));
+  if (shape.empty())
+    return;
+  Aabb aabb = byPositionAndProgress(pos, boundsOf(shape), self);
+  auto entities = world.entitiesIn(
+      unionBox(movementArea(aabb, movement, deltaProgress), aabb));
+  if (entities.empty())
+    return;
+  auto shapeAabbs = toAabbs(shape);
+  bool causeBounce = self.movedState.is(Blocks::SLIME_BLOCK);
+  for (redstone::Entity *entityPtr : entities) {
+    redstone::Entity &entity = *entityPtr;
+    if (causeBounce) {
+      Vec3 movementVec = entity.deltaMovement;
+      if (movement == Direction::East || movement == Direction::West)
+        movementVec.x = movement == Direction::East ? 1.0 : -1.0;
+      else if (movement == Direction::Up || movement == Direction::Down)
+        movementVec.y = movement == Direction::Up ? 1.0 : -1.0;
+      else
+        movementVec.z = movement == Direction::South ? 1.0 : -1.0;
+      entity.setDeltaMovement(movementVec);
+    }
+    double delta = 0;
+    for (const auto &shapeAabb : shapeAabbs) {
+      Aabb moving = movementArea(byPositionAndProgress(pos, shapeAabb, self),
+                                 movement, deltaProgress);
+      if (!moving.intersects(entity.boundingBox()))
+        continue;
+      delta = std::max(delta, getMovement(moving, movement,
+                                          entity.boundingBox()));
+      if (delta >= deltaProgress)
+        break;
+    }
+    if (delta <= 0)
+      continue;
+    delta = std::min(delta, deltaProgress) + 0.01;
+    moveEntityByPiston(world, movement, entity, delta, movement);
+    if (!self.extending && self.source)
+      fixEntityWithinPistonBase(world, pos, entity, movement, deltaProgress);
+  }
+}
+void moveStuckEntities(World &world, Pos pos, float newProgress,
+                       const PistonMovingBlockEntity &self) {
+  if (!self.movedState.is(Blocks::HONEY_BLOCK))
+    return;
+  Direction movement = self.movementDirection();
+  if (movement != Direction::East && movement != Direction::West &&
+      movement != Direction::North && movement != Direction::South)
+    return;
+  double stickyTop =
+      boundsOf(collisionShape(self.movedState)).maxY;
+  Aabb aabb = byPositionAndProgress(
+      pos, {0, stickyTop, 0, 1, 1.500001, 1}, self);
+  double deltaProgress = newProgress - self.progress;
+  for (redstone::Entity *entityPtr : world.entitiesIn(aabb)) {
+    redstone::Entity &entity = *entityPtr;
+    if (!entity.onGround)
+      continue;
+    if (!(entity.position.x >= aabb.minX && entity.position.x <= aabb.maxX &&
+          entity.position.z >= aabb.minZ && entity.position.z <= aabb.maxZ))
+      continue;
+    moveEntityByPiston(world, movement, entity, deltaProgress, movement);
+  }
+}
+} // namespace
+
 void pistonTickBlockEntities(World &w) {
   auto snapshot = w.pistonEntityOrder;
   for (auto &entry : snapshot) {
@@ -389,7 +602,7 @@ void pistonTickBlockEntities(World &w) {
         w.log.push_back({"piston_entity_remove", e->pos, ""});
       if (w.pistonCompletionObserver)
         w.pistonCompletionObserver(w, e->pos);
-      if (named(w.getBlock(e->pos), "moving_piston")) {
+      if (w.getBlock(e->pos).is(Blocks::MOVING_PISTON)) {
         if (w.traceUpdates)
           w.log.push_back({"piston_shape_resolve", e->pos, ""});
         auto s = w.updateFromNeighbourShapes(e->pos, e->movedState);
@@ -405,23 +618,22 @@ void pistonTickBlockEntities(World &w) {
             w.log.push_back({"piston_set_block", e->pos, "67"});
           w.setBlock(e->pos, s, 67);
           if (w.traceUpdates)
-            w.log.push_back({"piston_self_notify", e->pos, s.name});
-          w.neighborChanged(e->pos, s.name);
+            w.log.push_back({"piston_self_notify", e->pos, s.name()});
+          w.neighborChanged(e->pos, s.name());
         }
       }
     } else {
-      float next = std::min(1.0f, e->progress + 0.5f);
-      w.log.push_back(
-          {"todo", e->pos,
-           "piston entity collision, slime bounce, honey carry, and "
-           "piston-base displacement"}); // TODO: implement entity collision
-                                         // paths.
-      e->progress = next;
+      // Vanilla sweeps the full half-block step before clamping the stored
+      // progress. Nonstandard progress loaded from NBT can overshoot 1 here.
+      float next = e->progress + 0.5f;
+      moveCollidedEntities(w, e->pos, next, *e);
+      moveStuckEntities(w, e->pos, next, *e);
+      e->progress = std::min(1.0f, next);
     }
   }
   std::erase_if(w.pistonEntityOrder, [&](const auto &entry) {
     auto e = entry->entity.lock();
-    return !e || entityAt(w, e->pos) != e;
+    return !e || !e->live;
   });
 }
 void pistonPreRemoveSideEffects(World &w, Pos p) {

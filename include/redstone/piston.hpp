@@ -12,6 +12,16 @@ struct PistonMovingBlockEntity {
   bool source;
   float progress = 0, progressO = 0;
   long long lastTicked = -1;
+  // Cleared when the entity leaves World.pistonEntities, so the ticker slot
+  // sweep does not need a map lookup per entity per tick.
+  bool live = true;
+  // PistonMovingBlockEntity.getMovementDirection / getExtendedProgress.
+  Direction movementDirection() const {
+    return extending ? direction : opposite(direction);
+  }
+  float extendedProgress() const {
+    return extending ? progress - 1.0f : 1.0f - progress;
+  }
 };
 class PistonStructureResolver {
 public:
