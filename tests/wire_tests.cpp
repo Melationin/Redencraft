@@ -125,7 +125,7 @@ static void chunks(const std::filesystem::path &assets) {
                  .with("extended", x < 6 ? "true" : "false");
     world.rawSetBlock({-16 + x, -62, -32}, s);
   }
-  auto bytes = encodeChunk(world, -1, -2, registry);
+  auto bytes = encodeChunk(world.snapshotChunk(-1, -2), -1, -2, registry);
   Reader r(bytes);
   assert(r.i32() == -1);
   assert(r.i32() == -2);
@@ -184,7 +184,8 @@ static void chunks(const std::filesystem::path &assets) {
                                                  {{"distance", "7"},
                                                   {"persistent", "false"},
                                                   {"waterlogged", "false"}}));
-  auto heightChunk = encodeChunk(heightWorld, 0, 0, registry);
+  auto heightChunk =
+      encodeChunk(heightWorld.snapshotChunk(0, 0), 0, 0, registry);
   Reader hr(heightChunk);
   hr.raw(8);
   assert(hr.varInt() == 3);
@@ -214,7 +215,9 @@ static void chunks(const std::filesystem::path &assets) {
   world.rawSetBlock(piston->pos,
                     defaultState("moving_piston").with("facing", "west"));
   world.setPistonEntity(piston->pos, piston);
-  auto movingNbt = encodeMovingPistonNbt(*piston);
+  auto movingNbt = encodeMovingPistonNbt(
+      PistonSnapshot{piston->pos, piston->movedState, piston->direction,
+                     piston->progressO, piston->extending, piston->source});
   Bytes namedNbt{10, 0, 0};
   namedNbt.insert(namedNbt.end(), movingNbt.begin() + 1, movingNbt.end());
   auto tag = nbt::parse(namedNbt);
@@ -225,7 +228,7 @@ static void chunks(const std::filesystem::path &assets) {
   assert(tag.get("extending")->number == 0);
   assert(tag.get("blockState")->get("Name")->text ==
          "minecraft:white_terracotta");
-  auto movingChunk = encodeChunk(world, -1, -2, registry);
+  auto movingChunk = encodeChunk(world.snapshotChunk(-1, -2), -1, -2, registry);
   // Optional binary fixture, decoded by the actual Java 26.1 PLAY codec.
   if (const char *file = std::getenv("REDSTONE_WIRE_FIXTURE")) {
     Writer record, packet;

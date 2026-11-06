@@ -118,7 +118,7 @@ public:
       thread_.join();
   }
   void submit(const std::shared_ptr<Connection> &connection,
-              std::vector<Bytes> packets) {
+              std::vector<OutPacket> packets) {
     if (packets.empty())
       return;
     {
@@ -131,7 +131,7 @@ public:
 private:
   struct Job {
     std::shared_ptr<Connection> connection;
-    std::vector<Bytes> packets;
+    std::vector<OutPacket> packets;
   };
   void run() {
     std::deque<Job> jobs;
@@ -157,12 +157,24 @@ private:
           connection.sent = 0;
         }
         for (auto &packet : job.packets) {
-          if (connection.pending.size() + packet.size() > 16 * 1024 * 1024) {
+          Bytes produced;
+          try {
+            if (packet.deferred)
+              produced = packet.deferred();
+            else if (packet.packetId >= 0)
+              produced = frame(packet.packetId, packet.bytes);
+            else
+              produced = std::move(packet.bytes);
+          } catch (...) {
             connection.dead = true;
             break;
           }
-          connection.pending.insert(connection.pending.end(), packet.begin(),
-                                    packet.end());
+          if (connection.pending.size() + produced.size() > 16 * 1024 * 1024) {
+            connection.dead = true;
+            break;
+          }
+          connection.pending.insert(connection.pending.end(), produced.begin(),
+                                    produced.end());
         }
         if (!connection.dead &&
             std::find(active.begin(), active.end(), job.connection) ==
@@ -505,7 +517,7 @@ int runServer(int argc, char **argv) {
           else if (!count || !wouldBlock())
             c->dead = true;
         }
-        writer.submit(c, c->session.takeOutput());
+        writer.submit(c, c->session.takeOutputItems());
         if (c->session.closed())
           c->closing = true;
       }
@@ -531,7 +543,7 @@ int runServer(int argc, char **argv) {
         for (auto &c : connections)
           if (!c->dead) {
             c->session.sendTickTime(milliseconds, world.gameTime());
-            writer.submit(c, c->session.takeOutput());
+            writer.submit(c, c->session.takeOutputItems());
             if (c->session.closed())
               c->closing = true;
           }

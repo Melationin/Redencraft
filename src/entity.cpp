@@ -1188,6 +1188,27 @@ std::vector<Entity *> World::entitiesIn(const Aabb &box) const {
             [](const Entity *a, const Entity *b) { return a->id < b->id; });
   return result;
 }
+std::vector<Entity *> World::entitiesInSectionRange(int minX, int maxX, int minZ,
+                                                     int maxZ) const {
+  std::vector<Entity *> result;
+  for (int x = minX; x <= maxX; ++x) {
+    const auto lowest = sectionPosKey(x, 0, 0);
+    const auto highest = sectionPosKey(x, -1, -1) + 1;
+    for (auto it = entitySections_.lower_bound(lowest);
+         it != entitySections_.end() && it->first < highest; ++it) {
+      const int z = sectionKeyZ(it->first);
+      if (z < minZ || z > maxZ)
+        continue;
+      for (Entity *entity : it->second)
+        if (entity && !entity->isRemoved())
+          result.push_back(entity);
+    }
+  }
+  std::sort(result.begin(), result.end(),
+            [](const Entity *a, const Entity *b) { return a->id < b->id; });
+  return result;
+}
+
 // TODO: entity-to-entity collisions and the vehicle/passenger tick recursion
 // (ServerLevel.tickPassenger). Simple entities have no passengers yet.
 void World::tickEntities() {

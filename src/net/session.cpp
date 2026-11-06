@@ -263,8 +263,10 @@ Session::Session(World &world, const ProtocolData &data, ServerOptions options)
     chunksPerBatch_ = chunkBatchLimit_ = 2;
 }
 void Session::packet(int id, const Writer &payload) {
-  if (!closed())
-    queue(frame(id, payload.data));
+  if (closed())
+    return;
+  // Framing is a full payload copy; leave it to the writer thread.
+  output_.push_back(OutPacket{payload.data, id, {}});
 }
 void Session::queue(Bytes bytes) {
   if (closed())
@@ -279,16 +281,35 @@ void Session::queue(Bytes bytes) {
     return;
   }
   outputBytes_ += bytes.size();
-  output_.push_back(std::move(bytes));
+  output_.push_back(OutPacket{std::move(bytes), -1, {}});
+}
+void Session::queueDeferred(std::function<Bytes()> producer) {
+  if (closed())
+    return;
+  output_.push_back(OutPacket{{}, -1, std::move(producer)});
 }
 void Session::send(std::string_view name, const Writer &payload) {
   if (closed())
     return;
   packet(data_.packet(phaseName(phase_), "clientbound", name), payload);
 }
-std::vector<Bytes> Session::takeOutput() {
+std::vector<OutPacket> Session::takeOutputItems() {
   outputBytes_ = 0;
   return std::exchange(output_, {});
+}
+std::vector<Bytes> Session::takeOutput() {
+  std::vector<OutPacket> items = takeOutputItems();
+  std::vector<Bytes> packets;
+  packets.reserve(items.size());
+  for (auto &item : items) {
+    if (item.deferred)
+      packets.push_back(item.deferred());
+    else if (item.packetId >= 0)
+      packets.push_back(frame(item.packetId, item.bytes));
+    else
+      packets.push_back(std::move(item.bytes));
+  }
+  return packets;
 }
 void Session::disconnect(const std::string &reason) {
   if (closed())
@@ -965,6 +986,8 @@ void Session::sendChunkBatch() {
   if (awaitingChunkBatch_ || pendingChunks_.empty() || closed())
     return;
   send("chunk_batch_start");
+  const int chunkPacket =
+      data_.packet(phaseName(phase_), "clientbound", "level_chunk_with_light");
   int count = 0;
   std::size_t bytes = 0;
   while (!pendingChunks_.empty() && count < chunksPerBatch_ &&
@@ -973,10 +996,18 @@ void Session::sendChunkBatch() {
     pendingChunks_.erase(pendingChunks_.begin());
     if (!world_.isChunkLoaded(x, z))
       continue;
-    Writer out;
-    out.data = encodeChunk(world_, x, z, data_.registry);
-    bytes += out.data.size();
-    send("level_chunk_with_light", out);
+    // Snapshot on the tick thread (the world is not thread safe), then let the
+    // writer thread run the palette/bit packing. The batch-start ordering is
+    // preserved because queue items are drained in order.
+    ChunkSnapshot snapshot = world_.snapshotChunk(x, z);
+    for (const auto &section : snapshot.sections)
+      bytes += section.palette.size() * sizeof(BlockState::Id) +
+               section.indices8.size() + section.indices16.size() * 2 + 64;
+    const auto &registry = data_.registry;
+    queueDeferred([snapshot = std::move(snapshot), chunkPacket, x, z,
+                   &registry]() {
+      return frame(chunkPacket, encodeChunk(snapshot, x, z, registry));
+    });
     sentChunks_.emplace(x, z);
     ++count;
   }
@@ -1144,8 +1175,23 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
 }
 
 void Session::syncEntities() {
-  for (const auto &ptr : world_.entities) {
-    const auto &e = *ptr;
+  // ChunkMap.TrackedEntity only updates entities inside the player's tracking
+  // view; the entity section storage makes that a small per-column scan.
+  std::vector<Entity *> candidates;
+  if (chunkCenter_) {
+    const int range = options_.viewDistance;
+    candidates = world_.entitiesInSectionRange(
+        chunkCenter_->first - range, chunkCenter_->first + range,
+        chunkCenter_->second - range, chunkCenter_->second + range);
+  } else {
+    candidates.reserve(world_.entities.size());
+    for (const auto &ptr : world_.entities)
+      candidates.push_back(ptr.get());
+  }
+  for (const Entity *candidate : candidates) {
+    if (!candidate)
+      continue;
+    const auto &e = *candidate;
     if (e.isRemoved() ||
         !world_.isChunkLoaded(chunkCoord(e.position.x),
                               chunkCoord(e.position.z)) ||

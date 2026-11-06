@@ -1,6 +1,7 @@
 #pragma once
 #include "redstone/engine.hpp"
 #include <filesystem>
+#include <functional>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
@@ -69,14 +70,27 @@ public:
   StateFlags stateFlags(int stateId) const;
 
 private:
+  // Dense tables indexed by this simulator's BlockState::Id (and by protocol
+  // state id for flags): packet paths never build a name/property string.
+  std::vector<int> protocolByLocal_;
+  std::vector<StateFlags> flagsByProtocol_;
   std::map<int, BlockState> states_;
   std::map<std::string, int> stateIds_, items_, entities_, blockEntities_,
       biomes_;
   std::map<int, std::string> itemNames_;
   std::map<int, StateFlags> flags_;
 };
-// ClientboundLevelChunkWithLight payload, no packet ID. Biomes use a single
-// plains value; lighting is a documented full-bright visualization placeholder.
-Bytes encodeChunk(World &, int chunkX, int chunkZ, const Registry &);
-Bytes encodeMovingPistonNbt(const PistonMovingBlockEntity &);
+// ClientboundLevelChunkWithLight payload, no packet ID. The snapshot is taken
+// on the tick thread; the encoder itself only reads the copy and the immutable
+// registry, so it can run on the network writer thread.
+Bytes encodeChunk(const ChunkSnapshot &, int chunkX, int chunkZ,
+                  const Registry &);
+Bytes encodeMovingPistonNbt(const PistonSnapshot &);
+// One queued clientbound packet: already framed bytes, or a producer that
+// frames them on the writer thread.
+struct OutPacket {
+  Bytes bytes;                     // framed bytes, or payload if id >= 0
+  int packetId = -1;               // >= 0: frame(id, bytes) on the writer
+  std::function<Bytes()> deferred; // produced entirely off-thread (chunks)
+};
 } // namespace redstone::net

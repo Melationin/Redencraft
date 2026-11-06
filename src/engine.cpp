@@ -906,6 +906,35 @@ BlockState World::getBlock(Pos p) const {
   const int cell = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
   return BlockState::fromId(s->get(cell));
 }
+ChunkSnapshot World::snapshotChunk(int chunkX, int chunkZ) const {
+  ChunkSnapshot snapshot;
+  snapshot.minY = minY_;
+  snapshot.maxY = maxY_;
+  snapshot.sections.resize(static_cast<std::size_t>(sectionCount()));
+  if (const Chunk *chunk = chunkAt(chunkX, chunkZ)) {
+    for (std::size_t i = 0; i < chunk->sections.size() &&
+                            i < snapshot.sections.size();
+         ++i) {
+      const Section *section = chunk->sections[i].get();
+      if (!section)
+        continue;
+      SectionSnapshot &out = snapshot.sections[i];
+      out.nonEmpty = section->nonEmpty;
+      out.bits = section->bits;
+      out.single = section->single;
+      out.palette = section->palette;
+      out.indices8 = section->indices8;
+      out.indices16 = section->indices16;
+    }
+  }
+  for (const auto &[pos, entity] : pistonEntities)
+    if (pos.x >= chunkX * 16 && pos.x < chunkX * 16 + 16 &&
+        pos.z >= chunkZ * 16 && pos.z < chunkZ * 16 + 16)
+      snapshot.pistons.push_back(
+          PistonSnapshot{pos, entity->movedState, entity->direction,
+                         entity->progressO, entity->extending, entity->source});
+  return snapshot;
+}
 void World::rawSetBlock(Pos p, BlockState state) {
   if (p.y < minY_ || p.y >= maxY_)
     return;

@@ -136,6 +136,29 @@ struct PistonTickerSlot {
   std::weak_ptr<PistonMovingBlockEntity> entity;
 };
 class Entity;
+// Chunk data exported for the network encoder: palette + index copies and the
+// moving piston block entities, so wire encoding can run off the tick thread.
+struct SectionSnapshot {
+  std::uint16_t nonEmpty = 0;
+  std::uint8_t bits = 0;
+  BlockState::Id single = 0;
+  std::vector<BlockState::Id> palette;
+  std::vector<std::uint8_t> indices8;
+  std::vector<std::uint16_t> indices16;
+};
+struct PistonSnapshot {
+  Pos pos;
+  BlockState movedState;
+  Direction direction = Direction::Down;
+  float progressO = 0.0f;
+  bool extending = false;
+  bool source = false;
+};
+struct ChunkSnapshot {
+  int minY = 0, maxY = 0;
+  std::vector<SectionSnapshot> sections;
+  std::vector<PistonSnapshot> pistons;
+};
 class World {
 public:
   explicit World(int minY = -64, int maxY = 320,
@@ -150,6 +173,8 @@ public:
   bool isChunkLoaded(int x, int z) const;
   bool isLoaded(Pos pos) const;
   BlockState getBlock(Pos pos) const;
+  // Copy of one chunk's paletted sections (mutable state is never exported).
+  ChunkSnapshot snapshotChunk(int chunkX, int chunkZ) const;
   bool setBlock(Pos pos, BlockState state, int flags = 3, int limit = 512);
   void rawSetBlock(Pos pos, BlockState state);
   std::map<Pos, BlockState> allBlocks() const;
@@ -219,6 +244,11 @@ public:
   // EntitySectionStorage.getEntities: only sections overlapping the box are
   // visited; results keep the previous spawn-order (entity id) ordering.
   std::vector<Entity *> entitiesIn(const Aabb &box) const;
+  // Entities in the section columns [minX,maxX] x [minZ,maxZ] at any height,
+  // sorted by entity id (spawn order). ChunkMap tracking only visits the
+  // chunks a player can see instead of the whole world entity list.
+  std::vector<Entity *> entitiesInSectionRange(int minX, int maxX, int minZ,
+                                               int maxZ) const;
   std::vector<std::shared_ptr<Entity>> entities;
   int nextEntityId = 1;
   Random random;

@@ -40,6 +40,8 @@ public:
   void blockEvent(const BlockEvent &);
   void fallingBlockLanded(int entityId, Pos, const BlockState &);
   std::vector<Bytes> takeOutput();
+  // Drains unframed work items for the network writer thread.
+  std::vector<OutPacket> takeOutputItems();
   Phase phase() const { return phase_; }
   bool closed() const { return phase_ == Phase::Closed; }
   const std::string &error() const { return error_; }
@@ -65,6 +67,7 @@ private:
   void send(std::string_view name, const Writer &payload = {});
   void packet(int id, const Writer &payload = {});
   void queue(Bytes bytes);
+  void queueDeferred(std::function<Bytes()> producer);
   void disconnect(const std::string &);
   void acknowledge(int sequence);
   void sendBlockUpdate(Pos);
@@ -89,7 +92,7 @@ private:
        teleportPending_ = true;
   bool sneaking_ = false;
   Bytes input_;
-  std::vector<Bytes> output_;
+  std::vector<OutPacket> output_;
   std::size_t outputBytes_ = 0;
   std::string username_, error_;
   Uuid uuid_{};
