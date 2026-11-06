@@ -1,3 +1,5 @@
+> 后续优化（Block 单例、指针身份、lithium 爆炸、网络发送）的记录与最新数据见 [性能优化记录](../../docs/performance.md)。
+
 # 原生服务器 CPU 采样
 
 2026-11-06 使用 Windows Performance Recorder `CPU.Verbose.File` 对正在运行的投影模拟服务器采样。PID 40120 全程保持监听，没有重启或暂停。管理员 ETW 采集时长 2 分 27 秒，记录 **0 lost events**；`xperf` 完成后处理。
