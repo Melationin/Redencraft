@@ -1,0 +1,36 @@
+{
+  "minecraft_version": "26.1",
+  "source_test_suite": "D:/Java/SafeSave2/tests/server (fixtures adapted; SafeSave not loaded)",
+  "vanilla_recordings": [
+    "F:\\source\\minecraft-merged-07da9a845a-26.1-sources\\redstone-cpp\\validation\\safesave_order\\vanilla\\vanilla-order.json"
+  ],
+  "passed_compared_cases": false,
+  "compared": 4,
+  "matched": 3,
+  "cases": {
+    "fixture_ticks": {
+      "match": true
+    },
+    "dedup_ticks": {
+      "match": true
+    },
+    "overdue_ticks": {
+      "match": true
+    },
+    "negative_orders": {
+      "match": false,
+      "difference": {
+        "path": "$[0][0]",
+        "expected": -1,
+        "actual": 16
+      }
+    }
+  },
+  "missing_required_vanilla_cases": [],
+  "native_only_not_vanilla_verified": [
+    "fixture_events",
+    "moving_completion_order",
+    "moving_entities",
+    "observer_reschedule"
+  ]
+}

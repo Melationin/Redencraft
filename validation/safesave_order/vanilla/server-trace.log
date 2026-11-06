@@ -1,0 +1,94 @@
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.sun.jna.Native in an unnamed module (file:/F:/source/minecraft-merged-07da9a845a-26.1-sources/redstone-cpp/validation/vanilla26_1/libraries/net/java/dev/jna/jna/5.17.0/jna-5.17.0.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/F:/source/minecraft-merged-07da9a845a-26.1-sources/redstone-cpp/validation/vanilla26_1/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)
+WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+[12:48:58] [main/INFO]: Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]
+[12:48:58] [Worker-Main-15/INFO]: No existing world data, creating new world
+[12:48:59] [main/INFO]: Loaded 1515 recipes
+[12:48:59] [main/INFO]: Loaded 1617 advancements
+[12:48:59] [Server thread/INFO]: Starting minecraft server version 26.1
+[12:48:59] [Server thread/INFO]: Loading properties
+[12:48:59] [Server thread/INFO]: Default game type: SURVIVAL
+[12:48:59] [Server thread/INFO]: Generating keypair
+[12:48:59] [Server thread/INFO]: Starting Minecraft server on 127.0.0.1:25598
+[12:49:00] [Server thread/INFO]: Preparing level "order-world"
+[12:49:00] [Server thread/INFO]: Selecting global world spawn...
+[12:49:03] [Server thread/INFO]: Loading 0 persistent chunks...
+[12:49:03] [Server thread/INFO]: Preparing spawn area: 100%
+[12:49:03] [Server thread/INFO]: Time elapsed: 2960 ms
+[12:49:03] [Server thread/INFO]: Done (3.196s)! For help, type "help"
+COMMAND: tick freeze
+[12:49:03] [Server thread/INFO]: Saving chunks for level 'ServerLevel[order-world]'/minecraft:overworld
+[12:49:03] [Server thread/INFO]: Saving chunks for level 'ServerLevel[order-world]'/minecraft:the_end
+[12:49:03] [Server thread/INFO]: Saving chunks for level 'ServerLevel[order-world]'/minecraft:the_nether
+[12:49:03] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[12:49:03] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[12:49:03] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[12:49:03] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[12:49:03] [Server thread/INFO]: The game is frozen
+COMMAND: forceload add -16 -16 15 15
+COMMAND: fill -4 79 -6 4 85 6 minecraft:air
+COMMAND: setblock -2 81 -4 minecraft:piston[facing=east]
+COMMAND: setblock -1 81 -4 minecraft:smooth_stone
+COMMAND: setblock -3 81 -4 minecraft:redstone_block
+COMMAND: forceload add 0 -16 31 15
+[12:49:04] [Server thread/INFO]: Marked 4 chunks in minecraft:overworld from [-1, -1] to [0, 0] to be force loaded
+[12:49:04] [Server thread/INFO]: No blocks were filled
+[12:49:04] [Server thread/INFO]: Changed the block at -2, 81, -4
+[12:49:04] [Server thread/INFO]: Changed the block at -1, 81, -4
+[12:49:04] [Server thread/INFO]: Changed the block at -3, 81, -4
+COMMAND: fill 12 79 -6 20 85 6 minecraft:air
+[12:49:04] [Server thread/INFO]: Marked 2 chunks in minecraft:overworld from [0, -1] to [1, 0] to be force loaded
+[12:49:04] [Server thread/INFO]: No blocks were filled
+COMMAND: setblock 14 81 -4 minecraft:piston[facing=east]
+[12:49:04] [Server thread/INFO]: Changed the block at 14, 81, -4
+COMMAND: setblock 15 81 -4 minecraft:smooth_stone
+[12:49:05] [Server thread/INFO]: Changed the block at 15, 81, -4
+COMMAND: setblock 13 81 -4 minecraft:redstone_block
+[12:49:05] [Server thread/INFO]: Changed the block at 13, 81, -4
+COMMAND: forceload add 8176 -16 8207 15
+COMMAND: fill 8188 79 -6 8196 85 6 minecraft:air
+COMMAND: setblock 8190 81 -4 minecraft:piston[facing=east]
+COMMAND: setblock 8191 81 -4 minecraft:smooth_stone
+COMMAND: setblock 8189 81 -4 minecraft:redstone_block
+[12:49:06] [Server thread/INFO]: Marked 4 chunks in minecraft:overworld from [511, -1] to [512, 0] to be force loaded
+[12:49:06] [Server thread/INFO]: No blocks were filled
+[12:49:06] [Server thread/INFO]: Changed the block at 8190, 81, -4
+[12:49:06] [Server thread/INFO]: Changed the block at 8191, 81, -4
+[12:49:06] [Server thread/INFO]: Changed the block at 8189, 81, -4
+COMMAND: tick step 3
+[12:49:06] [Server thread/INFO]: Stepping 3 tick(s)
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_EVENT BlockEventData[pos=BlockPos{x=-2, y=81, z=-4}, block=Block{minecraft:piston}, paramA=0, paramB=5]
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_EVENT BlockEventData[pos=BlockPos{x=14, y=81, z=-4}, block=Block{minecraft:piston}, paramA=0, paramB=5]
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_EVENT BlockEventData[pos=BlockPos{x=8190, y=81, z=-4}, block=Block{minecraft:piston}, paramA=0, paramB=5]
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=0, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=-1, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=16, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=15, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=0, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=-1, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=16, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=15, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=0, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=-1, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=16, y=81, z=-4}
+[12:49:06] [Server thread/INFO]: [STDOUT]: ORDER_PISTON BlockPos{x=15, y=81, z=-4}
+COMMAND: say ORDER_TRACE_END
+[12:49:09] [Server thread/INFO]: [Not Secure] [Server] ORDER_TRACE_END
+COMMAND: stop
+[12:49:09] [Server thread/INFO]: Stopping the server
+[12:49:09] [Server thread/INFO]: Stopping server
+[12:49:09] [Server thread/INFO]: Saving players
+[12:49:09] [Server thread/INFO]: Saving worlds
+[12:49:10] [Server thread/INFO]: Saving chunks for level 'ServerLevel[order-world]'/minecraft:overworld
+[12:49:11] [Server thread/INFO]: Saving chunks for level 'ServerLevel[order-world]'/minecraft:the_end
+[12:49:11] [Server thread/INFO]: Saving chunks for level 'ServerLevel[order-world]'/minecraft:the_nether
+[12:49:11] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[12:49:11] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[12:49:11] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[12:49:11] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved

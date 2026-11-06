@@ -1,0 +1,50 @@
+EXACT_RETRANSFORM class net.minecraft.world.level.block.piston.PistonMovingBlockEntity
+EXACT_TRANSFORM net/minecraft/world/level/block/piston/PistonMovingBlockEntity tick
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.sun.jna.Native in an unnamed module (file:/F:/source/minecraft-merged-07da9a845a-26.1-sources/redstone-cpp/validation/vanilla26_1/libraries/net/java/dev/jna/jna/5.17.0/jna-5.17.0.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+EXACT_TRANSFORM net/minecraft/server/level/ServerLevel doBlockEvent
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/F:/source/minecraft-merged-07da9a845a-26.1-sources/redstone-cpp/validation/vanilla26_1/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)
+WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+[12:53:16] [main/INFO]: Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]
+[12:53:16] [main/INFO]: [STDERR]: EXACT_TRANSFORM net/minecraft/server/MinecraftServer tickServer
+[12:53:17] [main/INFO]: Loaded 1515 recipes
+[12:53:17] [main/INFO]: Loaded 1617 advancements
+[12:53:18] [Server thread/INFO]: Starting minecraft server version 26.1
+[12:53:18] [Server thread/INFO]: Loading properties
+[12:53:18] [Server thread/INFO]: Default game type: SURVIVAL
+[12:53:18] [Server thread/INFO]: Generating keypair
+[12:53:18] [Server thread/INFO]: Starting Minecraft server on 127.0.0.1:25598
+[12:53:18] [Server thread/INFO]: Preparing level "exact-order-world"
+[12:53:18] [Server thread/INFO]: Loading 78 persistent chunks...
+[12:53:18] [Server thread/INFO]: Preparing spawn area: 11%
+[12:53:19] [Server thread/INFO]: Preparing spawn area: 11%
+[12:53:19] [Server thread/INFO]: Preparing spawn area: 42%
+[12:53:19] [Server thread/INFO]: Time elapsed: 1020 ms
+[12:53:19] [Server thread/INFO]: Done (1.420s)! For help, type "help"
+[12:53:19] [Server thread/INFO]: Saving chunks for level 'ServerLevel[exact-order-world]'/minecraft:overworld
+[12:53:20] [Server thread/INFO]: Saving chunks for level 'ServerLevel[exact-order-world]'/minecraft:the_end
+[12:53:20] [Server thread/INFO]: Saving chunks for level 'ServerLevel[exact-order-world]'/minecraft:the_nether
+[12:53:20] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[12:53:20] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[12:53:20] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[12:53:20] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[12:53:20] [Server thread/INFO]: [STDOUT]: EXACT_WAITING_FOR_CHUNKS
+[12:53:20] [Server thread/INFO]: [STDOUT]: EXACT_SETUP_DONE 40
+[12:53:20] [Server thread/INFO]: [STDOUT]: EXACT_JSON {"fixture_events":[[0,82,4,0,1],[-1,82,4,0,2],[1,82,4,0,3],[-2,82,4,0,4],[16,82,4,0,5],[15,82,4,0,6],[17,82,4,0,7],[14,82,4,0,8],[8192,82,4,0,9],[8191,82,4,0,10],[8193,82,4,0,11],[8190,82,4,0,12]],"moving_entities":[[[1,84,-3,1.0,0.5,1,"minecraft:moving_piston"],[-1,84,-3,1.0,0.5,1,"minecraft:moving_piston"],[17,84,-3,1.0,0.5,1,"minecraft:moving_piston"],[15,84,-3,1.0,0.5,1,"minecraft:moving_piston"],[8193,84,-3,1.0,0.5,1,"minecraft:moving_piston"],[8191,84,-3,1.0,0.5,1,"minecraft:moving_piston"]],[[1,84,-3,null,null,null,"minecraft:slime_block"],[-1,84,-3,null,null,null,"minecraft:slime_block"],[17,84,-3,null,null,null,"minecraft:slime_block"],[15,84,-3,null,null,null,"minecraft:slime_block"],[8193,84,-3,null,null,null,"minecraft:slime_block"],[8191,84,-3,null,null,null,"minecraft:slime_block"]],[[1,84,-3,null,null,null,"minecraft:slime_block"],[-1,84,-3,null,null,null,"minecraft:slime_block"],[17,84,-3,null,null,null,"minecraft:slime_block"],[15,84,-3,null,null,null,"minecraft:slime_block"],[8193,84,-3,null,null,null,"minecraft:slime_block"],[8191,84,-3,null,null,null,"minecraft:slime_block"]]],"moving_completion_order":[[1,84,-3],[-1,84,-3],[17,84,-3],[15,84,-3],[8193,84,-3],[8191,84,-3]]}
+COMMAND: stop
+[12:53:20] [Server thread/INFO]: Stopping the server
+[12:53:20] [Server thread/INFO]: Stopping server
+[12:53:20] [Server thread/INFO]: Saving players
+[12:53:20] [Server thread/INFO]: Saving worlds
+[12:53:21] [Server thread/INFO]: Saving chunks for level 'ServerLevel[exact-order-world]'/minecraft:overworld
+[12:53:21] [Server thread/INFO]: Saving chunks for level 'ServerLevel[exact-order-world]'/minecraft:the_end
+[12:53:21] [Server thread/INFO]: Saving chunks for level 'ServerLevel[exact-order-world]'/minecraft:the_nether
+[12:53:21] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[12:53:21] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[12:53:21] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[12:53:21] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
