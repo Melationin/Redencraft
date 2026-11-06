@@ -30,15 +30,15 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 - 区块采用 26.1 的 section 双计数（non-empty、fluid）、palette 固定 long 存储、原版状态标志计算的高度图及移动活塞 NBT（ByteTag facing、progressO）。块/物品/实体等 ID 使用完整原版导出表，而非 C++ 子集的注册顺序。
 - 创造放置与破坏经过距离、范围、已加载区块、物品、支撑及当前玩家/简单实体碰撞检查；处理珊瑚地面/挂墙候选、活塞和侦测器方向、铁轨方向、草/墙/音符盒初始属性、音符盒右键调音、创造破坏活塞头关联基座、矿车坡道放置。侦测器放置不得调用会调度计划刻的通用 updateShape 查询。
 - 输入预测 sequence 在修改世界之前校验，修正包和 block_changed_ack 回传；负序列不会先编辑再断开。创造丢弃限制堆叠/频率，不向未加载区块生成暂停实体。
-- 物品、TNT、下落方块、矿车发送 spawn、元数据、绝对位置/速度和移除；物品堆叠和 TNT 引信会同步。尚未采用原版 ServerEntity 的相对位移/脏元数据优化和矿车轨迹插值。
+- 物品、TNT、下落方块、矿车按原版 `ServerEntity` 跟踪：spawn 携带一次非默认元数据；之后位置是相对 `VecDeltaCodec` 基准的 1/4096 位移（`move_entity_pos` / `move_entity_pos_rot`），旋转是 1/256 圈（`move_entity_rot`），位移超出 short、着地状态变化或 400 刻未更新时改用 `entity_position_sync`，位置每 60 刻、旋转每 1 刻至少刷新一次。更新间隔取 `EntityType` 的 20（物品/下落方块）、10（TNT）、3（矿车）；矿车轨迹插值与受击速度包仍未实现。
 
 ## 广播顺序
 
-`World::setBlock` 在原版 sendBlockUpdated 所在位置记录变化，保留 flags 判断；网络层只记录脏位置。`World::tick` 的计划刻完成后、方块事件前新增观察性广播入口，对应 `ServerChunkCache.tickChunks → broadcastChangedChunks`。广播时读取当前位置，合并同一位置的多次写入。
+`World::setBlock` 在原版 sendBlockUpdated 所在位置记录变化，保留 flags 判断；网络层只记录打包的脏位置（`SectionPos << 12 | 局部坐标`）。`World::tick` 的计划刻完成后、方块事件前新增观察性广播入口，对应 `ServerChunkCache.tickChunks → broadcastChangedChunks`。广播时读取当前位置，按 `ChunkHolder.broadcastChanges` 的规则发包：section 内只有一个变化时发 `block_update`，多个变化合并成一条 `section_blocks_update`（`SectionPos` long + VarInt 数量 + 每条 `(stateId << 12) | 局部坐标` 的 VarLong），同一位置的多次写入只保留一次。
 
 成功方块事件在 `pistonBlockEvent` 等回调之后立即发包；事件、实体、方块实体阶段产生的普通块变化留至下一刻区块广播。特别是活塞源位置清空不能先于活塞事件发给客户端，否则客户端本地结构解析会丢失待移动方块。输入预测修正包独立立即回传。
 
-网络对象和核心在同一线程；输出积压只关闭该连接。发送前缀及时压缩，避免慢连接长期持有已发送字节。网络 ID 映射失败不会向核心邻居更新链抛出协议异常。世界的计划刻、方块事件、实体、移动活塞方块实体顺序保持原实现。
+网络对象的序列化仍在主线程（方块状态与实体位置来自 `World`，不能跨线程读取）；成帧后的字节交给独立的 `NetworkWriter` 线程，由它合并发送缓冲、等待写侧 `select` 并执行 `send`，主线程只等待可读 socket。因此慢连接和积压不会阻塞 tick，输出积压仍只关闭该连接。网络 ID 映射失败不会向核心邻居更新链抛出协议异常。世界的计划刻、方块事件、实体、移动活塞方块实体顺序保持原实现。
 
 ## 验证与剩余工作
 

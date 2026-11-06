@@ -35,6 +35,34 @@ void uuid(Writer &out, const Uuid &id) { out.raw(id); }
 int chunkCoord(double coordinate) {
   return static_cast<int>(std::floor(coordinate / 16));
 }
+// SectionPos.sectionRelativePos: x << 8 | z << 4 | y.
+std::uint16_t packSectionLocal(Pos p) {
+  return static_cast<std::uint16_t>(((p.x & 15) << 8) | ((p.z & 15) << 4) |
+                                    (p.y & 15));
+}
+// SectionPos.asLong: x << 42 | z << 20 | y, each 22/22/20 bits.
+std::int64_t packSectionPos(Pos p) {
+  const std::uint64_t x = static_cast<std::uint64_t>(p.x >> 4) & 0x3ffffful;
+  const std::uint64_t y = static_cast<std::uint64_t>(p.y >> 4) & 0xfffffull;
+  const std::uint64_t z = static_cast<std::uint64_t>(p.z >> 4) & 0x3ffffful;
+  return static_cast<std::int64_t>((x << 42) | (z << 20) | y);
+}
+Pos unpackSectionBlock(std::int64_t section, std::uint16_t local) {
+  const auto signExtend = [](std::uint64_t value, int bits) {
+    const std::uint64_t mask = (std::uint64_t{1} << bits) - 1;
+    value &= mask;
+    return static_cast<std::int64_t>(
+        value & (std::uint64_t{1} << (bits - 1)) ? value | ~mask : value);
+  };
+  const auto s = static_cast<std::uint64_t>(section);
+  return Pos{static_cast<int>(signExtend(s >> 42, 22) * 16 + ((local >> 8) & 15)),
+             static_cast<int>(signExtend(s, 20) * 16 + (local & 15)),
+             static_cast<int>(signExtend(s >> 20, 22) * 16 + ((local >> 4) & 15))};
+}
+std::uint8_t packDegrees(float degrees) {
+  // Mth.packDegrees: round(degrees * 256 / 360) as a signed byte.
+  return static_cast<std::uint8_t>(std::lround(degrees * 256.0 / 360.0));
+}
 Direction horizontal(float yaw) {
   constexpr Direction directions[]{Direction::South, Direction::West,
                                    Direction::North, Direction::East};
@@ -495,14 +523,57 @@ bool Session::canInteract(Pos p) const {
 }
 void Session::blockUpdate(Pos p, const BlockState &) {
   if (phase_ == Phase::Play && hasChunk(p))
-    changedBlocks_.insert(p);
+    changedBlocks_.push_back((static_cast<std::uint64_t>(packSectionPos(p))
+                              << 12) |
+                             packSectionLocal(p));
 }
 void Session::flushBlockUpdates() {
-  auto positions = std::exchange(changedBlocks_, {});
-  for (Pos p : positions)
-    correct(p);
+  if (changedBlocks_.empty())
+    return;
+  // ChunkHolder.broadcastChanges accumulates one SectionPos -> ShortSet map and
+  // emits a single block_update when a section only has one change, otherwise
+  // one section_blocks_update. The states are read from the current section at
+  // broadcast time, like ClientboundSectionBlocksUpdatePacket's constructor.
+  auto keys = std::exchange(changedBlocks_, {});
+  std::sort(keys.begin(), keys.end());
+  keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+  for (std::size_t i = 0; i < keys.size();) {
+    const std::int64_t section = static_cast<std::int64_t>(keys[i] >> 12);
+    std::size_t j = i + 1;
+    while (j < keys.size() && (keys[j] >> 12) == keys[i] >> 12)
+      ++j;
+    if (j - i == 1) {
+      sendBlockUpdate(
+          unpackSectionBlock(section, static_cast<std::uint16_t>(keys[i] & 0xfff)));
+      i = j;
+      continue;
+    }
+    std::vector<std::pair<std::uint16_t, std::int32_t>> entries;
+    entries.reserve(j - i);
+    for (std::size_t k = i; k < j; ++k) {
+      const auto local = static_cast<std::uint16_t>(keys[k] & 0xfff);
+      const Pos p = unpackSectionBlock(section, local);
+      if (!hasChunk(p))
+        continue;
+      try {
+        entries.emplace_back(local, data_.registry.stateId(world_.getBlock(p)));
+      } catch (const ProtocolError &) {
+        disconnect("Unsupported block state for protocol 775");
+        return;
+      }
+    }
+    if (!entries.empty()) {
+      Writer out;
+      out.i64(section);
+      out.varInt(static_cast<std::int32_t>(entries.size()));
+      for (const auto &[local, stateId] : entries)
+        out.varLong((static_cast<std::int64_t>(stateId) << 12) | local);
+      send("section_blocks_update", out);
+    }
+    i = j;
+  }
 }
-void Session::correct(Pos p) {
+void Session::sendBlockUpdate(Pos p) {
   if (phase_ != Phase::Play || !hasChunk(p))
     return;
   try {
@@ -532,8 +603,8 @@ void Session::blockEvent(const BlockEvent &event) {
 void Session::fallingBlockLanded(int entityId, Pos pos, const BlockState &) {
   // FallingBlockEntity.sendToTrackingPlayers precedes discard. Ordinary chunk
   // dirty broadcasts remain in their existing earlier tick phase.
-  if (knownEntities_.contains(entityId))
-    correct(pos);
+  if (trackedEntities_.contains(entityId))
+    sendBlockUpdate(pos);
 }
 void Session::acknowledge(int sequence) {
   if (sequence < 0)
@@ -613,7 +684,7 @@ void Session::playerAction(Reader &in) {
       }
       world_.setBlock(p, airState());
     }
-    correct(p);
+    sendBlockUpdate(p);
     acknowledge(sequence);
   } else if (action == 6) {
     const auto held = inventory_[selectedSlot_];
@@ -752,8 +823,8 @@ void Session::useItemOn(Reader &in) {
     } else if (diagnostic)
       diagnostic("TODO: unsupported placement item");
   }
-  correct(clicked);
-  correct(target);
+  sendBlockUpdate(clicked);
+  sendBlockUpdate(target);
   acknowledge(sequence);
 }
 void Session::play(int id, Reader &in) {
@@ -931,8 +1002,148 @@ void Session::sendTickTime(double milliseconds, std::int64_t tick) {
     disconnect("Tick timing packet failed");
   }
 }
+void Session::sendEntitySpawn(const Entity &e, TrackedEntity &tracked) {
+  Writer out;
+  out.varInt(e.id);
+  uuid(out, offlineUuid("entity_" + std::to_string(e.id)));
+  out.varInt(data_.registry.entityTypeId(e.typeName()));
+  out.f64(e.position.x);
+  out.f64(e.position.y);
+  out.f64(e.position.z);
+  lpVector(out, e.deltaMovement);
+  out.u8(packDegrees(e.pitch));
+  out.u8(packDegrees(e.yaw));
+  out.u8(0);
+  const auto *falling = dynamic_cast<const FallingBlockEntity *>(&e);
+  out.varInt(falling ? data_.registry.stateId(falling->blockState) : 0);
+  send("add_entity", out);
+
+  // ServerEntity.sendPairingData: non-default synced data goes out once, with
+  // the spawn, instead of on every update tick.
+  Writer values;
+  values.varInt(e.id);
+  bool hasValues = false;
+  if (auto item = dynamic_cast<const ItemEntity *>(&e)) {
+    values.u8(8);
+    values.varInt(7);
+    stack(values, item->item);
+    hasValues = true;
+  } else if (auto tnt = dynamic_cast<const PrimedTnt *>(&e)) {
+    values.u8(8);
+    values.varInt(1);
+    values.varInt(tnt->fuse);
+    values.u8(9);
+    values.varInt(14);
+    values.varInt(data_.registry.stateId(tnt->blockState));
+    hasValues = true;
+  }
+  if (hasValues) {
+    values.u8(255);
+    send("set_entity_data", values);
+  }
+
+  tracked.base = e.position;
+  tracked.lastMovement = e.deltaMovement;
+  tracked.yRot = packDegrees(e.yaw);
+  tracked.xRot = packDegrees(e.pitch);
+  tracked.headRot = tracked.yRot;
+  tracked.tickCount = 0;
+  tracked.teleportDelay = 0;
+  tracked.wasOnGround = e.onGround;
+}
+
+void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
+  // ServerEntity.sendChanges: movement is encoded as a 1/4096 delta against the
+  // last acknowledged position (VecDeltaCodec), rotation as 1/256 turns, and a
+  // full entity_position_sync only when the delta overflows a short or the
+  // ground state changes.
+  const auto *type = entityType(e.typeName());
+  const int interval =
+      type && type->updateInterval > 0 ? type->updateInterval : 3;
+  if (tracked.tickCount % interval == 0) {
+    const std::uint8_t yRot = packDegrees(e.yaw);
+    const std::uint8_t xRot = packDegrees(e.pitch);
+    const bool rotationChanged =
+        std::abs(int(yRot) - int(tracked.yRot)) >= 1 ||
+        std::abs(int(xRot) - int(tracked.xRot)) >= 1;
+    const Vec3 offset = e.position - tracked.base;
+    const bool positionChanged = offset.lengthSqr() >= 7.6293945e-6;
+    const bool position = positionChanged || tracked.tickCount % 60 == 0;
+    const auto encode = [](double value) {
+      return std::llround(value * 4096.0);
+    };
+    const std::int64_t xa = encode(e.position.x) - encode(tracked.base.x);
+    const std::int64_t ya = encode(e.position.y) - encode(tracked.base.y);
+    const std::int64_t za = encode(e.position.z) - encode(tracked.base.z);
+    const bool deltaTooBig = xa < -32768 || xa > 32767 || ya < -32768 ||
+                             ya > 32767 || za < -32768 || za > 32767;
+    ++tracked.teleportDelay;
+    bool sentPosition = false, sentRotation = false;
+    if (deltaTooBig || tracked.teleportDelay > 400 ||
+        tracked.wasOnGround != e.onGround) {
+      tracked.wasOnGround = e.onGround;
+      tracked.teleportDelay = 0;
+      Writer out;
+      out.varInt(e.id);
+      out.f64(e.position.x);
+      out.f64(e.position.y);
+      out.f64(e.position.z);
+      out.f64(e.deltaMovement.x);
+      out.f64(e.deltaMovement.y);
+      out.f64(e.deltaMovement.z);
+      out.f32(e.yaw);
+      out.f32(e.pitch);
+      out.bool_(e.onGround);
+      send("entity_position_sync", out);
+      sentPosition = sentRotation = true;
+    } else if (position && rotationChanged) {
+      Writer out;
+      out.varInt(e.id);
+      out.i16(static_cast<std::int16_t>(xa));
+      out.i16(static_cast<std::int16_t>(ya));
+      out.i16(static_cast<std::int16_t>(za));
+      out.u8(yRot);
+      out.u8(xRot);
+      out.bool_(e.onGround);
+      send("move_entity_pos_rot", out);
+      sentPosition = sentRotation = true;
+    } else if (position) {
+      Writer out;
+      out.varInt(e.id);
+      out.i16(static_cast<std::int16_t>(xa));
+      out.i16(static_cast<std::int16_t>(ya));
+      out.i16(static_cast<std::int16_t>(za));
+      out.bool_(e.onGround);
+      send("move_entity_pos", out);
+      sentPosition = true;
+    } else if (rotationChanged) {
+      Writer out;
+      out.varInt(e.id);
+      out.u8(yRot);
+      out.u8(xRot);
+      out.bool_(e.onGround);
+      send("move_entity_rot", out);
+      sentRotation = true;
+    }
+    if (sentPosition)
+      tracked.base = e.position;
+    if (sentRotation) {
+      tracked.yRot = yRot;
+      tracked.xRot = xRot;
+    }
+    const std::uint8_t headRot = packDegrees(e.yaw);
+    if (std::abs(int(headRot) - int(tracked.headRot)) >= 1) {
+      Writer out;
+      out.varInt(e.id);
+      out.u8(headRot);
+      send("rotate_head", out);
+      tracked.headRot = headRot;
+    }
+  }
+  ++tracked.tickCount;
+}
+
 void Session::syncEntities() {
-  std::set<int> active;
   for (const auto &ptr : world_.entities) {
     const auto &e = *ptr;
     if (e.isRemoved() ||
@@ -941,60 +1152,32 @@ void Session::syncEntities() {
         !sentChunks_.contains(
             {chunkCoord(e.position.x), chunkCoord(e.position.z)}))
       continue;
-    active.insert(e.id);
-    Writer out;
-    if (!knownEntities_.contains(e.id)) {
-      out.varInt(e.id);
-      uuid(out, offlineUuid("entity_" + std::to_string(e.id)));
-      out.varInt(data_.registry.entityTypeId(e.typeName()));
-      out.f64(e.position.x);
-      out.f64(e.position.y);
-      out.f64(e.position.z);
-      lpVector(out, e.deltaMovement);
-      out.u8(static_cast<std::uint8_t>(int(std::floor(e.pitch * 256 / 360))));
-      out.u8(static_cast<std::uint8_t>(int(std::floor(e.yaw * 256 / 360))));
-      out.u8(0);
-      const auto *falling = dynamic_cast<const FallingBlockEntity *>(&e);
-      out.varInt(falling ? data_.registry.stateId(falling->blockState) : 0);
-      send("add_entity", out);
+    const auto tracked = trackedEntities_.find(e.id);
+    if (tracked == trackedEntities_.end()) {
+      TrackedEntity state;
+      sendEntitySpawn(e, state);
+      state.lastSeenTick = connectionTicks_;
+      trackedEntities_.emplace(e.id, state);
     } else {
-      out.varInt(e.id);
-      positionPacket(out, e.position, e.deltaMovement, e.yaw, e.pitch);
-      out.bool_(e.onGround);
-      send("teleport_entity", out);
+      tracked->second.lastSeenTick = connectionTicks_;
+      sendEntityChanges(e, tracked->second);
     }
-    out = {};
-    out.varInt(e.id);
-    if (auto item = dynamic_cast<const ItemEntity *>(&e)) {
-      out.u8(8);
-      out.varInt(7);
-      stack(out, item->item);
-    } else if (auto tnt = dynamic_cast<const PrimedTnt *>(&e)) {
-      out.u8(8);
-      out.varInt(1);
-      out.varInt(tnt->fuse);
-      out.u8(9);
-      out.varInt(14);
-      out.varInt(data_.registry.stateId(tnt->blockState));
-    }
-    out.u8(255);
-    send("set_entity_data", out);
   }
   Writer removed;
   int count = 0;
-  for (int id : knownEntities_)
-    if (!active.contains(id))
+  for (const auto &[id, tracked] : trackedEntities_)
+    if (tracked.lastSeenTick != connectionTicks_)
       ++count;
   if (count) {
     removed.varInt(count);
-    for (int id : knownEntities_)
-      if (!active.contains(id))
+    for (const auto &[id, tracked] : trackedEntities_)
+      if (tracked.lastSeenTick != connectionTicks_)
         removed.varInt(id);
     send("remove_entities", removed);
   }
-  knownEntities_ = std::move(active);
-  // TODO: vanilla ServerEntity dirty metadata/range/relative interpolation and
-  // minecart track interpolation; absolute sync retains authoritative physics.
+  std::erase_if(trackedEntities_, [&](const auto &entry) {
+    return entry.second.lastSeenTick != connectionTicks_;
+  });
 }
 void Session::tick() {
   if (closed())

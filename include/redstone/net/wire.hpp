@@ -20,6 +20,7 @@ struct Writer {
   void f32(float);
   void f64(double);
   void varInt(std::int32_t);
+  void varLong(std::int64_t);
   void string(std::string_view);
   void position(Pos);
   void raw(std::span<const std::uint8_t>);
@@ -38,6 +39,7 @@ struct Reader {
   float f32();
   double f64();
   std::int32_t varInt();
+  std::int64_t varLong();
   std::string string(std::size_t maxBytes = 32767 * 3);
   Pos position();
   std::span<const std::uint8_t> raw(std::size_t);

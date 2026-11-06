@@ -34,6 +34,14 @@ void Writer::varInt(std::int32_t v) {
     u8(static_cast<std::uint8_t>(b | (n ? 128 : 0)));
   } while (n);
 }
+void Writer::varLong(std::int64_t v) {
+  auto n = std::bit_cast<std::uint64_t>(v);
+  do {
+    auto b = n & 127;
+    n >>= 7;
+    u8(static_cast<std::uint8_t>(b | (n ? 128 : 0)));
+  } while (n);
+}
 void Writer::string(std::string_view v) {
   if (v.size() > 32767 * 3)
     throw ProtocolError("string too large");
@@ -88,6 +96,18 @@ std::int32_t Reader::varInt() {
       return std::bit_cast<std::int32_t>(n);
   }
   throw ProtocolError("VarInt too long");
+}
+std::int64_t Reader::varLong() {
+  std::uint64_t n = 0;
+  for (int i = 0; i < 10; ++i) {
+    auto b = u8();
+    if (i == 9 && (b & 0xfe))
+      throw ProtocolError("VarLong overflow");
+    n |= std::uint64_t(b & 127) << (i * 7);
+    if (!(b & 128))
+      return std::bit_cast<std::int64_t>(n);
+  }
+  throw ProtocolError("VarLong too long");
 }
 std::string Reader::string(std::size_t maxBytes) {
   int n = varInt();

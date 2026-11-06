@@ -14,7 +14,12 @@
 #include "redstone/net/session.hpp"
 #include "redstone/storage.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <cmath>
 #include <csignal>
 #include <iomanip>
@@ -78,9 +83,15 @@ private:
 struct Connection {
   Socket socket;
   Session session;
+  // Written only by the network thread; the session itself stays on the main
+  // thread and hands finished frames over through NetworkWriter::submit. The
+  // pending buffer is compacted by the writer, never by the tick thread.
   Bytes pending;
   std::size_t sent = 0;
-  bool dead = false;
+  std::atomic<bool> dead{false};
+  std::atomic<bool> closing{false};
+  // Set by the writer once a closing connection's last byte was sent.
+  std::atomic<bool> flushed{false};
   Connection(Socket accepted, World &world, const ProtocolData &data,
              ServerOptions options)
       : socket(std::move(accepted)), session(world, data, std::move(options)) {
@@ -88,20 +99,134 @@ struct Connection {
       std::cerr << "connection: " << message << '\n';
     };
   }
-  void collect() {
-    if (sent) {
-      pending.erase(pending.begin(), pending.begin() + sent);
-      sent = 0;
+};
+
+// Off-main-thread sender: the tick thread only serializes packets and moves
+// the finished frames here; buffer assembly, the write-side select and the
+// send() syscalls happen on this thread instead of inside World::tick.
+class NetworkWriter {
+public:
+  ~NetworkWriter() { stop(); }
+  void start() { thread_ = std::thread([this] { run(); }); }
+  void stop() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
     }
-    for (auto &packet : session.takeOutput()) {
-      if (pending.size() + packet.size() > 16 * 1024 * 1024) {
-        dead = true;
-        return;
+    wake_.notify_all();
+    if (thread_.joinable())
+      thread_.join();
+  }
+  void submit(const std::shared_ptr<Connection> &connection,
+              std::vector<Bytes> packets) {
+    if (packets.empty())
+      return;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      jobs_.push_back(Job{connection, std::move(packets)});
+    }
+    wake_.notify_one();
+  }
+
+private:
+  struct Job {
+    std::shared_ptr<Connection> connection;
+    std::vector<Bytes> packets;
+  };
+  void run() {
+    std::deque<Job> jobs;
+    std::vector<std::shared_ptr<Connection>> active;
+    std::vector<std::uint8_t> buffer;
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        wake_.wait_for(lock, std::chrono::milliseconds(2),
+                       [this] { return stopping_ || !jobs_.empty(); });
+        if (stopping_ && jobs_.empty())
+          break;
+        jobs.swap(jobs_);
       }
-      pending.insert(pending.end(), packet.begin(), packet.end());
+      for (auto &job : jobs) {
+        Connection &connection = *job.connection;
+        if (connection.dead)
+          continue;
+        if (connection.sent) {
+          connection.pending.erase(connection.pending.begin(),
+                                   connection.pending.begin() +
+                                       connection.sent);
+          connection.sent = 0;
+        }
+        for (auto &packet : job.packets) {
+          if (connection.pending.size() + packet.size() > 16 * 1024 * 1024) {
+            connection.dead = true;
+            break;
+          }
+          connection.pending.insert(connection.pending.end(), packet.begin(),
+                                    packet.end());
+        }
+        if (!connection.dead &&
+            std::find(active.begin(), active.end(), job.connection) ==
+                active.end())
+          active.push_back(std::move(job.connection));
+      }
+      jobs.clear();
+      fd_set writes;
+      FD_ZERO(&writes);
+      SocketHandle largest = invalidSocket;
+      bool waiting = false;
+      for (auto &connection : active) {
+        if (connection->dead || connection->sent >= connection->pending.size())
+          continue;
+        FD_SET(connection->socket.get(), &writes);
+        largest = largest == invalidSocket
+                      ? connection->socket.get()
+                      : std::max(largest, connection->socket.get());
+        waiting = true;
+      }
+      if (waiting && largest != invalidSocket) {
+        timeval timeout{};
+        timeout.tv_usec = 2000;
+        (void)select(static_cast<int>(largest + 1), nullptr, &writes, nullptr,
+                     &timeout);
+      }
+      for (auto &connection : active) {
+        if (connection->dead || connection->sent >= connection->pending.size())
+          continue;
+        if (waiting && !FD_ISSET(connection->socket.get(), &writes))
+          continue;
+        const int count =
+            static_cast<int>(::send(connection->socket.get(),
+                                    reinterpret_cast<const char *>(
+                                        connection->pending.data() +
+                                        connection->sent),
+                                    static_cast<int>(connection->pending.size() -
+                                                     connection->sent),
+                                    0));
+        if (count > 0) {
+          connection->sent += static_cast<std::size_t>(count);
+        } else if (!wouldBlock()) {
+          connection->dead = true;
+        }
+      }
+      std::erase_if(active, [](const std::shared_ptr<Connection> &connection) {
+        if (connection->dead)
+          return true;
+        if (connection->closing &&
+            connection->sent >= connection->pending.size()) {
+          connection->flushed = true;
+          return true;
+        }
+        return false;
+      });
     }
   }
+  std::mutex mutex_;
+  std::condition_variable wake_;
+  std::deque<Job> jobs_;
+  bool stopping_ = false;
+  std::thread thread_;
 };
+
 int integer(const std::string &value, int lo, int hi) {
   std::size_t consumed;
   int n = std::stoi(value, &consumed);
@@ -304,7 +429,11 @@ int runServer(int argc, char **argv) {
     std::cout << "LISTENING 127.0.0.1:" << ntohs(address.sin_port)
               << " protocol=775 allocator=" << REDSTONE_ALLOCATOR_NAME
               << std::endl;
-    std::vector<std::unique_ptr<Connection>> connections;
+    std::vector<std::shared_ptr<Connection>> connections;
+    // All packet buffers and socket writes happen on this thread; the tick
+    // thread only serializes them and hands the frames over.
+    NetworkWriter writer;
+    writer.start();
     world.blockUpdateObserver = [&](Pos p, const BlockState &s, int) {
       for (auto &c : connections)
         if (!c->dead)
@@ -336,22 +465,20 @@ int runServer(int argc, char **argv) {
     int ticks = 0;
     double totalTickMilliseconds = 0, maxTickMilliseconds = 0;
     while (!stopRequested && (!maxTicks || ticks < maxTicks)) {
-      fd_set reads, writes;
+      // The main thread only waits for readable sockets; the write side lives
+      // on NetworkWriter.
+      fd_set reads;
       FD_ZERO(&reads);
-      FD_ZERO(&writes);
       FD_SET(listener.get(), &reads);
       SocketHandle largest = listener.get();
-      for (auto &c : connections) {
-        c->collect();
-        if (!c->session.closed())
+      for (auto &c : connections)
+        if (!c->session.closed()) {
           FD_SET(c->socket.get(), &reads);
-        if (c->sent < c->pending.size())
-          FD_SET(c->socket.get(), &writes);
-        largest = std::max(largest, c->socket.get());
-      }
+          largest = std::max(largest, c->socket.get());
+        }
       timeval timeout{};
       timeout.tv_usec = 5000;
-      if (select(static_cast<int>(largest + 1), &reads, &writes, nullptr,
+      if (select(static_cast<int>(largest + 1), &reads, nullptr, nullptr,
                  &timeout) < 0) {
         if (stopRequested)
           break;
@@ -364,12 +491,12 @@ int runServer(int argc, char **argv) {
           auto sessionOptions = options;
           sessionOptions.playerId +=
               ticks * 8 + static_cast<int>(connections.size());
-          connections.push_back(std::make_unique<Connection>(
+          connections.push_back(std::make_shared<Connection>(
               std::move(socket), world, data, std::move(sessionOptions)));
         }
       }
       for (auto &c : connections) {
-        if (FD_ISSET(c->socket.get(), &reads)) {
+        if (!c->session.closed() && FD_ISSET(c->socket.get(), &reads)) {
           std::uint8_t buffer[65536];
           int count = recv(c->socket.get(), reinterpret_cast<char *>(buffer),
                            sizeof(buffer), 0);
@@ -378,21 +505,13 @@ int runServer(int argc, char **argv) {
           else if (!count || !wouldBlock())
             c->dead = true;
         }
-        c->collect();
-        if (FD_ISSET(c->socket.get(), &writes) && c->sent < c->pending.size()) {
-          int count = ::send(
-              c->socket.get(),
-              reinterpret_cast<const char *>(c->pending.data() + c->sent),
-              static_cast<int>(c->pending.size() - c->sent), 0);
-          if (count > 0)
-            c->sent += count;
-          else if (!wouldBlock())
-            c->dead = true;
-        }
-        if (c->session.closed() && c->sent == c->pending.size())
-          c->dead = true;
+        writer.submit(c, c->session.takeOutput());
+        if (c->session.closed())
+          c->closing = true;
       }
-      std::erase_if(connections, [](const auto &c) { return c->dead; });
+      std::erase_if(connections, [](const auto &c) {
+        return c->dead.load() || (c->closing.load() && c->flushed.load());
+      });
       auto now = std::chrono::steady_clock::now();
       if (now >= nextTick) {
         const auto tickStart = std::chrono::steady_clock::now();
@@ -410,8 +529,12 @@ int runServer(int argc, char **argv) {
         // Idle waiting, socket IO outside the tick and this display are
         // excluded.
         for (auto &c : connections)
-          if (!c->dead)
+          if (!c->dead) {
             c->session.sendTickTime(milliseconds, world.gameTime());
+            writer.submit(c, c->session.takeOutput());
+            if (c->session.closed())
+              c->closing = true;
+          }
         ++ticks;
         if (ticks == 1 || ticks % 100 == 0)
           std::cout << "TICK tick=" << world.gameTime() << " ms=" << std::fixed
@@ -425,6 +548,7 @@ int runServer(int argc, char **argv) {
           nextTick = tickEnd + std::chrono::milliseconds(50);
       }
     }
+    writer.stop();
     std::cout << "STOPPED ticks=" << ticks
               << " mean_ms=" << (ticks ? totalTickMilliseconds / ticks : 0)
               << " max_ms=" << maxTickMilliseconds << '\n';

@@ -194,10 +194,11 @@ bool Aabb::intersects(const Aabb &o) const {
 }
 const std::vector<EntityType> &entityRegistry() {
   static const std::vector<EntityType> entries = {
-      {"minecraft:item", 0.25f, 0.25f, 0.2125f, false, true},
-      {"minecraft:tnt", 0.98f, 0.98f, 0.15f, true, true},
-      {"minecraft:falling_block", 0.98f, 0.98f, 0.833f, false, true},
-      {"minecraft:minecart", 0.98f, 0.7f, 0.595f, false, true}};
+      // EntityType.clientTrackingRange/updateInterval of the vanilla types.
+      {"minecraft:item", 0.25f, 0.25f, 0.2125f, false, true, 20},
+      {"minecraft:tnt", 0.98f, 0.98f, 0.15f, true, true, 10},
+      {"minecraft:falling_block", 0.98f, 0.98f, 0.833f, false, true, 20},
+      {"minecraft:minecart", 0.98f, 0.7f, 0.595f, false, true, 3}};
   return entries;
 }
 const EntityType *entityType(const std::string &name) {

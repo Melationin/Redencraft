@@ -346,7 +346,17 @@ int main(int argc, char **argv) {
   world.tick();
   session.tick();
   ids = drain(session, true);
-  assert(std::count(ids.begin(), ids.end(), 125) == 4);
+  // ServerEntity delta tracking: moving entities send move_entity_pos(_rot)
+  // against the VecDeltaCodec base instead of a full teleport every tick.
+  const int movePos = data.packet("play", "clientbound", "move_entity_pos");
+  const int movePosRot =
+      data.packet("play", "clientbound", "move_entity_pos_rot");
+  assert(std::count(ids.begin(), ids.end(), movePos) +
+             std::count(ids.begin(), ids.end(), movePosRot) ==
+         4);
+  assert(std::count(ids.begin(), ids.end(),
+                    data.packet("play", "clientbound", "teleport_entity")) ==
+         0);
   world.entities.front()->discard();
   session.tick();
   ids = drain(session, true);

@@ -2,6 +2,7 @@
 #include "redstone/entity.hpp"
 #include "redstone/net/wire.hpp"
 #include <array>
+#include <map>
 #include <set>
 
 namespace redstone::net {
@@ -47,6 +48,17 @@ public:
   std::function<void(std::string_view)> diagnostic;
 
 private:
+  // ServerEntity state: VecDeltaCodec base, packed rotations and the update /
+  // teleport timers. One entry per entity this session currently tracks.
+  struct TrackedEntity {
+    Vec3 base;
+    Vec3 lastMovement;
+    std::uint8_t yRot = 0, xRot = 0, headRot = 0;
+    int tickCount = 0;
+    int teleportDelay = 0;
+    std::int64_t lastSeenTick = 0;
+    bool wasOnGround = false;
+  };
   void handle(Reader &);
   void play(int, Reader &);
   void join();
@@ -54,11 +66,13 @@ private:
   void packet(int id, const Writer &payload = {});
   void queue(Bytes bytes);
   void disconnect(const std::string &);
-  void correct(Pos);
   void acknowledge(int sequence);
+  void sendBlockUpdate(Pos);
   void setSlot(int slot, ItemStack stack);
   void stack(Writer &, const ItemStack &) const;
   void syncEntities();
+  void sendEntitySpawn(const Entity &, TrackedEntity &);
+  void sendEntityChanges(const Entity &, TrackedEntity &);
   void refreshChunkView();
   void sendChunkBatch();
   bool hasChunk(Pos) const;
@@ -83,8 +97,10 @@ private:
   float yaw_ = 0, pitch_ = 0;
   std::array<ItemStack, 41> inventory_{};
   int selectedSlot_ = 0;
-  std::set<int> knownEntities_;
-  std::set<Pos> changedBlocks_;
+  std::map<int, TrackedEntity> trackedEntities_;
+  // Packed (SectionPos << 12 | section-relative position), deduplicated and
+  // grouped at broadcast time like ChunkHolder.changedBlocksPerSection.
+  std::vector<std::uint64_t> changedBlocks_;
   std::set<std::pair<int, int>> availableChunks_, sentChunks_;
   std::vector<std::pair<int, int>> pendingChunks_;
   std::optional<std::pair<int, int>> chunkCenter_;

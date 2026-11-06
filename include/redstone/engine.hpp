@@ -88,6 +88,9 @@ struct EntityType {
   float eyeHeight = 1.53f;
   bool fireImmune = false;
   bool simulated = false;
+  // EntityType.clientTrackingRange/updateInterval: how often ServerEntity
+  // syncs a tracked entity's position and rotation.
+  int updateInterval = 3;
 };
 const std::vector<EntityType> &entityRegistry();
 const EntityType *entityType(const std::string &name);
