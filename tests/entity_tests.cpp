@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -779,6 +780,126 @@ void storageEntityImport() {
               itemEntity->item.id == "minecraft:white_carpet",
           "item entity NBT is imported");
 }
+
+// Slab test used by the reference scan: does the segment touch this world-space
+// box? Independent of World::clip's traversal, only of its per-box answer.
+bool rayHits(double x0, double y0, double z0, double x1, double y1, double z1,
+             Vec3 from, Vec3 to) {
+  double tmin = 0, tmax = 1;
+  const double lo[3] = {x0, y0, z0};
+  const double hi[3] = {x1, y1, z1};
+  const double start[3] = {from.x, from.y, from.z};
+  const double delta[3] = {to.x - from.x, to.y - from.y, to.z - from.z};
+  for (int axis = 0; axis < 3; ++axis) {
+    if (std::abs(delta[axis]) < 1.0e-7) {
+      if (start[axis] < lo[axis] || start[axis] > hi[axis])
+        return false;
+      continue;
+    }
+    double a = (lo[axis] - start[axis]) / delta[axis];
+    double b = (hi[axis] - start[axis]) / delta[axis];
+    if (a > b)
+      std::swap(a, b);
+    tmin = std::max(tmin, a);
+    tmax = std::min(tmax, b);
+    if (tmin > tmax)
+      return false;
+  }
+  return true;
+}
+
+// Every block in the segment's bounding box, no traversal shortcut: the answer
+// World::clip must keep producing after switching to BlockGetter.traverseBlocks'
+// DDA.
+bool scanClip(World &world, Vec3 from, Vec3 to) {
+  const int x0 = static_cast<int>(std::floor(std::min(from.x, to.x)));
+  const int y0 = static_cast<int>(std::floor(std::min(from.y, to.y)));
+  const int z0 = static_cast<int>(std::floor(std::min(from.z, to.z)));
+  const int x1 = static_cast<int>(std::floor(std::max(from.x, to.x)));
+  const int y1 = static_cast<int>(std::floor(std::max(from.y, to.y)));
+  const int z1 = static_cast<int>(std::floor(std::max(from.z, to.z)));
+  for (int x = x0; x <= x1; ++x)
+    for (int y = y0; y <= y1; ++y)
+      for (int z = z0; z <= z1; ++z) {
+        const Pos pos{x, y, z};
+        const auto state = world.getBlock(pos);
+        if (state.isAir())
+          continue;
+        VoxelShape moving;
+        const VoxelShape &shape =
+            state.is(Blocks::MOVING_PISTON)
+                ? (moving = collisionShape(world, pos, state), moving)
+                : collisionShape(state);
+        for (const auto &b : shape)
+          if (rayHits(b.x0 / 16.0 + x, b.y0 / 16.0 + y, b.z0 / 16.0 + z,
+                      b.x1 / 16.0 + x, b.y1 / 16.0 + y, b.z1 / 16.0 + z,
+                      from, to))
+            return true;
+      }
+  return false;
+}
+
+void clipTraversal() {
+  World world;
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z)
+      world.loadChunk(x, z);
+  for (int x = -12; x <= 12; ++x)
+    for (int z = -12; z <= 12; ++z)
+      world.rawSetBlock({x, 62, z}, defaultState("smooth_stone"));
+  // Full wall at x=4, a 0.0625-high carpet, a partial snow layer and a glass
+  // cube, so the ray meets full, thin and airborne-only cells.
+  for (int y = 63; y <= 66; ++y)
+    for (int z = -6; z <= 6; ++z)
+      world.rawSetBlock({4, y, z}, defaultState("smooth_stone"));
+  world.rawSetBlock({-3, 63, 2}, defaultState("white_carpet"));
+  world.rawSetBlock({-6, 63, -4}, defaultState("snow"));
+  world.rawSetBlock({0, 65, 0}, defaultState("glass"));
+
+  // Axis-aligned cases with a known answer.
+  require(world.clip({2.5, 64.5, 0.5}, {6.5, 64.5, 0.5}),
+          "clip crosses a one-block wall");
+  require(!world.clip({2.5, 64.5, 8.5}, {6.5, 64.5, 8.5}),
+          "clip misses the wall outside its extent");
+  // BlockGetter.traverseBlocks pushes both endpoints outward by 1e-7, so a
+  // segment that ends exactly on the wall face still enters the wall cell (the
+  // exhaustive scan answers the same way for the same endpoint).
+  require(world.clip({2.5, 64.5, 0.5}, {4.0, 64.5, 0.5}),
+          "clip visits the cell of a boundary endpoint");
+  require(!world.clip({2.5, 64.5, 0.5}, {3.9999, 64.5, 0.5}),
+          "clip does not reach the wall before the face");
+  require(world.clip({-5.5, 63.03125, 2.5}, {-1.5, 63.03125, 2.5}),
+          "clip hits a 1/16-high carpet");
+  require(!world.clip({-5.5, 63.5, 2.5}, {-1.5, 63.5, 2.5}),
+          "clip passes over a 1/16-high carpet");
+  require(world.clip({0.2, 65.2, 0.2}, {0.8, 65.8, 0.8}),
+          "clip probes the block that contains the start point");
+  require(!world.clip({-0.5, 70.5, -0.5}, {6.5, 74.5, 6.5}),
+          "clip through open air reports no hit");
+
+  // Random short segments must agree with the exhaustive bounding-box scan.
+  std::uint64_t state = 0x9E3779B97F4A7C15ull;
+  const auto nextDouble = [&state](double lo, double hi) {
+    state = state * 6364136223846793005ull + 1442695040888963407ull;
+    const double unit = static_cast<double>((state >> 11) & ((1ull << 53) - 1)) /
+                        static_cast<double>(1ull << 53);
+    return lo + (hi - lo) * unit;
+  };
+  int hits = 0;
+  for (int i = 0; i < 20000; ++i) {
+    const Vec3 from{nextDouble(-10.5, 10.5), nextDouble(62.0, 68.0),
+                    nextDouble(-10.5, 10.5)};
+    const Vec3 to{from.x + nextDouble(-5.5, 5.5), from.y + nextDouble(-3.5, 3.5),
+                  from.z + nextDouble(-5.5, 5.5)};
+    const bool expected = scanClip(world, from, to);
+    const bool actual = world.clip(from, to);
+    hits += actual ? 1 : 0;
+    require(actual == expected,
+            "clip agrees with the exhaustive segment scan");
+  }
+  require(hits > 2000 && hits < 18000,
+          "clip fixture produces a mix of hits and misses");
+}
 } // namespace
 
 int main() {
@@ -817,6 +938,7 @@ int main() {
     entityTickOrder();
     entityHeightBoundaries();
     storageEntityImport();
+    clipTraversal();
     std::cout << "entity tests passed\n";
     return 0;
   } catch (const std::exception &e) {

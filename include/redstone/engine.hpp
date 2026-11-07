@@ -328,6 +328,26 @@ public:
   // interaction. source may be null; only the direct damage source identity is
   // needed for knockback filtering.
   void explode(Entity *source, Vec3 center, float radius, bool fire);
+  // ServerExplosion.calculateExplodedPositions work counters, accumulated for
+  // the lifetime of the world. The simulation never reads them: they exist so a
+  // harness can report how many probes and list entries an explosion really
+  // costs, and how much of the list the final sort/unique has to discard.
+  struct ExplosionStats {
+    std::uint64_t explosions = 0;
+    // Positions that missed the direct-mapped block cache, i.e. the ones that
+    // actually read a block state ("probe").
+    std::uint64_t probes = 0;
+    // Entries appended to the destruction list before deduplication: every step
+    // that enters a new block position and still has power left.
+    std::uint64_t candidates = 0;
+    // Entries surviving sort + unique, i.e. what interactWithBlocks visits.
+    std::uint64_t destroyed = 0;
+  };
+  ExplosionStats explosionStats;
+  // BlockGetter.traverseBlocks work counters (same rationale): how often a clip
+  // runs and how many cells it probes.
+  std::uint64_t clipCalls = 0;
+  std::uint64_t clipCells = 0;
   // PistonMovingBlockEntity's ThreadLocal NOCLIP guard. While set, the moving
   // piston(s) whose movement direction matches ignore their moved-state
   // collision shape for pushed entities.

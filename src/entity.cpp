@@ -1385,33 +1385,93 @@ bool World::noCollision(const Aabb &box) {
   return true;
 }
 bool World::clip(Vec3 from, Vec3 to) {
-  int x0 = static_cast<int>(std::floor(std::min(from.x, to.x))),
-      y0 = static_cast<int>(std::floor(std::min(from.y, to.y))),
-      z0 = static_cast<int>(std::floor(std::min(from.z, to.z)));
-  int x1 = static_cast<int>(std::floor(std::max(from.x, to.x))),
-      y1 = static_cast<int>(std::floor(std::max(from.y, to.y))),
-      z1 = static_cast<int>(std::floor(std::max(from.z, to.z)));
-  for (int x = x0; x <= x1; ++x)
-    for (int y = y0; y <= y1; ++y)
-      for (int z = z0; z <= z1; ++z) {
-        Pos p{x, y, z};
-        if (!isLoaded(p))
-          continue;
-        const BlockState state = getBlock(p);
-        if (state.isAir())
-          continue;
-        VoxelShape moving;
-        const VoxelShape &shape =
-            state.is(Blocks::MOVING_PISTON)
-                ? (moving = collisionShape(*this, p, state), moving)
-                : collisionShape(state);
-        for (const auto &b : shape) {
-          ShapeBox box{b.x0 / 16.0 + x, b.y0 / 16.0 + y, b.z0 / 16.0 + z,
-                       b.x1 / 16.0 + x, b.y1 / 16.0 + y, b.z1 / 16.0 + z};
-          if (rayBox(from, to, box))
-            return true;
-        }
+  // [VanillaCopy] BlockGetter.traverseBlocks: step through only the blocks the
+  // segment actually enters (Amanatides-Woo DDA) instead of scanning every block
+  // in the segment's bounding box. The difference matters for explosion entity
+  // exposure (ServerExplosion.getSeenPercent casts up to 27 short diagonal rays
+  // per damaged entity): a 5-block diagonal segment touches ~8 cells while its
+  // bounding box holds 125.
+  //
+  // Both endpoints are pushed outward by 1e-7, exactly like the vanilla lerp, so
+  // the cell that contains an endpoint sitting on a boundary is still visited.
+  ++clipCalls;
+  const double rawX = to.x - from.x;
+  const double rawY = to.y - from.y;
+  const double rawZ = to.z - from.z;
+  const double fromX = from.x - rawX * 1.0e-7;
+  const double fromY = from.y - rawY * 1.0e-7;
+  const double fromZ = from.z - rawZ * 1.0e-7;
+  const double toX = to.x + rawX * 1.0e-7;
+  const double toY = to.y + rawY * 1.0e-7;
+  const double toZ = to.z + rawZ * 1.0e-7;
+
+  const auto hits = [&](int x, int y, int z) {
+    ++clipCells;
+    const Pos p{x, y, z};
+    // getBlock answers air for out-of-bounds and unloaded chunks, which is what
+    // Level.getBlockState does for this read-only world.
+    const BlockState state = getBlock(p);
+    if (state.isAir())
+      return false;
+    VoxelShape moving;
+    const VoxelShape &shape = shapeAt(*this, p, state, moving);
+    for (const auto &b : shape) {
+      const ShapeBox box{b.x0 / 16.0 + x, b.y0 / 16.0 + y, b.z0 / 16.0 + z,
+                         b.x1 / 16.0 + x, b.y1 / 16.0 + y, b.z1 / 16.0 + z};
+      if (rayBox(from, to, box))
+        return true;
+    }
+    return false;
+  };
+
+  int cellX = floorToInt(fromX);
+  int cellY = floorToInt(fromY);
+  int cellZ = floorToInt(fromZ);
+  if (hits(cellX, cellY, cellZ))
+    return true;
+
+  const double dx = toX - fromX;
+  const double dy = toY - fromY;
+  const double dz = toZ - fromZ;
+  const int stepX = dx == 0.0 ? 0 : (dx > 0.0 ? 1 : -1);
+  const int stepY = dy == 0.0 ? 0 : (dy > 0.0 ? 1 : -1);
+  const int stepZ = dz == 0.0 ? 0 : (dz > 0.0 ? 1 : -1);
+  const double deltaX =
+      stepX == 0 ? std::numeric_limits<double>::max() : stepX / dx;
+  const double deltaY =
+      stepY == 0 ? std::numeric_limits<double>::max() : stepY / dy;
+  const double deltaZ =
+      stepZ == 0 ? std::numeric_limits<double>::max() : stepZ / dz;
+  // Mth.frac keeps the fractional part in [0, 1); a positive step crosses the
+  // next boundary after (1 - frac), a negative one after frac.
+  const double fracX = fromX - std::floor(fromX);
+  const double fracY = fromY - std::floor(fromY);
+  const double fracZ = fromZ - std::floor(fromZ);
+  double nextX = deltaX * (stepX > 0 ? 1.0 - fracX : fracX);
+  double nextY = deltaY * (stepY > 0 ? 1.0 - fracY : fracY);
+  double nextZ = deltaZ * (stepZ > 0 ? 1.0 - fracZ : fracZ);
+
+  while (nextX <= 1.0 || nextY <= 1.0 || nextZ <= 1.0) {
+    // Advance the axis whose boundary is crossed first; ties resolve z last,
+    // matching the vanilla branch order.
+    if (nextX < nextY) {
+      if (nextX < nextZ) {
+        cellX += stepX;
+        nextX += deltaX;
+      } else {
+        cellZ += stepZ;
+        nextZ += deltaZ;
       }
+    } else if (nextY < nextZ) {
+      cellY += stepY;
+      nextY += deltaY;
+    } else {
+      cellZ += stepZ;
+      nextZ += deltaZ;
+    }
+    if (hits(cellX, cellY, cellZ))
+      return true;
+  }
   return false;
 }
 void World::spawnItem(Pos pos, const std::string &item, int count,
@@ -1532,6 +1592,7 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
   // block-entity explosion hooks, and fire creation.
   std::vector<Pos> &toBlow = explosionTargets_;
   toBlow.clear();
+  ++explosionStats.explosions;
   // Lithium-style direct-mapped cache: the ray shell samples the same block
   // positions many times, so the state/fluid/resistance lookup is memoised
   // instead of hitting the chunk map on every step. The table outlives a single
@@ -1581,6 +1642,7 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
         ExplosionCacheEntry &cached =
             blockCache[(key * 0x9E3779B97F4A7C15ull) >> kBlockCacheShift];
         if (cached.generation != generation || cached.key != key) {
+          ++explosionStats.probes;
           const auto state = getBlock(pos);
           const bool fluid = isLiquidBlock(state) || waterloggedOf(state);
           const float blast = static_cast<float>(std::max(
@@ -1609,8 +1671,10 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
       // interactWithBlocks, and fire/counting are not modelled here. Later
       // steps are strictly weaker, so only the first step inside a block
       // can add it: repeated same-block steps only produced duplicates.
-      if (!sameBlock && remainingPower > 0 && !prevAir)
+      if (!sameBlock && remainingPower > 0 && !prevAir) {
+        ++explosionStats.candidates;
         toBlow.push_back({blockX, blockY, blockZ});
+      }
       xp += stepX;
       yp += stepY;
       zp += stepZ;
@@ -1658,6 +1722,7 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
   // paying a tree node per ray step.
   std::sort(toBlow.begin(), toBlow.end());
   toBlow.erase(std::unique(toBlow.begin(), toBlow.end()), toBlow.end());
+  explosionStats.destroyed += toBlow.size();
   std::vector<ExplosionStack> stacks;
   for (const auto pos : toBlow) {
     const auto state = getBlock(pos);
