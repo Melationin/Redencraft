@@ -594,7 +594,7 @@ int main(int argc, char **argv) {
     assert(found == 1);
     // A failed network mapping disconnects that connection without skipping
     // World::tick's remaining events/entity/block-entity stages.
-    world.setBlock({6, 65, 11}, defaultState("glass").with("invalid", "true"),
+    world.setBlock({6, 65, 11}, BlockState("minecraft:unmapped_test_state"),
                    2);
     bool completed = false;
     world.blockEntityTicker = [&](World &) { completed = true; };

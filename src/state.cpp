@@ -544,23 +544,28 @@ BlockState BlockState::with(std::string_view key,
     if (block_->stateDefinition().with(variant(), key, value, next))
       return BlockState::fromId(block_->firstState() + next);
   }
-  // Out-of-schema transition (imported blocks, unexpected values): register the
-  // resulting combination so no state exists silently outside the registry.
-  auto properties = this->properties();
-  properties[std::string(key)] = value;
-  const auto id = detail::internState(block_);
-  detail::tables().extensions.emplace(id, Extension{std::move(properties)});
-  return BlockState(block_, id);
+  // A state change is only allowed inside the block's own StateDefinition. The
+  // registry no longer invents out-of-schema states: a property or value the
+  // block does not declare is a programming error, exactly like vanilla's
+  // IllegalArgumentException from StateHolder.setValue.
+  std::string message = "unknown block property '";
+  message.append(key).append("'='").append(value).append("' for ");
+  message.append(block_->name());
+  throw std::invalid_argument(message);
 }
 
 BlockState BlockState::with(PropertyKind kind, std::uint8_t value) const {
-  if (!block_ || !isSchemaState())
-    return *this; // extension states carry no packed layout
+  if (!block_)
+    return *this;
   std::uint32_t nextVariant = 0;
   std::uint32_t nextPacked = 0;
-  if (!block_->stateDefinition().withPacked(packed_, variant(), kind, value,
-                                            nextVariant, nextPacked))
-    return *this;
+  if (!isSchemaState() ||
+      !block_->stateDefinition().withPacked(packed_, variant(), kind, value,
+                                            nextVariant, nextPacked)) {
+    std::string message = "property not valid for ";
+    message.append(block_->name());
+    throw std::invalid_argument(message);
+  }
   if (nextVariant == variant())
     return *this;
   return BlockState(block_, block_->firstState() + nextVariant, nextPacked);

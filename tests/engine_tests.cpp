@@ -56,12 +56,22 @@ void stateViewsAndTransitions() {
   assert(note.getView(keyView) == "iron_xylophone");
   assert(note.with(keyView, valueView) == note);
   assert(note.getView("missing", "fallback") == "fallback");
-  // A value outside the schema must still survive the extension path.
-  const std::string longValue = "an_imported_value_longer_than_small_string_storage";
-  const auto extended = note.with(keyView, longValue);
-  assert(extended.getView(keyView) == longValue);
-  assert(extended.with("note", "7").getView(keyView) == longValue);
-  assert(extended.with("note", "7").getView("note") == "7");
+  // Out-of-schema values are no longer registered: a state change outside the
+  // block's own StateDefinition is a hard error, like vanilla's setValue.
+  bool threw = false;
+  try {
+    (void)note.with(keyView, "an_imported_value_longer_than_small_string_storage");
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  assert(threw);
+  threw = false;
+  try {
+    (void)note.with("outside_schema", "true");
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  assert(threw);
   for (const auto &registration : blockRegistry()) {
     const auto &block = blockByName(registration.name);
     for (const auto state : block.states())
@@ -198,11 +208,11 @@ void inlineSectionStorage() {
   {
     World w;
     w.loadChunk(0, 0);
-    const auto base = Blocks::SMOOTH_STONE.defaultState();
-    std::vector<BlockState> states;
-    states.reserve(300);
-    for (int i = 0; i < 300; ++i)
-      states.push_back(base.with("variant", std::to_string(i)));
+    // 800 registered note block states: 25 notes x 16 instruments x 2 powered.
+    const std::vector<BlockState> all =
+        findBlockByName("minecraft:note_block")->states();
+    assert(all.size() == 800);
+    const std::vector<BlockState> states(all.begin(), all.begin() + 300);
     for (int n = 0; n < 300; ++n) {
       const int x = n & 15, z = (n >> 4) & 15, y = 64 + n / 256;
       w.rawSetBlock({x, y, z}, states[n]);
@@ -263,15 +273,34 @@ void enumPropertyAccessors() {
     }
   }
   assert(transitions > 1000); // the registry really was enumerated
-  // A property the block does not declare leaves the state untouched.
+  // A property the block does not declare is rejected, not silently applied.
   const BlockState air = airState();
-  assert(air.with(PropertyKind::Facing, 0) == air);
   assert(facingOf(air) == Facing::North);
-  // Values outside the block's own list are rejected, not silently applied.
+  bool threw = false;
+  try {
+    (void)air.with(PropertyKind::Facing, 0);
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  assert(threw);
+  threw = false;
+  try {
+    (void)air.with("facing", "north");
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  assert(threw);
+  // Values outside the block's own list are rejected too (a gate has four
+  // facings, not six).
   const BlockState gate = defaultState("oak_fence_gate");
   assert(facingOf(gate) == Facing::North);
-  assert(gate.with(PropertyKind::Facing, static_cast<std::uint8_t>(Facing::Down)) ==
-         gate);
+  threw = false;
+  try {
+    (void)gate.with(PropertyKind::Facing, static_cast<std::uint8_t>(Facing::Down));
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  assert(threw);
   assert(gate.with(PropertyKind::Facing, static_cast<std::uint8_t>(Facing::East)) !=
          gate);
   // Enum accessors agree with the string accessors on a real state.

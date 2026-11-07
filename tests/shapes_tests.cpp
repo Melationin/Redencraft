@@ -11,7 +11,7 @@ int main() {
     World w;
     const auto &stableShape = collisionShape(defaultState("smooth_stone"));
     const auto *stableAddress = &stableShape;
-    const auto extendedState = defaultState("smooth_stone").with("cache_test", "1");
+    const auto extendedState = defaultState("bedrock");
     collisionShape(extendedState);
     require(&collisionShape(defaultState("smooth_stone")) == stableAddress &&
                 stableShape.size() == 1 && stableShape[0].x1 == 16,
