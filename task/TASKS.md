@@ -81,6 +81,8 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 ### 提交
 
-（待填）
+- 主提交：`6e7ab6d` — Adopt full-vanilla technical target and coder/reviewer task workflow
+  （11 个文件，+652 / -18；含 `AGENTS.md`、`PLAN.md`、`task/TASKS.md`、`docs/fluid-testing.md` 与 7 个文档的定位表述）
+- 状态记录提交：见本行记录之后的 bookkeeping 提交（只改本文件的「提交」段与末尾状态）。
 
-任务进行中
+任务完成
