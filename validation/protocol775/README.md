@@ -36,6 +36,7 @@ Remove-Item Env:REDSTONE_PLAY_FIXTURE
 | `block_entity_types.tsv` | block entity type registry ID、identifier |
 | `biomes.tsv` | biome registry ID、identifier |
 | `registry_ids.tsv` | registry identifier、entry ID、entry identifier；也含不向客户端发送的世界生成注册表，仅供索引 |
+| `explosion_effects.tsv` | 原版爆炸粒子和声音的名称、注册 ID |
 | `packet_ids.tsv` | phase、flow、packet type identifier、packet ID；phase 为 handshake/status/login/configuration/play，flow 为 clientbound/serverbound |
 | `entity_data_serializers.tsv` | serializer ID、Java 静态常量名；从真实 serializer 注册表取得，不能从字段声明顺序猜测 |
 | `empty_section.bin` | 真实 `LevelChunkSection.write` 的空 section；8 字节 `00 00 00 00 00 00 00 28`，最后一个 VarInt 为 plains biome ID 40 |

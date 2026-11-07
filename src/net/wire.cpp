@@ -1,9 +1,12 @@
 #include "redstone/net/wire.hpp"
+#include "redstone/command.hpp"
 #include "redstone/piston.hpp"
 #include <algorithm>
 #include <bit>
+#include <deque>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <sstream>
 
 namespace redstone::net {
@@ -135,6 +138,65 @@ Bytes frame(int id, std::span<const std::uint8_t> payload) {
   w.varInt(static_cast<int>(b.data.size()));
   w.raw(b.data);
   return std::move(w.data);
+}
+Bytes encodeCommandTree(const redstone::command::Node &root) {
+  // ClientboundCommandsPacket enumerates nodes breadth first and then writes the
+  // root index; children refer to the ids assigned in that same order.
+  std::vector<const redstone::command::Node *> order;
+  std::map<const redstone::command::Node *, int> ids;
+  std::deque<const redstone::command::Node *> queue;
+  queue.push_back(&root);
+  while (!queue.empty()) {
+    const redstone::command::Node *node = queue.front();
+    queue.pop_front();
+    if (ids.contains(node))
+      continue;
+    ids[node] = static_cast<int>(order.size());
+    order.push_back(node);
+    for (const auto &child : node->children)
+      queue.push_back(child.get());
+  }
+  constexpr std::uint8_t kFlagExecutable = 4;
+  constexpr std::uint8_t kFlagRestricted = 32;
+  Writer out;
+  out.varInt(static_cast<std::int32_t>(order.size()));
+  for (const redstone::command::Node *node : order) {
+    std::uint8_t flags = 0;
+    switch (node->kind) {
+    case redstone::command::Node::Kind::Root:
+      break;
+    case redstone::command::Node::Kind::Literal:
+      flags = 1;
+      break;
+    case redstone::command::Node::Kind::Argument:
+      flags = 2;
+      break;
+    }
+    if (node->executable())
+      flags |= kFlagExecutable;
+    if (node->restricted())
+      flags |= kFlagRestricted;
+    out.u8(flags);
+    out.varInt(static_cast<std::int32_t>(node->children.size()));
+    for (const auto &child : node->children)
+      out.varInt(ids.at(child.get()));
+    if (node->kind == redstone::command::Node::Kind::Literal) {
+      out.string(node->name);
+    } else if (node->kind == redstone::command::Node::Kind::Argument) {
+      out.string(node->name);
+      if (node->argumentKind == redstone::command::Node::ArgumentKind::Float) {
+        out.varInt(1); // brigadier:float
+        out.u8(3);     // ArgumentUtils.createNumberFlags(true, true)
+        out.f32(static_cast<float>(node->minimum));
+        out.f32(static_cast<float>(node->maximum));
+      } else {
+        out.varInt(43); // minecraft:time
+        out.i32(static_cast<std::int32_t>(node->minimum));
+      }
+    }
+  }
+  out.varInt(0); // root index
+  return out.data;
 }
 std::optional<Bytes> popFrame(Bytes &input) {
   std::uint32_t n = 0;

@@ -6,6 +6,9 @@
 #include <stdexcept>
 #include <unordered_map>
 
+namespace redstone::command {
+struct Node;
+}
 namespace redstone::net {
 using Bytes = std::vector<std::uint8_t>;
 struct ProtocolError : std::runtime_error {
@@ -84,6 +87,10 @@ private:
 // must use prepareChunkSnapshot on the world thread and the frozen overload.
 Bytes encodeChunk(const ChunkSnapshot &, int chunkX, int chunkZ,
                   const Registry &);
+// ClientboundCommandsPacket body: node entries in breadth-first order followed by
+// the root index. Only the literal and the two argument types /tick needs are
+// supported (brigadier:float, minecraft:time).
+Bytes encodeCommandTree(const redstone::command::Node &root);
 Bytes encodeMovingPistonNbt(const PistonSnapshot &);
 // Frozen on the world thread. Sections contain protocol IDs, and block entity
 // NBT is owned bytes, so encoding never touches the mutable state registry.

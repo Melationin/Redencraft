@@ -1,4 +1,5 @@
 #pragma once
+#include "redstone/command.hpp"
 #include "redstone/entity.hpp"
 #include "redstone/net/wire.hpp"
 #include <array>
@@ -13,6 +14,7 @@ struct ProtocolData {
   Registry registry;
   std::vector<Bytes> configuration;
   std::map<std::string, int> packetIds, blockIds;
+  std::map<std::string, int> explosionEffectIds;
   int dimensionId = 0;
   int packet(std::string_view phase, std::string_view flow,
              std::string_view name) const;
@@ -43,7 +45,17 @@ public:
   void blockUpdate(Pos, const BlockState &);
   void flushBlockUpdates();
   void blockEvent(const BlockEvent &);
+  void explosion(Vec3 center, float radius, int blockCount);
   void fallingBlockLanded(int entityId, Pos, const BlockState &);
+  // Command tree and tick state. Both owners live in the server loop and outlive
+  // every session.
+  void attachCommands(const command::Dispatcher *, const command::Context *);
+  void sendCommands();
+  // ClientboundTickingStatePacket / ClientboundTickingStepPacket.
+  void sendTickingState(const TickRateManager &);
+  void sendTickingStep(const TickRateManager &);
+  // One command feedback line (ClientboundSystemChatPacket).
+  void sendCommandMessage(const command::Message &);
   std::vector<Bytes> takeOutput();
   // Drains unframed work items for the network writer thread.
   std::vector<OutPacket> takeOutputItems();
@@ -60,7 +72,10 @@ private:
   struct TrackedEntity {
     Vec3 base;
     Vec3 lastMovement;
-    std::uint8_t yRot = 0, xRot = 0, headRot = 0;
+    std::uint64_t lastMotionRevision = 0;
+    std::uint8_t yRot = 0, xRot = 0;
+    int tntFuse = PrimedTnt::defaultFuse;
+    BlockState::Id tntBlockState = 0;
     int tickCount = 0;
     int teleportDelay = 0;
     std::uint64_t lastSeenGeneration = 0;
@@ -85,6 +100,7 @@ private:
   void syncEntities();
   void sendEntitySpawn(const Entity &, TrackedEntity &);
   void sendEntityChanges(const Entity &, TrackedEntity &);
+  void sendTntData(const PrimedTnt &, TrackedEntity &);
   void refreshChunkView();
   void sendChunkBatch();
   bool hasChunk(Pos) const;
@@ -93,9 +109,13 @@ private:
   void useItemOn(Reader &);
   void playerAction(Reader &);
   void creativeSlot(Reader &);
+  void runCommand(std::string_view line);
+  void sendSuggestions(int requestId, std::string_view line);
   World &world_;
   const ProtocolData &data_;
   ServerOptions options_;
+  const command::Dispatcher *commands_ = nullptr;
+  const command::Context *commandContext_ = nullptr;
   Phase phase_ = Phase::Handshake;
   bool awaitingKnownPacks_ = false, finishSent_ = false,
        teleportPending_ = true;
@@ -110,9 +130,12 @@ private:
   std::array<ItemStack, 41> inventory_{};
   int selectedSlot_ = 0;
   std::map<int, TrackedEntity> trackedEntities_;
-  // Packed (SectionPos << 12 | section-relative position), deduplicated and
-  // grouped at broadcast time like ChunkHolder.changedBlocksPerSection.
-  std::vector<std::uint64_t> changedBlocks_;
+  struct ChangedBlock {
+    std::uint64_t section;
+    std::uint32_t order;
+    std::uint16_t local;
+  };
+  std::vector<ChangedBlock> changedBlocks_;
   std::set<std::pair<int, int>> availableChunks_, sentChunks_;
   std::vector<std::pair<int, int>> pendingChunks_;
   std::optional<std::pair<int, int>> chunkCenter_;

@@ -1,5 +1,5 @@
 #pragma once
-#include "redstone/engine.hpp"
+#include "redstone/entity.hpp"
 #include <algorithm>
 #include <array>
 #include <string>
@@ -10,22 +10,10 @@ namespace redstone::client {
 // Item represented by a block; an empty result means there is no selectable
 // item.
 inline std::string itemForBlock(const BlockState &state) {
-  const auto &name = state.name();
-  if (name == "minecraft:air" || name == "minecraft:cave_air" ||
-      name == "minecraft:void_air" || name == "minecraft:moving_piston" ||
-      name == "minecraft:water" || name == "minecraft:lava")
-    return {};
-  if (name == "minecraft:piston_head")
+  if (state.is(Blocks::PISTON_HEAD))
     return state.get("type") == "sticky" ? "minecraft:sticky_piston"
                                          : "minecraft:piston";
-  if (isDeadCoralWallFan(state)) {
-    auto item = name;
-    auto pos = item.rfind("_wall_fan");
-    if (pos != std::string::npos)
-      item.replace(pos, 9, "_fan");
-    return item;
-  }
-  return name;
+  return blockItem(state);
 }
 
 inline std::vector<std::string> creativeCatalog() {

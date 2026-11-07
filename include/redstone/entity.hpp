@@ -46,6 +46,8 @@ public:
   // EntitySectionStorage: SectionPos.asLong of the section this entity is
   // bucketed in (maintained by World, like the vanilla entity section callback).
   std::uint64_t entitySection = 0;
+  // Each tracking session observes impulses independently.
+  std::uint64_t motionRevision = 0;
   Vec3 position;
   Vec3 oldPosition;
   Vec3 deltaMovement;
@@ -125,7 +127,6 @@ public:
   int pickupDelay = 0;
   int health = 5;
   float bobOffs = 0;
-  bool needsSync = false;
 
 private:
   void setFluidMovement(double multiplier);
@@ -141,7 +142,8 @@ public:
   bool fireImmune() const override { return true; }
   bool isPickable() const override { return !isRemoved(); }
 
-  int fuse = 80;
+  static constexpr int defaultFuse = 80;
+  int fuse = defaultFuse;
   float explosionPower = 4.0f;
   BlockState blockState = defaultState("tnt");
   bool usedPortal = false;

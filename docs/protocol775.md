@@ -30,15 +30,15 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 - 区块采用 26.1 的 section 双计数（non-empty、fluid）、palette 固定 long 存储、原版状态标志计算的高度图及移动活塞 NBT（ByteTag facing、progressO）。块/物品/实体等 ID 使用完整原版导出表，而非 C++ 子集的注册顺序。
 - 创造放置与破坏经过距离、范围、已加载区块、物品、支撑及当前玩家/简单实体碰撞检查；处理珊瑚地面/挂墙候选、活塞和侦测器方向、铁轨方向、草/墙/音符盒初始属性、音符盒右键调音、创造破坏活塞头关联基座、矿车坡道放置。侦测器放置不得调用会调度计划刻的通用 updateShape 查询。
 - 输入预测 sequence 在修改世界之前校验，修正包和 block_changed_ack 回传；负序列不会先编辑再断开。创造丢弃限制堆叠/频率，不向未加载区块生成暂停实体。
-- 物品、TNT、下落方块、矿车按原版 `ServerEntity` 跟踪：spawn 携带一次非默认元数据；之后位置是相对 `VecDeltaCodec` 基准的 1/4096 位移（`move_entity_pos` / `move_entity_pos_rot`），旋转是 1/256 圈（`move_entity_rot`），位移超出 short、着地状态变化或 400 刻未更新时改用 `entity_position_sync`，位置每 60 刻、旋转每 1 刻至少刷新一次。更新间隔取 `EntityType` 的 20（物品/下落方块）、10（TNT）、3（矿车）；矿车轨迹插值与受击速度包仍未实现。
+- 物品、TNT、下落方块、矿车生成时用包组发送实体和非默认元数据。跟踪采用原版 `VecDeltaCodec` 的 1/4096 位移及 `Mth.packDegrees` 的 1/256 圈旋转。位移超出 short、着地变化或超过重同步阈值时发送 `entity_position_sync`。同一轮更新先发变化的速度，再发位置或旋转，最后发变化的 TNT 元数据。TNT 引信每刻变化，因此也会每刻进入跟踪更新。实体受推力时可以提前进入更新。矿车轨迹插值、物品后续元数据更新与原版受击专用速度同步仍待实现。
 
 ## 广播顺序
 
-`World::setBlock` 在原版 sendBlockUpdated 所在位置记录变化，保留 flags 判断；网络层只记录打包的脏位置（`SectionPos << 12 | 局部坐标`）。`World::tick` 的计划刻完成后、方块事件前新增观察性广播入口，对应 `ServerChunkCache.tickChunks → broadcastChangedChunks`。广播时读取当前位置，按 `ChunkHolder.broadcastChanges` 的规则发包：section 内只有一个变化时发 `block_update`，多个变化合并成一条 `section_blocks_update`（`SectionPos` long + VarInt 数量 + 每条 `(stateId << 12) | 局部坐标` 的 VarLong），同一位置的多次写入只保留一次。
+`World::setBlock` 按 flags 记录普通方块变化，`World::tick` 在计划刻之后、方块事件之前读取最新状态并合并。每个区块内从低到高处理 section，同一 section 内按原版 `ShortOpenHashSet` 的迭代顺序发送，重复位置只发一次。单个位置使用 `block_update`，多个位置使用包含完整 64 位 `SectionPos` 的 `section_blocks_update`。跨区块采用确定的坐标顺序，原版的顺序取决于 JVM 中 `ChunkHolder` 的对象身份哈希。
 
-成功方块事件在 `pistonBlockEvent` 等回调之后立即发包；事件、实体、方块实体阶段产生的普通块变化留至下一刻区块广播。特别是活塞源位置清空不能先于活塞事件发给客户端，否则客户端本地结构解析会丢失待移动方块。输入预测修正包独立立即回传。
+成功方块事件在 `pistonBlockEvent` 等回调之后立即发给距离小于 64 格的客户端。事件、实体和方块实体阶段产生的普通方块变化留至下一刻区块广播。客户端先根据事件解析活塞推动结构，下一次区块广播再接收活塞源位置的变化。输入预测修正包独立立即回传。
 
-实体跟踪广播移到区块变化广播之后、方块事件和本刻实体运动之前，对照 `ServerChunkCache.tick → tickChunks/broadcastChangedChunks → ChunkMap.tick → ServerEntity.sendChanges`。实体注册后立即提交 spawn；下落方块落地修正先于移除。实体刻清理与方块实体刻结束时提交移除，避免延后一刻；TODO：原版 `Entity.setRemoved/discard → levelCallback.onRemove` 在调用位置立即通知，当前尚未复刻同一阶段内每个 discard 的精细交错顺序。
+实体跟踪广播位于区块变化广播之后、方块事件和本刻实体运动之前，对应 `ServerChunkCache.tick` 中的 `ChunkMap.tick`。实体区段查询使用包含式上界，以覆盖区块 X 为 -1 时的最大打包键。实体注册后立即发包，下落方块落地修正先于移除。引信耗尽时先发旧 TNT 的移除，再发连锁点燃的 TNT，最后向距离小于 64 格的客户端发送爆炸效果。爆炸粒子和声音 ID 来自 26.1 导出。协议玩家的爆炸击退及其他实体在每次 `discard` 调用点立即通知仍待实现，普通清理在当前实体阶段或方块实体阶段提交移除。
 
 世界状态和普通包 payload 仍在主线程采集/构造；独立的 `NetworkWriter` 负责 VarInt 成帧、区块高度图/palette/位打包、发送缓冲合并、写侧 `select` 和 `send`。区块先复制子区块 palette + 索引，再在主线程把本地状态 ID 映射成协议 ID、冻结移动活塞 NBT；后台编码只读该快照与不可变协议状态标志，不访问 `World` 或可能扩容的全局状态注册表。实体同步只扫描玩家视野内的 entity section；块变化缓冲复用容量，热路径 payload 移交时不再复制。
 
@@ -52,4 +52,22 @@ MSVC Release + jemalloc 的 CTest **14/14 通过**。除既有行为用例外，
 
 本轮将 wire/protocol 测试产生的记录合并，使用同一官方 codec 验证 **294 包通过**；导出写入构建目录，未覆盖固定协议资产。没有启动真实 Minecraft 客户端，也没有运行本轮真实 26.1 服务端逐 tick 差分，不能声称原版等价。
 
-仍有明确 TODO：真实 ServerPlayer 服务端物理与推挤、其他玩家模型/放置碰撞、动态区块跟踪、玩家拾取/容器与生存、任意物品组件/工具与完整 BlockPlaceContext、命令/聊天/配方/世界时钟、原版光照引擎、其他生物群系、音效粒子和完整元数据优化。当前 sky light 统一全亮、biome 统一 plains，仅用于查看；水/流体刻继续排除。网络支持是创造编辑入口，不代表完整原版多人服务端等价。
+仍有明确 TODO：真实 ServerPlayer 服务端物理与推挤、其他玩家模型/放置碰撞、动态区块跟踪、玩家拾取/容器与生存、任意物品组件/工具与完整 BlockPlaceContext、聊天与配方、原版光照引擎、其他生物群系、音效粒子和完整元数据优化。当前 sky light 统一全亮、biome 统一 plains，仅用于查看；水/流体刻继续排除。网络支持是创造编辑入口，不代表完整原版多人服务端等价。
+
+## 命令系统与 `/tick`
+
+命令骨架是 `CommandDispatcher` / `CommandSourceStack` / `CommandNode` 的最小可用子集，`/tick` 按 `TickCommand.java` 逐条复刻：
+
+- `src/command.cpp`：字面量节点、参数节点（`brigadier:float` 与 `minecraft:time` 两种）、节点要求（`CommandNode.getRequirement`）和执行函数。解析失败返回 -1，与"未知或不完整命令"同一条路径。
+- `Source::success/failure` 产生 `{translate, with}` 形式的反馈，客户端用自身语言文件渲染；`broadcast` 对应 `sendSuccess(..., true)`。
+- `include/redstone/tick_rate.hpp`：`TickRateManager` + `ServerTickRateManager` 语义——`tick()` 决定本刻是否推进游戏元素，冻结时按 `frozenTicksToRun` 放行；`/tick sprint` 立即推进并统计；`finishTickSprint` 的报告以值返回，由服务端打印并下发。
+- 子命令：`query`、`rate <1..10000>`、`step [<time>|stop]`、`sprint <time>|stop`、`freeze`、`unfreeze`；`time` 接受 `t`/`s`/`d` 后缀，1s = 20 tick、1d = 24000 tick，与 `TimeArgument` 一致。
+- 客户端协议：进入 play 后发送 `clientbound/commands`（广度优先节点表，参数类型 id 1 = `brigadier:float`、43 = `minecraft:time`，管理员节点带 restricted 标记），随后发送 `ticking_state` / `ticking_step`，状态变化时重新广播。收到 `serverbound/chat_command` 后解析执行，反馈走 `system_chat`。
+- 补全：`serverbound/command_suggestion` → `clientbound/command_suggestions`。按 Brigadier 的方式沿已完成的词走树，未完成的词只做前缀过滤：字面量子节点给出自身名字，参数节点给出 `ArgumentCommandNode.getCustomSuggestions` 的示例值（`rate` → `20`，`step`/`sprint` 的 `time` → `1t`/`1s`、`60s`/`1d`/`3d`）。参数节点本身也做前缀匹配，所以输入 `2` 会建议 `20`。返回的 `start`/`length` 是替换区间。
+- 服务端循环按 `MinecraftServer.run/tickServer` 组织：冻结时跳过 `World::tick` 但仍处理连接；`nextTick` 按 `nanosecondsPerTick` 推进；`tick query` 使用 100 项环形样本与 `min(100, tickCount)` 平均值。
+
+补全的坐标约定：客户端发送的字符串保留前导 `/`（`ServerGamePacketListenerImpl` 用 `StringReader.skip` 跳过它而不裁剪字符串），所以服务端解析时去斜杠、返回前再把 `start` 加 1，让区间落在客户端实际持有的文本上。手工探测结果：`/tick f` → start 6/len 1/`freeze`，`tick f` → start 5，`/` → `tick`，`/tick ` → 六个子命令，`/tick rate ` → `20`，`/bogus` → 空列表。
+
+验证：`command_tests` 覆盖解析、权限（level 3 = admins）、`TimeArgument` 换算、冻结/步进/冲刺状态机、命令树编码与补全（前缀过滤、字面量/参数示例、空结果、权限）；`protocol_socket` 在真实 TCP 连接上断言加入时收到 `commands` 包、`/tick freeze` 触发 `ticking_state(frozen=true)`、`/tick unfreeze` 恢复，并断言 `/tick f` 的补全请求返回 `start=6, length=1, ["freeze"]`。手工运行确认冻结期间 `gameTime` 停在原值而循环继续、`/tick sprint 1s` 报告 20 tick 已完成。
+
+TODO：没有 op 列表，本地玩家固定为 level 4；`broadcast=true` 的反馈只回显给发起者（原版广播给有权玩家）；补全只给固定示例，不按注册表/玩家名动态生成，也没有 tooltip；`chat_command_signed` 未处理；其余命令尚未移植。

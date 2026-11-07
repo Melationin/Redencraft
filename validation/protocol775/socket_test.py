@@ -67,9 +67,11 @@ def position(x, y, z):
     return struct.pack(">Q", ((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 4095))
 
 
-def until(s, target):
+def until(s, target, seen=None):
     for _ in range(300):
         ident, payload = packet(s)
+        if seen is not None:
+            seen.add(ident)
         if ident == 32:
             raise AssertionError("server disconnected: " + repr(payload))
         if ident == 44:
@@ -123,7 +125,61 @@ def run(server):
             assert count == 30
             send(s, 3)
             assert packet(s)[0] == 49
-            until(s, 72)
+            seen = set()
+            until(s, 72, seen)
+            # The join sequence carries the command tree (/tick) and the initial
+            # ticking state.
+            assert 16 in seen, "commands packet missing"
+
+
+            def read_varint(payload, index):
+                value = 0
+                for shift in range(0, 35, 7):
+                    byte = payload[index]
+                    index += 1
+                    value |= (byte & 127) << shift
+                    if not byte & 128:
+                        return value, index
+                raise AssertionError("bad varint")
+
+
+            # Completion for "/tick f" must report the replacement range and the
+            # matching subcommand. The client sends the slash and expects the
+            # offsets back in the same coordinates.
+            send(s, 15, vint(7) + string("/tick f"))
+            while True:
+                ident, payload = packet(s)
+                assert ident != 32, "disconnected after suggestion request"
+                if ident == 15:
+                    break
+            request_id, index = read_varint(payload, 0)
+            assert request_id == 7, payload
+            start, index = read_varint(payload, index)
+            length, index = read_varint(payload, index)
+            count, index = read_varint(payload, index)
+            assert (start, length, count) == (6, 1, 1), (start, length, count)
+            size, index = read_varint(payload, index)
+            text = payload[index:index + size].decode()
+            assert text == "freeze", text
+
+            send(s, 7, string("tick freeze"))
+            while True:
+                ident, payload = packet(s)
+                assert ident != 32, "disconnected after tick command"
+                if ident == 127:
+                    tick_rate, frozen = struct.unpack(">f?", payload)
+                    assert frozen is True, payload
+                    assert abs(tick_rate - 20.0) < 1e-4, payload
+                    break
+            # The world is frozen: no further tick-driven packets are required,
+            # so unfreeze again and check the state round-trips.
+            send(s, 7, string("tick unfreeze"))
+            while True:
+                ident, payload = packet(s)
+                assert ident != 32, "disconnected after tick unfreeze"
+                if ident == 127:
+                    assert struct.unpack(">f?", payload)[1] is False, payload
+                    break
             send(s, 0, vint(1))
             # Place selected smooth stone, then break. Wait for prediction ACK
             # and require the corresponding authoritative block update.

@@ -220,6 +220,141 @@ void fallingLandingPacketOrder(const ProtocolData &data) {
   assert(block != ids.end() && removed != ids.end() && block < removed);
   assert(world.getBlock({8, 65, 8}).name() == "minecraft:sand");
 }
+void tntPacketOrder(const ProtocolData &data) {
+  const auto packet = [&](std::string_view name) {
+    return data.packet("play", "clientbound", name);
+  };
+  World world;
+  world.loadChunk(-1, 0);
+  world.spawnPrimedTnt({-0.5, 70, 8.5}, PrimedTnt::defaultFuse);
+  auto &tnt = static_cast<PrimedTnt &>(*world.entities.front());
+  const int entityId = tnt.id;
+  assert(world.entitiesIn(tnt.boundingBox()) == std::vector<Entity *>{&tnt});
+  ServerOptions options;
+  options.spawn = {-0.5, 70, 8.5};
+  options.chunks = {{-1, 0}};
+  Session session(world, data, options);
+  join(session, data);
+  Reader bundleStart(allPlay[allPlay.size() - 3]);
+  Reader spawn(allPlay[allPlay.size() - 2]);
+  Reader bundleEnd(allPlay.back());
+  assert(bundleStart.varInt() == packet("bundle_delimiter") && bundleStart.empty());
+  assert(spawn.varInt() == packet("add_entity") && spawn.varInt() == entityId);
+  assert(bundleEnd.varInt() == packet("bundle_delimiter") && bundleEnd.empty());
+  session.broadcastEntities(); // First movement update, interval index zero.
+  drain(session, true);
+
+  auto begin = allPlay.size();
+  tnt.position.x -= 64.5 / 4096;
+  tnt.yaw = 0.9f; // Mth.packDegrees floors this to zero.
+  tnt.setDeltaMovement(0, 0.25, 0);
+  --tnt.fuse;
+  session.broadcastEntities();
+  const auto ids = drain(session, true);
+  assert((ids == std::vector{packet("set_entity_motion"), packet("move_entity_pos"),
+                             packet("set_entity_data")}));
+  Reader motion(allPlay[begin]);
+  assert(motion.varInt() == ids[0] && motion.varInt() == entityId);
+  const auto low = motion.u8();
+  const auto mid = motion.u8();
+  const std::uint64_t bits = low | (std::uint64_t{mid} << 8) |
+      (std::uint64_t{static_cast<std::uint32_t>(motion.i32())} << 16);
+  assert((bits & 7) == 1 && ((bits >> 18) & 0x7fff) == 20479 && motion.empty());
+  Reader pos(allPlay[begin + 1]);
+  assert(pos.varInt() == ids[1] && pos.varInt() == entityId);
+  assert(pos.i16() == -64 && pos.i16() == 0 && pos.i16() == 0);
+  assert(!pos.bool_() && pos.empty());
+  Reader values(allPlay[begin + 2]);
+  assert(values.varInt() == ids[2] && values.varInt() == entityId);
+  assert(values.u8() == 8 && values.varInt() == 1 && values.varInt() == 79);
+  assert(values.u8() == 255 && values.empty());
+
+  const Pos chained{-2, 70, 8};
+  world.rawSetBlock(chained, defaultState("tnt"));
+  world.entityRemovedObserver = [&](int id) { session.entityRemoved(id); };
+  world.entityAddedObserver = [&](const Entity &e) { session.entityAdded(e); };
+  world.explosionObserver = [&](Vec3 center, float radius, int count) {
+    session.explosion(center, radius, count);
+  };
+  world.blockUpdateObserver = [&](Pos p, const BlockState &state, int) {
+    session.blockUpdate(p, state);
+  };
+  tnt.fuse = 1;
+  begin = allPlay.size();
+  world.tick();
+  const auto blast = drain(session, true);
+  assert((blast == std::vector{packet("remove_entities"), packet("bundle_delimiter"),
+                               packet("add_entity"), packet("set_entity_data"),
+                               packet("bundle_delimiter"), packet("explode")}));
+  Reader removed(allPlay[begin]);
+  assert(removed.varInt() == blast[0] && removed.varInt() == 1);
+  assert(removed.varInt() == entityId && removed.empty());
+  Reader added(allPlay[begin + 2]);
+  assert(added.varInt() == blast[2]);
+  const int chainedId = added.varInt();
+  assert(chainedId != entityId);
+  Reader chainedValues(allPlay[begin + 3]);
+  assert(chainedValues.varInt() == blast[3] && chainedValues.varInt() == chainedId);
+  assert(chainedValues.u8() == 8 && chainedValues.varInt() == 1);
+  const auto fuse = chainedValues.varInt();
+  assert(fuse >= 10 && fuse < 30);
+  assert(chainedValues.u8() == 255 && chainedValues.empty());
+  Reader effect(allPlay[begin + 5]);
+  assert(effect.varInt() == blast[5]);
+  assert(effect.f64() == -0.5 - 64.5 / 4096 && effect.f64() > 70 && effect.f64() == 8.5);
+  assert(effect.f32() == 4 && effect.i32() >= 1 && !effect.bool_());
+  assert(effect.varInt() == data.explosionEffectIds.at("explosion_emitter"));
+  assert(world.getBlock(chained).isAir());
+  session.flushBlockUpdates();
+  assert(drain(session, true) == std::vector{packet("block_update")});
+}
+void sectionPacketOrder(const ProtocolData &data) {
+  World world;
+  constexpr int chunkX = 2048, chunkZ = -2048;
+  constexpr Pos origin{chunkX * 16, -16, chunkZ * 16};
+  const Pos upper{origin.x, 0, origin.z};
+  world.loadChunk(chunkX, chunkZ);
+  ServerOptions options;
+  options.spawn = {origin.x + 0.5, 66, origin.z + 0.5};
+  options.chunks = {{chunkX, chunkZ}};
+  Session session(world, data, options);
+  join(session, data);
+  const auto glass = defaultState("glass");
+  world.rawSetBlock(upper, glass);
+  session.blockUpdate(upper, glass);
+  // Crosses the first rehash at 25 entries and includes the special zero key.
+  for (int n = 0; n < 26; ++n) {
+    const int local = n * 151;
+    const Pos p{origin.x + (local >> 8), origin.y + (local & 15),
+                origin.z + ((local >> 4) & 15)};
+    world.rawSetBlock(p, glass);
+    session.blockUpdate(p, glass);
+    session.blockUpdate(p, glass);
+  }
+  session.flushBlockUpdates();
+  const auto begin = allPlay.size();
+  const auto ids = drain(session, true);
+  assert((ids == std::vector{data.packet("play", "clientbound", "section_blocks_update"),
+                             data.packet("play", "clientbound", "block_update")}));
+  Reader section(allPlay[begin]);
+  assert(section.varInt() == ids[0]);
+  const auto key = (std::int64_t{chunkX} << 42) |
+                   ((chunkZ & 0x3fffffLL) << 20) | 0xfffffLL;
+  assert(section.i64() == key);
+  // Iteration recorded from the 26.1 server's fastutil ShortOpenHashSet.
+  constexpr int order[]{0, 1208, 2416, 3624, 2869, 453, 1963, 906, 2114, 1359,
+                        151, 1661, 3171, 604, 1812, 1057, 3473, 2718, 302, 3775,
+                        3322, 2567, 3020, 2265, 1510, 755};
+  assert(section.varInt() == std::size(order));
+  for (int local : order)
+    assert(section.varLong() == (std::int64_t{data.registry.stateId(glass)} << 12 | local));
+  assert(section.empty());
+  Reader block(allPlay[begin + 1]);
+  assert(block.varInt() == ids[1] && block.position() == upper);
+  assert(block.varInt() == data.registry.stateId(glass) && block.empty());
+  session.blockEvent({{origin.x, 130, origin.z}, "minecraft:note_block", 0, 0});
+  assert(drain(session).empty()); // Loaded and sent, but outside 64 blocks.
+}
 void entityBroadcastPhase(const ProtocolData &data) {
   World world;
   world.loadChunk(0, 0);
@@ -389,6 +524,8 @@ int main(int argc, char **argv) {
   viewDistanceTen(data);
   chunkViewAndTiming(data);
   fallingLandingPacketOrder(data);
+  tntPacketOrder(data);
+  sectionPacketOrder(data);
   entityBroadcastPhase(data);
   sessionOutputLimit(data);
   placementRules(data);
@@ -461,14 +598,19 @@ int main(int argc, char **argv) {
   ids = drain(session, true);
   auto event = std::find(ids.begin(), ids.end(), 7);
   assert(event != ids.end());
+  const int sectionUpdate = data.packet("play", "clientbound", "section_blocks_update");
+  const auto isBlockUpdate = [&](int id) { return id == 8 || id == sectionUpdate; };
   // Event must reach the client while its original push structure exists.
   // Event-induced source removals are dirty until the next chunk broadcast.
-  assert(std::find(event + 1, ids.end(), 8) == ids.end());
+  assert(std::any_of(ids.begin(), event, isBlockUpdate));
+  assert(std::none_of(event + 1, ids.end(), isBlockUpdate));
   assert(!world.pistonEntities.empty());
   for (int i = 0; i < 4; ++i) {
     world.tick();
     session.tick();
-    drain(session, true);
+    ids = drain(session, true);
+    if (i == 0)
+      assert(std::any_of(ids.begin(), ids.end(), isBlockUpdate));
   }
   world.spawnItem({9, 67, 9}, "white_carpet");
   world.spawnPrimedTnt({10.5, 67, 10.5}, 80);

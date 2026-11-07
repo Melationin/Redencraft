@@ -323,11 +323,10 @@ void tntExplosion() {
   require(!world.log.empty(), "explosion is observable");
 }
 void denseExplosion() {
-  // Low-resistance solid in every direction: the ray shell then covers ~1,400
-  // distinct cells, far more than the 512 slots of the explosion air filter.
-  // Without a tag, a slot colliding with an air cell would answer "air" for
-  // stone and the rays would run straight through it, so the destroyed count
-  // guards the filter against that.
+  // Low-resistance solid in every direction, so the ray shell covers ~1,400
+  // distinct cells instead of the handful an air burst touches. Every other
+  // explosion test detonates in open air; this one also pins down how far a
+  // power-4 blast reaches into a solid mass.
   World world;
   for (int x = -1; x <= 1; ++x)
     for (int z = -1; z <= 1; ++z)
@@ -345,8 +344,8 @@ void denseExplosion() {
         removed += isAirState(world.getBlock({x, y, z})) ? 1 : 0;
   require(isAirState(world.getBlock({0, 64, 0})),
           "an explosion inside sand destroys the cell it starts in");
-  // 180 cells on this seed; the band tolerates float drift, not a filter that
-  // misreads stone as air (which would leave the count in the single digits).
+  // 180 cells on this seed; the band tolerates float drift without hiding a
+  // blast that stops short of its cell radius or leaks past it.
   require(removed > 150 && removed < 220,
           "an explosion inside sand destroys the expected ball of blocks");
 }

@@ -265,6 +265,7 @@ public:
   std::function<void()> entityTrackingBroadcastObserver;
   std::function<void(const Entity &)> entityAddedObserver;
   std::function<void(int)> entityRemovedObserver;
+  std::function<void(Vec3, float, int)> explosionObserver;
 
   void setPistonEntity(Pos pos,
                        std::shared_ptr<PistonMovingBlockEntity> entity);
@@ -334,11 +335,9 @@ public:
   // costs, and how much of the list the final sort/unique has to discard.
   struct ExplosionStats {
     std::uint64_t explosions = 0;
-    // Positions whose block state had to be read, i.e. that missed the air
-    // filter.
+    // Positions that missed the direct-mapped block cache, i.e. the ones that
+    // actually read a block state ("probe").
     std::uint64_t probes = 0;
-    // Positions answered as air by the filter without touching the world.
-    std::uint64_t airHits = 0;
     // Entries appended to the destruction list before deduplication: every step
     // that enters a new block position and still has power left.
     std::uint64_t candidates = 0;
@@ -457,6 +456,7 @@ private:
   void entitySectionAdd(Entity &entity);
   void entitySectionRemove(Entity &entity);
   void entitySectionUpdate(Entity &entity);
+  friend class PrimedTnt;
   void notifyEntityRemoved(Entity &entity);
   void broadcastEntityRemovals();
   int minY_, maxY_, maxUpdates_, updateCount_ = 0;
@@ -479,16 +479,20 @@ private:
   std::vector<BlockEvent> blockEventsToReschedule_;
   std::int64_t nextSubTickCount();
 
-  // ServerExplosion.calculateExplodedPositions: the ray shell revisits the same
-  // cells from many directions and almost all of them are air. Only that fact is
-  // memoised: a 512-slot direct-mapped filter with a one-bit value. The tag is
-  // needed for correctness - two positions share a slot for ~1 cell in 512, and
-  // answering "air" for a tagged mismatch would let a ray walk through a solid
-  // block. Tags are never cleared because the value bit is what makes a slot
-  // valid, and a slot only ever sets its bit together with its tag.
-  static constexpr std::size_t kExplosionAirSlots = 512;
-  std::array<std::uint64_t, kExplosionAirSlots> explosionAirTags_{};
-  std::array<std::uint64_t, kExplosionAirSlots / 64> explosionAirBits_{};
+  // ServerExplosion.calculateExplodedPositions memoises per-block probes: the
+  // ray shell revisits the same positions many times. The table lives across
+  // explosions and a generation stamp replaces the old per-call zero fill.
+  struct ExplosionCacheEntry {
+    std::uint64_t key = 0;
+    std::uint32_t generation = 0;
+    float resistance = 0.0f;
+    bool air = true;
+    bool fluid = false;
+    bool loaded = false;
+  };
+  static constexpr std::size_t kExplosionCacheSize = 512;
+  std::array<ExplosionCacheEntry, kExplosionCacheSize> explosionCache_{};
+  std::uint32_t explosionGeneration_ = 0;
   // Scratch list of exploded positions; capacity is kept between explosions.
   std::vector<Pos> explosionTargets_;
 };

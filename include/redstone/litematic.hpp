@@ -1,6 +1,7 @@
 #pragma once
 #include "redstone/storage.hpp"
 #include <functional>
+#include <map>
 
 namespace redstone {
 struct LitematicOptions {
@@ -8,11 +9,21 @@ struct LitematicOptions {
   int minY = -64, maxY = 320;
   // Caller can validate full state/property combinations against official IDs.
   std::function<void(const BlockState &)> validateState;
+  // Preview import for projections that use blocks this simulator does not
+  // implement. Every such state becomes smooth_stone and its block entity is
+  // dropped; LitematicImport::substitutedBlocks reports what was replaced so the
+  // substitution is never silent. Off by default: an unimplemented block is an
+  // error, not a guess.
+  bool substituteUnsupported = false;
 };
 struct LitematicImport {
   LoadedWorld world;
   std::size_t replacedAnvils{}, skippedSigns{}, skippedSignBlockEntities{};
   std::size_t regeneratedEntityUuids{}, regionCount{};
+  std::size_t skippedUnsupportedBlockEntities{};
+  std::size_t skippedUnsupportedEntities{};
+  // Source block name -> number of cells placed as smooth_stone.
+  std::map<std::string, std::size_t> substitutedBlocks;
   Pos min, maxExclusive;
   int sourceDataVersion{};
 };

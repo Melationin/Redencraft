@@ -47,6 +47,11 @@ public class ExportProtocol {
     try(var w=writer("blocks.tsv")) { for(var v:BuiltInRegistries.BLOCK) w.println(BuiltInRegistries.BLOCK.getId(v)+"\t"+BuiltInRegistries.BLOCK.getKey(v)); }
     try(var w=writer("block_entity_types.tsv")) { for(var v:BuiltInRegistries.BLOCK_ENTITY_TYPE) w.println(BuiltInRegistries.BLOCK_ENTITY_TYPE.getId(v)+"\t"+BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(v)); }
     try(var w=writer("entities.tsv")) { for(var v:BuiltInRegistries.ENTITY_TYPE) w.println(BuiltInRegistries.ENTITY_TYPE.getId(v)+"\t"+BuiltInRegistries.ENTITY_TYPE.getKey(v)); }
+    try(var w=writer("explosion_effects.tsv")) {
+      for(var name:List.of("explosion", "explosion_emitter", "poof", "smoke"))
+        w.println(name+"\t"+BuiltInRegistries.PARTICLE_TYPE.getId(BuiltInRegistries.PARTICLE_TYPE.getValue(Identifier.withDefaultNamespace(name))));
+      w.println("sound\t"+BuiltInRegistries.SOUND_EVENT.getId(net.minecraft.sounds.SoundEvents.GENERIC_EXPLODE.value()));
+    }
     try(var w=writer("entity_data_serializers.tsv")) {
       for(var f:net.minecraft.network.syncher.EntityDataSerializers.class.getFields())
         if(f.get(null) instanceof net.minecraft.network.syncher.EntityDataSerializer<?> s)

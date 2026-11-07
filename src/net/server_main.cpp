@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+#include "redstone/command.hpp"
 #include "redstone/litematic.hpp"
 #include "redstone/net/session.hpp"
 #include "redstone/net/outbox.hpp"
@@ -27,6 +28,8 @@
 #include <cstdio>
 #include <iomanip>
 #include <iostream>
+#include <locale>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <utility>
@@ -36,6 +39,108 @@ using namespace redstone::net;
 namespace {
 volatile std::sig_atomic_t stopRequested = 0;
 void stop(int) { stopRequested = 1; }
+
+// English strings for the keys /tick emits, copied from the 26.1.2 client's
+// assets/minecraft/lang/en_us.json. A connected client resolves the same keys
+// itself; this table is only for the server console, which has no language
+// files.
+const char *consoleText(const std::string &key) {
+  static const std::map<std::string, const char *> table{
+      {"commands.tick.query.percentiles",
+       "Percentiles: P50: %sms P95: %sms P99: %sms. Sample: %s"},
+      {"commands.tick.query.rate.running",
+       "Target tick rate: %s per second.\nAverage time per tick: %sms "
+       "(Target: %sms)"},
+      {"commands.tick.query.rate.sprinting",
+       "Target tick rate: %s per second (ignored, reference only).\nAverage "
+       "time per tick: %sms"},
+      {"commands.tick.rate.success", "Set the target tick rate to %s per second"},
+      {"commands.tick.sprint.report",
+       "Sprint completed with %s ticks per second, or %s ms per tick"},
+      {"commands.tick.sprint.stop.fail", "No tick sprint in progress"},
+      {"commands.tick.sprint.stop.success",
+       "Interrupted the current tick sprint"},
+      {"commands.tick.status.frozen", "The game is frozen"},
+      {"commands.tick.status.lagging",
+       "The game is running, but can't keep up with the target tick rate"},
+      {"commands.tick.status.running", "The game is running normally"},
+      {"commands.tick.status.sprinting", "The game is sprinting"},
+      {"commands.tick.step.fail",
+       "Unable to step the game - the game must be frozen first"},
+      {"commands.tick.step.stop.fail", "No tick step in progress"},
+      {"commands.tick.step.stop.success",
+       "Interrupted the current tick step"},
+      {"commands.tick.step.success", "Stepping %s tick(s)"},
+  };
+  const auto it = table.find(key);
+  return it == table.end() ? nullptr : it->second;
+}
+// Component.translatable rendering for the console: substitute the arguments for
+// "%s" in order, like the client's formatter does.
+std::string formatConsole(const command::Message &message) {
+  const char *format = consoleText(message.key);
+  if (!format)
+    return message.key + (message.args.empty() ? "" : " " + message.args.front());
+  std::string out = format;
+  for (const auto &argument : message.args) {
+    const auto at = out.find("%s");
+    if (at == std::string::npos)
+      break;
+    out.replace(at, 2, argument);
+  }
+  return out;
+}
+
+// Reads complete lines off the server stdin. The reader runs on its own thread
+// so a blocking read never stalls the tick loop; the loop drains the queue.
+class ConsoleInput {
+public:
+  ConsoleInput() : worker_([this] { run(); }) {}
+  ~ConsoleInput() {
+    done_ = true;
+    if (worker_.joinable())
+      worker_.join();
+  }
+  // Returns false when no complete line is pending.
+  bool next(std::string &line) {
+    std::lock_guard lock(mutex_);
+    if (pending_.empty())
+      return false;
+    line = std::move(pending_.front());
+    pending_.pop_front();
+    return true;
+  }
+
+private:
+  void run() {
+    std::string buffer;
+    for (int c; !done_ && (c = std::fgetc(stdin)) != EOF;) {
+      if (c != 10 && c != 13) {
+        buffer.push_back(static_cast<char>(c));
+        continue;
+      }
+      if (buffer.empty())
+        continue;
+      {
+        std::lock_guard lock(mutex_);
+        pending_.push_back(buffer);
+      }
+      buffer.clear();
+    }
+    if (!buffer.empty()) {
+      std::lock_guard lock(mutex_);
+      pending_.push_back(std::move(buffer));
+    }
+    // stdin hit EOF (a piped script or a closed console): the server keeps
+    // running instead of treating it as a stop request.
+  }
+  std::mutex mutex_;
+  std::deque<std::string> pending_;
+  std::atomic<bool> done_{false};
+  std::thread worker_;
+};
+
+
 #ifdef _WIN32
 using SocketHandle = SOCKET;
 constexpr SocketHandle invalidSocket = INVALID_SOCKET;
@@ -289,6 +394,7 @@ int runServer(int argc, char **argv) {
                           schematicPath;
     int port = 25565, maxTicks = 0, forceMargin = 2;
     bool explicitSpawn = false, explicitOffset = false;
+    bool consoleEnabled = true;
     LitematicOptions schematicOptions;
     ServerOptions options;
     for (int i = 1; i < argc; ++i) {
@@ -299,10 +405,21 @@ int runServer(int argc, char **argv) {
                "directory] [--world directory | --schematic file]\n"
                "  [--chunk x,z ...] [--ticks N] [--spawn x,y,z]\n"
                "  [--offset x,y,z] [--view-distance 3] [--force-margin 2]\n"
+               "  [--allow-unsupported] [--no-console]\n"
                "Local offline protocol 775 creative editor. Fixed loaded "
                "simulation region; no saving. Litematic: anvils become "
                "obsidian, signs are omitted. Tick time sent to chat.\n";
         return 0;
+      }
+      if (arg == "--no-console") {
+        consoleEnabled = false;
+        continue;
+      }
+      if (arg == "--allow-unsupported") {
+        // Preview only: unimplemented schematic blocks become smooth_stone and
+        // are reported on stdout as SUBSTITUTED lines.
+        schematicOptions.substituteUnsupported = true;
+        continue;
       }
       if (i + 1 >= argc)
         throw ProtocolError("argument needs a value");
@@ -415,6 +532,15 @@ int runServer(int argc, char **argv) {
                 << schematicOptions.offset.y << ',' << schematicOptions.offset.z
                 << " spawn=" << options.spawn.x << ',' << options.spawn.y << ','
                 << options.spawn.z << std::endl;
+      for (const auto &[name, count] : imported.substitutedBlocks)
+        std::cout << "SUBSTITUTED " << name << " x" << count
+                  << " -> minecraft:smooth_stone" << std::endl;
+      if (imported.skippedUnsupportedBlockEntities ||
+          imported.skippedUnsupportedEntities)
+        std::cout << "SKIPPED unsupported_block_entities="
+                  << imported.skippedUnsupportedBlockEntities
+                  << " unsupported_entities="
+                  << imported.skippedUnsupportedEntities << std::endl;
     } else if (!worldPath.empty()) {
       auto loaded =
           loadAnvilWorld(worldPath, defaultRegionDirectory(worldPath));
@@ -519,6 +645,13 @@ int runServer(int argc, char **argv) {
           writer.submit(c, c->session.takeOutputItems());
         }
     };
+    world.explosionObserver = [&](Vec3 center, float radius, int blockCount) {
+      for (auto &c : connections)
+        if (!c->dead) {
+          c->session.explosion(center, radius, blockCount);
+          writer.submit(c, c->session.takeOutputItems());
+        }
+    };
     world.fallingBlockLandObserver = [&](int entityId, Pos pos,
                                          const BlockState &state) {
       for (auto &c : connections)
@@ -532,12 +665,69 @@ int runServer(int argc, char **argv) {
 #ifndef _WIN32
     std::signal(SIGPIPE, SIG_IGN);
 #endif
+    // MinecraftServer's command dispatcher and tick rate manager. /tick is the
+    // first registered command; the rest of the vanilla tree is TODO.
+    command::Dispatcher commands;
+    command::registerTickCommand(commands);
+    TickRateManager tickRate;
+    command::Context commandContext;
+    commandContext.ticks = &tickRate;
+    std::array<std::int64_t, 100> tickTimes{};
+    std::int64_t aggregatedTickNanos = 0;
+    std::int64_t tickCount = 0;
+    std::uint64_t tickStateRevision = tickRate.revision();
     auto nextTick =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
     int ticks = 0;
     TickTimingWindow timingWindow;
     double totalTickMilliseconds = 0, maxTickMilliseconds = 0;
+    // Console front end: the same dispatcher the client uses, with a source at
+    // owner level so the local operator can drive /tick without an op list.
+    ConsoleInput console;
+    if (consoleEnabled)
+      std::cout << "CONSOLE ready: type /tick ... (stop to shut down)"
+                << std::endl;
     while (!stopRequested && (!maxTicks || ticks < maxTicks)) {
+      // Console commands run on the server thread between ticks, so they can
+      // never interleave with a running simulation.
+      if (consoleEnabled)
+        for (std::string line; console.next(line);) {
+          while (!line.empty() && line.front() == '/')
+            line.erase(line.begin());
+          if (line == "stop" || line == "quit" || line == "exit") {
+            stopRequested = 1;
+            break;
+          }
+          if (line.empty())
+            continue;
+          if (line == "help" || line == "?") {
+            std::cout << "Commands: /tick query | /tick rate <1..10000> | "
+                         "/tick step [<time>|stop] | /tick sprint "
+                         "<time>|stop | /tick freeze | /tick unfreeze"
+                      << std::endl;
+            continue;
+          }
+          command::Source source;
+          source.permissionLevel = 4;
+          source.name = "Server";
+          if (commands.run(line, source, commandContext) < 0) {
+            std::cout << "Unknown or incomplete command: " << line << std::endl;
+            continue;
+          }
+          for (const auto &message : source.messages) {
+            std::cout << (message.failure ? "[FAIL] " : "")
+                      << formatConsole(message) << std::endl;
+            // A broadcast line reaches connected players, like a vanilla server.
+            if (message.broadcast)
+              for (auto &c : connections)
+                if (!c->dead) {
+                  c->session.sendCommandMessage(message);
+                  writer.submit(c, c->session.takeOutputItems());
+                }
+          }
+        }
+      if (stopRequested)
+        break;
       // The main thread only waits for readable sockets; the write side lives
       // on NetworkWriter.
       fd_set reads;
@@ -550,7 +740,9 @@ int runServer(int argc, char **argv) {
           largest = std::max(largest, c->socket.get());
         }
       timeval timeout{};
-      timeout.tv_usec = 5000;
+      // A sprinting server polls without waiting, like MinecraftServer.run:
+      // the loop must spin as fast as it can instead of pacing to the tick rate.
+      timeout.tv_usec = tickRate.isSprinting() ? 0 : 5000;
       if (select(static_cast<int>(largest + 1), &reads, nullptr, nullptr,
                  &timeout) < 0) {
         if (stopRequested)
@@ -567,6 +759,7 @@ int runServer(int argc, char **argv) {
           connections.push_back(std::make_shared<Connection>(
               std::move(socket), world, data, std::move(sessionOptions)));
           writer.add(connections.back());
+          connections.back()->session.attachCommands(&commands, &commandContext);
         }
       }
       for (auto &c : connections) {
@@ -587,19 +780,49 @@ int runServer(int argc, char **argv) {
         return c->dead.load() || (c->closing.load() && c->flushed.load());
       });
       auto now = std::chrono::steady_clock::now();
+      // MinecraftServer.run: a sprinting iteration ticks immediately and
+      // restarts the scheduler clock; otherwise the loop waits for the current
+      // tick rate.
+      bool sprintingThisIteration = false;
+      if (tickRate.isSprinting() && tickRate.checkShouldSprintThisTick(now)) {
+        sprintingThisIteration = true;
+        nextTick = now;
+      }
       if (now >= nextTick) {
-        const auto tickStart = std::chrono::steady_clock::now();
-        world.tick();
+        const auto tickStart = now;
+        tickRate.tick();
+        // TickRateManager.runsNormally: a frozen server skips level ticking but
+        // keeps connections alive.
+        if (tickRate.runsNormally())
+          world.tick();
         for (auto &c : connections)
           if (!c->dead.load()) c->session.tick();
-        world.log.clear();
+        if (tickRate.runsNormally())
+          world.log.clear();
         const auto tickEnd = std::chrono::steady_clock::now();
+        if (sprintingThisIteration)
+          tickRate.endTickWork(tickEnd);
+        const auto tickNanos =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(tickEnd -
+                                                                 tickStart)
+                .count();
         const double milliseconds =
             std::chrono::duration<double, std::milli>(tickEnd - tickStart)
                 .count();
         totalTickMilliseconds += milliseconds;
         maxTickMilliseconds = std::max(maxTickMilliseconds, milliseconds);
         const auto timingReport = timingWindow.record(tickEnd, milliseconds);
+        // MinecraftServer.tickServer "tallying": 100-sample ring plus the average
+        // over min(100, tickCount) samples used by /tick query.
+        ++tickCount;
+        const auto index = static_cast<std::size_t>(tickCount % 100);
+        aggregatedTickNanos -= tickTimes[index];
+        aggregatedTickNanos += tickNanos;
+        tickTimes[index] = tickNanos;
+        commandContext.averageTickTimeNanos =
+            aggregatedTickNanos /
+            std::min<std::int64_t>(100, std::max<std::int64_t>(tickCount, 1));
+        commandContext.tickTimes = tickTimes;
         // Sent after this tick's simulation and connection synchronization.
         // Idle waiting, socket IO outside the tick and this display are
         // excluded.
@@ -618,10 +841,44 @@ int runServer(int argc, char **argv) {
                     << " entities=" << world.entities.size()
                     << " scheduled=" << world.scheduledTickCount()
                     << " moving_pistons=" << world.pistonEntities.size()
+                    << " tick_rate=" << std::setprecision(1)
+                    << tickRate.tickrate()
+                    << (tickRate.isFrozen() ? " frozen" : "")
                     << std::endl;
-        nextTick += std::chrono::milliseconds(50);
+        nextTick += std::chrono::nanoseconds(tickRate.nanosecondsPerTick());
         if (tickEnd - nextTick > std::chrono::seconds(1))
-          nextTick = tickEnd + std::chrono::milliseconds(50);
+          nextTick =
+              tickEnd + std::chrono::nanoseconds(tickRate.nanosecondsPerTick());
+      }
+      // ServerTickRateManager.updateStateToClients / updateStepTicks: only
+      // command-driven changes are broadcast; the countdown is client side.
+      if (tickRate.revision() != tickStateRevision) {
+        tickStateRevision = tickRate.revision();
+        for (auto &c : connections)
+          if (!c->dead) {
+            c->session.sendTickingState(tickRate);
+            c->session.sendTickingStep(tickRate);
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      }
+      // ServerTickRateManager.finishTickSprint reporting.
+      if (const auto report = tickRate.takeSprintReport()) {
+        std::ostringstream text;
+        text.imbue(std::locale::classic());
+        text << std::fixed << std::setprecision(2)
+             << report->millisecondsPerTick;
+        std::cout << "SPRINT ticks_per_second=" << report->ticksPerSecond
+                  << " ms_per_tick=" << text.str()
+                  << std::endl;
+        for (auto &c : connections)
+          if (!c->dead) {
+            c->session.sendCommandMessage(
+                command::Message{"commands.tick.sprint.report",
+                                 {std::to_string(report->ticksPerSecond),
+                                  text.str()},
+                                 false, true});
+            writer.submit(c, c->session.takeOutputItems());
+          }
       }
     }
     writer.stop();

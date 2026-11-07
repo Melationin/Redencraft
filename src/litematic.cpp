@@ -2,9 +2,11 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
 
 namespace redstone {
 namespace {
@@ -161,6 +163,8 @@ LitematicImport loadLitematic(const nbt::Tag &root,
       throw nbt::Error("invalid litematic packed array length");
     const std::uint64_t mask = (std::uint64_t{1} << bits) - 1;
     std::vector<bool> checked(palette.size(), false);
+    std::vector<bool> unsubstituted(palette.size(), false);
+    std::map<std::string, std::size_t> substituted;
     for (std::uint64_t index = 0; index < volume; ++index) {
       const auto bit = index * bits, word = bit / 64, shift = bit % 64;
       auto id = std::uint64_t(words[word]) >> shift;
@@ -179,11 +183,16 @@ LitematicImport loadLitematic(const nbt::Tag &root,
         block = defaultState("obsidian");
       }
       if (!checked[id]) {
-        if (!isSupportedBlock(block.name()) || isLiquidBlock(block))
+        unsubstituted[id] = !isSupportedBlock(block.name()) || isLiquidBlock(block);
+        if (unsubstituted[id] && !options.substituteUnsupported)
           throw nbt::Error("unsupported schematic block: " + block.name());
-        if (options.validateState)
-          options.validateState(block);
         checked[id] = true;
+        if (options.validateState && !unsubstituted[id])
+          options.validateState(block);
+      }
+      if (unsubstituted[id]) {
+        ++substituted[palette[id].name()];
+        block = defaultState("smooth_stone");
       }
       if (block.isAir())
         continue;
@@ -192,10 +201,16 @@ LitematicImport loadLitematic(const nbt::Tag &root,
                     lo.z + int((index / size.x) % size.z)};
       result.world.blocks.emplace(pos, std::move(block));
     }
+    for (const auto &[name, count] : substituted)
+      result.substitutedBlocks[name] += count;
     for (auto entity : list(region, "Entities")) {
       const auto &id = required(entity, "id", 8).text;
-      if (!entityType(id))
-        throw nbt::Error("unsupported schematic entity: " + id);
+      if (!entityType(id)) {
+        if (!options.substituteUnsupported)
+          throw nbt::Error("unsupported schematic entity: " + id);
+        ++result.skippedUnsupportedEntities;
+        continue;
+      }
       if (entity.get("Passengers"))
         throw nbt::Error(
             "schematic passengers are not implemented"); // TODO: passengers.
@@ -231,8 +246,12 @@ LitematicImport loadLitematic(const nbt::Tag &root,
         ++result.skippedSignBlockEntities;
         continue;
       }
-      if (id != "minecraft:piston")
-        throw nbt::Error("unsupported schematic block entity: " + id);
+      if (id != "minecraft:piston") {
+        if (!options.substituteUnsupported)
+          throw nbt::Error("unsupported schematic block entity: " + id);
+        ++result.skippedUnsupportedBlockEntities;
+        continue;
+      }
       const Pos pos = add(lo, vector(entity), options);
       entity.compound["x"] = integerTag(pos.x);
       entity.compound["y"] = integerTag(pos.y);
@@ -247,8 +266,11 @@ LitematicImport loadLitematic(const nbt::Tag &root,
     for (const auto &tick : list(region, "PendingBlockTicks")) {
       const auto pos = add(lo, vector(tick), options);
       const auto &type = required(tick, "Block", 8).text;
-      if (!isSupportedBlock(type))
-        throw nbt::Error("unsupported schematic tick");
+      if (!isSupportedBlock(type)) {
+        if (!options.substituteUnsupported)
+          throw nbt::Error("unsupported schematic tick");
+        continue;
+      }
       result.world.ticks.push_back(
           {pos, type,
            bounded(numeric(tick, "Time"), std::numeric_limits<int>::min(),

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -30,6 +31,31 @@ void nbtText(Writer &out, const std::string &text) {
   out.u8(8);
   out.i16(static_cast<std::int16_t>(text.size()));
   out.raw({reinterpret_cast<const std::uint8_t *>(text.data()), text.size()});
+}
+// Network NBT for Component.translatable(key, args): a compound with "translate"
+// and, when present, "with" as a list of string tags. The client resolves the
+// key from its own language files, exactly like a vanilla server's packet.
+void nbtTranslate(Writer &out, const std::string &key,
+                  const std::vector<std::string> &args) {
+  const auto string_tag = [&](std::string_view value) {
+    out.i16(static_cast<std::int16_t>(value.size()));
+    out.raw({reinterpret_cast<const std::uint8_t *>(value.data()), value.size()});
+  };
+  const auto named = [&](std::uint8_t tag, std::string_view name) {
+    out.u8(tag);
+    string_tag(name);
+  };
+  out.u8(10); // TAG_Compound, unnamed root.
+  named(8, "translate");
+  string_tag(key);
+  if (!args.empty()) {
+    named(9, "with");
+    out.u8(8); // list of TAG_String
+    out.i32(static_cast<std::int32_t>(args.size()));
+    for (const auto &arg : args)
+      string_tag(arg);
+  }
+  out.u8(0); // TAG_End
 }
 void uuid(Writer &out, const Uuid &id) { out.raw(id); }
 int chunkCoord(double coordinate) {
@@ -60,9 +86,66 @@ Pos unpackSectionBlock(std::int64_t section, std::uint16_t local) {
              static_cast<int>(signExtend(s >> 20, 22) * 16 + ((local >> 4) & 15))};
 }
 std::uint8_t packDegrees(float degrees) {
-  // Mth.packDegrees: round(degrees * 256 / 360) as a signed byte.
-  return static_cast<std::uint8_t>(std::lround(degrees * 256.0 / 360.0));
+  // Mth.packDegrees floors the float result before narrowing to a byte.
+  return static_cast<std::uint8_t>(
+      static_cast<int>(std::floor(degrees * 256.0f / 360.0f)));
 }
+
+// ChunkHolder's fastutil ShortOpenHashSet uses linear probing and iterates
+// zero first, then the occupied slots in descending order. A section has at
+// most 4096 local positions, so its largest table is 8192 slots.
+class SectionChanges {
+public:
+  void reset() {
+    table_ = std::span(tableA_).first(32);
+    std::ranges::fill(table_, std::uint16_t{0});
+    size_ = 0;
+    hasZero_ = false;
+  }
+  void add(std::uint16_t local) {
+    if (local == 0) {
+      if (std::exchange(hasZero_, true))
+        return;
+    } else if (!insert(table_, local)) {
+      return;
+    }
+    if (size_++ < static_cast<int>(table_.size() * 3 / 4))
+      return;
+    auto &storage = table_.data() == tableA_.data() ? tableB_ : tableA_;
+    auto grown = std::span(storage).first(table_.size() * 2);
+    std::ranges::fill(grown, std::uint16_t{0});
+    for (auto it = table_.rbegin(); it != table_.rend(); ++it)
+      if (*it != 0)
+        insert(grown, *it);
+    table_ = grown;
+  }
+  int size() const { return size_; }
+  template <typename Emit> void forEach(Emit emit) const {
+    if (hasZero_)
+      emit(0);
+    for (auto it = table_.rbegin(); it != table_.rend(); ++it)
+      if (*it != 0)
+        emit(*it);
+  }
+
+private:
+  static bool insert(std::span<std::uint16_t> table, std::uint16_t local) {
+    const auto hash = std::uint32_t{local} * 0x9e3779b9u;
+    const auto mask = table.size() - 1;
+    auto slot = (hash ^ (hash >> 16)) & mask;
+    while (table[slot] != 0 && table[slot] != local)
+      slot = (slot + 1) & mask;
+    if (table[slot] == local)
+      return false;
+    table[slot] = local;
+    return true;
+  }
+
+  std::array<std::uint16_t, 8192> tableA_, tableB_;
+  std::span<std::uint16_t> table_;
+  int size_;
+  bool hasZero_;
+};
 Direction horizontal(float yaw) {
   constexpr Direction directions[]{Direction::South, Direction::West,
                                    Direction::North, Direction::East};
@@ -172,6 +255,17 @@ ProtocolData::ProtocolData(const std::filesystem::path &directory)
   }
   if (!overworld)
     throw ProtocolError("missing overworld dimension registry ID");
+  std::ifstream effects(directory / "explosion_effects.tsv");
+  for (std::string line; std::getline(effects, line);) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    auto f = fields(line);
+    if (f.size() == 2)
+      explosionEffectIds.emplace(f[0], std::stoi(f[1]));
+  }
+  for (const auto *name : {"explosion", "explosion_emitter", "poof", "smoke", "sound"})
+    if (!explosionEffectIds.contains(name))
+      throw ProtocolError("missing explosion effect ID in explosion_effects.tsv");
   std::ifstream config(directory / "configuration.bin", std::ios::binary);
   if (!config)
     throw ProtocolError(
@@ -505,6 +599,12 @@ void Session::join() {
   out = {};
   out.varInt(options_.viewDistance);
   send("set_chunk_cache_radius", out);
+  sendCommands();
+  if (commandContext_ && commandContext_->ticks) {
+    // ServerTickRateManager.updateJoiningPlayer.
+    sendTickingState(*commandContext_->ticks);
+    sendTickingStep(*commandContext_->ticks);
+  }
   refreshChunkView();
   out = {};
   out.u8(13);
@@ -558,9 +658,9 @@ bool Session::canInteract(Pos p) const {
 }
 void Session::blockUpdate(Pos p, const BlockState &) {
   if (phase_ == Phase::Play && hasChunk(p))
-    changedBlocks_.push_back((static_cast<std::uint64_t>(packSectionPos(p))
-                              << 12) |
-                             packSectionLocal(p));
+    changedBlocks_.push_back({static_cast<std::uint64_t>(packSectionPos(p)),
+                              static_cast<std::uint32_t>(changedBlocks_.size()),
+                              packSectionLocal(p)});
 }
 void Session::flushBlockUpdates() {
   if (changedBlocks_.empty())
@@ -569,32 +669,47 @@ void Session::flushBlockUpdates() {
   // emits a single block_update when a section only has one change, otherwise
   // one section_blocks_update. The states are read from the current section at
   // broadcast time, like ClientboundSectionBlocksUpdatePacket's constructor.
-  auto keys = std::exchange(changedBlocks_, {});
-  std::sort(keys.begin(), keys.end());
-  keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-  for (std::size_t i = 0; i < keys.size();) {
-    const std::int64_t section = static_cast<std::int64_t>(keys[i] >> 12);
+  auto changes = std::exchange(changedBlocks_, {});
+  // TODO: vanilla's cross-chunk order depends on ChunkHolder identity hashes.
+  // Use coordinate order across chunks and vanilla's bottom-up order within each.
+  std::sort(changes.begin(), changes.end(), [](const auto &a, const auto &b) {
+    constexpr auto signs = (1ull << 63) | (1ull << 41) | (1ull << 19);
+    if (a.section != b.section)
+      return (a.section ^ signs) < (b.section ^ signs);
+    return a.order < b.order;
+  });
+  SectionChanges locals;
+  for (std::size_t i = 0; i < changes.size();) {
+    const auto section = static_cast<std::int64_t>(changes[i].section);
     std::size_t j = i + 1;
-    while (j < keys.size() && (keys[j] >> 12) == keys[i] >> 12)
+    while (j < changes.size() && changes[j].section == changes[i].section)
       ++j;
+    const auto first = changes[i].local;
+    const Pos firstPos = unpackSectionBlock(section, first);
     if (j - i == 1) {
-      sendBlockUpdate(
-          unpackSectionBlock(section, static_cast<std::uint16_t>(keys[i] & 0xfff)));
+      sendBlockUpdate(firstPos);
       i = j;
       continue;
     }
     // Every position in a section belongs to the same chunk.
-    if (hasChunk(unpackSectionBlock(section, static_cast<std::uint16_t>(keys[i] & 0xfff)))) {
+    if (hasChunk(firstPos)) {
+      locals.reset();
+      for (auto k = i; k < j; ++k)
+        locals.add(changes[k].local);
+      if (locals.size() == 1) {
+        sendBlockUpdate(firstPos);
+        i = j;
+        continue;
+      }
       Writer out;
       out.i64(section);
-      out.varInt(static_cast<std::int32_t>(j - i));
+      out.varInt(locals.size());
       try {
-        for (std::size_t k = i; k < j; ++k) {
-          const auto local = static_cast<std::uint16_t>(keys[k] & 0xfff);
+        locals.forEach([&](std::uint16_t local) {
           const auto stateId = data_.registry.stateId(
               world_.getBlock(unpackSectionBlock(section, local)));
           out.varLong((static_cast<std::int64_t>(stateId) << 12) | local);
-        }
+        });
       } catch (const ProtocolError &) {
         disconnect("Unsupported block state for protocol 775");
         return;
@@ -605,8 +720,8 @@ void Session::flushBlockUpdates() {
   }
   // Reuse capacity unless a callback recorded another change during broadcast.
   if (changedBlocks_.empty()) {
-    keys.clear();
-    changedBlocks_.swap(keys);
+    changes.clear();
+    changedBlocks_.swap(changes);
   }
 }
 void Session::sendBlockUpdate(Pos p) {
@@ -622,7 +737,8 @@ void Session::sendBlockUpdate(Pos p) {
   }
 }
 void Session::blockEvent(const BlockEvent &event) {
-  if (phase_ != Phase::Play || !hasChunk(event.pos))
+  const Vec3 origin{double(event.pos.x), double(event.pos.y), double(event.pos.z)};
+  if (phase_ != Phase::Play || (position_ - origin).lengthSqr() >= 64.0 * 64.0)
     return;
   const auto block = data_.blockIds.find(event.block.str());
   if (block == data_.blockIds.end()) {
@@ -635,6 +751,33 @@ void Session::blockEvent(const BlockEvent &event) {
   out.u8(static_cast<std::uint8_t>(event.data));
   out.varInt(block->second);
   send("block_event", std::move(out));
+}
+void Session::explosion(Vec3 center, float radius, int blockCount) {
+  if (phase_ != Phase::Play || (position_ - center).lengthSqr() >= 64.0 * 64.0)
+    return;
+  const auto &ids = data_.explosionEffectIds;
+  Writer out;
+  out.f64(center.x);
+  out.f64(center.y);
+  out.f64(center.z);
+  out.f32(radius);
+  out.i32(blockCount);
+  // TODO: protocol players are not simulated entities and have no server-side
+  // explosion knockback yet.
+  out.bool_(false);
+  out.varInt(ids.at(radius < 2.0f ? "explosion" : "explosion_emitter"));
+  out.varInt(ids.at("sound") + 1); // Registry holder, 0 reserved for inline.
+  out.varInt(2);
+  // Level.DEFAULT_EXPLOSION_BLOCK_PARTICLES, each with weight 1.
+  out.varInt(ids.at("poof"));
+  out.f32(0.5f);
+  out.f32(1.0f);
+  out.varInt(1);
+  out.varInt(ids.at("smoke"));
+  out.f32(1.0f);
+  out.f32(1.0f);
+  out.varInt(1);
+  send("explode", std::move(out));
 }
 void Session::fallingBlockLanded(int entityId, Pos pos, const BlockState &) {
   // FallingBlockEntity.sendToTrackingPlayers precedes discard. Ordinary chunk
@@ -950,6 +1093,17 @@ void Session::play(int id, Reader &in) {
     (void)in.f32();
     (void)in.f32();
     acknowledge(sequence);
+  } else if (is("chat_command")) {
+    const std::string line = in.string();
+    if (!in.empty())
+      throw ProtocolError("invalid chat command");
+    runCommand(line);
+  } else if (is("command_suggestion")) {
+    const int requestId = in.varInt();
+    const std::string line = in.string(32500);
+    if (!in.empty())
+      throw ProtocolError("invalid command suggestion request");
+    sendSuggestions(requestId, line);
   } else if (is("player_input")) {
     const auto flags = in.u8();
     if (!in.empty())
@@ -1070,6 +1224,95 @@ void Session::sendTickTime(double milliseconds, std::int64_t tick, std::size_t s
     disconnect("Tick timing packet failed");
   }
 }
+void Session::attachCommands(const command::Dispatcher *dispatcher,
+                             const command::Context *context) {
+  commands_ = dispatcher;
+  commandContext_ = context;
+}
+void Session::sendCommandMessage(const command::Message &message) {
+  Writer out;
+  nbtTranslate(out, message.key, message.args);
+  out.bool_(false); // ClientboundSystemChatPacket(component, overlay=false).
+  send("system_chat", out);
+}
+void Session::runCommand(std::string_view line) {
+  if (!commands_ || !commandContext_)
+    return;
+  command::Source source;
+  // TODO: vanilla checks the op list / permission level per player; this
+  // server has no operator list yet, so the local player is an admin.
+  source.permissionLevel = 4;
+  source.name = username_;
+  if (commands_->run(line, source, *commandContext_) < 0) {
+    // The client parses against the exported tree before sending, so this is a
+    // malformed or unknown line: brigadier would answer with a syntax error.
+    Writer out;
+    nbtText(out, "Unknown or incomplete command");
+    out.bool_(false);
+    send("system_chat", out);
+    return;
+  }
+  // TODO: broadcast=true lines go to every player with the command permission in
+  // vanilla; this server has a single local player, so they only echo here.
+  for (const auto &message : source.messages)
+    sendCommandMessage(message);
+}
+void Session::sendSuggestions(int requestId, std::string_view line) {
+  if (!commands_ || !commandContext_ || phase_ != Phase::Play)
+    return;
+  try {
+    // ServerGamePacketListenerImpl.handleCustomCommandSuggestions skips a leading
+    // slash with StringReader.skip, which leaves the string intact, so every
+    // replacement offset is still relative to the text the client sent.
+    const bool slash = !line.empty() && line.front() == '/';
+    const std::string_view body = slash ? line.substr(1) : line;
+    command::Source source;
+    source.permissionLevel = 4;
+    source.name = username_;
+    auto completion = commands_->suggestions(body, source);
+    if (slash)
+      ++completion.start;
+    Writer out;
+    out.varInt(requestId);
+    out.varInt(completion.start);
+    out.varInt(completion.length);
+    out.varInt(static_cast<std::int32_t>(completion.texts.size()));
+    for (const auto &text : completion.texts) {
+      out.string(text);
+      out.bool_(false); // Optional<Component> tooltip: none.
+    }
+    send("command_suggestions", out);
+  } catch (const ProtocolError &) {
+    disconnect("Command suggestion packet failed");
+  }
+}
+void Session::sendCommands() {
+  if (!commands_ || phase_ != Phase::Play)
+    return;
+  try {
+    Writer out;
+    const auto tree = encodeCommandTree(commands_->root());
+    out.raw(tree);
+    send("commands", out);
+  } catch (const ProtocolError &) {
+    disconnect("Command tree packet failed");
+  }
+}
+void Session::sendTickingState(const TickRateManager &ticks) {
+  if (phase_ != Phase::Play)
+    return;
+  Writer out;
+  out.f32(ticks.tickrate());
+  out.bool_(ticks.isFrozen());
+  send("ticking_state", out);
+}
+void Session::sendTickingStep(const TickRateManager &ticks) {
+  if (phase_ != Phase::Play)
+    return;
+  Writer out;
+  out.varInt(ticks.frozenTicksToRun());
+  send("ticking_step", out);
+}
 void Session::sendEntitySpawn(const Entity &e, TrackedEntity &tracked) {
   Writer out;
   out.varInt(e.id);
@@ -1084,51 +1327,89 @@ void Session::sendEntitySpawn(const Entity &e, TrackedEntity &tracked) {
   out.u8(0);
   const auto *falling = dynamic_cast<const FallingBlockEntity *>(&e);
   out.varInt(falling ? data_.registry.stateId(falling->blockState) : 0);
+  send("bundle_delimiter");
   send("add_entity", std::move(out));
 
-  // ServerEntity.sendPairingData: non-default synced data goes out once, with
-  // the spawn, instead of on every update tick.
-  Writer values;
-  values.varInt(e.id);
-  bool hasValues = false;
+  // ServerEntity pairs the spawn with the non-default synced data.
   if (auto item = dynamic_cast<const ItemEntity *>(&e)) {
+    Writer values;
+    values.varInt(e.id);
     values.u8(8);
     values.varInt(7);
     stack(values, item->item);
-    hasValues = true;
+    values.u8(255);
+    send("set_entity_data", std::move(values));
   } else if (auto tnt = dynamic_cast<const PrimedTnt *>(&e)) {
+    tracked.tntBlockState = Blocks::TNT.defaultState().id();
+    sendTntData(*tnt, tracked);
+  } else if (falling && falling->startPos != Pos{}) {
+    Writer values;
+    values.varInt(e.id);
     values.u8(8);
-    values.varInt(1);
-    values.varInt(tnt->fuse);
-    values.u8(9);
-    values.varInt(14);
-    values.varInt(data_.registry.stateId(tnt->blockState));
-    hasValues = true;
-  }
-  if (hasValues) {
+    values.varInt(10); // BLOCK_POS, see entity_data_serializers.tsv.
+    values.position(falling->startPos);
     values.u8(255);
     send("set_entity_data", std::move(values));
   }
+  send("bundle_delimiter");
 
   tracked.base = e.position;
   tracked.lastMovement = e.deltaMovement;
+  tracked.lastMotionRevision = e.motionRevision;
   tracked.yRot = packDegrees(e.yaw);
   tracked.xRot = packDegrees(e.pitch);
-  tracked.headRot = tracked.yRot;
   tracked.tickCount = 0;
   tracked.teleportDelay = 0;
   tracked.wasOnGround = e.onGround;
 }
 
+void Session::sendTntData(const PrimedTnt &tnt, TrackedEntity &tracked) {
+  const bool fuseChanged = tnt.fuse != tracked.tntFuse;
+  const bool stateChanged = tnt.blockState.id() != tracked.tntBlockState;
+  if (!fuseChanged && !stateChanged)
+    return;
+  Writer values;
+  values.varInt(tnt.id);
+  if (fuseChanged) {
+    values.u8(8);
+    values.varInt(1); // INT
+    values.varInt(tnt.fuse);
+  }
+  if (stateChanged) {
+    values.u8(9);
+    values.varInt(14); // BLOCK_STATE
+    values.varInt(data_.registry.stateId(tnt.blockState));
+  }
+  values.u8(255);
+  send("set_entity_data", std::move(values));
+  tracked.tntFuse = tnt.fuse;
+  tracked.tntBlockState = tnt.blockState.id();
+}
+
 void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
   // ServerEntity.sendChanges: movement is encoded as a 1/4096 delta against the
-  // last acknowledged position (VecDeltaCodec), rotation as 1/256 turns, and a
+  // last sent position (VecDeltaCodec), rotation as 1/256 turns, and a
   // full entity_position_sync only when the delta overflows a short or the
   // ground state changes.
-  const auto *type = entityType(e.typeName());
-  const int interval =
-      type && type->updateInterval > 0 ? type->updateInterval : 3;
-  if (tracked.tickCount % interval == 0) {
+  // TODO: new minecart interpolation and dirty metadata for item stacks.
+  // TODO: the separate post-update hurtMarked velocity packet.
+  const int interval = e.type().updateInterval > 0 ? e.type().updateInterval : 3;
+  const auto *tnt = dynamic_cast<const PrimedTnt *>(&e);
+  const bool dirty = tnt && (tnt->fuse != tracked.tntFuse ||
+                             tnt->blockState.id() != tracked.tntBlockState);
+  if (tracked.tickCount % interval == 0 || dirty ||
+      e.motionRevision != tracked.lastMotionRevision) {
+    tracked.lastMotionRevision = e.motionRevision;
+    const auto motionDiff = (e.deltaMovement - tracked.lastMovement).lengthSqr();
+    // All currently supported entity types track deltas. Send motion before
+    // the position packet, even when that packet is a full position sync.
+    if (motionDiff > 1e-7 || (motionDiff > 0 && e.deltaMovement.lengthSqr() == 0)) {
+      tracked.lastMovement = e.deltaMovement;
+      Writer out;
+      out.varInt(e.id);
+      lpVector(out, e.deltaMovement);
+      send("set_entity_motion", std::move(out));
+    }
     const std::uint8_t yRot = packDegrees(e.yaw);
     const std::uint8_t xRot = packDegrees(e.pitch);
     const bool rotationChanged =
@@ -1138,7 +1419,9 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
     const bool positionChanged = offset.lengthSqr() >= 7.6293945e-6;
     const bool position = positionChanged || tracked.tickCount % 60 == 0;
     const auto encode = [](double value) {
-      return std::llround(value * 4096.0);
+      const double scaled = value * 4096.0;
+      const double integral = std::floor(scaled);
+      return static_cast<std::int64_t>(integral) + (scaled - integral >= 0.5);
     };
     const std::int64_t xa = encode(e.position.x) - encode(tracked.base.x);
     const std::int64_t ya = encode(e.position.y) - encode(tracked.base.y);
@@ -1199,14 +1482,8 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
       tracked.yRot = yRot;
       tracked.xRot = xRot;
     }
-    const std::uint8_t headRot = packDegrees(e.yaw);
-    if (std::abs(int(headRot) - int(tracked.headRot)) >= 1) {
-      Writer out;
-      out.varInt(e.id);
-      out.u8(headRot);
-      send("rotate_head", std::move(out));
-      tracked.headRot = headRot;
-    }
+    if (dirty)
+      sendTntData(*tnt, tracked);
   }
   ++tracked.tickCount;
 }
