@@ -85,4 +85,42 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
   （11 个文件，+652 / -18；含 `AGENTS.md`、`PLAN.md`、`task/TASKS.md`、`docs/fluid-testing.md` 与 7 个文档的定位表述）
 - 状态记录提交：见本行记录之后的 bookkeeping 提交（只改本文件的「提交」段与末尾状态）。
 
-任务完成
+### Reviewer 审查意见
+
+审查提交 `6e7ab6d` 及交接记录 `731606e`。Luna 只读状态判定与主线程复核一致，交接进入审查前的末行是唯一的 `任务完成`，必填项齐全。提交差异只涉及文档，当前基线的 `build-jemalloc/Testing/Temporary/LastTest.log` 记录了 15 项通过、0 项失败。本次是文档审查，引用既有 CTest 记录。
+
+1. **阻塞 · 交接通过路径会产生歧义。** `AGENTS.md:50` 以最后一行定义状态，`AGENTS.md:74` 同时要求追加 `任务已完成` 结论行和设置相同的末行，`AGENTS.md:78` 又以文件中出现该字样作为领取下一任务的条件。照字面执行可能出现两条独立状态行，或把正文里的引用误判成验收通过。请规定验收理由写普通正文，唯一的独立状态行放在最后；所有角色切换和领取条件都读取同一末行状态。正常验收与异常恢复流程分别写清。
+2. **应修 · 时间目标仍使用旧版模型和规则名。** `AGENTS.md:15` 使用 `dayTime` / `doDaylightCycle` 描述 26.1，`AGENTS.md:24` 又把 `level.dat` 的 `DayTime` 当成当前缺失点。原版 `world/level/gamerules/GameRules.java:24` 注册 `advance_time`，`world/clock/ServerClockManager.java:27`、`:65` 管理 `world_clocks` 与推进规则，`server/commands/TimeCommand.java:48` 使用默认 World Clock。C++ 的 `src/storage.cpp:479`、`:513` 已读取 `level.dat` 的 `Time` 并恢复 `gameTime`。请把目标写成 `gameTime` 与 26.1 World Clocks，当前边界写明已恢复并内存推进 `gameTime`，时钟和持久化待实现。路线图 W-1 已按原版术语更新。
+3. **应修 · 定位文档链接及入口信息有冲突。** `docs/compatibility.md:59` 的 `PLAN.md` 相对链接解析到不存在的 `docs/PLAN.md`，应改为 `../PLAN.md`。`docs/handover.md:24` 的「下一步」仍写「水/流体刻仍不做」，与阶段 1 相冲突。请标明该段是历史记录，并将当前计划指向 `PLAN.md`。`docs/compatibility.md:70` 也可随本次同步区分已实现的 `/tick` 命令骨架和待补的命令系统，见 `src/command.cpp:310` 和 `docs/protocol775.md:59`。
+
+### 后续规划与测试要求
+
+以下是 reviewer 已更新的后续规划。用户已指定直接领取 F-1。
+
+- **F-1 流体状态模型。** 按 [流体测试规格 §4.1](../docs/fluid-testing.md#41-状态和调度) 的 F-01/F-02 状态映射部分建立聚焦测试。水、岩浆各枚举 `level=0..15`，断言空流体、精确类型、同族关系、amount、`isSource`、`isFull`、固有高度和 legacy 映射。`falling` 放在 `FluidState`，由方块 `level` 解码；导入的 `level=9..15` 保留原值，显式生成 legacy 方块时才归一到 `8`。断言同一查询不会写方块或发计划刻，所有水/岩浆方块状态继续命中现有 26.1 协议表。依据 `LiquidBlock.java:68`、`:123`、`:242` 和 `FlowingFluid.java:55`、`:463`。跨格液面随 F-3，含水宿主随 F-5。
+- **F-2 至 F-6 随任务交付回归。** `PLAN.md` 已逐项映射流体测试编号。优先用 Q-01…Q-06 锁定精确身份、两队列相位和积压队首。传播与接线再分别用 W/L/M、H/P 两组验证。原版 `FenceGateBlock.java:203` 只定义朝向、开关、受电及 `in_wall`，栅栏门用于通流几何对照。Anvil 与投影分别按 A-01…A-04 验证，采用各自的基准夹具。
+- **F-7 原版对照。** 按 [流体测试规格 §3](../docs/fluid-testing.md#3-制作原版对照) 制作隔离的 26.1 原版采集夹具，从官方 JAR 采集块/流体状态、schedule/dispatch、写序和关键副作用。逐刻报告首差；原版离线 JAR、真实服务端差分及 CTest 分开记录。W-01 水槽作为首个可复跑端到端夹具。
+
+**结论**　用户决定结束 M0-1 的本轮审查，直接进入 F-1。上面的三条意见尚未修复，已转入路线图的后续文档校正任务。此处的末行状态用于释放下一任务的领取条件。
+
+### 独立复核（reviewer 2）
+
+说明：本节由第二个 reviewer 在发现本文件已被主线程更新为「任务已完成 + F-1」后追加，只登记独立复核结果，不替代上面的结论，也不改变末行状态；补充项归入后续文档校正。
+
+- **代码依据（全部属实）**：`include/redstone/engine.hpp:192-216` 的 `World(int minY=-64, int maxY=320, ...)`、`kSectionCapacity=24` 与 `:201-202` 的 `loadChunk`/`unloadChunk`；`include/redstone/storage.hpp:13-31` 的 `LoadedWorld` 只有一份 `blocks`/`chunks`，`loadAnvilWorld` 只读，`src/storage.cpp`、`src/litematic.cpp` 无写回路径；`src/engine.cpp:1541` 的 TODO 与 `:1542-1570` 的 `World::tick` 一致（方块刻 → 广播 → 实体跟踪 → 方块事件 → 实体 → 方块实体，无流体刻、无光照）；`src/net/wire.cpp:562-578` 的天空光全 255、方块光 0 是占位。`AGENTS.md:20-24` 可在这些位置找到对应；其中 `:15`/`:24` 的时间表述已在本次 AGENTS.md 更新里改为 `Time` + `world_clocks`，与 `src/storage.cpp:479`/`:513` 一致（该项已解决）。
+- **链接复核**：以 UTF-8 重新扫描本次 11 个文件，唯一断链是 `docs/compatibility.md:59` 的 `[路线图](PLAN.md)`，应改为 `../PLAN.md`；其余新增链接均可解析。另：`docs/fluid-testing.md:33` 等 7 处 `../../net/...` 只在本工作区布局成立，已跟踪文档应说明该前提。
+- **历史与测试**：`docs/handover.md` 只加开头说明，历史章节未改；`docs/update-order-audit.md` 未动；`validation/safesave_order/README.md` 只调整时态/范围，七项结论未改，未发现历史结论被改写。`build-jemalloc/Testing/Temporary/LastTest.log` 记录 15 项通过、0 项失败（04:58:52，早于提交 04:59:16），与 15/15 说法一致；本任务无代码改动，按 `AGENTS.md:41` 不重跑构建可接受，且已注明不是原版等价。
+- **`docs/fluid-testing.md` 入版本库**：理由成立（`PLAN.md` 的 F-1/F-7、`docs/compatibility.md:59`、`docs/entities.md:34` 都链接它），作为已存在文件放进 M0-1 可以接受；更干净的做法是先原样提交再改定位段，便于 60KB 内容可 diff。
+- **补充流程问题（0 应修 + 1 建议）**：`PLAN.md:5` 已改为「每个任务一次主提交；状态记录提交不计入」，与 `AGENTS.md:67` 一致，原冲突已解决。剩余建议：`AGENTS.md:68` 未说明返工内容追加在哪里（状态行应始终最后一行）。`AGENTS.md:89` 的纠错写入者已明确为主智能体；`:87` 已改为「只读代码」；`:100` 与 `:105` 的冲突已由「本条是 §3.7 第二条的唯一例外」解决。
+- **AGENTS.md/PLAN.md/docs 更新与 M0-2 覆盖**：本轮更新（`3d5af1e`）已解决：§3.1（`AGENTS.md:50`）唯一裸状态行；§1（`:15`/`:24`）26.1 World Clocks；§3.5（`:87`/`:89`）reviewer 措辞与主智能体纠错写入；§3.6（`:100`）reviewer 优先的 §3.7 例外；`PLAN.md:5` 主提交/状态记录提交分离；`docs/compatibility.md:59` 断链、`:70` 命令边界、`docs/handover.md:24`、`README.md:1`、`docs/protocol775.md:55`。我确认 `task/TASKS.md` 只有末行 `任务已完成` 是裸状态行，符合 §3.1。`PLAN.md:46-48` 的 M0-2 遗留清单仍列了本轮已修的项（AGENTS 纠错写入、reviewer 措辞、handover 交叉引用、README/协议表述），应同步收窄到唯一未修的 `AGENTS.md:68`（返工内容追加位置），避免重复完成。
+
+**复核结论**：通过（无未解决应修）。`3d5af1e` 已修复主审查的阻塞、时间应修、断链/命令边界/handover 与 README/协议表述；M0-1 判 `任务已完成` 并释放 F-1 符合 §3.6。仅剩 1 条建议（`AGENTS.md:68` 返工追加位置），请把 `PLAN.md:48` 的 M0-2 遗留清单收窄到它。
+
+### 下一任务交给 coder · F-1 流体状态模型
+
+- **目标和范围**　实现独立的 `Fluid` / `FluidState` / `Fluids` 和水、岩浆方块到流体状态的查询。仅交付 F-1 的状态模型与聚焦测试。方块 `level=0..15` 保持 26.1 schema，`falling` 由状态解码。
+- **原版依据**　`LiquidBlock.java:68`、`:123`、`:242`，`FlowingFluid.java:55`、`:463`，以及 `FluidState.java`、`WaterFluid.java`、`LavaFluid.java`。
+- **验收**　按 [F-01/F-02](../docs/fluid-testing.md#41-状态和调度) 枚举水和岩浆全部档位，检查精确类型、同族关系、amount、`isSource`、`isFull`、`falling`、固有高度、legacy 映射及协议状态表。导入的 `9..15` 保留原值。查询无方块或队列副作用。构建并运行 CTest，记录证据口径。
+- **预计触及**　`include/redstone/` 和 `src/` 的流体模型与状态查询，相关 `tests/`、必要的 `CMakeLists.txt` 接线和流体文档。coder 领取时列出确切文件并更新末行状态。
+
+任务已完成
