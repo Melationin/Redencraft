@@ -456,5 +456,22 @@ private:
       std::make_unique<BlockEventQueue>();
   std::vector<BlockEvent> blockEventsToReschedule_;
   std::int64_t nextSubTickCount();
+
+  // ServerExplosion.calculateExplodedPositions memoises per-block probes: the
+  // ray shell revisits the same positions many times. The table lives across
+  // explosions and a generation stamp replaces the old per-call zero fill.
+  struct ExplosionCacheEntry {
+    std::uint64_t key = 0;
+    std::uint32_t generation = 0;
+    float resistance = 0.0f;
+    bool air = true;
+    bool fluid = false;
+    bool loaded = false;
+  };
+  static constexpr std::size_t kExplosionCacheSize = 512;
+  std::array<ExplosionCacheEntry, kExplosionCacheSize> explosionCache_{};
+  std::uint32_t explosionGeneration_ = 0;
+  // Scratch list of exploded positions; capacity is kept between explosions.
+  std::vector<Pos> explosionTargets_;
 };
 } // namespace redstone

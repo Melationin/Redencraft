@@ -1524,34 +1524,26 @@ void addExplosionStack(std::vector<ExplosionStack> &stacks,
 
 void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
   (void)source; // Direct/indirect source identity only affects player credit.
-  log.push_back({"explosion",
-                 {static_cast<int>(std::floor(center.x)),
-                  static_cast<int>(std::floor(center.y)),
-                  static_cast<int>(std::floor(center.z))},
-                 "power=" + std::to_string(radius)});
   // ServerExplosion.calculateExplodedPositions. The Java HashSet iteration
   // order is deliberately not reproduced (see docs/compatibility.md): positions
   // are deduplicated with a hash set and then sorted, reproducing the previous
   // ordered-set order without one tree node per ray step.
   // TODO: Util.shuffle(targetBlocks, random), source damage attribution,
   // block-entity explosion hooks, and fire creation.
-  std::vector<Pos> toBlow;
-  toBlow.reserve(1024);
+  std::vector<Pos> &toBlow = explosionTargets_;
+  toBlow.clear();
   // Lithium-style direct-mapped cache: the ray shell samples the same block
   // positions many times, so the state/fluid/resistance lookup is memoised
-  // instead of hitting the chunk map on every step.
-  struct CachedBlock {
-    std::uint64_t key = 0;
-    float resistance = 0.0f;
-    bool present = false;
-    bool air = true;
-    bool fluid = false;
-    bool loaded = false;
-  };
-  static_assert(sizeof(CachedBlock) == 16);
-  constexpr std::size_t kBlockCacheSize = 512;
+  // instead of hitting the chunk map on every step. The table outlives a single
+  // explosion, so a generation stamp replaces the per-call zero fill.
+  if (++explosionGeneration_ == 0) {
+    for (auto &entry : explosionCache_)
+      entry.generation = 0;
+    explosionGeneration_ = 1;
+  }
+  const std::uint32_t generation = explosionGeneration_;
+  auto &blockCache = explosionCache_;
   constexpr std::uint64_t kBlockCacheShift = 55; // 64 - 9
-  std::array<CachedBlock, kBlockCacheSize> blockCache{};
   const auto blockKey = [](Pos p) {
     return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.x)) &
             0x3FFFFFFull)
@@ -1586,18 +1578,16 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
       if (!sameBlock) {
         const Pos pos{blockX, blockY, blockZ};
         const std::uint64_t key = blockKey(pos);
-        CachedBlock &cached =
+        ExplosionCacheEntry &cached =
             blockCache[(key * 0x9E3779B97F4A7C15ull) >> kBlockCacheShift];
-        if (!cached.present || cached.key != key) {
+        if (cached.generation != generation || cached.key != key) {
           const auto state = getBlock(pos);
-          const bool fluid =
-              isLiquidBlock(state) ||
-              waterloggedOf(state);
+          const bool fluid = isLiquidBlock(state) || waterloggedOf(state);
           const float blast = static_cast<float>(std::max(
               static_cast<double>(blockMetadata(state).explosionResistance),
               fluid ? 100.0 : 0.0));
           cached.key = key;
-          cached.present = true;
+          cached.generation = generation;
           cached.air = state.isAir();
           cached.fluid = fluid;
           // Cache the per-step loss, (resistance + 0.3) * 0.3.
