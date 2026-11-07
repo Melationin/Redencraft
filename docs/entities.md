@@ -31,7 +31,7 @@
 - 基于方块碰撞盒的逐轴移动。轴顺序按 `Direction.axisStepOrder`：先 Y，再按水平位移绝对值选择 X 或 Z；`collideAxis` 的容差为 1e-7，碰撞标记容差为 1e-5。
 - 垂直碰撞后的 `onGround`/`verticalCollision`/`verticalCollisionBelow` 语义，水平碰撞清零对应速度分量。
 - 方块速度因子、落地后默认清零 Y 速度、史莱姆块落地反弹（非生物倍率 0.8）与 `stepOn` 水平减速。
-- 液体高度检测按 `FlowingFluid.getHeight` 的 8/9 源流体高度近似；水/岩浆刻本身当前仍未实现，因此暂不模拟流动、液面重算和流体推挤（流体刻是 [路线图](../PLAN.md) 阶段 1，测试规格见 [水与岩浆对照测试设计](fluid-testing.md)）。
+- 液体高度检测按 `FlowingFluid.getHeight` 的 8/9 源流体高度近似；流体状态模型（`fluid.hpp` 的 `fluidStateOf`）已可用，但流体刻、流动、液面重算和流体推挤仍未实现（[路线图](../PLAN.md) 阶段 1，测试规格见 [水与岩浆对照测试设计](fluid-testing.md)）。
 - 岩浆接触调用 `lavaIgnite` + `lavaHurt`（伤害 4）；火焰刻每 20 刻伤害 1。水和岩浆的存档状态保留，且碰撞为空。
 - `moveTowardsClosestSpace`：物品卡在方块内时按原版方向顺序选择最近空位并随机推出。
 - 世界底部 `minY - 64` 以下移除。
