@@ -3,19 +3,8 @@
 #include <string>
 
 namespace redstone {
-// net.minecraft.world.level.block.state.properties.RailShape.
-enum class RailShape {
-  NorthSouth,
-  EastWest,
-  AscendingEast,
-  AscendingWest,
-  AscendingNorth,
-  AscendingSouth,
-  SouthEast,
-  SouthWest,
-  NorthWest,
-  NorthEast
-};
+// net.minecraft.world.level.block.state.properties.RailShape is defined in
+// property.hpp, which block.hpp pulls in for its canonical property values.
 RailShape railShapeFromName(std::string_view name);
 std::string railShapeName(RailShape shape);
 bool railShapeIsSlope(RailShape shape);

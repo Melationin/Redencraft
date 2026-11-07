@@ -23,20 +23,8 @@ Pos relative(Pos p, Direction d, int n) {
     p = p.relative(d);
   return p;
 }
-Direction facing(const BlockState &s) {
-  auto f = s.getView("facing", "north");
-  if (f == "down")
-    return Direction::Down;
-  if (f == "up")
-    return Direction::Up;
-  if (f == "south")
-    return Direction::South;
-  if (f == "west")
-    return Direction::West;
-  if (f == "east")
-    return Direction::East;
-  return Direction::North;
-}
+Direction facing(const BlockState &s) { return directionOf(s); }
+
 std::string_view dirName(Direction d) {
   switch (d) {
   case Direction::Down:
@@ -67,8 +55,9 @@ bool base(const BlockState &s) {
 }
 BlockState moving(Direction d, bool stickyType = false) {
   return Blocks::MOVING_PISTON.defaultState()
-      .with("facing", dirName(d))
-      .with("type", stickyType ? "sticky" : "normal");
+      .with(PropertyKind::Facing, static_cast<std::uint8_t>(static_cast<Facing>(d)))
+      .with(PropertyKind::Type, stickyType ? static_cast<std::uint8_t>(PistonType::Sticky)
+                                   : static_cast<std::uint8_t>(PistonType::Normal));
 }
 using Entity = std::shared_ptr<PistonMovingBlockEntity>;
 Entity entityAt(World &w, Pos p) {
@@ -126,7 +115,7 @@ bool pistonIsPushable(World &w, Pos p, const BlockState &s, Direction d,
       s.is(Blocks::BEDROCK))
     return false;
   if (base(s))
-    return s.getView("extended", "false") != "true";
+    return !extendedOf(s);
   const auto &metadata = blockMetadata(s);
   auto reaction = s.getView("push_reaction", metadata.pushReaction);
   if (metadata.hardness == -1 || s.getView("hardness") == "-1" ||
@@ -279,8 +268,9 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
   }
   if (extending) {
     auto head = Blocks::PISTON_HEAD.defaultState()
-                    .with("facing", dirName(f))
-                    .with("type", stickyBase ? "sticky" : "normal");
+                    .with(PropertyKind::Facing, static_cast<std::uint8_t>(static_cast<Facing>(f)))
+                    .with(PropertyKind::Type, stickyBase ? static_cast<std::uint8_t>(PistonType::Sticky)
+                                              : static_cast<std::uint8_t>(PistonType::Normal));
     forgetRemoved(arm);
     w.setBlock(arm, moving(f, stickyBase), 324);
     putEntity(w, arm, head, f, true, true);
@@ -308,7 +298,7 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
 void check(World &w, Pos p, const BlockState &s) {
   auto f = facing(s);
   bool power = powered(w, p, f);
-  bool extended = s.getView("extended", "false") == "true";
+  bool extended = extendedOf(s);
   if (power && !extended) {
     PistonStructureResolver resolver(w, p, f, true);
     if (resolver.resolve())
@@ -338,7 +328,7 @@ bool pistonBlockEvent(World &w, Pos p, const BlockState &s, int type,
                       int data) {
   auto f = facing(s);
   bool power = powered(w, p, f);
-  auto extended = s.with("extended", "true");
+  auto extended = s.with(PropertyKind::Extended, std::uint8_t{1});
   if (power && (type == 1 || type == 2)) {
     w.setBlock(p, extended, 2);
     return false;
@@ -359,8 +349,8 @@ bool pistonBlockEvent(World &w, Pos p, const BlockState &s, int type,
     putEntity(w, p,
               (isSticky ? Blocks::STICKY_PISTON : Blocks::PISTON)
                   .defaultState()
-                  .with("facing", dirName(saved))
-                  .with("extended", "false"),
+                  .with(PropertyKind::Facing, static_cast<std::uint8_t>(static_cast<Facing>(saved)))
+                  .with(PropertyKind::Extended, std::uint8_t{0}),
               f, false, true);
     w.updateNeighborsAt(p, m.name());
     w.updateNeighbourShapes(p, m, 2, 512);
@@ -463,12 +453,15 @@ BlockState collisionRelatedState(const PistonMovingBlockEntity &entity) {
        entity.movedState.is(Blocks::STICKY_PISTON))) {
     auto head = Blocks::PISTON_HEAD.defaultState();
     head = head.with(
-        "facing",
-        entity.movedState.getView("facing", dirName(entity.direction)));
-    head = head.with("short", entity.progress > 0.25f ? "true" : "false");
-    head = head.with("type", entity.movedState.is(Blocks::STICKY_PISTON)
-                                 ? "sticky"
-                                 : "normal");
+        PropertyKind::Facing,
+        static_cast<std::uint8_t>(facingOf(
+            entity.movedState, static_cast<Facing>(entity.direction))));
+    head = head.with(PropertyKind::Short,
+                     entity.progress > 0.25f ? std::uint8_t{1} : std::uint8_t{0});
+    head = head.with(PropertyKind::Type,
+                     entity.movedState.is(Blocks::STICKY_PISTON)
+                         ? static_cast<std::uint8_t>(PistonType::Sticky)
+                         : static_cast<std::uint8_t>(PistonType::Normal));
     return head;
   }
   return entity.movedState;
@@ -638,8 +631,8 @@ void pistonTickBlockEntities(World &w) {
           w.setBlock(e.pos, e.movedState, 340);
           w.updateOrDestroy(e.pos, e.movedState, s, 3, 512);
         } else {
-          if (s.getView("waterlogged") == "true")
-            s = s.with("waterlogged", "false");
+          if (waterloggedOf(s))
+            s = s.with(PropertyKind::Waterlogged, std::uint8_t{0});
           if (w.traceUpdates)
             w.log.push_back({"piston_set_block", e.pos, "67"});
           w.setBlock(e.pos, s, 67);

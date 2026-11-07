@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <map>
@@ -6,6 +7,8 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#include "redstone/property.hpp"
 
 namespace redstone {
 class Block;
@@ -50,6 +53,10 @@ public:
     return detail::gStateData[value < detail::gStateCount ? value : 0u];
   }
   Id id() const { return id_; }
+  // Canonical property bit fields (shift/width per PropertyKind). Zero for the
+  // default state of a block without properties; irrelevant for states outside
+  // the block's StateDefinition, which is why lookups check isSchemaState().
+  std::uint32_t packed() const { return packed_; }
   const Block *blockOrNull() const { return block_; }
   // AbstractBlockState.getBlock: the owner reference.
   const Block &block() const;
@@ -70,22 +77,35 @@ public:
   bool hasProperty(std::string_view key) const;
   // StateHolder.setValue: transition to the registered neighbour state.
   BlockState with(std::string_view key, std::string_view value) const;
+  // Same transition through the canonical property kind: one field update on
+  // packed(), then the dense variant/id is derived from the property strides.
+  // Values outside the block's own list leave the state unchanged.
+  BlockState with(PropertyKind kind, std::uint8_t value) const;
   // Registry ids identify a state uniquely (one state per id).
   bool operator==(const BlockState &other) const { return id_ == other.id_; }
+  // Index of this state inside its block's dense variant space. States past the
+  // block's StateDefinition are the out-of-schema extension states.
+  std::uint32_t variant() const;
+  bool isSchemaState() const;
 
 private:
   friend void detail::registerBlock(Block &);
   friend std::uint32_t detail::internState(const Block *);
-  BlockState(const Block *owner, Id id) : block_(owner), id_(id) {}
-  std::uint32_t variant() const;
-  bool isSchemaState() const;
+  BlockState(const Block *owner, Id id, std::uint32_t packed = 0)
+      : block_(owner), id_(id), packed_(packed) {}
   std::string_view extensionValue(std::string_view key,
                                   std::string_view fallback) const;
   bool extensionHas(std::string_view key) const;
   std::map<std::string, std::string> extensionProperties() const;
   const Block *block_ = nullptr;
   Id id_ = 0;
+  std::uint32_t packed_ = 0;
 };
+// detail::kNullState is two uint64 words reinterpreted as a BlockState, and the
+// registry table is indexed by id, so the layout must stay two words plus the
+// packed property field inside the second word.
+static_assert(sizeof(BlockState) == 16 && alignof(BlockState) == 8,
+              "BlockState must stay 16 bytes");
 
 // ---------------------------------------------------------------------------
 // StateDefinition (net/minecraft/world/level/block/state/StateDefinition)
@@ -97,6 +117,7 @@ private:
 // ---------------------------------------------------------------------------
 class Property {
 public:
+  static constexpr std::uint8_t kAbsent = 0xFF;
   Property() = default;
   Property(std::string name, std::vector<std::string> values,
            std::string defaultValue = {});
@@ -104,6 +125,16 @@ public:
   const std::vector<std::string> &values() const { return values_; }
   std::uint32_t defaultIndex() const { return defaultIndex_; }
   bool indexOf(std::string_view value, std::uint32_t &index) const;
+  // Canonical identity and value mapping. Registration fills both: local order
+  // is the block's own declaration order, canonical order is shared by every
+  // block that uses the kind.
+  PropertyKind kind() const { return kind_; }
+  std::uint8_t canonicalValue(std::uint32_t localIndex) const {
+    return valueByLocal_[localIndex];
+  }
+  std::uint8_t localIndex(std::uint32_t canonicalValue) const {
+    return localByValue_[canonicalValue];
+  }
 
 private:
   struct ValueHash {
@@ -117,6 +148,20 @@ private:
   std::unordered_map<std::string, std::uint32_t, ValueHash, std::equal_to<>>
       valueIndex_;
   std::uint32_t defaultIndex_ = 0;
+  PropertyKind kind_ = PropertyKind::Count;
+  std::array<std::uint8_t, kMaxPropertyValue + 1> valueByLocal_{};
+  std::array<std::uint8_t, kMaxPropertyValue + 1> localByValue_{};
+};
+
+// One property's placement inside BlockState::packed(): the canonical value
+// occupies `width` bits at `shift`, and `stride` is its dense variant weight.
+struct PropertyLayout {
+  const Property *property = nullptr; // null when the block has no such kind
+  std::uint32_t stride = 0;
+  std::uint32_t mask = 0;
+  std::uint8_t shift = 0;
+  std::uint8_t width = 0;
+  std::uint8_t count = 0;
 };
 
 class StateDefinition {
@@ -139,12 +184,24 @@ public:
   std::string_view value(std::uint32_t variant, std::string_view key,
                           std::string_view fallback = {}) const;
   std::map<std::string, std::string> values(std::uint32_t variant) const;
+  // Enum path: one bit field per property, no name lookup.
+  const PropertyLayout &layout(PropertyKind kind) const {
+    return layout_[static_cast<std::size_t>(kind)];
+  }
+  // Canonical bit fields for a dense variant.
+  std::uint32_t packedOf(std::uint32_t variant) const;
+  // Replaces one property field. Returns false when the block has no such
+  // property or the canonical value is not part of this block's value list.
+  bool withPacked(std::uint32_t packed, std::uint32_t variant, PropertyKind kind,
+                  std::uint8_t value, std::uint32_t &nextVariant,
+                  std::uint32_t &nextPacked) const;
 
 private:
   Properties properties_; // sorted by property name
   std::vector<std::uint32_t> stride_;
   std::uint32_t stateCount_ = 1;
   std::uint32_t defaultVariant_ = 0;
+  std::array<PropertyLayout, kPropertyKindCount> layout_{};
 };
 
 // BlockBehaviour.Properties subset (see docs/compatibility.md).
@@ -292,6 +349,64 @@ inline BlockState Block::defaultState() const {
   return BlockState::fromId(defaultStateId_);
 }
 inline BlockState airState() { return BlockState{}; }
+
+// ---------------------------------------------------------------------------
+// Enum property accessors. Each is one shift and one mask on
+// BlockState::packed(); the string form (getView) stays for names that cross
+// the registry boundary (import/export, protocol, diagnostics).
+// `fallback` is returned for blocks that do not declare the property, matching
+// the old getView(key, fallback) behaviour.
+// ---------------------------------------------------------------------------
+inline std::uint32_t propertyValue(const BlockState &state, PropertyKind kind,
+                                   std::uint32_t fallback = 0) {
+  if (!state.isSchemaState())
+    return fallback;
+  const PropertyLayout &layout = state.block().stateDefinition().layout(kind);
+  return layout.property ? (state.packed() >> layout.shift) & layout.mask
+                         : fallback;
+}
+
+inline Facing facingOf(const BlockState &state, Facing fallback = Facing::North) {
+  return static_cast<Facing>(propertyValue(
+      state, PropertyKind::Facing, static_cast<std::uint32_t>(fallback)));
+}
+inline PistonType pistonTypeOf(const BlockState &state) {
+  return static_cast<PistonType>(propertyValue(state, PropertyKind::Type));
+}
+inline WallSide wallSideOf(const BlockState &state, PropertyKind side) {
+  return static_cast<WallSide>(propertyValue(state, side));
+}
+inline bool poweredOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Powered) != 0;
+}
+inline bool litOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Lit) != 0;
+}
+inline bool openOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Open) != 0;
+}
+inline bool waterloggedOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Waterlogged) != 0;
+}
+inline bool extendedOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Extended) != 0;
+}
+inline bool snowyOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Snowy) != 0;
+}
+inline bool unstableOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Unstable) != 0;
+}
+inline bool upOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Up) != 0;
+}
+inline bool inWallOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::InWall) != 0;
+}
+inline bool shortOf(const BlockState &state) {
+  return propertyValue(state, PropertyKind::Short) != 0;
+}
+
 // BlockBehaviour.Properties subset of a state: per-block data, no cache.
 inline const BlockMetadata &blockMetadata(const BlockState &state) {
   return state.block().metadata();

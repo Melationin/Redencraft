@@ -236,9 +236,54 @@ void inlineSectionStorage() {
     assert(threw);
   }
 }
+// The canonical bit fields must agree with the string registry for every
+// registered state, and a transition through the enum must land on exactly the
+// same state id as the same transition through the property/value names.
+void enumPropertyAccessors() {
+  std::size_t transitions = 0;
+  for (const auto &entry : blockRegistry()) {
+    const Block *block = findBlockByName(entry.name);
+    assert(block != nullptr);
+    const StateDefinition &definition = block->stateDefinition();
+    for (const BlockState &state : block->states()) {
+      assert(state.isSchemaState());
+      assert(definition.packedOf(state.variant()) == state.packed());
+      for (const Property &property : definition.properties()) {
+        const std::uint32_t canonical = propertyValue(state, property.kind());
+        const std::uint8_t local = property.localIndex(canonical);
+        assert(local != Property::kAbsent);
+        assert(property.values()[local] == state.getView(property.name()));
+        for (std::uint32_t v = 0; v < property.values().size(); ++v) {
+          const std::uint8_t target = property.canonicalValue(v);
+          assert(state.with(property.kind(), target) ==
+                 state.with(property.name(), property.values()[v]));
+          ++transitions;
+        }
+      }
+    }
+  }
+  assert(transitions > 1000); // the registry really was enumerated
+  // A property the block does not declare leaves the state untouched.
+  const BlockState air = airState();
+  assert(air.with(PropertyKind::Facing, 0) == air);
+  assert(facingOf(air) == Facing::North);
+  // Values outside the block's own list are rejected, not silently applied.
+  const BlockState gate = defaultState("oak_fence_gate");
+  assert(facingOf(gate) == Facing::North);
+  assert(gate.with(PropertyKind::Facing, static_cast<std::uint8_t>(Facing::Down)) ==
+         gate);
+  assert(gate.with(PropertyKind::Facing, static_cast<std::uint8_t>(Facing::East)) !=
+         gate);
+  // Enum accessors agree with the string accessors on a real state.
+  const BlockState observer =
+      defaultState("observer").with(PropertyKind::Powered, std::uint8_t{1});
+  assert(poweredOf(observer) && observer.getView("powered") == "true");
+  assert(directionOf(observer, Direction::South) == Direction::South);
+}
 int main() {
   sectionReadCacheLifecycle();
   inlineSectionStorage();
+  enumPropertyAccessors();
   stateViewsAndTransitions();
   addedBlockTicks();
   World w;

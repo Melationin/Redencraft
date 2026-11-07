@@ -68,13 +68,129 @@ BlockRef::BlockRef(std::string_view name) {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical property kinds and values (StateDefinition's enum path)
+// ---------------------------------------------------------------------------
+namespace {
+template <std::size_t N>
+bool lookupName(const std::string_view (&names)[N], std::string_view value,
+                std::uint8_t &out) {
+  for (std::size_t i = 0; i < N; ++i)
+    if (names[i] == value) {
+      out = static_cast<std::uint8_t>(i);
+      return true;
+    }
+  return false;
+}
+bool parseSmallNumber(std::string_view text, std::uint8_t &out) {
+  if (text.empty() || text.size() > 3)
+    return false;
+  unsigned value = 0;
+  for (char c : text) {
+    if (c < '0' || c > '9')
+      return false;
+    value = value * 10 + static_cast<unsigned>(c - '0');
+  }
+  out = static_cast<std::uint8_t>(value);
+  return true;
+}
+} // namespace
+
+bool propertyKindFromName(std::string_view name, PropertyKind &out) {
+  // Order must match PropertyKind.
+  static constexpr std::string_view names[] = {
+      "facing",   "type",     "shape",      "instrument", "note",
+      "level",    "extended", "in_wall",    "lit",        "open",
+      "powered",  "short",    "snowy",      "unstable",   "up",
+      "waterlogged", "east",  "north",      "south",      "west"};
+  static_assert(std::size(names) == kPropertyKindCount);
+  for (std::size_t i = 0; i < std::size(names); ++i)
+    if (names[i] == name) {
+      out = static_cast<PropertyKind>(i);
+      return true;
+    }
+  return false;
+}
+
+bool propertyValueFromName(PropertyKind kind, std::string_view value,
+                           std::uint8_t &out) {
+  switch (kind) {
+  case PropertyKind::Facing: {
+    static constexpr std::string_view names[] = {"down", "up",   "north",
+                                                 "south", "west", "east"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Type: {
+    static constexpr std::string_view names[] = {"normal", "sticky"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Shape: {
+    static constexpr std::string_view names[] = {
+        "north_south",     "east_west",       "ascending_east",
+        "ascending_west",  "ascending_north", "ascending_south",
+        "south_east",      "south_west",      "north_west",
+        "north_east"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Instrument: {
+    static constexpr std::string_view names[] = {
+        "harp",  "basedrum", "snare",        "hat",     "bass",
+        "flute", "bell",     "guitar",       "chime",   "xylophone",
+        "iron_xylophone",    "cow_bell",     "didgeridoo",
+        "bit",               "banjo",        "pling"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Note:
+    return parseSmallNumber(value, out) && out <= 24;
+  case PropertyKind::Level:
+    return parseSmallNumber(value, out) && out <= 15;
+  case PropertyKind::WallEast:
+  case PropertyKind::WallNorth:
+  case PropertyKind::WallSouth:
+  case PropertyKind::WallWest: {
+    static constexpr std::string_view names[] = {"none", "low", "tall"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Extended:
+  case PropertyKind::InWall:
+  case PropertyKind::Lit:
+  case PropertyKind::Open:
+  case PropertyKind::Powered:
+  case PropertyKind::Short:
+  case PropertyKind::Snowy:
+  case PropertyKind::Unstable:
+  case PropertyKind::Up:
+  case PropertyKind::Waterlogged: {
+    static constexpr std::string_view names[] = {"false", "true"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Count:
+    break;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Property / StateDefinition (net/minecraft/world/level/block/state)
 // ---------------------------------------------------------------------------
 Property::Property(std::string name, std::vector<std::string> values,
                    std::string defaultValue)
     : name_(std::move(name)), values_(std::move(values)) {
-  for (std::size_t i = 0; i < values_.size(); ++i)
+  if (values_.size() > kMaxPropertyValue + 1)
+    throw std::invalid_argument("block property has too many values: " +
+                                name_);
+  if (!propertyKindFromName(name_, kind_))
+    throw std::invalid_argument("unknown block property: " + name_);
+  valueByLocal_.fill(0);
+  localByValue_.fill(kAbsent);
+  for (std::size_t i = 0; i < values_.size(); ++i) {
     valueIndex_.emplace(values_[i], static_cast<std::uint32_t>(i));
+    std::uint8_t canonical = 0;
+    if (!propertyValueFromName(kind_, values_[i], canonical))
+      throw std::invalid_argument("unknown value '" + values_[i] +
+                                  "' for block property " + name_);
+    valueByLocal_[i] = canonical;
+    localByValue_[canonical] = static_cast<std::uint8_t>(i);
+  }
   const auto found = valueIndex_.find(defaultValue);
   defaultIndex_ = found == valueIndex_.end() ? 0 : found->second;
 }
@@ -107,6 +223,76 @@ StateDefinition::StateDefinition(Properties properties)
   for (std::size_t i = 0; i < count; ++i)
     variant += properties_[i].defaultIndex() * stride_[i];
   defaultVariant_ = variant;
+  // Canonical bit fields: property i occupies `width` bits at `shift`, where
+  // width covers the largest canonical value this block accepts. The dense
+  // variant stays independent (it is the registry id's base), so packed() and
+  // variant() are two encodings of the same combination.
+  std::uint32_t shift = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    const Property &property = properties_[i];
+    PropertyLayout &slot = layout_[static_cast<std::size_t>(property.kind())];
+    if (slot.property)
+      throw std::invalid_argument("duplicate property kind in one definition");
+    std::uint8_t maxValue = 0;
+    for (std::size_t v = 0; v < property.values().size(); ++v)
+      maxValue = std::max(
+          maxValue,
+          property.canonicalValue(static_cast<std::uint32_t>(v)));
+    std::uint8_t width = 0;
+    while ((1u << width) <= maxValue)
+      ++width;
+    slot.property = &property;
+    slot.shift = static_cast<std::uint8_t>(shift);
+    slot.width = width;
+    slot.count = static_cast<std::uint8_t>(property.values().size());
+    slot.stride = stride_[i];
+    slot.mask = (1u << width) - 1u;
+    shift += width;
+  }
+  if (shift > 32)
+    throw std::invalid_argument("block state needs more than 32 packed bits");
+}
+
+std::uint32_t StateDefinition::packedOf(std::uint32_t variant) const {
+  std::uint32_t packed = 0;
+  for (std::size_t i = 0; i < properties_.size(); ++i) {
+    const Property &property = properties_[i];
+    const PropertyLayout &slot =
+        layout_[static_cast<std::size_t>(property.kind())];
+    const std::uint32_t local =
+        (variant / stride_[i]) %
+        static_cast<std::uint32_t>(property.values().size());
+    packed |= static_cast<std::uint32_t>(property.canonicalValue(local))
+              << slot.shift;
+  }
+  return packed;
+}
+
+bool StateDefinition::withPacked(std::uint32_t packed, std::uint32_t variant,
+                                 PropertyKind kind, std::uint8_t value,
+                                 std::uint32_t &nextVariant,
+                                 std::uint32_t &nextPacked) const {
+  const PropertyLayout &slot = layout_[static_cast<std::size_t>(kind)];
+  if (!slot.property || value > kMaxPropertyValue)
+    return false;
+  const std::uint8_t local = slot.property->localIndex(value);
+  if (local == Property::kAbsent)
+    return false;
+  const std::uint32_t current = (packed >> slot.shift) & slot.mask;
+  if (current == value) {
+    nextVariant = variant;
+    nextPacked = packed;
+    return true;
+  }
+  const std::uint8_t currentLocal =
+      slot.property->localIndex(static_cast<std::uint32_t>(current));
+  // Unsigned wraparound is exact here: the result is the dense variant of the
+  // target combination.
+  nextVariant = variant + (static_cast<std::uint32_t>(local) -
+                           static_cast<std::uint32_t>(currentLocal)) *
+                              slot.stride;
+  nextPacked = packed ^ ((current ^ value) << slot.shift);
+  return true;
 }
 
 const Property *StateDefinition::find(std::string_view name) const {
@@ -260,7 +446,8 @@ void registerBlock(Block &block) {
   table.blocks.push_back(&block);
   table.byName.emplace(std::string_view(block.name_), &block);
   for (std::uint32_t variant = 0; variant < block.stateCount_; ++variant)
-    table.states.push_back(BlockState(&block, block.firstState_ + variant));
+    table.states.push_back(BlockState(&block, block.firstState_ + variant,
+                                      block.definition_.packedOf(variant)));
   gStateData = table.states.data();
   gStateCount = static_cast<std::uint32_t>(table.states.size());
 }
@@ -364,6 +551,19 @@ BlockState BlockState::with(std::string_view key,
   const auto id = detail::internState(block_);
   detail::tables().extensions.emplace(id, Extension{std::move(properties)});
   return BlockState(block_, id);
+}
+
+BlockState BlockState::with(PropertyKind kind, std::uint8_t value) const {
+  if (!block_ || !isSchemaState())
+    return *this; // extension states carry no packed layout
+  std::uint32_t nextVariant = 0;
+  std::uint32_t nextPacked = 0;
+  if (!block_->stateDefinition().withPacked(packed_, variant(), kind, value,
+                                            nextVariant, nextPacked))
+    return *this;
+  if (nextVariant == variant())
+    return *this;
+  return BlockState(block_, block_->firstState() + nextVariant, nextPacked);
 }
 
 std::vector<BlockState> Block::states() const {

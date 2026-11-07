@@ -22,6 +22,13 @@ enum class Direction { Down, Up, North, South, West, East };
 Direction opposite(Direction d);
 Direction directionFromString(std::string_view s);
 std::string directionName(Direction d);
+// Facing and Direction share the Down..East order, so the property field can be
+// reinterpreted instead of re-parsed from its name.
+inline Direction directionOf(const BlockState &state,
+                             Direction fallback = Direction::North) {
+  return static_cast<Direction>(
+      facingOf(state, static_cast<Facing>(fallback)));
+}
 // Namespaced resource location with the default "minecraft:" namespace.
 std::string canonicalName(std::string name);
 struct Pos {

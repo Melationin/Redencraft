@@ -160,7 +160,7 @@ public:
         shape = RailShape::AscendingWest;
     }
     updateConnections(*shape);
-    state_ = state_.with("shape", railShapeName(*shape));
+    state_ = state_.with(PropertyKind::Shape, static_cast<std::uint8_t>(*shape));
     if (first || world_.getBlock(pos_) != state_) {
       world_.setBlock(pos_, state_, 3);
       for (auto connection : connections_) {
@@ -242,7 +242,7 @@ private:
       if (isRailBlock(world_.getBlock(west.relative(Direction::Up))))
         shape = RailShape::AscendingWest;
     }
-    state_ = state_.with("shape", railShapeName(shape));
+    state_ = state_.with(PropertyKind::Shape, static_cast<std::uint8_t>(shape));
     world_.setBlock(pos_, state_, 3);
   }
   bool hasNeighborRail(Pos pos) {
@@ -410,7 +410,7 @@ bool findPoweredRailSignal(World &world, Pos pos, const BlockState &state,
          myShape == RailShape::AscendingEast ||
          myShape == RailShape::AscendingWest))
       return false;
-    if (checkState.getView("powered", "false") != "true")
+    if (!poweredOf(checkState))
       return false;
     return world.hasNeighborSignal(check) ||
            findPoweredRailSignal(world, check, checkState, forward,
@@ -425,7 +425,7 @@ bool findPoweredRailSignal(World &world, Pos pos, const BlockState &state,
 void detectorCheckPressed(World &world, Pos pos, const BlockState &state) {
   if (!railCanSurvive(world, pos, state))
     return;
-  bool wasPressed = state.getView("powered", "false") == "true";
+  bool wasPressed = poweredOf(state);
   Aabb search{pos.x + 0.2, double(pos.y), pos.z + 0.2, pos.x + 0.8,
               pos.y + 0.8, pos.z + 0.8};
   bool shouldBePressed = false;
@@ -435,7 +435,7 @@ void detectorCheckPressed(World &world, Pos pos, const BlockState &state) {
       break;
     }
   if (shouldBePressed != wasPressed) {
-    auto next = state.with("powered", shouldBePressed ? "true" : "false");
+    auto next = state.with(PropertyKind::Powered, shouldBePressed ? std::uint8_t{1} : std::uint8_t{0});
     world.setBlock(pos, next, 3);
     RailState rail(world, pos, next);
     for (auto connection : rail.connections()) {
@@ -450,12 +450,12 @@ void detectorCheckPressed(World &world, Pos pos, const BlockState &state) {
     world.scheduleTick(pos, state.name(), 20);
 }
 void poweredUpdateState(World &world, Pos pos, const BlockState &state) {
-  bool powered = state.getView("powered", "false") == "true";
+  bool powered = poweredOf(state);
   bool shouldPower = world.hasNeighborSignal(pos) ||
                      findPoweredRailSignal(world, pos, state, true, 0) ||
                      findPoweredRailSignal(world, pos, state, false, 0);
   if (shouldPower != powered) {
-    world.setBlock(pos, state.with("powered", shouldPower ? "true" : "false"),
+    world.setBlock(pos, state.with(PropertyKind::Powered, shouldPower ? std::uint8_t{1} : std::uint8_t{0}),
                    3);
     world.updateNeighborsAt(pos.relative(Direction::Down), state.name());
     if (ascending(railShapeOf(state)))
@@ -517,7 +517,7 @@ bool railShapeIsSlope(RailShape shape) {
          shape == RailShape::AscendingSouth;
 }
 RailShape railShapeOf(const BlockState &state) {
-  return railShapeFromName(state.getView("shape", "north_south"));
+  return static_cast<RailShape>(propertyValue(state, PropertyKind::Shape, static_cast<std::uint32_t>(RailShape::NorthSouth)));
 }
 bool railIsStraight(const BlockState &state) {
   return !state.is(Blocks::RAIL);
@@ -606,7 +606,7 @@ void railScheduledTick(World &world, Pos pos, const BlockState &state) {
 }
 int railSignal(const BlockState &state) {
   return state.is(Blocks::DETECTOR_RAIL) &&
-                 state.getView("powered", "false") == "true"
+                 poweredOf(state)
              ? 15
              : 0;
 }
@@ -615,7 +615,7 @@ BlockState railPlacementState(World &world, Pos pos,
   auto state = defaultState("rail");
   bool eastWest = horizontalFacing == Direction::East ||
                   horizontalFacing == Direction::West;
-  state = state.with("shape", eastWest ? "east_west" : "north_south");
+  state = state.with(PropertyKind::Shape, static_cast<std::uint8_t>(eastWest ? RailShape::EastWest : RailShape::NorthSouth));
   (void)world;
   (void)pos;
   return state;
@@ -623,7 +623,7 @@ BlockState railPlacementState(World &world, Pos pos,
 void railEntityInside(World &world, Pos pos, const BlockState &state,
                       Entity &entity) {
   if (state.is(Blocks::DETECTOR_RAIL) &&
-      state.getView("powered", "false") != "true" &&
+      !poweredOf(state) &&
       dynamic_cast<Minecart *>(&entity))
     detectorCheckPressed(world, pos, state);
 }

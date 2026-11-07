@@ -26,10 +26,9 @@ constexpr std::array<Direction, 6> shapeOrder{
     Direction::South, Direction::Down, Direction::Up};
 std::string canonical(std::string n) { return canonicalName(std::move(n)); }
 bool fittingBase(const BlockState &head, const BlockState &base) {
-  return (head.getView("type", "normal") == "sticky" ? base.is(Blocks::STICKY_PISTON)
-                                                 : base.is(Blocks::PISTON)) &&
-         base.getView("extended", "false") == "true" &&
-         base.getView("facing", "north") == head.getView("facing", "north");
+  return (pistonTypeOf(head) == PistonType::Sticky ? base.is(Blocks::STICKY_PISTON)
+                                                   : base.is(Blocks::PISTON)) &&
+         extendedOf(base) && facingOf(base) == facingOf(head);
 }
 bool piston(const BlockState &s) {
   return s.is(Blocks::PISTON) || s.is(Blocks::STICKY_PISTON);
@@ -1050,10 +1049,10 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
     if (state.is(Blocks::SAND) && !old.sameBlock(state))
       scheduleTick(p, state.block(), 2);
     if (state.is(Blocks::OBSERVER) && !old.sameBlock(state) &&
-        state.getView("powered", "false") == "true" &&
+        poweredOf(state) &&
         !hasScheduledTick(p, state.block())) {
-      setBlock(p, state.with("powered", "false"), 18);
-      observerNotify(p, state.with("powered", "false"));
+      setBlock(p, state.with(PropertyKind::Powered, std::uint8_t{0}), 18);
+      observerNotify(p, state.with(PropertyKind::Powered, std::uint8_t{0}));
     }
     if (state.is(Blocks::TNT) && !old.sameBlock(state) &&
         hasNeighborSignal(p) && primeTntBlock(p)) {
@@ -1111,7 +1110,7 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
   if (isDeadCoralFan(state)) {
     const auto supportDirection =
         isDeadCoralWallFan(state)
-            ? opposite(directionFromString(state.getView("facing", "north")))
+            ? opposite(directionOf(state))
             : Direction::Down;
     if (direction == supportDirection && !coralCanSurvive(*this, p, state))
       return airState();
@@ -1120,10 +1119,10 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
     const bool snowy = neighbor.is(Blocks::SNOW) ||
                        neighbor.is(Blocks::SNOW_BLOCK) ||
                        neighbor.is(Blocks::POWDER_SNOW);
-    return state.with("snowy", snowy ? "true" : "false");
+    return state.with(PropertyKind::Snowy, snowy ? std::uint8_t{1} : std::uint8_t{0});
   }
   if (isFenceGate(state)) {
-    const auto facing = directionFromString(state.getView("facing", "north"));
+    const auto facing = directionOf(state);
     const bool facingZ = facing == Direction::North || facing == Direction::South;
     const bool directionX = direction == Direction::East || direction == Direction::West;
     const bool directionZ = direction == Direction::North || direction == Direction::South;
@@ -1138,16 +1137,16 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
     return wallUpdateShape(*this, p, state, direction, neighbor);
   if (state.is(Blocks::PISTON_HEAD) &&
       opposite(direction) ==
-          directionFromString(state.getView("facing", "north"))) {
+          directionOf(state)) {
     const auto base = getBlock(neighborPos);
     if (!fittingBase(state, base) &&
         !(base.is(Blocks::MOVING_PISTON) &&
-          base.getView("facing", "north") == state.getView("facing", "north")))
+          facingOf(base) == facingOf(state)))
       return airState();
   }
   if (state.is(Blocks::OBSERVER) &&
-      directionFromString(state.getView("facing", "south")) == direction &&
-      state.getView("powered", "false") == "false" &&
+      directionOf(state, Direction::South) == direction &&
+      !poweredOf(state) &&
       !hasScheduledTick(p, state.block()))
     scheduleTick(p, state.block(), 2);
   if (state.is(Blocks::NOTE_BLOCK) &&
@@ -1216,16 +1215,16 @@ void World::updateIndirectNeighbourShapes(
 void World::affectNeighborsAfterRemoval(Pos p, const BlockState &state, bool) {
   if (state.is(Blocks::PISTON_HEAD)) {
     auto q =
-        p.relative(opposite(directionFromString(state.getView("facing", "north"))));
+        p.relative(opposite(directionOf(state)));
     if (fittingBase(state, getBlock(q))) {
       for (const auto &drop : blockDrops(getBlock(q)))
         spawnItem(q, drop.id, drop.count);
       setBlock(q, airState(), 3);
     }
   }
-  if (state.is(Blocks::OBSERVER) && state.getView("powered", "false") == "true" &&
+  if (state.is(Blocks::OBSERVER) && poweredOf(state) &&
       hasScheduledTick(p, state.block()))
-    observerNotify(p, state.with("powered", "false"));
+    observerNotify(p, state.with(PropertyKind::Powered, std::uint8_t{0}));
 }
 void World::neighborChanged(Pos p, const BlockRef &source) {
   Update u{};
@@ -1342,43 +1341,48 @@ void World::executeNeighbor(Pos p, const BlockState &state,
   if (piston(state))
     pistonNeighborChanged(*this, p, state);
   else if (state.is(Blocks::PISTON_HEAD)) {
-    auto d = directionFromString(state.getView("facing", "north"));
+    auto d = directionOf(state);
     auto basePos = p.relative(opposite(d));
     auto base = getBlock(basePos);
     if (fittingBase(state, base) ||
-        (base.is(Blocks::MOVING_PISTON) &&
-         base.getView("facing", "north") == state.getView("facing", "north")))
+        (base.is(Blocks::MOVING_PISTON) && facingOf(base) == facingOf(state)))
       neighborChanged(basePos, source.str());
   } else if (state.is(Blocks::TNT) && hasNeighborSignal(p) && tntExplodes) {
     primeTntBlock(p);
   } else if (isRailBlock(state)) {
     railNeighborChanged(*this, p, state, source, movedByPiston);
   } else if (state.is(Blocks::REDSTONE_LAMP)) {
-    const bool lit = state.getView("lit", "false") == "true";
+    const bool lit = litOf(state);
     if (lit != hasNeighborSignal(p)) {
       if (lit)
         scheduleTick(p, state.block(), 4);
       else
-        setBlock(p, state.with("lit", "true"), 2);
+        setBlock(p, state.with(PropertyKind::Lit, std::uint8_t{1}), 2);
     }
   } else if (isFenceGate(state)) {
     const bool signal = hasNeighborSignal(p);
-    const bool powered = state.getView("powered", "false") == "true";
+    const bool powered = poweredOf(state);
     if (signal != powered) {
-      setBlock(p, state.with("powered", signal ? "true" : "false")
-                           .with("open", signal ? "true" : "false"), 2);
-      if ((state.getView("open", "false") == "true") != signal) {
+      setBlock(p,
+               state.with(PropertyKind::Powered,
+                          signal ? std::uint8_t{1} : std::uint8_t{0})
+                   .with(PropertyKind::Open,
+                         signal ? std::uint8_t{1} : std::uint8_t{0}),
+               2);
+      if (openOf(state) != signal) {
         (void)random.nextFloat();
         // TODO: fence gate sound and BLOCK_OPEN/BLOCK_CLOSE game events.
       }
     }
   } else if (state.is(Blocks::NOTE_BLOCK)) {
-    bool signal = hasNeighborSignal(p),
-         powered = state.getView("powered", "false") == "true";
+    bool signal = hasNeighborSignal(p), powered = poweredOf(state);
     if (signal != powered) {
       if (signal && getBlock(p.relative(Direction::Up)).isAir())
         blockEvent(p, state.block(), 0, 0);
-      setBlock(p, state.with("powered", signal ? "true" : "false"), 3);
+      setBlock(p,
+               state.with(PropertyKind::Powered,
+                          signal ? std::uint8_t{1} : std::uint8_t{0}),
+               3);
     }
   }
 }
@@ -1386,8 +1390,8 @@ int World::getSignal(Pos p, Direction d) const {
   auto s = getBlock(p);
   if (s.is(Blocks::REDSTONE_BLOCK))
     return 15;
-  if (s.is(Blocks::OBSERVER) && s.getView("powered", "false") == "true" &&
-      directionFromString(s.getView("facing", "south")) == d)
+  if (s.is(Blocks::OBSERVER) && poweredOf(s) &&
+      directionOf(s, Direction::South) == d)
     return 15;
   if (isRailBlock(s) && railSignal(s) > 0)
     return railSignal(s);
@@ -1396,14 +1400,13 @@ int World::getSignal(Pos p, Direction d) const {
     for (auto n : neighborOrder) {
       auto q = p.relative(n);
       auto x = getBlock(q);
-      if (x.is(Blocks::OBSERVER) && x.getView("powered", "false") == "true" &&
-          directionFromString(x.getView("facing", "south")) == n)
+      if (x.is(Blocks::OBSERVER) && poweredOf(x) &&
+          directionOf(x, Direction::South) == n)
         return 15;
       // DetectorRailBlock.getDirectSignal returns 15 only toward UP. With the
       // SignalGetter convention (direction from the conductor to the source),
       // this reaches the block below a powered detector rail.
-      if (n == Direction::Up && x.is(Blocks::DETECTOR_RAIL) &&
-          x.getView("powered", "false") == "true")
+      if (n == Direction::Up && x.is(Blocks::DETECTOR_RAIL) && poweredOf(x))
         return 15;
     }
   }
@@ -1475,7 +1478,7 @@ std::vector<BlockEvent> World::pendingBlockEvents() const {
   return blockEventQueue_->snapshot();
 }
 void World::observerNotify(Pos p, const BlockState &s) {
-  auto d = directionFromString(s.getView("facing", "south"));
+  auto d = directionOf(s, Direction::South);
   auto q = p.relative(opposite(d));
   neighborChanged(q, s.block());
   updateNeighborsAt(q, s.block(), d);
@@ -1487,15 +1490,15 @@ void World::runScheduled(const ScheduledTick &t) {
   if (t.block.block() != s.blockOrNull())
     return;
   if (s.is(Blocks::OBSERVER)) {
-    bool on = s.getView("powered", "false") == "true";
-    setBlock(t.pos, s.with("powered", on ? "false" : "true"), 2);
+    bool on = poweredOf(s);
+    setBlock(t.pos, s.with(PropertyKind::Powered, on ? std::uint8_t{0} : std::uint8_t{1}), 2);
     if (!on)
       scheduleTick(t.pos, s.block(), 2);
     observerNotify(t.pos, s);
   } else if (isRailBlock(s)) {
     railScheduledTick(*this, t.pos, s);
   } else if (s.is(Blocks::REDSTONE_LAMP)) {
-    if (s.getView("lit", "false") == "true" && !hasNeighborSignal(t.pos))
+    if (litOf(s) && !hasNeighborSignal(t.pos))
       setBlock(t.pos, s.with("lit", "false"), 2);
   } else if (s.is(Blocks::SAND)) {
     // TODO: FIRE tags and replaceable blocks outside the implemented registry.

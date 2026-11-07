@@ -168,11 +168,11 @@ bool canSurvive(World &world, Pos pos, const BlockState &state) {
   if (isDeadCoralFan(state))
     return coralCanSurvive(world, pos, state);
   if (state.is(Blocks::PISTON_HEAD)) {
-    auto d = directionFromString(state.getView("facing", "north"));
+    auto d = directionOf(state);
     auto base = world.getBlock(pos.relative(opposite(d)));
     return base.is(Blocks::PISTON) || base.is(Blocks::STICKY_PISTON) ||
            (base.is(Blocks::MOVING_PISTON) &&
-            base.getView("facing", "north") == state.getView("facing", "north"));
+            facingOf(base) == facingOf(state));
   }
   if (isRailBlock(state))
     return railCanSurvive(world, pos, state);
@@ -276,7 +276,7 @@ std::vector<ItemStack> blockDrops(const BlockState &state) {
   if (name == "minecraft:glass" || isDeadCoralFan(state))
     return {}; // Silk Touch only; the empty tool used here never has it.
   if (name == "minecraft:tnt" &&
-      state.getView("unstable", "false") == "true")
+      unstableOf(state))
     return {};
   if (name == "minecraft:grass_block")
     return {itemStack("minecraft:dirt", 1)};
@@ -538,7 +538,7 @@ double Entity::fluidHeight(World &world, bool lava) const {
         auto state = world.getBlock({x, y, z});
         bool water =
             state.is(Blocks::WATER) ||
-            state.getView("waterlogged", "false") == "true";
+            waterloggedOf(state);
         bool lavaState = state.is(Blocks::LAVA);
         if ((lava && lavaState) || (!lava && water)) {
           int level = 0;
@@ -942,7 +942,7 @@ void Minecart::tickOldBehavior(World &world) {
     moveAlongTrack(world);
     if (state.is(Blocks::ACTIVATOR_RAIL))
       activateMinecart(world, railPos,
-                       state.getView("powered", "false") == "true");
+                       poweredOf(state));
   } else
     comeOffTrack(world);
   applyEffectsFromBlocks(world);
@@ -984,7 +984,7 @@ void Minecart::moveAlongTrack(World &world) {
   y = pos.y;
   bool powerTrack = false, haltTrack = false;
   if (state.is(Blocks::POWERED_RAIL)) {
-    powerTrack = state.getView("powered", "false") == "true";
+    powerTrack = poweredOf(state);
     haltTrack = !powerTrack;
   }
   double slideSpeed = 0.0078125;
@@ -1592,7 +1592,7 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
           const auto state = getBlock(pos);
           const bool fluid =
               isLiquidBlock(state) ||
-              state.getView("waterlogged", "false") == "true";
+              waterloggedOf(state);
           const float blast = static_cast<float>(std::max(
               static_cast<double>(blockMetadata(state).explosionResistance),
               fluid ? 100.0 : 0.0));
