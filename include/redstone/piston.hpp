@@ -1,6 +1,7 @@
 #pragma once
 #include "redstone/engine.hpp"
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace redstone {
@@ -12,8 +13,9 @@ struct PistonMovingBlockEntity {
   bool source;
   float progress = 0, progressO = 0;
   long long lastTicked = -1;
-  // Cleared when the entity leaves World.pistonEntities, so the ticker slot
-  // sweep does not need a map lookup per entity per tick.
+  // BlockEntity.removed: cleared when this entity is replaced at its position
+  // or removed from World.pistonEntities. The tick pass reads it instead of
+  // looking the position up again.
   bool live = true;
   // PistonMovingBlockEntity.getMovementDirection / getExtendedProgress.
   Direction movementDirection() const {
@@ -27,7 +29,7 @@ class PistonStructureResolver {
 public:
   PistonStructureResolver(World &, Pos, Direction, bool);
   bool resolve();
-  const std::vector<Pos> &toPush() const { return push_; }
+  std::span<const Pos> toPush() const { return {push_.data(), pushCount_}; }
   const std::vector<Pos> &toDestroy() const { return destroy_; }
 
 private:
@@ -37,7 +39,10 @@ private:
   Pos piston_, start_;
   Direction facing_, movement_;
   bool extending_;
-  std::vector<Pos> push_, destroy_;
+  // PistonStructureResolver.PUSH_LIMIT: checked before every insertion.
+  std::array<Pos, 12> push_;
+  std::size_t pushCount_ = 0;
+  std::vector<Pos> destroy_;
 };
 bool pistonIsPushable(World &, Pos, const BlockState &, Direction, bool,
                       Direction);

@@ -257,7 +257,7 @@ Uuid offlineUuid(std::string_view name) {
 Session::Session(World &world, const ProtocolData &data, ServerOptions options)
     : world_(world), data_(data), options_(std::move(options)),
       position_(options_.spawn) {
-  options_.viewDistance = std::clamp(options_.viewDistance, 2, 8);
+  options_.viewDistance = std::clamp(options_.viewDistance, 2, maxViewDistance);
   availableChunks_.insert(options_.chunks.begin(), options_.chunks.end());
   if (availableChunks_.size() > 64)
     chunksPerBatch_ = chunkBatchLimit_ = 2;
@@ -266,12 +266,19 @@ void Session::packet(int id, const Writer &payload) {
   if (closed())
     return;
   // Framing is a full payload copy; leave it to the writer thread.
-  output_.push_back(OutPacket{payload.data, id, {}});
+  enqueue(OutPacket{payload.data, id, {}});
 }
-void Session::queue(Bytes bytes) {
+void Session::packet(int id, Writer &&payload) {
+  if (!closed())
+    enqueue(OutPacket{std::move(payload.data), id, {}});
+}
+void Session::enqueue(OutPacket item) {
   if (closed())
     return;
-  if (outputBytes_ + bytes.size() > 16 * 1024 * 1024) {
+  const std::size_t charge = outPacketCharge(item);
+  if (output_.size() >= maxQueuedOutputPackets ||
+      charge > maxQueuedOutputBytes ||
+      outputBytes_ > maxQueuedOutputBytes - charge) {
     output_.clear();
     outputBytes_ = 0;
     error_ = "Connection output backlog exceeded";
@@ -280,18 +287,25 @@ void Session::queue(Bytes bytes) {
       diagnostic(error_);
     return;
   }
-  outputBytes_ += bytes.size();
-  output_.push_back(OutPacket{std::move(bytes), -1, {}});
+  outputBytes_ += charge;
+  output_.push_back(std::move(item));
 }
-void Session::queueDeferred(std::function<Bytes()> producer) {
-  if (closed())
-    return;
-  output_.push_back(OutPacket{{}, -1, std::move(producer)});
+void Session::queue(Bytes bytes) {
+  enqueue(OutPacket{std::move(bytes), -1, {}});
+}
+void Session::queueDeferred(std::function<Bytes()> producer,
+                            std::size_t retainedBytes) {
+  enqueue(OutPacket{{}, -1, std::move(producer), retainedBytes});
 }
 void Session::send(std::string_view name, const Writer &payload) {
   if (closed())
     return;
   packet(data_.packet(phaseName(phase_), "clientbound", name), payload);
+}
+void Session::send(std::string_view name, Writer &&payload) {
+  if (!closed())
+    packet(data_.packet(phaseName(phase_), "clientbound", name),
+           std::move(payload));
 }
 std::vector<OutPacket> Session::takeOutputItems() {
   outputBytes_ = 0;
@@ -511,7 +525,7 @@ void Session::join() {
   out.varInt(1);
   positionPacket(out, position_, {}, yaw_, pitch_);
   send("player_position", out);
-  syncEntities();
+  broadcastEntities();
   // TODO: recipes, commands, world clocks, achievements, player avatars and
   // player physics/pushes. This endpoint is a creative editor of loaded chunks.
 }
@@ -569,29 +583,30 @@ void Session::flushBlockUpdates() {
       i = j;
       continue;
     }
-    std::vector<std::pair<std::uint16_t, std::int32_t>> entries;
-    entries.reserve(j - i);
-    for (std::size_t k = i; k < j; ++k) {
-      const auto local = static_cast<std::uint16_t>(keys[k] & 0xfff);
-      const Pos p = unpackSectionBlock(section, local);
-      if (!hasChunk(p))
-        continue;
+    // Every position in a section belongs to the same chunk.
+    if (hasChunk(unpackSectionBlock(section, static_cast<std::uint16_t>(keys[i] & 0xfff)))) {
+      Writer out;
+      out.i64(section);
+      out.varInt(static_cast<std::int32_t>(j - i));
       try {
-        entries.emplace_back(local, data_.registry.stateId(world_.getBlock(p)));
+        for (std::size_t k = i; k < j; ++k) {
+          const auto local = static_cast<std::uint16_t>(keys[k] & 0xfff);
+          const auto stateId = data_.registry.stateId(
+              world_.getBlock(unpackSectionBlock(section, local)));
+          out.varLong((static_cast<std::int64_t>(stateId) << 12) | local);
+        }
       } catch (const ProtocolError &) {
         disconnect("Unsupported block state for protocol 775");
         return;
       }
-    }
-    if (!entries.empty()) {
-      Writer out;
-      out.i64(section);
-      out.varInt(static_cast<std::int32_t>(entries.size()));
-      for (const auto &[local, stateId] : entries)
-        out.varLong((static_cast<std::int64_t>(stateId) << 12) | local);
-      send("section_blocks_update", out);
+      send("section_blocks_update", std::move(out));
     }
     i = j;
+  }
+  // Reuse capacity unless a callback recorded another change during broadcast.
+  if (changedBlocks_.empty()) {
+    keys.clear();
+    changedBlocks_.swap(keys);
   }
 }
 void Session::sendBlockUpdate(Pos p) {
@@ -601,7 +616,7 @@ void Session::sendBlockUpdate(Pos p) {
     Writer out;
     out.position(p);
     out.varInt(data_.registry.stateId(world_.getBlock(p)));
-    send("block_update", out);
+    send("block_update", std::move(out));
   } catch (const ProtocolError &) {
     disconnect("Unsupported block state for protocol 775");
   }
@@ -619,7 +634,7 @@ void Session::blockEvent(const BlockEvent &event) {
   out.u8(static_cast<std::uint8_t>(event.type));
   out.u8(static_cast<std::uint8_t>(event.data));
   out.varInt(block->second);
-  send("block_event", out);
+  send("block_event", std::move(out));
 }
 void Session::fallingBlockLanded(int entityId, Pos pos, const BlockState &) {
   // FallingBlockEntity.sendToTrackingPlayers precedes discard. Ordinary chunk
@@ -741,7 +756,20 @@ void Session::useItemOn(Reader &in) {
   const auto old = world_.getBlock(clicked);
   const Pos target = isReplaceable(old) ? clicked : clicked.relative(face);
   const auto held = inventory_[hand ? 40 : selectedSlot_];
-  if (canInteract(clicked) && !sneaking_ &&
+  if (canInteract(clicked) && !sneaking_ && isFenceGate(old)) {
+    auto next = old;
+    if (old.getView("open", "false") == "true") {
+      next = next.with("open", "false");
+    } else {
+      const auto playerFacing = horizontal(yaw_);
+      if (directionFromString(old.getView("facing", "north")) == opposite(playerFacing))
+        next = next.with("facing", directionName(playerFacing));
+      next = next.with("open", "true");
+    }
+    world_.setBlock(clicked, next, 10);
+    (void)world_.random.nextFloat();
+    // TODO: fence gate sound and BLOCK_OPEN/BLOCK_CLOSE game events.
+  } else if (canInteract(clicked) && !sneaking_ &&
       old.is(Blocks::NOTE_BLOCK)) {
     auto tuned = old.with(
         "note", std::to_string((std::stoi(old.get("note", "0")) + 1) % 25));
@@ -791,6 +819,12 @@ void Session::useItemOn(Reader &in) {
             break;
           }
         }
+      } else if (isFenceGate(state)) {
+        const bool powered = world_.hasNeighborSignal(target);
+        state = state.with("facing", directionName(horizontal(yaw_)))
+                     .with("open", powered ? "true" : "false")
+                     .with("powered", powered ? "true" : "false");
+        state = world_.updateFromNeighbourShapes(target, state);
       } else if (state.hasProperty("facing")) {
         const auto look = lookingDirections(yaw_, pitch_)[0];
         state = state.with("facing",
@@ -999,15 +1033,18 @@ void Session::sendChunkBatch() {
     // Snapshot on the tick thread (the world is not thread safe), then let the
     // writer thread run the palette/bit packing. The batch-start ordering is
     // preserved because queue items are drained in order.
-    ChunkSnapshot snapshot = world_.snapshotChunk(x, z);
+    auto snapshot = prepareChunkSnapshot(world_.snapshotChunk(x, z), data_.registry);
     for (const auto &section : snapshot.sections)
       bytes += section.palette.size() * sizeof(BlockState::Id) +
                section.indices8.size() + section.indices16.size() * 2 + 64;
     const auto &registry = data_.registry;
+    const auto retainedBytes = snapshot.retainedBytes();
     queueDeferred([snapshot = std::move(snapshot), chunkPacket, x, z,
                    &registry]() {
       return frame(chunkPacket, encodeChunk(snapshot, x, z, registry));
-    });
+    }, retainedBytes);
+    if (closed())
+      return;
     sentChunks_.emplace(x, z);
     ++count;
   }
@@ -1016,14 +1053,14 @@ void Session::sendChunkBatch() {
   send("chunk_batch_finished", out);
   awaitingChunkBatch_ = true;
 }
-void Session::sendTickTime(double milliseconds, std::int64_t tick) {
+void Session::sendTickTime(double milliseconds, std::int64_t tick, std::size_t samples) {
   if (phase_ != Phase::Play || !std::isfinite(milliseconds) || milliseconds < 0)
     return;
   try {
     std::ostringstream text;
     text.imbue(std::locale::classic());
     text << "Tick " << tick << ": " << std::fixed << std::setprecision(3)
-         << milliseconds << " ms";
+         << milliseconds << " ms (1s avg, " << samples << " ticks)";
     Writer out;
     // ComponentSerialization accepts a network NBT StringTag for literal text.
     nbtText(out, text.str());
@@ -1047,7 +1084,7 @@ void Session::sendEntitySpawn(const Entity &e, TrackedEntity &tracked) {
   out.u8(0);
   const auto *falling = dynamic_cast<const FallingBlockEntity *>(&e);
   out.varInt(falling ? data_.registry.stateId(falling->blockState) : 0);
-  send("add_entity", out);
+  send("add_entity", std::move(out));
 
   // ServerEntity.sendPairingData: non-default synced data goes out once, with
   // the spawn, instead of on every update tick.
@@ -1070,7 +1107,7 @@ void Session::sendEntitySpawn(const Entity &e, TrackedEntity &tracked) {
   }
   if (hasValues) {
     values.u8(255);
-    send("set_entity_data", values);
+    send("set_entity_data", std::move(values));
   }
 
   tracked.base = e.position;
@@ -1125,7 +1162,7 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
       out.f32(e.yaw);
       out.f32(e.pitch);
       out.bool_(e.onGround);
-      send("entity_position_sync", out);
+      send("entity_position_sync", std::move(out));
       sentPosition = sentRotation = true;
     } else if (position && rotationChanged) {
       Writer out;
@@ -1136,7 +1173,7 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
       out.u8(yRot);
       out.u8(xRot);
       out.bool_(e.onGround);
-      send("move_entity_pos_rot", out);
+      send("move_entity_pos_rot", std::move(out));
       sentPosition = sentRotation = true;
     } else if (position) {
       Writer out;
@@ -1145,7 +1182,7 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
       out.i16(static_cast<std::int16_t>(ya));
       out.i16(static_cast<std::int16_t>(za));
       out.bool_(e.onGround);
-      send("move_entity_pos", out);
+      send("move_entity_pos", std::move(out));
       sentPosition = true;
     } else if (rotationChanged) {
       Writer out;
@@ -1153,7 +1190,7 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
       out.u8(yRot);
       out.u8(xRot);
       out.bool_(e.onGround);
-      send("move_entity_rot", out);
+      send("move_entity_rot", std::move(out));
       sentRotation = true;
     }
     if (sentPosition)
@@ -1167,7 +1204,7 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
       Writer out;
       out.varInt(e.id);
       out.u8(headRot);
-      send("rotate_head", out);
+      send("rotate_head", std::move(out));
       tracked.headRot = headRot;
     }
   }
@@ -1177,6 +1214,7 @@ void Session::sendEntityChanges(const Entity &e, TrackedEntity &tracked) {
 void Session::syncEntities() {
   // ChunkMap.TrackedEntity only updates entities inside the player's tracking
   // view; the entity section storage makes that a small per-column scan.
+  ++syncGeneration_;
   std::vector<Entity *> candidates;
   if (chunkCenter_) {
     const int range = options_.viewDistance;
@@ -1198,32 +1236,72 @@ void Session::syncEntities() {
         !sentChunks_.contains(
             {chunkCoord(e.position.x), chunkCoord(e.position.z)}))
       continue;
-    const auto tracked = trackedEntities_.find(e.id);
-    if (tracked == trackedEntities_.end()) {
-      TrackedEntity state;
-      sendEntitySpawn(e, state);
-      state.lastSeenTick = connectionTicks_;
-      trackedEntities_.emplace(e.id, state);
+    const auto [tracked, inserted] = trackedEntities_.try_emplace(e.id);
+    if (inserted) {
+      sendEntitySpawn(e, tracked->second);
+      tracked->second.lastSeenGeneration = syncGeneration_;
     } else {
-      tracked->second.lastSeenTick = connectionTicks_;
+      tracked->second.lastSeenGeneration = syncGeneration_;
       sendEntityChanges(e, tracked->second);
     }
   }
   Writer removed;
   int count = 0;
   for (const auto &[id, tracked] : trackedEntities_)
-    if (tracked.lastSeenTick != connectionTicks_)
+    if (tracked.lastSeenGeneration != syncGeneration_)
       ++count;
   if (count) {
     removed.varInt(count);
     for (const auto &[id, tracked] : trackedEntities_)
-      if (tracked.lastSeenTick != connectionTicks_)
+      if (tracked.lastSeenGeneration != syncGeneration_)
         removed.varInt(id);
-    send("remove_entities", removed);
+    send("remove_entities", std::move(removed));
   }
   std::erase_if(trackedEntities_, [&](const auto &entry) {
-    return entry.second.lastSeenTick != connectionTicks_;
+    return entry.second.lastSeenGeneration != syncGeneration_;
   });
+}
+void Session::broadcastEntities() {
+  if (phase_ != Phase::Play)
+    return;
+  try {
+    syncEntities();
+  } catch (const ProtocolError &) {
+    disconnect("Unsupported entity state for protocol 775");
+  }
+}
+void Session::entityAdded(const Entity &entity) {
+  if (phase_ != Phase::Play || entity.isRemoved() ||
+      !world_.isChunkLoaded(chunkCoord(entity.position.x),
+                            chunkCoord(entity.position.z)) ||
+      !sentChunks_.contains({chunkCoord(entity.position.x),
+                             chunkCoord(entity.position.z)}))
+    return;
+  try {
+    const auto [tracked, inserted] = trackedEntities_.try_emplace(entity.id);
+    if (inserted) {
+      sendEntitySpawn(entity, tracked->second);
+      tracked->second.lastSeenGeneration = syncGeneration_;
+    }
+  } catch (const ProtocolError &) {
+    disconnect("Unsupported entity state for protocol 775");
+  }
+}
+void Session::entityRemoved(int entityId) {
+  if (phase_ != Phase::Play)
+    return;
+  const auto tracked = trackedEntities_.find(entityId);
+  if (tracked == trackedEntities_.end())
+    return;
+  try {
+    Writer out;
+    out.varInt(1);
+    out.varInt(entityId);
+    send("remove_entities", std::move(out));
+    trackedEntities_.erase(tracked);
+  } catch (const ProtocolError &) {
+    disconnect("Unsupported entity state for protocol 775");
+  }
 }
 void Session::tick() {
   if (closed())
@@ -1256,7 +1334,6 @@ void Session::tick() {
     }
     refreshChunkView();
     sendChunkBatch();
-    syncEntities();
   } catch (const ProtocolError &) {
     disconnect("Unsupported entity state for protocol 775");
   }

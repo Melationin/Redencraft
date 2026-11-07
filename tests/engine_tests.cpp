@@ -2,9 +2,81 @@
 #include "redstone/entity.hpp"
 #include <algorithm>
 #include <cassert>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 #include <vector>
 using namespace redstone;
+void sectionReadCacheLifecycle() {
+  World w;
+  const Pos p{-17, -1, -1};
+  const auto stone = Blocks::SMOOTH_STONE.defaultState();
+  const auto glass = Blocks::GLASS.defaultState();
+  assert(w.getBlock(p).isAir()); // Missing chunk must not mask a later load.
+  w.loadChunk(-2, -1);
+  assert(w.getBlock(p).isAir()); // Cache the absent section.
+  w.rawSetBlock(p, stone);
+  assert(w.getBlock(p) == stone); // Section creation invalidates that miss.
+  w.rawSetBlock(p, glass);
+  assert(w.getBlock(p) == glass); // Cached pointer reads current palette data.
+  w.rawSetBlock(p, airState());
+  assert(w.getBlock(p).isAir());
+  w.rawSetBlock(p, stone);
+  w.unloadChunk(-2, -1);
+  assert(w.getBlock(p).isAir());
+  w.loadChunk(-2, -1);
+  assert(w.getBlock(p) == stone);
+  const Pos above{p.x, 16, p.z};
+  w.rawSetBlock(above, glass);
+  assert(w.getBlock(above) == glass && w.getBlock(p) == stone);
+  assert(w.getBlock({p.x, w.minY() - 1, p.z}).isAir());
+  assert(w.getBlock({p.x, w.maxY(), p.z}).isAir());
+  World moved(std::move(w));
+  assert(moved.getBlock(p) == stone && w.getBlock(p).isAir());
+  World assigned;
+  assigned.loadChunk(-2, -1);
+  assigned.rawSetBlock(p, glass);
+  assert(assigned.getBlock(p) == glass);
+  assigned = std::move(moved);
+  assert(assigned.getBlock(p) == stone && moved.getBlock(p).isAir());
+  for (int x : {std::numeric_limits<int>::min(), -17, -16, -1, 0, 15, 16,
+                std::numeric_limits<int>::max()}) {
+    assigned.loadChunk(x >> 4, 0);
+    assigned.rawSetBlock({x, 0, 0}, glass);
+    assert(assigned.getBlock({x, 0, 0}) == glass);
+  }
+}
+void stateViewsAndTransitions() {
+  const std::string key = "_instrument_";
+  const std::string value = "_iron_xylophone_";
+  const auto keyView = std::string_view(key).substr(1, key.size() - 2);
+  const auto valueView = std::string_view(value).substr(1, value.size() - 2);
+  const auto note = Blocks::NOTE_BLOCK.defaultState().with(keyView, valueView);
+  assert(note.getView(keyView) == "iron_xylophone");
+  assert(note.with(keyView, valueView) == note);
+  assert(note.getView("missing", "fallback") == "fallback");
+  // A value outside the schema must still survive the extension path.
+  const std::string longValue = "an_imported_value_longer_than_small_string_storage";
+  const auto extended = note.with(keyView, longValue);
+  assert(extended.getView(keyView) == longValue);
+  assert(extended.with("note", "7").getView(keyView) == longValue);
+  assert(extended.with("note", "7").getView("note") == "7");
+  for (const auto &registration : blockRegistry()) {
+    const auto &block = blockByName(registration.name);
+    for (const auto state : block.states())
+      for (const auto &property : block.stateDefinition().properties())
+        for (const auto &nextValue : property.values()) {
+          auto expected = state.properties();
+          expected[property.name()] = nextValue;
+          std::uint32_t variant = 0;
+          assert(block.stateDefinition().variantOf(expected, variant));
+          const auto next = state.with(property.name(), std::string_view(nextValue));
+          assert(next.id() == block.firstState() + variant);
+          assert(next.getView(property.name()) == nextValue);
+        }
+  }
+}
 void addedBlockTicks() {
   World lamp;
   lamp.loadChunk(0, 0);
@@ -90,7 +162,84 @@ void addedBlockTicks() {
   suppressed.tick(); suppressed.tick();
   assert(suppressed.entities.empty()); // Stale callbacks check current block type.
 }
+void inlineSectionStorage() {
+  // Chunk sections are stored inline. A section that was never written keeps
+  // bits == 0 and no palette, so writing air (the value it already holds) must
+  // not materialise any storage.
+  {
+    World w;
+    w.loadChunk(0, 0);
+    w.rawSetBlock({0, 64, 0}, airState());
+    const auto chunk = w.snapshotChunk(0, 0);
+    const int section = (64 - w.minY()) / 16;
+    assert(chunk.sections[section].bits == 0);
+    assert(chunk.sections[section].nonEmpty == 0);
+    assert(chunk.sections[section].palette.empty());
+    assert(chunk.sections[section].indices8.empty());
+    assert(w.getBlock({0, 64, 0}).isAir());
+  }
+  // One real write materialises exactly one section; its neighbours stay empty.
+  {
+    World w;
+    w.loadChunk(0, 0);
+    const auto stone = Blocks::SMOOTH_STONE.defaultState();
+    w.rawSetBlock({3, 70, 5}, stone);
+    const auto chunk = w.snapshotChunk(0, 0);
+    const int section = (70 - w.minY()) / 16;
+    assert(chunk.sections[section].bits == 8);
+    assert(chunk.sections[section].nonEmpty == 1);
+    assert(w.getBlock({3, 70, 5}) == stone);
+    for (std::size_t i = 0; i < chunk.sections.size(); ++i)
+      if (static_cast<int>(i) != section)
+        assert(chunk.sections[i].bits == 0 && chunk.sections[i].nonEmpty == 0);
+  }
+  // Past 256 distinct states the palette widens to 16 bit indices; every cell
+  // must still resolve to the state it was written with.
+  {
+    World w;
+    w.loadChunk(0, 0);
+    const auto base = Blocks::SMOOTH_STONE.defaultState();
+    std::vector<BlockState> states;
+    states.reserve(300);
+    for (int i = 0; i < 300; ++i)
+      states.push_back(base.with("variant", std::to_string(i)));
+    for (int n = 0; n < 300; ++n) {
+      const int x = n & 15, z = (n >> 4) & 15, y = 64 + n / 256;
+      w.rawSetBlock({x, y, z}, states[n]);
+    }
+    for (int n = 0; n < 300; ++n) {
+      const int x = n & 15, z = (n >> 4) & 15, y = 64 + n / 256;
+      assert(w.getBlock({x, y, z}) == states[n]);
+    }
+    const auto chunk = w.snapshotChunk(0, 0);
+    const int section = (64 - w.minY()) / 16;
+    assert(chunk.sections[section].bits == 16);
+    assert(chunk.sections[section].nonEmpty == 300);
+    assert(chunk.sections[section].palette.size() == 301); // air + 300 states
+    assert(chunk.sections[section].indices16.size() == 4096);
+    assert(chunk.sections[section].indices8.empty());
+  }
+  // The fixed inline array covers 24 sections; taller worlds are rejected
+  // instead of indexing past the array.
+  {
+    World edge(0, 24 * 16);
+    edge.loadChunk(0, 0);
+    const auto stone = Blocks::SMOOTH_STONE.defaultState();
+    edge.rawSetBlock({0, edge.maxY() - 1, 0}, stone);
+    assert(edge.getBlock({0, edge.maxY() - 1, 0}) == stone);
+    bool threw = false;
+    try {
+      World tooTall(0, 24 * 16 + 1);
+    } catch (const std::invalid_argument &) {
+      threw = true;
+    }
+    assert(threw);
+  }
+}
 int main() {
+  sectionReadCacheLifecycle();
+  inlineSectionStorage();
+  stateViewsAndTransitions();
   addedBlockTicks();
   World w;
   w.loadChunk(-1, -1);
@@ -412,4 +561,27 @@ int main() {
     if (entry.kind == "scheduled_tick")
       signedExecution.push_back(entry.pos);
   assert((signedExecution == std::vector<Pos>{{-1, 82, 5}, {16, 82, 5}}));
+  World gates;
+  gates.loadChunk(0, 0);
+  const Pos gatePos{8, 65, 8};
+  auto gate = defaultState("oak_fence_gate");
+  assert(gate.get("facing") == "north" && gate.get("open") == "false" &&
+         gate.get("powered") == "false" && gate.get("in_wall") == "false");
+  assert(blockMetadata(gate).hardness == 2.0f &&
+         blockMetadata(gate).explosionResistance == 3.0f &&
+         blockMetadata(gate).pushReaction == "normal");
+  gates.rawSetBlock(gatePos, gate);
+  gates.setBlock({9, 65, 8}, defaultState("stone_brick_wall"));
+  assert(gates.getBlock(gatePos).get("in_wall") == "true");
+  gates.setBlock({9, 65, 8}, airState());
+  assert(gates.getBlock(gatePos).get("in_wall") == "false");
+  gates.setBlock({8, 65, 7}, defaultState("redstone_block"));
+  assert(gates.getBlock(gatePos).get("powered") == "true" &&
+         gates.getBlock(gatePos).get("open") == "true");
+  gates.setBlock(gatePos, gates.getBlock(gatePos).with("open", "false"), 10);
+  gates.neighborChanged(gatePos, "redstone_block");
+  assert(gates.getBlock(gatePos).get("open") == "false");
+  gates.setBlock({8, 65, 7}, airState());
+  assert(gates.getBlock(gatePos).get("powered") == "false" &&
+         gates.getBlock(gatePos).get("open") == "false");
 }

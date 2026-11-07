@@ -28,7 +28,17 @@ bool fullSupport(World &world, Pos pos) {
   if (!world.isLoaded(pos) || air(state) || isLiquidBlock(state) ||
       isRailBlock(state))
     return false;
-  auto shape = collisionShape(world, pos, state);
+  VoxelShape movingShape;
+  const auto &shape = state.is(Blocks::MOVING_PISTON)
+                          ? (movingShape = collisionShape(world, pos, state))
+                          : collisionShape(state);
+  if (shape.empty())
+    return false;
+  if (shape.size() == 1) {
+    const auto &part = shape.front();
+    return part.y0 < 16 && part.y1 >= 16 && part.x0 <= 0 &&
+           part.x1 >= 16 && part.z0 <= 0 && part.z1 >= 16;
+  }
   // SupportType.RIGID checks the top face's outer 2-pixel ring, not the
   // volume of the block. The full top of an upward piston head and of a
   // downward-facing extended piston base can support rails.
@@ -400,7 +410,7 @@ bool findPoweredRailSignal(World &world, Pos pos, const BlockState &state,
          myShape == RailShape::AscendingEast ||
          myShape == RailShape::AscendingWest))
       return false;
-    if (checkState.get("powered", "false") != "true")
+    if (checkState.getView("powered", "false") != "true")
       return false;
     return world.hasNeighborSignal(check) ||
            findPoweredRailSignal(world, check, checkState, forward,
@@ -415,7 +425,7 @@ bool findPoweredRailSignal(World &world, Pos pos, const BlockState &state,
 void detectorCheckPressed(World &world, Pos pos, const BlockState &state) {
   if (!railCanSurvive(world, pos, state))
     return;
-  bool wasPressed = state.get("powered", "false") == "true";
+  bool wasPressed = state.getView("powered", "false") == "true";
   Aabb search{pos.x + 0.2, double(pos.y), pos.z + 0.2, pos.x + 0.8,
               pos.y + 0.8, pos.z + 0.8};
   bool shouldBePressed = false;
@@ -440,7 +450,7 @@ void detectorCheckPressed(World &world, Pos pos, const BlockState &state) {
     world.scheduleTick(pos, state.name(), 20);
 }
 void poweredUpdateState(World &world, Pos pos, const BlockState &state) {
-  bool powered = state.get("powered", "false") == "true";
+  bool powered = state.getView("powered", "false") == "true";
   bool shouldPower = world.hasNeighborSignal(pos) ||
                      findPoweredRailSignal(world, pos, state, true, 0) ||
                      findPoweredRailSignal(world, pos, state, false, 0);
@@ -454,7 +464,7 @@ void poweredUpdateState(World &world, Pos pos, const BlockState &state) {
 }
 } // namespace
 
-RailShape railShapeFromName(const std::string &name) {
+RailShape railShapeFromName(std::string_view name) {
   if (name == "east_west")
     return RailShape::EastWest;
   if (name == "ascending_east")
@@ -507,7 +517,7 @@ bool railShapeIsSlope(RailShape shape) {
          shape == RailShape::AscendingSouth;
 }
 RailShape railShapeOf(const BlockState &state) {
-  return railShapeFromName(state.get("shape", "north_south"));
+  return railShapeFromName(state.getView("shape", "north_south"));
 }
 bool railIsStraight(const BlockState &state) {
   return !state.is(Blocks::RAIL);
@@ -596,7 +606,7 @@ void railScheduledTick(World &world, Pos pos, const BlockState &state) {
 }
 int railSignal(const BlockState &state) {
   return state.is(Blocks::DETECTOR_RAIL) &&
-                 state.get("powered", "false") == "true"
+                 state.getView("powered", "false") == "true"
              ? 15
              : 0;
 }
@@ -613,7 +623,7 @@ BlockState railPlacementState(World &world, Pos pos,
 void railEntityInside(World &world, Pos pos, const BlockState &state,
                       Entity &entity) {
   if (state.is(Blocks::DETECTOR_RAIL) &&
-      state.get("powered", "false") != "true" &&
+      state.getView("powered", "false") != "true" &&
       dynamic_cast<Minecart *>(&entity))
     detectorCheckPressed(world, pos, state);
 }

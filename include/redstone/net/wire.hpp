@@ -80,17 +80,51 @@ private:
   std::map<int, std::string> itemNames_;
   std::map<int, StateFlags> flags_;
 };
-// ClientboundLevelChunkWithLight payload, no packet ID. The snapshot is taken
-// on the tick thread; the encoder itself only reads the copy and the immutable
-// registry, so it can run on the network writer thread.
+// Synchronous compatibility entry point, no packet ID. Background encoding
+// must use prepareChunkSnapshot on the world thread and the frozen overload.
 Bytes encodeChunk(const ChunkSnapshot &, int chunkX, int chunkZ,
                   const Registry &);
 Bytes encodeMovingPistonNbt(const PistonSnapshot &);
+// Frozen on the world thread. Sections contain protocol IDs, and block entity
+// NBT is owned bytes, so encoding never touches the mutable state registry.
+struct ProtocolChunkSnapshot {
+  struct BlockEntity {
+    Pos pos;
+    Bytes nbt;
+  };
+  int minY = 0, maxY = 0;
+  int airId = 0, stateBits = 0, biomeId = 0, pistonTypeId = 0;
+  std::vector<SectionSnapshot> sections;
+  std::vector<BlockEntity> blockEntities;
+  std::size_t retainedBytes() const noexcept;
+};
+ProtocolChunkSnapshot prepareChunkSnapshot(ChunkSnapshot, const Registry &);
+Bytes encodeChunk(const ProtocolChunkSnapshot &, int chunkX, int chunkZ,
+                  const Registry &);
 // One queued clientbound packet: already framed bytes, or a producer that
 // frames them on the writer thread.
 struct OutPacket {
   Bytes bytes;                     // framed bytes, or payload if id >= 0
   int packetId = -1;               // >= 0: frame(id, bytes) on the writer
   std::function<Bytes()> deferred; // produced entirely off-thread (chunks)
+  std::size_t retainedBytes = 0;   // captured snapshot/storage owned by deferred
 };
+inline constexpr std::size_t maxQueuedOutputBytes = 16 * 1024 * 1024;
+inline constexpr std::size_t maxQueuedOutputPackets = 65536;
+// Account retained capacity before encoding, not just the eventual wire size.
+// Unknown producers still have a minimum charge; chunk producers supply their
+// actual captured snapshot footprint. Saturate to make overflow a rejection.
+inline std::size_t outPacketCharge(const OutPacket &packet) noexcept {
+  std::size_t result = sizeof(OutPacket) + 6;
+  const auto add = [&](std::size_t amount) {
+    if (amount > maxQueuedOutputBytes ||
+        result > maxQueuedOutputBytes - amount)
+      result = maxQueuedOutputBytes + 1;
+    else
+      result += amount;
+  };
+  add(packet.bytes.capacity());
+  add(packet.deferred && !packet.retainedBytes ? 4096 : packet.retainedBytes);
+  return result;
+}
 } // namespace redstone::net

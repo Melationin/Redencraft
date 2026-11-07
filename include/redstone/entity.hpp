@@ -103,6 +103,12 @@ protected:
   const EntityType *type_ = nullptr;
   std::array<double, 3> pistonDeltas_{};
   std::int64_t pistonDeltasGameTime_ = -1;
+
+private:
+  friend class World;
+  bool removalObserved_ = false;
+  // Used only during the callback-free collision collection and resolution.
+  std::vector<ShapeBox> movementColliders_;
 };
 
 class ItemEntity : public Entity {

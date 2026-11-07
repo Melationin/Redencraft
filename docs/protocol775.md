@@ -1,6 +1,6 @@
 # 原生 C++ 协议 775 服务端
 
-后续已支持沙子、石砖墙和红石灯，以及完整投影快照导入，见 [投影模拟](litematic.md)。世界中的全部指定区块保持强加载，客户端采用周边视野及带 ACK 的分批传输，已取消旧版 64 区块总量限制。每个 tick 结束后，向玩家**聊天栏**发送 `Tick N: x.xxx ms`；计时包含世界 tick 和连接同步准备，排除休眠、tick 外 socket IO 及耗时消息本身。不是动作栏显示。
+后续已支持沙子、石砖墙和红石灯，以及完整投影快照导入，见 [投影模拟](litematic.md)。世界中的全部指定区块保持强加载，客户端采用周边视野及带 ACK 的分批传输，已取消旧版 64 区块总量限制。玩家**聊天栏**每秒更新一次 `Tick N: x.xxx ms (1s avg, M ticks)`：取报告时刻前 1 秒内完成的各 tick 耗时的算术平均，并显示样本数；边界为 `(报告时刻 − 1s, 报告时刻]`，卡顿恢复后不补发积压报告。仍逐 tick 计时，包含世界 tick 和连接同步准备，排除休眠、tick 外 socket IO 及耗时消息本身。
 
 用户选择原生 C++ 直连并要求放置/破坏方块，因此新增独立可选目标 `redstone_vanilla_server`，不依赖真实服务端桥接。默认只监听 `127.0.0.1:25565`，离线模式；协议数据来自未修改的官方 26.1 jar。26.1.2 同为 775，但它的静态 ID 和实际连接尚未独立验证。26.2 不在此协议资产支持范围。
 
@@ -21,7 +21,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 ./build-jemalloc/Release/redstone_vanilla_server.exe --world "D:/Minecraft/saves/Test" --chunk 0,0 --chunk -1,0 --spawn 8.5,66,8.5
 ```
 
-`--chunk` 可重复；未指定则选择存档中已读取的全部区块。指定的区块必须存在，不会因玩家移动或放置自动加载/生成区块。`--view-distance 3` 控制网络视野半径（2–8），独立于模拟强加载；客户端移动时发送新的中心和区块、卸载旧视野。大世界每批最多 2 区块，小场景最多 9 区块，等待 `chunk_batch_received` 再继续。当前视野为方形边界，原版圆角边界和客户端距离协商仍为 TODO。协议维度目前固定原版 overworld 高度 [-64,320)，存档仍要求 DataVersion 4786；没有保存。`--port 0` 自动分配本地端口，`--ticks N` 用于有限时长自动测试，`--assets` 可选择导出资产目录。Ctrl+C 正常结束；不执行自动客户端启动。
+`--chunk` 可重复；未指定则选择存档中已读取的全部区块。指定的区块必须存在，不会因玩家移动或放置自动加载/生成区块。`--view-distance 3` 控制网络视野半径（2–10），独立于模拟强加载；客户端移动时发送新的中心和区块、卸载旧视野。大世界每批最多 2 区块，小场景最多 9 区块，等待 `chunk_batch_received` 再继续。当前视野为方形边界，原版圆角边界和客户端距离协商仍为 TODO。协议维度目前固定原版 overworld 高度 [-64,320)，存档仍要求 DataVersion 4786；没有保存。`--port 0` 自动分配本地端口，`--ticks N` 用于有限时长自动测试，`--assets` 可选择导出资产目录。Ctrl+C 正常结束；不执行自动客户端启动。
 
 ## 连接与同步
 
@@ -38,12 +38,18 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 成功方块事件在 `pistonBlockEvent` 等回调之后立即发包；事件、实体、方块实体阶段产生的普通块变化留至下一刻区块广播。特别是活塞源位置清空不能先于活塞事件发给客户端，否则客户端本地结构解析会丢失待移动方块。输入预测修正包独立立即回传。
 
-世界状态的采集在主线程（方块状态、实体位置、区块 palette 只能从 `World` 读），字节编码则在独立的 `NetworkWriter` 线程完成：主线程只把“packet id + 未成帧 payload”或“区块快照”放进有序队列，写线程负责 VarInt 长度前缀、区块 palette/位打包、发送缓冲合并、写侧 `select` 和 `send`。区块发送先复制子区块的 palette + 索引（不复制 4096 个方块状态），编码完全在写线程进行。实体同步只扫描玩家视野内的 entity section（`EntitySectionStorage`），不再遍历全世界的实体表。协议注册表把 `BlockState` → 协议 ID 和协议 ID → 状态标志改成稠密数组索引，编码时不再构造名字/属性字符串。因此慢连接和积压不会阻塞 tick，输出积压仍只关闭该连接。网络 ID 映射失败不会向核心邻居更新链抛出协议异常。世界的计划刻、方块事件、实体、移动活塞方块实体顺序保持原实现。
+实体跟踪广播移到区块变化广播之后、方块事件和本刻实体运动之前，对照 `ServerChunkCache.tick → tickChunks/broadcastChangedChunks → ChunkMap.tick → ServerEntity.sendChanges`。实体注册后立即提交 spawn；下落方块落地修正先于移除。实体刻清理与方块实体刻结束时提交移除，避免延后一刻；TODO：原版 `Entity.setRemoved/discard → levelCallback.onRemove` 在调用位置立即通知，当前尚未复刻同一阶段内每个 discard 的精细交错顺序。
+
+世界状态和普通包 payload 仍在主线程采集/构造；独立的 `NetworkWriter` 负责 VarInt 成帧、区块高度图/palette/位打包、发送缓冲合并、写侧 `select` 和 `send`。区块先复制子区块 palette + 索引，再在主线程把本地状态 ID 映射成协议 ID、冻结移动活塞 NBT；后台编码只读该快照与不可变协议状态标志，不访问 `World` 或可能扩容的全局状态注册表。实体同步只扫描玩家视野内的 entity section；块变化缓冲复用容量，热路径 payload 移交时不再复制。
+
+每连接有界 SPSC 队列保留 FIFO；tick 内提交不获取写线程互斥锁，也不等待 socket。队列最多 4096 批、65536 包、16 MiB 计费存储，计费包含正在编码的批次及 deferred 区块持有的容量；Session 暂存另限 16 MiB，已编码未发送数据另限 16 MiB。这些是分别实施的积压预算，不是连接总内存上限，容器保留容量和编码临时缓冲另计。达到上限只关闭该连接。写线程每轮每连接最多编码 64 包或约 2 ms，未发送数据达 1 MiB 时暂停继续编码；单个区块编码不可中途抢占。这些阈值是本项目的背压策略，不声称与原版 Netty 参数一致。诊断输出也通过有界槽交给写线程。网络映射失败不会向核心更新链抛出协议异常，各模拟更新阶段保持独立。
 
 ## 验证与剩余工作
 
-MSVC Release + jemalloc 的 CTest 11 组覆盖原有顺序比较、实体/活塞修复、编码边界/负坐标/多 palette、高度图、协议状态机、放置/破坏/物品栏、支撑/侦测器/碰撞、预测校验、方块事件广播时机和网络失败隔离。socket 测试实际启动本地 C++ 服务端，完成状态查询、离线登录、30 配置包、区块、放置、破坏和确认。
+MSVC Release + jemalloc 的 CTest **14/14 通过**。除既有行为用例外，新增队列 FIFO/容量/并发、冻结快照后台编码期间注册扩容、实体广播阶段/注册/落地移除顺序、块变化去重后读取最新状态、Session 积压隔离，以及 1 秒滑动窗口平均值和报告节流断言。socket 测试实际启动有限时长的本地 C++ 服务端；慢连接压测触发 1 次输出积压断开，健康连接仍通过 ping、放置、破坏并收到递增 tick 报告，服务端完成 160 tick。投影 TCP 冒烟通过 50 个区块、视野切换与右键激活。详细结果见 [发包验证记录](../validation/performance/2026-11-07-network-sync.json)。
 
 `validation/protocol775/export.ps1` 从官方 jar 重建资产并检查版本与哈希。其 `-VerifyPlayPackets` 使用官方 GameProtocols codec 解码 C++ 测试生成的所有记录，区块继续用真实 LevelChunkSection.read 解码 24 个子区块，检查无剩余字节。来源、格式和结果见 `validation/protocol775/README.md`、`verification-result.json`。这验证编码和源码约定，不能代替真实客户端实际连接、资源加载和动画验证。
+
+本轮将 wire/protocol 测试产生的记录合并，使用同一官方 codec 验证 **294 包通过**；导出写入构建目录，未覆盖固定协议资产。没有启动真实 Minecraft 客户端，也没有运行本轮真实 26.1 服务端逐 tick 差分，不能声称原版等价。
 
 仍有明确 TODO：真实 ServerPlayer 服务端物理与推挤、其他玩家模型/放置碰撞、动态区块跟踪、玩家拾取/容器与生存、任意物品组件/工具与完整 BlockPlaceContext、命令/聊天/配方/世界时钟、原版光照引擎、其他生物群系、音效粒子和完整元数据优化。当前 sky light 统一全亮、biome 统一 plains，仅用于查看；水/流体刻继续排除。网络支持是创造编辑入口，不代表完整原版多人服务端等价。

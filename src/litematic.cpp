@@ -82,9 +82,14 @@ BlockState state(const nbt::Tag &tag) {
 
 LitematicImport loadLitematic(const nbt::Tag &root,
                               const LitematicOptions &options) {
-  if (root.type != 10 || numeric(root, "Version") != 6 ||
-      numeric(root, "SubVersion") != 1)
-    throw nbt::Error("only litematic version 6/subversion 1 is supported");
+  if (root.type != 10)
+    throw nbt::Error("litematic root must be a compound");
+  const auto version = numeric(root, "Version");
+  // LitematicaSchematic.readSubRegionsFromNBT uses the same region coordinates,
+  // palette and compact cross-long storage for v6/v7. Entity/block-entity data
+  // still follows the explicit supported-field checks below, without DataFixer.
+  if ((version != 6 && version != 7) || numeric(root, "SubVersion") != 1)
+    throw nbt::Error("only litematic version 6/7, subversion 1 is supported");
   if (options.minY >= options.maxY)
     throw nbt::Error("invalid litematic world height");
   LitematicImport result;
@@ -97,12 +102,13 @@ LitematicImport loadLitematic(const nbt::Tag &root,
   // states;
   // TODO: general vanilla DataFixer conversion for older schematic/entity data.
   const auto &regions = required(root, "Regions", 10).compound;
-  if (regions.empty() || regions.size() > 4096)
+  if (regions.empty() || regions.size() > 8192)
     throw nbt::Error("invalid litematic region count");
   struct Box {
     Pos lo, hi;
   };
   std::vector<Box> boxes;
+  boxes.reserve(regions.size());
   std::uint64_t totalVolume = 0;
   for (const auto &[name, region] : regions) {
     (void)name;

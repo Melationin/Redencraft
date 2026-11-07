@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-07",
+  "scope": "Quick pass: chunk shift, last-section read cache, compact explosion cache and precomputed ray steps",
+  "benchmark": {
+    "ticks": 3000,
+    "runs_per_version": 1,
+    "logical_cpu": 2,
+    "priority": "High",
+    "allocator": "jemalloc",
+    "compiler": "MSVC Release /O2 /MT /Zi, existing incremental symbol link",
+    "fingerprint_observer": true,
+    "fingerprint_calculation_excluded_from_tick_wall": true,
+    "cpu_loop_includes_fingerprint_work": true,
+    "before": {
+      "ticks": 3000.0,
+      "total_ms": 25382.202,
+      "mean_ms": 8.461,
+      "median_ms": 7.629,
+      "p95_ms": 38.741
+    },
+    "after": {
+      "ticks": 3000.0,
+      "total_ms": 24954.298,
+      "mean_ms": 8.318,
+      "median_ms": 7.413,
+      "p95_ms": 37.439
+    },
+    "tick_wall_reduction_percent": 1.6858427019058597,
+    "limitation": "Single before/after pair; small difference may include noise. No sampler/allocation profiler/repeated trials."
+  },
+  "validation": {
+    "ctest": "Release 12/12 passed (4.85 sec)",
+    "checkpoints_equal": 12,
+    "checkpoint_lines": [
+      "FINGERPRINT tick=250 blocks=4fbb0b63aa3a2a76 scheduled=2f9f3d59e1a90a02 entities=08820b6b64bdd96c pistons=05a4e9f384ab0763 accepted_events=209571fcd0033cf7 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=500 blocks=7220439b4affef42 scheduled=71fd69c27c8418fb entities=bd78e3b5f21b17d5 pistons=42a640a5e2799bbe accepted_events=7f12baee34b286c9 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=750 blocks=9517253efcab07c4 scheduled=614eb6a64330d1d9 entities=2c709faa26dd82da pistons=7f82fe62ee8b6d09 accepted_events=24dc42b2c0dff2aa pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=1000 blocks=6c84486fcc0d1dd7 scheduled=d3ed01e4a27ed13b entities=a8c89af39eaaf6c4 pistons=3988dafd7fc3bc4d accepted_events=921abee472340f90 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=1250 blocks=e1bb39567a23339c scheduled=ba31becb3a6ce6e6 entities=8981d4aea51dd650 pistons=b1dac4f709286631 accepted_events=b4dca545c8f14740 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=1500 blocks=d066da060e75cbe4 scheduled=099e8e5320319006 entities=7c0e1f4dd90d1139 pistons=9a5248cc06851bb3 accepted_events=3d2e6f0aa4f2e384 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=1750 blocks=da81ed0cd9a75444 scheduled=eb97cd952e322baa entities=e0e558c8b2cbfbde pistons=769004ae3314f96d accepted_events=faeb4b476273388f pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=2000 blocks=3ae7051ba8a6c309 scheduled=b5d0e7bd1c8e1cb1 entities=5a6f214aadc69784 pistons=d571ff16570b0937 accepted_events=e04ff2865027345c pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=2250 blocks=97370fee9d1698d4 scheduled=ff69cf3682f09da8 entities=3695b29cdd84270a pistons=97d474a03cd4b719 accepted_events=da054d67b958a082 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=2500 blocks=9d0891119e0afba9 scheduled=8e8595ee3f69ee43 entities=b52036667e7c0b5c pistons=072f7336fb619b23 accepted_events=4cc87d3987ad0b09 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=2750 blocks=09c7f648f51c5cdc scheduled=3465b66af3bbdbdb entities=b3fc5bd9416a4c91 pistons=fa2b6b9315ef4ba5 accepted_events=6c053bff2107c053 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=3000 blocks=3099b115c211f681 scheduled=6582cae5beb8270a entities=74f55470745489dc pistons=24e0a5b719d33cb3 accepted_events=1942103ba25e15d0 pending_events=cbf29ce484222325 pending_event_count=0"
+    ],
+    "final": "entities=1197 scheduled=1197 moving_pistons=1995 events=0",
+    "live_vanilla26_1_differential": false
+  },
+  "after_source_sha256": {
+    "include\\redstone\\engine.hpp": "d6424ac1797c1498e710491c0e205d5636be679c51e5fbc35561c6053d4bb438",
+    "src\\engine.cpp": "84398a95c37a75e3b3fc83865de681ada3573b59fdf7eeed27bb31fd9e7d8867",
+    "src\\entity.cpp": "8a95b40a2f118a55fb08830b7d4863f156ea62f099bb359942b113f45bad98be",
+    "tests\\engine_tests.cpp": "c8b34f80e2f023ad3179b8f6020c1c96c946332aa7f40a60cb79952facdd5c61",
+    "tests\\entity_tests.cpp": "dccd2670fec61c289c966d08d3b43e864b0920faf37c57cc8f6390e48517fec3"
+  }
+}

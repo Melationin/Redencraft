@@ -24,7 +24,7 @@ Pos relative(Pos p, Direction d, int n) {
   return p;
 }
 Direction facing(const BlockState &s) {
-  auto f = s.get("facing", "north");
+  auto f = s.getView("facing", "north");
   if (f == "down")
     return Direction::Down;
   if (f == "up")
@@ -37,7 +37,7 @@ Direction facing(const BlockState &s) {
     return Direction::East;
   return Direction::North;
 }
-std::string dirName(Direction d) {
+std::string_view dirName(Direction d) {
   switch (d) {
   case Direction::Down:
     return "down";
@@ -126,11 +126,11 @@ bool pistonIsPushable(World &w, Pos p, const BlockState &s, Direction d,
       s.is(Blocks::BEDROCK))
     return false;
   if (base(s))
-    return s.get("extended", "false") != "true";
-  auto metadata = blockMetadata(s);
-  auto reaction = s.get("push_reaction", metadata.pushReaction);
-  if (metadata.hardness == -1 || s.get("hardness") == "-1" ||
-      s.get("has_block_entity") == "true" || reaction == "block")
+    return s.getView("extended", "false") != "true";
+  const auto &metadata = blockMetadata(s);
+  auto reaction = s.getView("push_reaction", metadata.pushReaction);
+  if (metadata.hardness == -1 || s.getView("hardness") == "-1" ||
+      s.getView("has_block_entity") == "true" || reaction == "block")
     return false;
   if (reaction == "destroy")
     return allowDestroy;
@@ -143,12 +143,12 @@ PistonStructureResolver::PistonStructureResolver(World &w, Pos p, Direction f,
     : world_(w), piston_(p), start_(relative(p, f, e ? 1 : 2)), facing_(f),
       movement_(e ? f : opposite(f)), extending_(e) {}
 bool PistonStructureResolver::resolve() {
-  push_.clear();
+  pushCount_ = 0;
   destroy_.clear();
   auto s = world_.getBlock(start_);
   if (!pistonIsPushable(world_, start_, s, movement_, false, facing_)) {
     if (extending_ &&
-        (s.get("push_reaction", blockMetadata(s).pushReaction) == "destroy")) {
+        (s.getView("push_reaction", blockMetadata(s).pushReaction) == "destroy")) {
       destroy_.push_back(start_);
       return true;
     }
@@ -156,7 +156,7 @@ bool PistonStructureResolver::resolve() {
   }
   if (!addBlockLine(start_, movement_))
     return false;
-  for (size_t i = 0; i < push_.size(); ++i)
+  for (size_t i = 0; i < pushCount_; ++i)
     if (sticky(world_.getBlock(push_[i])) && !addBranchingBlocks(push_[i]))
       return false;
   return true;
@@ -165,12 +165,12 @@ bool PistonStructureResolver::addBlockLine(Pos start, Direction connection) {
   auto s = world_.getBlock(start);
   if (air(s) ||
       !pistonIsPushable(world_, start, s, movement_, false, connection) ||
-      eq(start, piston_) || std::any_of(push_.begin(), push_.end(), [&](Pos p) {
-        return eq(p, start);
-      }))
+      eq(start, piston_) ||
+      std::any_of(push_.begin(), push_.begin() + pushCount_,
+                  [&](Pos p) { return eq(p, start); }))
     return true;
   int count = 1;
-  if (count + push_.size() > 12)
+  if (count + pushCount_ > 12)
     return false;
   while (sticky(s)) {
     auto p = relative(start, opposite(movement_), count);
@@ -181,21 +181,22 @@ bool PistonStructureResolver::addBlockLine(Pos start, Direction connection) {
                           opposite(movement_)) ||
         eq(p, piston_))
       break;
-    if (++count + push_.size() > 12)
+    if (++count + pushCount_ > 12)
       return false;
   }
   int added = 0;
   for (int i = count - 1; i >= 0; --i) {
-    push_.push_back(relative(start, opposite(movement_), i));
+    push_[pushCount_++] = relative(start, opposite(movement_), i);
     ++added;
   }
   for (int i = 1;; ++i) {
     auto p = relative(start, movement_, i);
-    auto it = std::find_if(push_.begin(), push_.end(),
+    auto it = std::find_if(push_.begin(), push_.begin() + pushCount_,
                            [&](Pos q) { return eq(p, q); });
-    if (it != push_.end()) {
+    if (it != push_.begin() + pushCount_) {
       auto index = static_cast<size_t>(it - push_.begin());
-      std::rotate(push_.begin() + index, push_.end() - added, push_.end());
+      std::rotate(push_.begin() + index, push_.begin() + pushCount_ - added,
+                  push_.begin() + pushCount_);
       for (size_t j = 0; j <= index + added; ++j)
         if (sticky(world_.getBlock(push_[j])) && !addBranchingBlocks(push_[j]))
           return false;
@@ -207,13 +208,13 @@ bool PistonStructureResolver::addBlockLine(Pos start, Direction connection) {
     if (!pistonIsPushable(world_, p, s, movement_, true, movement_) ||
         eq(p, piston_))
       return false;
-    if ((s.get("push_reaction", blockMetadata(s).pushReaction) == "destroy")) {
+    if ((s.getView("push_reaction", blockMetadata(s).pushReaction) == "destroy")) {
       destroy_.push_back(p);
       return true;
     }
-    if (push_.size() >= 12)
+    if (pushCount_ >= 12)
       return false;
-    push_.push_back(p);
+    push_[pushCount_++] = p;
     ++added;
   }
 }
@@ -235,19 +236,32 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
   PistonStructureResolver resolver(w, p, f, extending);
   if (!resolver.resolve())
     return false;
-  auto push = resolver.toPush(), destroy = resolver.toDestroy();
-  std::vector<std::pair<Pos, BlockState>> removed;
-  std::vector<BlockState> original;
-  for (auto q : push) {
+  const auto push = resolver.toPush();
+  const auto &destroy = resolver.toDestroy();
+  // Only the pushed list is bounded by PUSH_LIMIT. Destruction may include
+  // multiple sticky branches, so keep that snapshot dynamically sized.
+  std::array<std::pair<Pos, BlockState>, 12> removedStorage;
+  std::span removed(removedStorage.data(), push.size());
+  std::array<BlockState, 12> original;
+  for (std::size_t i = 0; i < push.size(); ++i) {
+    const auto q = push[i];
     auto s = w.getBlock(q);
-    original.push_back(s);
-    removed.emplace_back(q, s);
+    original[i] = s;
+    removed[i] = {q, s};
   }
   auto movement = extending ? f : opposite(f);
-  std::vector<BlockState> updates;
+  std::array<BlockState, 12> pushedUpdates;
+  std::vector<BlockState> destroyedUpdates;
+  destroyedUpdates.reserve(destroy.size());
+  const auto forgetRemoved = [&](Pos dest) {
+    const auto end = std::remove_if(
+        removed.begin(), removed.end(),
+        [&](const auto &pair) { return eq(pair.first, dest); });
+    removed = removed.first(static_cast<std::size_t>(end - removed.begin()));
+  };
   for (auto it = destroy.rbegin(); it != destroy.rend(); ++it) {
     auto s = w.getBlock(*it);
-    updates.push_back(s);
+    destroyedUpdates.push_back(s);
     // Empty-tool loot evaluation: coral fans/glass require Silk Touch, while
     // normal blocks pop a real item entity before the destruction callback.
     for (const auto &drop : blockDrops(s))
@@ -258,16 +272,16 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
   for (int i = static_cast<int>(push.size()) - 1; i >= 0; --i) {
     auto s = w.getBlock(push[i]);
     auto dest = push[i].relative(movement);
-    std::erase_if(removed, [&](auto &pair) { return eq(pair.first, dest); });
+    forgetRemoved(dest);
     w.setBlock(dest, moving(f), 324);
     putEntity(w, dest, original[i], f, extending, false);
-    updates.push_back(s);
+    pushedUpdates[i] = s;
   }
   if (extending) {
     auto head = Blocks::PISTON_HEAD.defaultState()
                     .with("facing", dirName(f))
                     .with("type", stickyBase ? "sticky" : "normal");
-    std::erase_if(removed, [&](auto &pair) { return eq(pair.first, arm); });
+    forgetRemoved(arm);
     w.setBlock(arm, moving(f, stickyBase), 324);
     putEntity(w, arm, head, f, true, true);
   }
@@ -280,13 +294,13 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
   }
   size_t index = 0;
   for (auto it = destroy.rbegin(); it != destroy.rend(); ++it) {
-    auto old = updates[index++];
+    auto old = destroyedUpdates[index++];
     w.affectNeighborsAfterRemoval(*it, old, false);
     w.updateIndirectNeighbourShapes(*it, old, 2, 512);
     w.updateNeighborsAt(*it, old.name());
   }
-  for (auto it = push.rbegin(); it != push.rend(); ++it)
-    w.updateNeighborsAt(*it, updates[index++].name());
+  for (std::size_t i = push.size(); i-- > 0;)
+    w.updateNeighborsAt(push[i], pushedUpdates[i].block());
   if (extending)
     w.updateNeighborsAt(arm, "piston_head");
   return true;
@@ -294,7 +308,7 @@ bool moveBlocks(World &w, Pos p, Direction f, bool extending, bool stickyBase) {
 void check(World &w, Pos p, const BlockState &s) {
   auto f = facing(s);
   bool power = powered(w, p, f);
-  bool extended = s.get("extended", "false") == "true";
+  bool extended = s.getView("extended", "false") == "true";
   if (power && !extended) {
     PistonStructureResolver resolver(w, p, f, true);
     if (resolver.resolve())
@@ -360,7 +374,7 @@ bool pistonBlockEvent(World &w, Pos p, const BlockState &s, int type,
         finalTick(w, e);
       else if (type != 1 || air(moved) ||
                !pistonIsPushable(w, two, moved, opposite(f), false, f) ||
-               (moved.get("push_reaction", blockMetadata(moved).pushReaction) !=
+               (moved.getView("push_reaction", blockMetadata(moved).pushReaction) !=
                     "normal" &&
                 !base(moved)))
         w.setBlock(arm, airState(), 3);
@@ -385,12 +399,9 @@ Aabb boundsOf(const VoxelShape &shape) {
   }
   return bounds;
 }
-std::vector<Aabb> toAabbs(const VoxelShape &shape) {
-  std::vector<Aabb> result;
-  for (const auto &box : shape)
-    result.push_back({box.x0 / 16.0, box.y0 / 16.0, box.z0 / 16.0,
-                      box.x1 / 16.0, box.y1 / 16.0, box.z1 / 16.0});
-  return result;
+Aabb toAabb(const ShapeBox &box) {
+  return {box.x0 / 16.0, box.y0 / 16.0, box.z0 / 16.0,
+          box.x1 / 16.0, box.y1 / 16.0, box.z1 / 16.0};
 }
 Aabb unionBox(const Aabb &a, const Aabb &b) {
   return {std::min(a.minX, b.minX), std::min(a.minY, b.minY),
@@ -453,7 +464,7 @@ BlockState collisionRelatedState(const PistonMovingBlockEntity &entity) {
     auto head = Blocks::PISTON_HEAD.defaultState();
     head = head.with(
         "facing",
-        entity.movedState.get("facing", dirName(entity.direction)));
+        entity.movedState.getView("facing", dirName(entity.direction)));
     head = head.with("short", entity.progress > 0.25f ? "true" : "false");
     head = head.with("type", entity.movedState.is(Blocks::STICKY_PISTON)
                                  ? "sticky"
@@ -522,7 +533,7 @@ void moveCollidedEntities(World &world, Pos pos, float newProgress,
                           const PistonMovingBlockEntity &self) {
   Direction movement = self.movementDirection();
   double deltaProgress = newProgress - self.progress;
-  VoxelShape shape = collisionShape(collisionRelatedState(self));
+  const VoxelShape &shape = collisionShape(collisionRelatedState(self));
   if (shape.empty())
     return;
   Aabb aabb = byPositionAndProgress(pos, boundsOf(shape), self);
@@ -530,7 +541,6 @@ void moveCollidedEntities(World &world, Pos pos, float newProgress,
       unionBox(movementArea(aabb, movement, deltaProgress), aabb));
   if (entities.empty())
     return;
-  auto shapeAabbs = toAabbs(shape);
   bool causeBounce = self.movedState.is(Blocks::SLIME_BLOCK);
   for (redstone::Entity *entityPtr : entities) {
     redstone::Entity &entity = *entityPtr;
@@ -545,8 +555,8 @@ void moveCollidedEntities(World &world, Pos pos, float newProgress,
       entity.setDeltaMovement(movementVec);
     }
     double delta = 0;
-    for (const auto &shapeAabb : shapeAabbs) {
-      Aabb moving = movementArea(byPositionAndProgress(pos, shapeAabb, self),
+    for (const auto &part : shape) {
+      Aabb moving = movementArea(byPositionAndProgress(pos, toAabb(part), self),
                                  movement, deltaProgress);
       if (!moving.intersects(entity.boundingBox()))
         continue;
@@ -589,52 +599,65 @@ void moveStuckEntities(World &world, Pos pos, float newProgress,
 } // namespace
 
 void pistonTickBlockEntities(World &w) {
-  auto snapshot = w.pistonEntityOrder;
-  for (auto &entry : snapshot) {
-    auto e = entry->entity.lock();
-    if (!e || entityAt(w, e->pos) != e || !w.isLoaded(e->pos))
+  // Level.tickBlockEntities: fold the deferred tickers in, walk the flat list
+  // once, then sweep the entries marked removed. Tickers registered during the
+  // walk land in the pending list and first run on the next pass, so the list
+  // being walked is never resized underneath us and registration order holds.
+  w.mergePendingPistonTickers();
+  struct PassGuard {
+    bool &flag;
+    explicit PassGuard(bool &value) : flag(value) { flag = true; }
+    ~PassGuard() { flag = false; }
+  } guard{w.tickingPistonBlockEntities};
+  const std::size_t count = w.pistonTickers.size();
+  for (std::size_t i = 0; i < count; ++i) {
+    PistonTickerSlot &slot = *w.pistonTickers[i];
+    if (slot.removed || !slot.entity)
       continue;
-    e->lastTicked = w.gameTime();
-    e->progressO = e->progress;
-    if (e->progressO >= 1) {
-      eraseEntity(w, e->pos);
+    // The slot owns the entity until the sweep, so a removal caused by this
+    // very tick (finalTick, completion, explosions) cannot invalidate it. No
+    // position lookup is needed: the ticker is bound to its entity.
+    PistonMovingBlockEntity &e = *slot.entity;
+    if (!e.live || !w.isLoaded(e.pos))
+      continue;
+    e.lastTicked = w.gameTime();
+    e.progressO = e.progress;
+    if (e.progressO >= 1) {
+      eraseEntity(w, e.pos);
       if (w.traceUpdates)
-        w.log.push_back({"piston_entity_remove", e->pos, ""});
+        w.log.push_back({"piston_entity_remove", e.pos, ""});
       if (w.pistonCompletionObserver)
-        w.pistonCompletionObserver(w, e->pos);
-      if (w.getBlock(e->pos).is(Blocks::MOVING_PISTON)) {
+        w.pistonCompletionObserver(w, e.pos);
+      if (w.getBlock(e.pos).is(Blocks::MOVING_PISTON)) {
         if (w.traceUpdates)
-          w.log.push_back({"piston_shape_resolve", e->pos, ""});
-        auto s = w.updateFromNeighbourShapes(e->pos, e->movedState);
+          w.log.push_back({"piston_shape_resolve", e.pos, ""});
+        auto s = w.updateFromNeighbourShapes(e.pos, e.movedState);
         if (air(s)) {
           if (w.traceUpdates)
-            w.log.push_back({"piston_set_block", e->pos, "340"});
-          w.setBlock(e->pos, e->movedState, 340);
-          w.updateOrDestroy(e->pos, e->movedState, s, 3, 512);
+            w.log.push_back({"piston_set_block", e.pos, "340"});
+          w.setBlock(e.pos, e.movedState, 340);
+          w.updateOrDestroy(e.pos, e.movedState, s, 3, 512);
         } else {
-          if (s.get("waterlogged") == "true")
+          if (s.getView("waterlogged") == "true")
             s = s.with("waterlogged", "false");
           if (w.traceUpdates)
-            w.log.push_back({"piston_set_block", e->pos, "67"});
-          w.setBlock(e->pos, s, 67);
+            w.log.push_back({"piston_set_block", e.pos, "67"});
+          w.setBlock(e.pos, s, 67);
           if (w.traceUpdates)
-            w.log.push_back({"piston_self_notify", e->pos, s.name()});
-          w.neighborChanged(e->pos, s.name());
+            w.log.push_back({"piston_self_notify", e.pos, s.name()});
+          w.neighborChanged(e.pos, s.name());
         }
       }
     } else {
       // Vanilla sweeps the full half-block step before clamping the stored
       // progress. Nonstandard progress loaded from NBT can overshoot 1 here.
-      float next = e->progress + 0.5f;
-      moveCollidedEntities(w, e->pos, next, *e);
-      moveStuckEntities(w, e->pos, next, *e);
-      e->progress = std::min(1.0f, next);
+      float next = e.progress + 0.5f;
+      moveCollidedEntities(w, e.pos, next, e);
+      moveStuckEntities(w, e.pos, next, e);
+      e.progress = std::min(1.0f, next);
     }
   }
-  std::erase_if(w.pistonEntityOrder, [&](const auto &entry) {
-    auto e = entry->entity.lock();
-    return !e || !e->live;
-  });
+  w.sweepPistonTickers();
 }
 void pistonPreRemoveSideEffects(World &w, Pos p) {
   finalTick(w, entityAt(w, p));
@@ -642,6 +665,8 @@ void pistonPreRemoveSideEffects(World &w, Pos p) {
 void pistonForgetWorld(World &w) {
   w.pistonEntities.clear();
   w.pistonTickerSlots.clear();
-  w.pistonEntityOrder.clear();
+  w.pistonTickers.clear();
+  w.pendingPistonTickers.clear();
+  w.tickingPistonBlockEntities = false;
 }
 } // namespace redstone

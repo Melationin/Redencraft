@@ -80,7 +80,7 @@ Property::Property(std::string name, std::vector<std::string> values,
 }
 
 bool Property::indexOf(std::string_view value, std::uint32_t &index) const {
-  const auto found = valueIndex_.find(std::string(value));
+  const auto found = valueIndex_.find(value);
   if (found == valueIndex_.end())
     return false;
   index = found->second;
@@ -348,8 +348,8 @@ std::map<std::string, std::string> BlockState::extensionProperties() const {
                                           : record->second.properties;
 }
 
-BlockState BlockState::with(const std::string &key,
-                            const std::string &value) const {
+BlockState BlockState::with(std::string_view key,
+                            std::string_view value) const {
   if (!block_)
     return *this;
   if (isSchemaState()) {
@@ -360,7 +360,7 @@ BlockState BlockState::with(const std::string &key,
   // Out-of-schema transition (imported blocks, unexpected values): register the
   // resulting combination so no state exists silently outside the registry.
   auto properties = this->properties();
-  properties[key] = value;
+  properties[std::string(key)] = value;
   const auto id = detail::internState(block_);
   detail::tables().extensions.emplace(id, Extension{std::move(properties)});
   return BlockState(block_, id);

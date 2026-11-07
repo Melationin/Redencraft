@@ -1,0 +1,178 @@
+{
+  "date": "2026-11-07",
+  "before_commit": "c459cbb52b846f5f46d0b546657af92d10a37709",
+  "before_headers": "verified against HEAD; allocator.hpp includes benchmark-only counter declarations",
+  "after_source_sha256": {
+    "CMakeLists.txt": "5a114b815b672ab6b9cac7dfaf578f3df34d9ae47499fbe0ff5e87f493647ae5",
+    "include/redstone/allocator.hpp": "609d247dd275162de6638e7966f8c84e93aea09b734029ded9eb404a9b4cf453",
+    "include/redstone/block.hpp": "b2d9c50c8ed4a569c27684bfc52780f0e5cbf7e31a307b64bfbdff1e0e867098",
+    "include/redstone/engine.hpp": "014b7bba0e478f9669292f33402f70957d8feabb77c53d6adde5f422cb1c8e9f",
+    "include/redstone/entity.hpp": "b340ada3ea319daa687762ae08bb45644f932a2a0fedf766ad8dbbcdd9a50e7f",
+    "include/redstone/piston.hpp": "f1618427283a4adb28c20b14a4bc3483fc32d2c0180befca6b0f02be80ff8e08",
+    "include/redstone/rail.hpp": "e6bc7f4b6f07590aa8d810e76224956b444fe1ea7d7f362228a933ef28e6129f",
+    "src/allocator.cpp": "a8aa72ad82d71fcb657eb283979431d22fa9fdb07425e8f864e2036a220de6fc",
+    "src/engine.cpp": "1809b88292e20fb39e7c7ce49f0f93f7b0e09fe22ec32061675dd0f1afc3ec80",
+    "src/entity.cpp": "2b4dde7df513286adee655929ac34daa606dd0c934d1f9010f65185cbc182406",
+    "src/piston.cpp": "4d6e3990f310abbbf7f1d8dd5c0ba6f7ba1917526f93fd2ec73fe808cdd847fa",
+    "src/rail.cpp": "b8a0e85a906dda194bc42719fd7efe0bd077f23c8a036e6bace51b3f3772fce3",
+    "src/shapes.cpp": "021887e160acc644bad82b1f90a93bc35a1b98f1258bceb0dbc573cf8daeb241",
+    "src/state.cpp": "47ff3bdb81b7bfa6067c86ec4aabe2b77294398c0bd353bfeec65ce331014872",
+    "benchmarks/tick_benchmark.cpp": "1ee425c3659efd167f98eb44e4b5b37469066f8ce4a0f921003e9275f32a3f28"
+  },
+  "workload": {
+    "input_name": "[再灰二度] 无沟V3.1双倍速防雪世吞-997.生成导出-800x83x800.litematic",
+    "input_sha256": "7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52",
+    "ticks": 3000,
+    "blocks_imported": 70111,
+    "entities_imported": 133,
+    "forced_chunks": 2916,
+    "activation": {
+      "pos": [
+        2,
+        101,
+        3
+      ],
+      "note_from": 0,
+      "note_to": 1,
+      "block_event": false
+    },
+    "network": false,
+    "realtime_pacing": false
+  },
+  "environment": {
+    "cpu": "Intel Core i9-13980HX",
+    "os": "Windows",
+    "compiler": "MSVC Release /O2 /MT",
+    "allocator": "jemalloc",
+    "affinity_mask": 4,
+    "logical_cpu": 2,
+    "priority": "High",
+    "order": [
+      "before",
+      "after",
+      "before",
+      "after"
+    ],
+    "concurrent_benchmarks": false
+  },
+  "timing": {
+    "before": [
+      {
+        "total": {
+          "ticks": 3000,
+          "total_ms": 30903.533,
+          "mean_ms": 10.301,
+          "median_ms": 9.413,
+          "p95_ms": 43.303
+        },
+        "final": {
+          "entities": 1197,
+          "scheduled": 1197,
+          "moving_pistons": 1995,
+          "events": 0
+        },
+        "cpu": {
+          "loop_thread_ms": 30593.75
+        }
+      },
+      {
+        "total": {
+          "ticks": 3000,
+          "total_ms": 30148.961,
+          "mean_ms": 10.05,
+          "median_ms": 9.225,
+          "p95_ms": 42.545
+        },
+        "final": {
+          "entities": 1197,
+          "scheduled": 1197,
+          "moving_pistons": 1995,
+          "events": 0
+        },
+        "cpu": {
+          "loop_thread_ms": 29906.25
+        }
+      }
+    ],
+    "after": [
+      {
+        "total": {
+          "ticks": 3000,
+          "total_ms": 28216.102,
+          "mean_ms": 9.405,
+          "median_ms": 8.381,
+          "p95_ms": 42.458
+        },
+        "final": {
+          "entities": 1197,
+          "scheduled": 1197,
+          "moving_pistons": 1995,
+          "events": 0
+        },
+        "cpu": {
+          "loop_thread_ms": 28062.5
+        }
+      },
+      {
+        "total": {
+          "ticks": 3000,
+          "total_ms": 29623.981,
+          "mean_ms": 9.875,
+          "median_ms": 8.787,
+          "p95_ms": 44.873
+        },
+        "final": {
+          "entities": 1197,
+          "scheduled": 1197,
+          "moving_pistons": 1995,
+          "events": 0
+        },
+        "cpu": {
+          "loop_thread_ms": 28156.25
+        }
+      }
+    ],
+    "mean_wall_reduction_percent": 5.261719529426589,
+    "mean_loop_thread_cpu_reduction_percent": 7.076446280991733,
+    "allocation_counters": false,
+    "fingerprints": false
+  },
+  "allocations": {
+    "before": {
+      "tick_new_calls": 56365745,
+      "tick_requested_bytes": 3844659796
+    },
+    "after": {
+      "tick_new_calls": 22446198,
+      "tick_requested_bytes": 1906838108
+    },
+    "reduction_percent": {
+      "tick_new_calls": 60.177590130317625,
+      "tick_requested_bytes": 50.40294306445834
+    },
+    "scope": "Successful global C++ new/new[] requests during World::tick and log.clear only; not resident or peak memory"
+  },
+  "regression": {
+    "checkpoints_equal": 12,
+    "checkpoint_lines": [
+      "FINGERPRINT tick=250 blocks=4fbb0b63aa3a2a76 scheduled=2f9f3d59e1a90a02 entities=08820b6b64bdd96c pistons=05a4e9f384ab0763 accepted_events=209571fcd0033cf7 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=500 blocks=7220439b4affef42 scheduled=71fd69c27c8418fb entities=bd78e3b5f21b17d5 pistons=42a640a5e2799bbe accepted_events=7f12baee34b286c9 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=750 blocks=9517253efcab07c4 scheduled=614eb6a64330d1d9 entities=2c709faa26dd82da pistons=7f82fe62ee8b6d09 accepted_events=24dc42b2c0dff2aa pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=1000 blocks=6c84486fcc0d1dd7 scheduled=d3ed01e4a27ed13b entities=a8c89af39eaaf6c4 pistons=3988dafd7fc3bc4d accepted_events=921abee472340f90 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=1250 blocks=e1bb39567a23339c scheduled=ba31becb3a6ce6e6 entities=8981d4aea51dd650 pistons=b1dac4f709286631 accepted_events=b4dca545c8f14740 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=1500 blocks=d066da060e75cbe4 scheduled=099e8e5320319006 entities=7c0e1f4dd90d1139 pistons=9a5248cc06851bb3 accepted_events=3d2e6f0aa4f2e384 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=1750 blocks=da81ed0cd9a75444 scheduled=eb97cd952e322baa entities=e0e558c8b2cbfbde pistons=769004ae3314f96d accepted_events=faeb4b476273388f pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=2000 blocks=3ae7051ba8a6c309 scheduled=b5d0e7bd1c8e1cb1 entities=5a6f214aadc69784 pistons=d571ff16570b0937 accepted_events=e04ff2865027345c pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=2250 blocks=97370fee9d1698d4 scheduled=ff69cf3682f09da8 entities=3695b29cdd84270a pistons=97d474a03cd4b719 accepted_events=da054d67b958a082 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=2500 blocks=9d0891119e0afba9 scheduled=8e8595ee3f69ee43 entities=b52036667e7c0b5c pistons=072f7336fb619b23 accepted_events=4cc87d3987ad0b09 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=2750 blocks=09c7f648f51c5cdc scheduled=3465b66af3bbdbdb entities=b3fc5bd9416a4c91 pistons=fa2b6b9315ef4ba5 accepted_events=6c053bff2107c053 pending_events=cbf29ce484222325 pending_event_count=0",
+      "FINGERPRINT tick=3000 blocks=3099b115c211f681 scheduled=6582cae5beb8270a entities=74f55470745489dc pistons=24e0a5b719d33cb3 accepted_events=1942103ba25e15d0 pending_events=cbf29ce484222325 pending_event_count=0"
+    ],
+    "entity_records_equal": 11571,
+    "entity_records_sha256": "9425e8d4b60b605d736df1ec152121bb677b1eed136b9702f6799eea3951a67b",
+    "ctest": "Release 12/12 passed",
+    "java_source_review": true,
+    "live_vanilla26_1_differential": false,
+    "limitation": "Sampled state fields and prior C++ core comparison, not complete state or vanilla equivalence"
+  }
+}

@@ -172,6 +172,11 @@ void horizontalCollision() {
   require(item->position.x <= 0.875 + 1.0e-9,
           "item AABB stops at the wall face");
   require(item->horizontalCollision, "horizontal collision is reported");
+  world.rawSetBlock({1, 64, 0}, defaultState("air"));
+  const auto before = item->position.x;
+  item->move(world, Vec3{1.0, 0, 0});
+  require(close(item->position.x, before + 1.0) && !item->horizontalCollision,
+          "subsequent movement clears collision boxes from the previous move");
 }
 void collisionShapesOutsideTheirBlock() {
   World world;
@@ -315,6 +320,22 @@ void tntExplosion() {
       dropped |= item->item.id == "minecraft:smooth_stone";
   require(dropped, "destroyed blocks produce real item entities");
   require(!world.log.empty(), "explosion is observable");
+}
+void explosionRayRandomConsumption() {
+  World world;
+  world.setSeed(123);
+  Random expected(123);
+  // Even zero-strength explosions consume one random float for every shell
+  // ray. Check both the first table initialization and a subsequent reuse.
+  for (int pass = 0; pass < 2; ++pass) {
+    world.explode(nullptr, {-0.5, 64, -0.5}, 0.0f, false);
+    for (int i = 0; i < 1352; ++i)
+      expected.nextFloat();
+    require(world.random.nextInt() == expected.nextInt(),
+            "precomputed explosion rays preserve random stream consumption");
+    require(world.entities.empty() && world.allBlocks().empty(),
+            "zero-strength rays do not create or destroy blocks/entities");
+  }
 }
 void tntChain() {
   auto world = floorWorld();
@@ -626,6 +647,21 @@ private:
   int value_;
   std::shared_ptr<Entity> spawn_;
 };
+class RemovingProbe : public Entity {
+public:
+  RemovingProbe(std::vector<int> &order, std::shared_ptr<Entity> target)
+      : Entity("minecraft:item"), order_(order), target_(std::move(target)) {
+    setPos(0.5, 64.0, 0.5);
+  }
+  void tick(World &world) override {
+    order_.push_back(10);
+    world.removeEntity(target_);
+    discard();
+  }
+private:
+  std::vector<int> &order_;
+  std::shared_ptr<Entity> target_;
+};
 void entityTickOrder() {
   auto world = floorWorld();
   std::vector<int> order;
@@ -644,6 +680,22 @@ void entityTickOrder() {
   world.tick();
   require(std::find(order.begin(), order.end(), 3) != order.end(),
           "deferred entity ticks on the following pass");
+
+  auto removals = floorWorld();
+  order.clear();
+  auto skipped = std::make_shared<ProbeEntity>(removals, order, 11);
+  auto first = std::make_shared<ProbeEntity>(removals, order, 9);
+  auto last = std::make_shared<ProbeEntity>(removals, order, 12);
+  removals.addEntity(first);
+  removals.addEntity(std::make_shared<RemovingProbe>(order, skipped));
+  removals.addEntity(skipped);
+  removals.addEntity(last);
+  removals.tick();
+  require((order == std::vector<int>{9, 10, 12}),
+          "discarded entity is skipped during the current snapshot");
+  require(removals.entities.size() == 2 && removals.entities[0] == first &&
+              removals.entities[1] == last,
+          "entity cleanup retains survivors in registration order");
 }
 void entityHeightBoundaries() {
   World world;
@@ -745,6 +797,7 @@ int main() {
     tntBlockPriming();
     tntDisabledRule();
     tntExplosion();
+    explosionRayRandomConsumption();
     tntChain();
     itemExplosionDamage();
     minecartExplosion();

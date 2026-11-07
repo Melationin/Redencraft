@@ -12,6 +12,29 @@
 namespace redstone {
 namespace {
 constexpr double EPS = 1.0e-7;
+const std::array<Vec3, 1352> &explosionSteps() {
+  static const auto steps = [] {
+    std::array<Vec3, 1352> result;
+    std::size_t index = 0;
+    // Preserve the original shell order and the exact normalization sequence.
+    for (int x = 0; x < 16; ++x)
+      for (int y = 0; y < 16; ++y)
+        for (int z = 0; z < 16; ++z) {
+          if (x != 0 && x != 15 && y != 0 && y != 15 && z != 0 && z != 15)
+            continue;
+          double dx = x / 15.0 * 2.0 - 1.0;
+          double dy = y / 15.0 * 2.0 - 1.0;
+          double dz = z / 15.0 * 2.0 - 1.0;
+          const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+          dx /= length;
+          dy /= length;
+          dz /= length;
+          result[index++] = {dx * 0.3, dy * 0.3, dz * 0.3};
+        }
+    return result;
+  }();
+  return steps;
+}
 // Mth.floor: truncate-and-adjust, avoiding a libm floor call in the
 // explosion ray loop (coordinates stay well inside the int range).
 inline int floorToInt(double value) {
@@ -145,11 +168,11 @@ bool canSurvive(World &world, Pos pos, const BlockState &state) {
   if (isDeadCoralFan(state))
     return coralCanSurvive(world, pos, state);
   if (state.is(Blocks::PISTON_HEAD)) {
-    auto d = directionFromString(state.get("facing", "north"));
+    auto d = directionFromString(state.getView("facing", "north"));
     auto base = world.getBlock(pos.relative(opposite(d)));
     return base.is(Blocks::PISTON) || base.is(Blocks::STICKY_PISTON) ||
            (base.is(Blocks::MOVING_PISTON) &&
-            base.get("facing", "north") == state.get("facing", "north"));
+            base.getView("facing", "north") == state.getView("facing", "north"));
   }
   if (isRailBlock(state))
     return railCanSurvive(world, pos, state);
@@ -253,7 +276,7 @@ std::vector<ItemStack> blockDrops(const BlockState &state) {
   if (name == "minecraft:glass" || isDeadCoralFan(state))
     return {}; // Silk Touch only; the empty tool used here never has it.
   if (name == "minecraft:tnt" &&
-      state.get("unstable", "false") == "true")
+      state.getView("unstable", "false") == "true")
     return {};
   if (name == "minecraft:grass_block")
     return {itemStack("minecraft:dirt", 1)};
@@ -383,7 +406,7 @@ void Entity::move(World &world, Vec3 movement, bool piston) {
       return;
   }
   Aabb box = boundingBox();
-  std::vector<ShapeBox> colliders;
+  auto &colliders = movementColliders_;
   world.collectCollisionBoxes(box.expandTowards(movement), colliders);
   Vec3 resolved;
   auto step = [&](int axis, double value) {
@@ -515,7 +538,7 @@ double Entity::fluidHeight(World &world, bool lava) const {
         auto state = world.getBlock({x, y, z});
         bool water =
             state.is(Blocks::WATER) ||
-            state.get("waterlogged", "false") == "true";
+            state.getView("waterlogged", "false") == "true";
         bool lavaState = state.is(Blocks::LAVA);
         if ((lava && lavaState) || (!lava && water)) {
           int level = 0;
@@ -919,7 +942,7 @@ void Minecart::tickOldBehavior(World &world) {
     moveAlongTrack(world);
     if (state.is(Blocks::ACTIVATOR_RAIL))
       activateMinecart(world, railPos,
-                       state.get("powered", "false") == "true");
+                       state.getView("powered", "false") == "true");
   } else
     comeOffTrack(world);
   applyEffectsFromBlocks(world);
@@ -961,7 +984,7 @@ void Minecart::moveAlongTrack(World &world) {
   y = pos.y;
   bool powerTrack = false, haltTrack = false;
   if (state.is(Blocks::POWERED_RAIL)) {
-    powerTrack = state.get("powered", "false") == "true";
+    powerTrack = state.getView("powered", "false") == "true";
     haltTrack = !powerTrack;
   }
   double slideSpeed = 0.0078125;
@@ -1145,9 +1168,27 @@ void Minecart::pushAndPickupEntities(World &world) {
 
 std::shared_ptr<Entity> World::addEntity(std::shared_ptr<Entity> entity) {
   entity->id = nextEntityId++;
+  entity->removalObserved_ = false;
   entities.push_back(entity);
   entitySectionAdd(*entity);
+  if (entityAddedObserver)
+    entityAddedObserver(*entity);
   return entity;
+}
+void World::notifyEntityRemoved(Entity &entity) {
+  if (entityRemovedObserver && !entity.removalObserved_) {
+    entity.removalObserved_ = true;
+    entityRemovedObserver(entity.id);
+  }
+}
+void World::broadcastEntityRemovals() {
+  // TODO: vanilla's levelCallback.onRemove runs inside setRemoved/discard.
+  // Observe cleanup/end-of-block-entity removals for now; finer intra-phase
+  // ordering still requires a world-aware entity lifecycle callback.
+  if (entityRemovedObserver)
+    for (const auto &entity : entities)
+      if (entity && entity->isRemoved())
+        notifyEntityRemoved(*entity);
 }
 void World::entitySectionAdd(Entity &entity) {
   entity.entitySection = entitySectionKey(entity.position);
@@ -1229,14 +1270,17 @@ void World::tickEntities() {
     if (!entity->isRemoved())
       entitySectionUpdate(*entity);
   }
-  for (auto it = entities.begin(); it != entities.end();) {
-    if (!*it || (*it)->isRemoved()) {
-      if (*it)
-        entitySectionRemove(**it);
-      it = entities.erase(it);
-    } else
-      ++it;
-  }
+  const auto newEnd = std::remove_if(
+      entities.begin(), entities.end(), [this](const auto &entity) {
+        if (entity && !entity->isRemoved())
+          return false;
+        if (entity) {
+          notifyEntityRemoved(*entity);
+          entitySectionRemove(*entity);
+        }
+        return true;
+      });
+  entities.erase(newEnd, entities.end());
 }
 void World::collectCollisionBoxes(const Aabb &box, std::vector<ShapeBox> &out) {
   out.clear();
@@ -1498,13 +1542,13 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
   // instead of hitting the chunk map on every step.
   struct CachedBlock {
     std::uint64_t key = 0;
-    BlockState::Id state = 0;
     float resistance = 0.0f;
     bool present = false;
     bool air = true;
     bool fluid = false;
     bool loaded = false;
   };
+  static_assert(sizeof(CachedBlock) == 16);
   constexpr std::size_t kBlockCacheSize = 512;
   constexpr std::uint64_t kBlockCacheShift = 55; // 64 - 9
   std::array<CachedBlock, kBlockCacheSize> blockCache{};
@@ -1518,88 +1562,72 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.y)) &
             0xFFFull);
   };
-  constexpr int size = 16;
-  for (int xx = 0; xx < size; ++xx)
-    for (int yy = 0; yy < size; ++yy)
-      for (int zz = 0; zz < size; ++zz) {
-        if (xx != 0 && xx != 15 && yy != 0 && yy != 15 && zz != 0 &&
-            zz != 15)
-          continue;
-        double xd = xx / 15.0 * 2.0 - 1.0;
-        double yd = yy / 15.0 * 2.0 - 1.0;
-        double zd = zz / 15.0 * 2.0 - 1.0;
-        double d = std::sqrt(xd * xd + yd * yd + zd * zd);
-        xd /= d;
-        yd /= d;
-        zd /= d;
-        // ServerExplosionMixin.performRayCast: the step vector is constant per
-        // ray, so the 0.3 scaling is hoisted out of the stepping loop.
-        const double stepX = xd * 0.3;
-        const double stepY = yd * 0.3;
-        const double stepZ = zd * 0.3;
-        double remainingPower = radius * (0.7f + random.nextFloat() * 0.6f);
-        double xp = center.x, yp = center.y, zp = center.z;
-        // A 0.3 step usually stays inside the same block. Reuse the previous
-        // block's resistance and air flags instead of probing the cache again
-        // (lithium's prevX/prevY/prevZ shortcut).
-        int prevX = std::numeric_limits<int>::min();
-        int prevY = std::numeric_limits<int>::min();
-        int prevZ = std::numeric_limits<int>::min();
-        float prevResistance = 0.0f;
-        bool prevAir = true;
-        bool prevFluid = false;
-        while (remainingPower > 0) {
-          const int blockX = floorToInt(xp);
-          const int blockY = floorToInt(yp);
-          const int blockZ = floorToInt(zp);
-          const bool sameBlock =
-              blockX == prevX && blockY == prevY && blockZ == prevZ;
-          if (!sameBlock) {
-            const Pos pos{blockX, blockY, blockZ};
-            const std::uint64_t key = blockKey(pos);
-            CachedBlock &cached =
-                blockCache[(key * 0x9E3779B97F4A7C15ull) >> kBlockCacheShift];
-            if (!cached.present || cached.key != key) {
-              const auto state = getBlock(pos);
-              const bool fluid =
-                  isLiquidBlock(state) ||
-                  state.getView("waterlogged", "false") == "true";
-              const float blast = static_cast<float>(std::max(
-                  static_cast<double>(blockMetadata(state).explosionResistance),
-                  fluid ? 100.0 : 0.0));
-              cached.key = key;
-              cached.present = true;
-              cached.state = state.id();
-              cached.air = state.isAir();
-              cached.fluid = fluid;
-              // Cache the per-step loss, (resistance + 0.3) * 0.3.
-              cached.resistance = (blast + 0.3f) * 0.3f;
-              cached.loaded = isLoaded(pos);
-            }
-            if (!cached.loaded)
-              break;
-            prevX = blockX;
-            prevY = blockY;
-            prevZ = blockZ;
-            prevResistance = cached.resistance;
-            prevAir = cached.air;
-            prevFluid = cached.fluid;
-          }
-          if (!prevAir || prevFluid)
-            remainingPower -= prevResistance;
-          // Lithium "skip air": air positions are never destroyed by
-          // interactWithBlocks, and fire/counting are not modelled here. Later
-          // steps are strictly weaker, so only the first step inside a block
-          // can add it: repeated same-block steps only produced duplicates.
-          if (!sameBlock && remainingPower > 0 && !prevAir)
-            toBlow.push_back({blockX, blockY, blockZ});
-          xp += stepX;
-          yp += stepY;
-          zp += stepZ;
-          // ServerExplosionMine: constant fall-off per step.
-          remainingPower -= 0.22500001;
+  for (const auto &step : explosionSteps()) {
+    const double stepX = step.x;
+    const double stepY = step.y;
+    const double stepZ = step.z;
+    double remainingPower = radius * (0.7f + random.nextFloat() * 0.6f);
+    double xp = center.x, yp = center.y, zp = center.z;
+    // A 0.3 step usually stays inside the same block. Reuse the previous
+    // block's resistance and air flags instead of probing the cache again
+    // (lithium's prevX/prevY/prevZ shortcut).
+    int prevX = std::numeric_limits<int>::min();
+    int prevY = std::numeric_limits<int>::min();
+    int prevZ = std::numeric_limits<int>::min();
+    float prevResistance = 0.0f;
+    bool prevAir = true;
+    bool prevFluid = false;
+    while (remainingPower > 0) {
+      const int blockX = floorToInt(xp);
+      const int blockY = floorToInt(yp);
+      const int blockZ = floorToInt(zp);
+      const bool sameBlock =
+          blockX == prevX && blockY == prevY && blockZ == prevZ;
+      if (!sameBlock) {
+        const Pos pos{blockX, blockY, blockZ};
+        const std::uint64_t key = blockKey(pos);
+        CachedBlock &cached =
+            blockCache[(key * 0x9E3779B97F4A7C15ull) >> kBlockCacheShift];
+        if (!cached.present || cached.key != key) {
+          const auto state = getBlock(pos);
+          const bool fluid =
+              isLiquidBlock(state) ||
+              state.getView("waterlogged", "false") == "true";
+          const float blast = static_cast<float>(std::max(
+              static_cast<double>(blockMetadata(state).explosionResistance),
+              fluid ? 100.0 : 0.0));
+          cached.key = key;
+          cached.present = true;
+          cached.air = state.isAir();
+          cached.fluid = fluid;
+          // Cache the per-step loss, (resistance + 0.3) * 0.3.
+          cached.resistance = (blast + 0.3f) * 0.3f;
+          cached.loaded = isLoaded(pos);
         }
+        if (!cached.loaded)
+          break;
+        prevX = blockX;
+        prevY = blockY;
+        prevZ = blockZ;
+        prevResistance = cached.resistance;
+        prevAir = cached.air;
+        prevFluid = cached.fluid;
       }
+      if (!prevAir || prevFluid)
+        remainingPower -= prevResistance;
+      // Lithium "skip air": air positions are never destroyed by
+      // interactWithBlocks, and fire/counting are not modelled here. Later
+      // steps are strictly weaker, so only the first step inside a block
+      // can add it: repeated same-block steps only produced duplicates.
+      if (!sameBlock && remainingPower > 0 && !prevAir)
+        toBlow.push_back({blockX, blockY, blockZ});
+      xp += stepX;
+      yp += stepY;
+      zp += stepZ;
+      // ServerExplosionMine: constant fall-off per step.
+      remainingPower -= 0.22500001;
+    }
+  }
   // ServerExplosion.hurtEntities.
   if (radius >= 1.0e-5f) {
     double doubleRadius = radius * 2.0;
@@ -1633,6 +1661,9 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
     }
   }
   // ServerExplosion.interactWithBlocks.
+  // TODO: TRIGGER_BLOCK explosions (e.g. wind charges) toggle unpowered
+  // fence gates without destroying them; this simulator only models the TNT
+  // destructive explosion mode here.
   // calculateExplodedPositions yields a set: sort and deduplicate instead of
   // paying a tree node per ray step.
   std::sort(toBlow.begin(), toBlow.end());

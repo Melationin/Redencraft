@@ -69,7 +69,7 @@ public:
                            std::string_view fallback = std::string_view{}) const;
   bool hasProperty(std::string_view key) const;
   // StateHolder.setValue: transition to the registered neighbour state.
-  BlockState with(const std::string &key, const std::string &value) const;
+  BlockState with(std::string_view key, std::string_view value) const;
   // Registry ids identify a state uniquely (one state per id).
   bool operator==(const BlockState &other) const { return id_ == other.id_; }
 
@@ -106,9 +106,16 @@ public:
   bool indexOf(std::string_view value, std::uint32_t &index) const;
 
 private:
+  struct ValueHash {
+    using is_transparent = void;
+    std::size_t operator()(std::string_view value) const {
+      return std::hash<std::string_view>{}(value);
+    }
+  };
   std::string name_;
   std::vector<std::string> values_;
-  std::unordered_map<std::string, std::uint32_t> valueIndex_;
+  std::unordered_map<std::string, std::uint32_t, ValueHash, std::equal_to<>>
+      valueIndex_;
   std::uint32_t defaultIndex_ = 0;
 };
 
@@ -313,6 +320,10 @@ extern const Block DEAD_FIRE_CORAL_FAN;
 extern const Block DEAD_HORN_CORAL_FAN;
 extern const Block COBBLESTONE_WALL;
 extern const Block STONE_BRICK_WALL;
+extern const Block OAK_FENCE_GATE;
+extern const Block BIRCH_FENCE_GATE;
+extern const Block MOSS_BLOCK;
+extern const Block STONE_BRICKS;
 extern const Block SAND;
 extern const Block REDSTONE_LAMP;
 extern const Block OBSIDIAN;
@@ -385,6 +396,9 @@ inline bool isWoolCarpet(const BlockState &state) {
 inline bool isWallBlock(const BlockState &state) {
   const Block *block = state.blockOrNull();
   return block && block->isWall();
+}
+inline bool isFenceGate(const BlockState &state) {
+  return state.is(Blocks::OAK_FENCE_GATE) || state.is(Blocks::BIRCH_FENCE_GATE);
 }
 inline bool isDeadCoralWallFan(const BlockState &state) {
   const Block *block = state.blockOrNull();

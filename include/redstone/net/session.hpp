@@ -20,6 +20,7 @@ struct ProtocolData {
 using Uuid = std::array<std::uint8_t, 16>;
 Uuid offlineUuid(std::string_view name);
 enum class Phase { Handshake, Status, Login, Configuration, Play, Closed };
+inline constexpr int maxViewDistance = 10;
 struct ServerOptions {
   Vec3 spawn{8.5, 66, 8.5};
   std::vector<std::pair<int, int>> chunks;
@@ -33,8 +34,12 @@ public:
   Session(World &, const ProtocolData &, ServerOptions);
   void receive(std::span<const std::uint8_t> bytes);
   void tick();
+  // Called at the chunk/entity broadcast phase of World::tick.
+  void broadcastEntities();
+  void entityAdded(const Entity &);
+  void entityRemoved(int entityId);
   // Call after the measured tick; wall-clock duration excludes this packet.
-  void sendTickTime(double milliseconds, std::int64_t tick);
+  void sendTickTime(double milliseconds, std::int64_t tick, std::size_t samples = 1);
   void blockUpdate(Pos, const BlockState &);
   void flushBlockUpdates();
   void blockEvent(const BlockEvent &);
@@ -58,16 +63,20 @@ private:
     std::uint8_t yRot = 0, xRot = 0, headRot = 0;
     int tickCount = 0;
     int teleportDelay = 0;
-    std::int64_t lastSeenTick = 0;
+    std::uint64_t lastSeenGeneration = 0;
     bool wasOnGround = false;
   };
   void handle(Reader &);
   void play(int, Reader &);
   void join();
   void send(std::string_view name, const Writer &payload = {});
+  void send(std::string_view name, Writer &&payload);
   void packet(int id, const Writer &payload = {});
+  void packet(int id, Writer &&payload);
+  void enqueue(OutPacket packet);
   void queue(Bytes bytes);
-  void queueDeferred(std::function<Bytes()> producer);
+  void queueDeferred(std::function<Bytes()> producer,
+                     std::size_t retainedBytes);
   void disconnect(const std::string &);
   void acknowledge(int sequence);
   void sendBlockUpdate(Pos);
@@ -112,6 +121,7 @@ private:
   int chunkBatchLimit_ = 9;
   int dropSpam_ = 0;
   std::int64_t connectionTicks_ = 0, keepAliveSent_ = 0;
+  std::uint64_t syncGeneration_ = 0;
   std::optional<std::int64_t> keepAlive_;
 };
 } // namespace redstone::net

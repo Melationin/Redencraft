@@ -85,6 +85,33 @@ void creative(Session &s, const ProtocolData &data, int slot,
   out.varInt(0);
   s.receive(frame(56, out.data));
 }
+void viewDistanceTen(const ProtocolData &data) {
+  World world;
+  ServerOptions options;
+  options.viewDistance = 10;
+  for (int x : {0, 9, 10, 11}) {
+    world.loadChunk(x, 0);
+    options.chunks.emplace_back(x, 0);
+  }
+  Session session(world, data, options);
+  const auto begin = allPlay.size();
+  join(session, data);
+  bool radiusSeen = false;
+  std::set<std::pair<int, int>> chunks;
+  for (auto i = begin; i < allPlay.size(); ++i) {
+    Reader in(allPlay[i]);
+    const auto id = in.varInt();
+    if (id == data.packet("play", "clientbound", "set_chunk_cache_radius")) {
+      assert(in.varInt() == 10 && in.empty());
+      radiusSeen = true;
+    } else if (id == data.packet("play", "clientbound", "level_chunk_with_light")) {
+      const int x = in.i32(), z = in.i32();
+      chunks.emplace(x, z);
+    }
+  }
+  assert(radiusSeen);
+  assert((chunks == std::set<std::pair<int, int>>{{0, 0}, {9, 0}, {10, 0}}));
+}
 void chunkViewAndTiming(const ProtocolData &data) {
   World world;
   ServerOptions options;
@@ -132,6 +159,7 @@ void chunkViewAndTiming(const ProtocolData &data) {
   session.receive(
       frame(data.packet("play", "serverbound", "move_player_pos"), move.data));
   session.tick();
+  session.broadcastEntities();
   ids = drain(session, true);
   assert(std::count(ids.begin(), ids.end(), 37) == 4); // Unload prior view.
   assert(std::count(ids.begin(), ids.end(), 45) ==
@@ -142,13 +170,14 @@ void chunkViewAndTiming(const ProtocolData &data) {
   session.receive(frame(
       data.packet("play", "serverbound", "chunk_batch_received"), ack.data));
   session.tick();
+  session.broadcastEntities();
   ids = drain(session, true);
   assert(std::count(ids.begin(), ids.end(), 45) == 2);
   assert(std::count(ids.begin(), ids.end(),
                     data.packet("play", "clientbound", "add_entity")) == 1);
   assert(world.isChunkLoaded(0, 0) && world.isChunkLoaded(12, 0));
   const auto tick = world.gameTime();
-  session.sendTickTime(12.34567, 123);
+  session.sendTickTime(12.34567, 123, 20);
   auto packets = session.takeOutput();
   assert(packets.size() == 1);
   auto body = popFrame(packets[0]);
@@ -156,7 +185,7 @@ void chunkViewAndTiming(const ProtocolData &data) {
   assert(timing.varInt() == data.packet("play", "clientbound", "system_chat"));
   assert(timing.u8() == 8);
   const auto bytes = timing.raw(timing.i16());
-  assert(std::string(bytes.begin(), bytes.end()) == "Tick 123: 12.346 ms");
+  assert(std::string(bytes.begin(), bytes.end()) == "Tick 123: 12.346 ms (1s avg, 20 ticks)");
   assert(!timing.bool_() && timing.empty());
   assert(world.gameTime() ==
          tick); // Observational reporting never advances simulation.
@@ -175,20 +204,104 @@ void fallingLandingPacketOrder(const ProtocolData &data) {
     session.blockUpdate(p, state);
   };
   world.blockUpdatesBroadcastObserver = [&] { session.flushBlockUpdates(); };
+  world.entityTrackingBroadcastObserver = [&] { session.broadcastEntities(); };
+  world.entityRemovedObserver = [&](int id) { session.entityRemoved(id); };
   world.fallingBlockLandObserver = [&](int id, Pos p, const BlockState &state) {
     session.fallingBlockLanded(id, p, state);
   };
   world.tick();
   session.tick();
-  const auto ids = drain(session, true);
+  auto ids = drain(session, true);
   const auto block =
       std::find(ids.begin(), ids.end(),
                 data.packet("play", "clientbound", "block_update"));
-  const auto removed =
-      std::find(ids.begin(), ids.end(),
-                data.packet("play", "clientbound", "remove_entities"));
+  const auto removed = std::find(ids.begin(), ids.end(),
+      data.packet("play", "clientbound", "remove_entities"));
   assert(block != ids.end() && removed != ids.end() && block < removed);
   assert(world.getBlock({8, 65, 8}).name() == "minecraft:sand");
+}
+void entityBroadcastPhase(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.spawnItem({8, 70, 8}, "white_carpet");
+  ServerOptions options;
+  options.chunks = {{0, 0}};
+  Session session(world, data, options);
+  join(session, data);
+  Entity *entity = world.entities.front().get();
+  const int entityId = entity->id;
+  entity->position.x += 1;
+  world.entityTrackingBroadcastObserver = [&] { session.broadcastEntities(); };
+  world.entityAddedObserver = [&](const Entity &e) { session.entityAdded(e); };
+  world.entityRemovedObserver = [&](int id) { session.entityRemoved(id); };
+  int newEntityId = 0;
+  world.blockEntityTicker = [&](World &w) {
+    entity->discard();
+    w.spawnItem({10, 70, 8}, "white_carpet");
+    newEntityId = w.entities.back()->id;
+    w.entities.back()->discard();
+  };
+  world.tick();
+  auto packets = session.takeOutput();
+  int moveIndex = -1, removeIndex = -1, spawnIndex = -1;
+  int spawnedRemoveIndex = -1, index = 0;
+  for (auto &bytes : packets) {
+    auto body = popFrame(bytes);
+    Reader in(*body);
+    const int id = in.varInt();
+    if (id == data.packet("play", "clientbound", "move_entity_pos")) {
+      assert(in.varInt() == entityId);
+      assert(in.i16() == 4096);
+      moveIndex = index;
+    }
+    if (id == data.packet("play", "clientbound", "remove_entities")) {
+      assert(in.varInt() == 1);
+      const int removedId = in.varInt();
+      if (removedId == entityId) removeIndex = index;
+      if (removedId == newEntityId) spawnedRemoveIndex = index;
+    }
+    if (id == data.packet("play", "clientbound", "add_entity")) {
+      assert(in.varInt() == newEntityId);
+      spawnIndex = index;
+    }
+    ++index;
+  }
+  assert(moveIndex >= 0 && removeIndex > moveIndex && spawnIndex > moveIndex &&
+         spawnedRemoveIndex > spawnIndex);
+  // A second broadcast at the same connection tick does not repeat removal
+  // or spawn for entities already updated by the lifecycle callbacks.
+  session.broadcastEntities();
+  auto ids = drain(session, true);
+  assert(std::find(ids.begin(), ids.end(), data.packet("play", "clientbound", "remove_entities")) == ids.end());
+  assert(std::find(ids.begin(), ids.end(), data.packet("play", "clientbound", "add_entity")) == ids.end());
+  world.spawnItem({11, 70, 8}, "white_carpet");
+  drain(session, true);
+  world.entities.back()->discard();
+  session.broadcastEntities();
+  ids = drain(session, true);
+  assert(std::find(ids.begin(), ids.end(), data.packet("play", "clientbound", "remove_entities")) != ids.end());
+}
+void sessionOutputLimit(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  ServerOptions options;
+  options.chunks = {{0, 0}};
+  Session slow(world, data, options), other(world, data, options);
+  join(slow, data);
+  join(other, data);
+  for (std::size_t i = 0; i < maxQueuedOutputPackets; ++i)
+    slow.sendTickTime(1.0, static_cast<std::int64_t>(i));
+  assert(!slow.closed());
+  slow.sendTickTime(1.0, maxQueuedOutputPackets);
+  assert(slow.closed());
+  assert(slow.error() == "Connection output backlog exceeded");
+  assert(slow.takeOutputItems().empty());
+  bool completed = false;
+  world.blockEntityTicker = [&](World &) { completed = true; };
+  world.tick();
+  other.sendTickTime(1.0, 1);
+  assert(completed && !other.closed());
+  assert(other.takeOutputItems().size() == 1);
 }
 void placementRules(const ProtocolData &data) {
   World world;
@@ -200,6 +313,23 @@ void placementRules(const ProtocolData &data) {
   options.chunks = {{0, 0}};
   Session session(world, data, options);
   join(session, data);
+  // Gate opens away from a player facing its back, then closes without
+  // changing the powered property. Placement uses horizontal player facing.
+  world.rawSetBlock({7, 65, 8}, defaultState("birch_fence_gate"));
+  use(session, {7, 65, 8}, Direction::Up);
+  assert(world.getBlock({7, 65, 8}).get("open") == "true" &&
+         world.getBlock({7, 65, 8}).get("facing") == "south");
+  use(session, {7, 65, 8}, Direction::Up);
+  assert(world.getBlock({7, 65, 8}).get("open") == "false" &&
+         world.getBlock({7, 65, 8}).get("powered") == "false");
+  world.rawSetBlock({7, 65, 8}, airState());
+  creative(session, data, 0, "oak_fence_gate");
+  select(session, 0);
+  use(session, {6, 64, 8}, Direction::Up);
+  assert(world.getBlock({6, 65, 8}).is(Blocks::OAK_FENCE_GATE) &&
+         world.getBlock({6, 65, 8}).get("facing") == "south");
+  world.rawSetBlock({6, 65, 8}, airState());
+  drain(session, true);
   select(session, 5);
   use(session, {6, 64, 6}, Direction::Up);
   assert(world.getBlock({6, 65, 6}).name() == "minecraft:observer");
@@ -256,8 +386,11 @@ void placementRules(const ProtocolData &data) {
 int main(int argc, char **argv) {
   assert(argc == 2);
   ProtocolData data(argv[1]);
+  viewDistanceTen(data);
   chunkViewAndTiming(data);
   fallingLandingPacketOrder(data);
+  entityBroadcastPhase(data);
+  sessionOutputLimit(data);
   placementRules(data);
   {
     const Uuid expected{0xb5, 0x0a, 0xd3, 0x85, 0x82, 0x9d, 0x31, 0x41,
@@ -280,6 +413,7 @@ int main(int argc, char **argv) {
     session.blockEvent(e);
   };
   world.blockUpdatesBroadcastObserver = [&] { session.flushBlockUpdates(); };
+  world.entityTrackingBroadcastObserver = [&] { session.broadcastEntities(); };
   join(session, data);
   assert(session.inventory()[1].id == "minecraft:sticky_piston");
   use(session, {8, 64, 8}, Direction::Up);
@@ -340,7 +474,7 @@ int main(int argc, char **argv) {
   world.spawnPrimedTnt({10.5, 67, 10.5}, 80);
   world.spawnMinecart({11.5, 67, 11.5});
   world.spawnFallingBlock({12.5, 67, 12.5}, defaultState("smooth_stone"));
-  session.tick();
+  session.broadcastEntities();
   ids = drain(session, true);
   assert(std::count(ids.begin(), ids.end(), 1) == 4);
   world.tick();
@@ -358,7 +492,7 @@ int main(int argc, char **argv) {
                     data.packet("play", "clientbound", "teleport_entity")) ==
          0);
   world.entities.front()->discard();
-  session.tick();
+  session.broadcastEntities();
   ids = drain(session, true);
   assert(std::find(ids.begin(), ids.end(), 77) != ids.end());
   // Initial chunk snapshot includes a moving piston block entity too.
@@ -409,6 +543,34 @@ int main(int argc, char **argv) {
     drain(early);
     early.receive(frame(3, {}));
     assert(early.closed());
+  }
+  {
+    // Repeated writes coalesce per section and encode the latest state at
+    // broadcast time, including on a subsequent broadcast with reused storage.
+    const Pos a{5, 65, 10}, b{6, 65, 10};
+    for (int pass = 0; pass < 2; ++pass) {
+      session.blockUpdate(b, defaultState("smooth_stone"));
+      session.blockUpdate(a, defaultState("smooth_stone"));
+      session.blockUpdate(b, defaultState("smooth_stone"));
+      world.rawSetBlock(a, defaultState("smooth_stone"));
+      world.rawSetBlock(b, defaultState("glass"));
+      session.flushBlockUpdates();
+      auto packets = session.takeOutput();
+      assert(packets.size() == 1);
+      auto body = popFrame(packets[0]);
+      assert(body && packets[0].empty());
+      Reader in(*body);
+      assert(in.varInt() == data.packet("play", "clientbound", "section_blocks_update"));
+      (void)in.i64();
+      assert(in.varInt() == 2);
+      const auto first = in.varLong(), second = in.varLong();
+      assert((first & 0xfff) == ((5 << 8) | (10 << 4) | 1));
+      assert((first >> 12) == data.registry.stateId(defaultState("smooth_stone")));
+      assert((second & 0xfff) == ((6 << 8) | (10 << 4) | 1));
+      assert((second >> 12) == data.registry.stateId(defaultState("glass")));
+      assert(in.empty());
+      allPlay.push_back(std::move(*body));
+    }
   }
   {
     // A dirty position records no stale state. Multiple changes coalesce;

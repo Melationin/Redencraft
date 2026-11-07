@@ -8,6 +8,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <thread>
 
 using namespace redstone;
 using namespace redstone::net;
@@ -229,6 +230,19 @@ static void chunks(const std::filesystem::path &assets) {
   assert(tag.get("blockState")->get("Name")->text ==
          "minecraft:white_terracotta");
   auto movingChunk = encodeChunk(world.snapshotChunk(-1, -2), -1, -2, registry);
+  auto frozen = prepareChunkSnapshot(world.snapshotChunk(-1, -2), registry);
+  assert(encodeChunk(frozen, -1, -2, registry) == movingChunk);
+  world.rawSetBlock(piston->pos, defaultState("air"));
+  piston->movedState = defaultState("glass").with("outside_schema", "true");
+  // The encoder may run while the world thread grows the state/extension
+  // registry. It must consume only frozen protocol IDs and owned NBT bytes.
+  std::thread encoder([&] {
+    for (int i = 0; i < 8; ++i)
+      assert(encodeChunk(frozen, -1, -2, registry) == movingChunk);
+  });
+  for (int i = 0; i < 1024; ++i)
+    defaultState("glass").with("outside_schema", std::to_string(i));
+  encoder.join();
   // Optional binary fixture, decoded by the actual Java 26.1 PLAY codec.
   if (const char *file = std::getenv("REDSTONE_WIRE_FIXTURE")) {
     Writer record, packet;

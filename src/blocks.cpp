@@ -163,6 +163,10 @@ const Block WATER{"minecraft:water", meta(100, false, "destroy"),
                   {Property{"level", numbered(16), "0"}}};
 const Block LAVA{"minecraft:lava", meta(100, false, "destroy"),
                  {Property{"level", numbered(16), "0"}}};
+const Block OAK_FENCE_GATE{
+    "minecraft:oak_fence_gate", BlockMetadata{2.0f, false, "normal", true, 0.6f, 1.0f, 3.0f},
+    {Property{"facing", values({"north", "east", "south", "west"}), "north"},
+     flag("open"), flag("powered"), flag("in_wall")}};
 
 // Vanilla blocks outside the simulated/editable registry subset. They exist so
 // that state.is(Blocks.SNOW) stays a reference comparison for imported worlds.
@@ -176,5 +180,15 @@ const Block RESPAWN_ANCHOR{"minecraft:respawn_anchor",
                            meta(0, false, "unsupported", false)};
 const Block REINFORCED_DEEPSLATE{"minecraft:reinforced_deepslate",
                                  meta(0, false, "unsupported", false)};
+
+const Block BIRCH_FENCE_GATE{
+    "minecraft:birch_fence_gate", OAK_FENCE_GATE.metadata(),
+    {Property{"facing", values({"north", "east", "south", "west"}), "north"},
+     flag("open"), flag("powered"), flag("in_wall")}};
+// TODO: bonemeal-driven moss patches require the excluded world features.
+const Block MOSS_BLOCK{"minecraft:moss_block",
+                       BlockMetadata{0.1f, true, "destroy", true, 0.6f, 1.0f, 0.1f}};
+const Block STONE_BRICKS{"minecraft:stone_bricks",
+                         BlockMetadata{1.5f, true, "normal", true, 0.6f, 1.0f, 6.0f}};
 } // namespace Blocks
 } // namespace redstone

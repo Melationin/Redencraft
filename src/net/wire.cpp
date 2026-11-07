@@ -383,7 +383,43 @@ Bytes encodeMovingPistonNbt(const PistonSnapshot &p) {
   w.u8(0);
   return std::move(w.data);
 }
+std::size_t ProtocolChunkSnapshot::retainedBytes() const noexcept {
+  std::size_t bytes = sizeof(*this) + sections.capacity() * sizeof(SectionSnapshot) +
+                      blockEntities.capacity() * sizeof(BlockEntity);
+  for (const auto &section : sections)
+    bytes += section.palette.capacity() * sizeof(BlockState::Id) +
+             section.indices8.capacity() + section.indices16.capacity() * 2;
+  for (const auto &entity : blockEntities)
+    bytes += entity.nbt.capacity();
+  return bytes;
+}
+ProtocolChunkSnapshot prepareChunkSnapshot(ChunkSnapshot snapshot,
+                                            const Registry &registry) {
+  ProtocolChunkSnapshot result;
+  result.minY = snapshot.minY;
+  result.maxY = snapshot.maxY;
+  result.airId = registry.stateId(BlockState{});
+  result.stateBits = registry.stateBits();
+  result.biomeId = registry.biomeId("minecraft:plains");
+  result.pistonTypeId = registry.blockEntityTypeId("minecraft:piston");
+  result.sections = std::move(snapshot.sections);
+  for (auto &section : result.sections) {
+    if (section.bits == 0)
+      section.single = registry.stateId(BlockState::fromId(section.single));
+    else
+      for (auto &id : section.palette)
+        id = registry.stateId(BlockState::fromId(id));
+  }
+  result.blockEntities.reserve(snapshot.pistons.size());
+  for (const auto &piston : snapshot.pistons)
+    result.blockEntities.push_back({piston.pos, encodeMovingPistonNbt(piston)});
+  return result;
+}
 Bytes encodeChunk(const ChunkSnapshot &snapshot, int cx, int cz,
+                  const Registry &registry) {
+  return encodeChunk(prepareChunkSnapshot(snapshot, registry), cx, cz, registry);
+}
+Bytes encodeChunk(const ProtocolChunkSnapshot &snapshot, int cx, int cz,
                   const Registry &registry) {
   if (snapshot.minY % 16 || snapshot.maxY % 16 ||
       snapshot.minY >= snapshot.maxY)
@@ -396,8 +432,8 @@ Bytes encodeChunk(const ChunkSnapshot &snapshot, int cx, int cz,
     h.resize(256, 0);
   Writer sections;
   const int sectionCount = (snapshot.maxY - snapshot.minY) / 16;
-  const int airId = registry.stateId(BlockState{});
-  const int globalBits = registry.stateBits();
+  const int airId = snapshot.airId;
+  const int globalBits = snapshot.stateBits;
   std::vector<int> ids(4096);
   std::vector<int> mapped;
   for (int i = 0; i < sectionCount; ++i) {
@@ -407,14 +443,12 @@ Bytes encodeChunk(const ChunkSnapshot &snapshot, int cx, int cz,
     if (!snap) {
       std::fill(ids.begin(), ids.end(), airId);
     } else if (snap->bits == 0) {
-      const int id = snap->single == 0
-                         ? airId
-                         : registry.stateId(BlockState::fromId(snap->single));
+      const int id = static_cast<int>(snap->single);
       std::fill(ids.begin(), ids.end(), id);
     } else {
       mapped.resize(snap->palette.size());
       for (std::size_t k = 0; k < snap->palette.size(); ++k)
-        mapped[k] = registry.stateId(BlockState::fromId(snap->palette[k]));
+        mapped[k] = static_cast<int>(snap->palette[k]);
       for (int cell = 0; cell < 4096; ++cell) {
         const int paletteIndex =
             snap->bits == 8 ? snap->indices8[cell] : snap->indices16[cell];
@@ -445,7 +479,7 @@ Bytes encodeChunk(const ChunkSnapshot &snapshot, int cx, int cz,
     sections.i16(static_cast<std::int16_t>(fluid));
     blockPalette(sections, ids, globalBits);
     sections.u8(0);
-    sections.varInt(registry.biomeId("minecraft:plains"));
+    sections.varInt(snapshot.biomeId);
   }
   out.varInt(3);
   const int types[] = {1, 4, 5};
@@ -456,12 +490,12 @@ Bytes encodeChunk(const ChunkSnapshot &snapshot, int cx, int cz,
   }
   out.varInt(static_cast<int>(sections.data.size()));
   out.raw(sections.data);
-  out.varInt(static_cast<int>(snapshot.pistons.size()));
-  for (const auto &p : snapshot.pistons) {
+  out.varInt(static_cast<int>(snapshot.blockEntities.size()));
+  for (const auto &p : snapshot.blockEntities) {
     out.u8(((p.pos.x & 15) << 4) | (p.pos.z & 15));
     out.i16(static_cast<std::int16_t>(p.pos.y));
-    out.varInt(registry.blockEntityTypeId("minecraft:piston"));
-    out.raw(encodeMovingPistonNbt(p));
+    out.varInt(snapshot.pistonTypeId);
+    out.raw(p.nbt);
   }
   // TODO: replace visualization light with a real light engine. A full sky
   // layer and empty block layer keep the optional viewer usable meanwhile.

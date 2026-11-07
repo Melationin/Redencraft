@@ -81,6 +81,21 @@ void carpetDuplicator() {
               carpetItem->position.x < 0.0,
           "duper carpet item is launched westward by the retracting slime");
 }
+void mossAndStoneBricks() {
+  World w;
+  setup(w);
+  const Pos base{0, 0, 0}, front{1, 0, 0};
+  put(w, front, block("moss_block"));
+  PistonStructureResolver moss(w, base, Direction::East, true);
+  require(moss.resolve() && moss.toPush().empty() &&
+              moss.toDestroy().size() == 1 && moss.toDestroy().front() == front,
+          "piston destroys moss instead of moving it");
+  put(w, front, block("stone_bricks"));
+  PistonStructureResolver bricks(w, base, Direction::East, true);
+  require(bricks.resolve() && bricks.toDestroy().empty() &&
+              bricks.toPush().size() == 1 && bricks.toPush().front() == front,
+          "piston moves stone bricks normally");
+}
 void slimePistonBounce() {
   World w;
   setup(w);
@@ -173,7 +188,35 @@ void limits() {
       put(w, {i, 0, 0}, block("smooth_stone"));
     PistonStructureResolver r(w, {0, 0, 0}, Direction::East, true);
     require(r.resolve() == (count == 12), "12/13 push limit");
+    require(r.toPush().size() == 12, "resolver never stores a thirteenth block");
+    put(w, {1, 0, 0}, block("air"));
+    require(r.resolve() && r.toPush().empty() && r.toDestroy().empty(),
+            "reused resolver clears its previous bounded push list");
   }
+}
+void fullLengthMoveSnapshots() {
+  World w;
+  setup(w);
+  const auto base = piston();
+  put(w, {0, 0, 0}, base);
+  put(w, {0, 0, -1}, block("redstone_block"));
+  std::array<BlockState, 12> states;
+  for (std::size_t i = 0; i < states.size(); ++i) {
+    states[i] = block("note_block").with("note", std::to_string(i));
+    put(w, {static_cast<int>(i) + 1, 0, 0}, states[i]);
+  }
+  require(pistonBlockEvent(w, {0, 0, 0}, base, 0,
+                           static_cast<int>(Direction::East)),
+          "full length piston movement succeeds");
+  for (std::size_t i = 0; i < states.size(); ++i) {
+    const Pos dest{static_cast<int>(i) + 2, 0, 0};
+    require(w.getBlock(dest).is(Blocks::MOVING_PISTON) &&
+                w.pistonEntities.at(dest)->movedState == states[i],
+            "each moved block keeps its pre-move state snapshot");
+  }
+  require(w.pistonEntities.size() == 13 &&
+              w.pistonEntities.at(Pos{1, 0, 0})->source,
+          "full length move registers twelve blocks and the head");
 }
 void adhesion() {
   World w;
@@ -397,15 +440,73 @@ void importedFractionalProgressSweep() {
               w.pistonEntities.contains(p),
           "fractional progress is clamped only after pushing and finalizes later");
 }
+void tickerStorageStructure() {
+  World w;
+  setup(w);
+  Pos first{4, 0, 0}, second{5, 0, 0};
+  auto make = [&](Pos p) {
+    put(w, p, block("moving_piston"));
+    return std::make_shared<PistonMovingBlockEntity>(PistonMovingBlockEntity{
+        p, block("smooth_stone"), Direction::East, true, false});
+  };
+  auto stale = make(first);
+  w.setPistonEntity(first, stale);
+  require(w.pistonTickerCount() == 1 && w.pendingPistonTickerCount() == 0,
+          "registration appends exactly one ticker");
+  auto replacement = make(first);
+  w.setPistonEntity(first, replacement);
+  require(w.pistonTickerCount() == 1,
+          "same-position replacement rebinds instead of appending");
+  require(!stale->live && replacement->live,
+          "replacement marks the previous entity removed");
+  w.setPistonEntity(second, make(second));
+  require(w.pistonTickerCount() == 2, "a new position appends one ticker");
+  require(w.pistonTickers.front()->pos == first &&
+              w.pistonTickers.back()->pos == second,
+          "tickers keep registration order");
+  // LevelChunk.removeBlockEntity drops the position immediately, while the
+  // ticker stays in the flat list until the sweep.
+  w.removePistonEntity(first);
+  require(!w.pistonEntities.contains(first),
+          "removal drops the position table entry immediately");
+  require(w.pistonTickerCount() == 2,
+          "removed ticker survives until the sweep");
+  pistonTickBlockEntities(w);
+  require(w.pistonTickerCount() == 1 && w.pistonTickers.front()->pos == second,
+          "the sweep drops only the removed ticker and keeps the order");
+  w.removePistonEntity(second);
+  pistonTickBlockEntities(w);
+  require(w.pistonTickerCount() == 0, "sweep empties the ticker list");
+
+  // Repeated add/remove cycles must not accumulate dead tickers.
+  World churn;
+  setup(churn);
+  Pos p{2, 0, 0};
+  for (int i = 0; i < 64; ++i) {
+    put(churn, p, block("moving_piston"));
+    churn.setPistonEntity(
+        p, std::make_shared<PistonMovingBlockEntity>(PistonMovingBlockEntity{
+               p, block("smooth_stone"), Direction::East, true, false}));
+    churn.removePistonEntity(p);
+    pistonTickBlockEntities(churn);
+    require(churn.pistonTickerCount() + churn.pendingPistonTickerCount() ==
+                churn.pistonEntities.size(),
+            "every registered position owns exactly one ticker");
+  }
+  require(churn.pistonTickerCount() == 0 && churn.pistonEntities.empty(),
+          "add/remove churn leaves no stale tickers");
+}
 int main() {
   try {
     carpet();
     carpetDuplicator();
+    mossAndStoneBricks();
     slimePistonBounce();
     movingPistonStageOrder();
     extension();
     pulse();
     limits();
+    fullLengthMoveSnapshots();
     adhesion();
     quasi();
     head();
@@ -415,6 +516,7 @@ int main() {
     moveNotificationOrder();
     completionStages();
     tickerRebindingAndPending();
+    tickerStorageStructure();
     importedFractionalProgressSweep();
     std::cout << "piston tests passed\n";
     return 0;

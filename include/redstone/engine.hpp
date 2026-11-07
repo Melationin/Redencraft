@@ -15,11 +15,12 @@
 #include <vector>
 
 #include "redstone/block.hpp"
+#include "redstone/flat_hash_map.hpp"
 
 namespace redstone {
 enum class Direction { Down, Up, North, South, West, East };
 Direction opposite(Direction d);
-Direction directionFromString(const std::string &s);
+Direction directionFromString(std::string_view s);
 std::string directionName(Direction d);
 // Namespaced resource location with the default "minecraft:" namespace.
 std::string canonicalName(std::string name);
@@ -28,6 +29,23 @@ struct Pos {
   auto operator<=>(const Pos &) const = default;
   Pos relative(Direction d) const;
 };
+// Same mixing as the scheduled-tick key: the low bits select the bucket, and
+// the multiply-xor chain keeps neighbouring block positions apart.
+struct PosHash {
+  std::uint64_t operator()(const Pos &p) const noexcept {
+    std::uint64_t hash =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.x)) *
+        0x9E3779B97F4A7C15ull;
+    hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.y)) *
+            0xC2B2AE3D27D4EB4Full;
+    hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.z)) *
+            0x165667B19E3779F9ull;
+    return hash ^ (hash >> 32);
+  }
+};
+// Position keyed flat table: LevelChunk.blockEntities / tickersInLevel are
+// Object2ObjectOpenHashMap in vanilla, not ordered maps.
+template <class T> using PosMap = FlatHashMap<Pos, T, PosHash>;
 // Java java.util.Random-compatible stream. Vanilla's ServerLevel.random is a
 // legacy RandomSource; this follows the same generator for source structure,
 // but exact random sequences are not a compatibility requirement (see
@@ -131,9 +149,14 @@ struct LogEntry {
   std::string detail;
 };
 struct PistonMovingBlockEntity;
+// LevelChunk.BoundTickingBlockEntity: the ticker owns its block entity and
+// `removed` is the only liveness test the pass performs. Holding the entity
+// strongly (vanilla does too) keeps every reference the pass takes valid even
+// when a removal lands mid-pass; the sweep drops the slot afterwards.
 struct PistonTickerSlot {
   Pos pos;
-  std::weak_ptr<PistonMovingBlockEntity> entity;
+  std::shared_ptr<PistonMovingBlockEntity> entity;
+  bool removed = false;
 };
 class Entity;
 // Chunk data exported for the network encoder: palette + index copies and the
@@ -180,6 +203,10 @@ public:
   std::map<Pos, BlockState> allBlocks() const;
   int minY() const { return minY_; }
   int maxY() const { return maxY_; }
+  // LevelChunkSection capacity: 24 * 16 = 384 blocks of vertical range, which
+  // covers the default -64..320 dimension. Chunk section storage is a fixed
+  // inline array of this size, so the constructor rejects taller worlds.
+  static constexpr int kSectionCapacity = 24;
   std::optional<BlockState> coralPlacementState(Pos pos,
                                                 const BlockState &selected,
                                                 Direction clickedFace);
@@ -228,13 +255,32 @@ public:
   std::function<void(int, Pos, const BlockState &)> fallingBlockLandObserver;
   std::function<void(const BlockEvent &)> blockEventObserver;
   std::function<void()> blockUpdatesBroadcastObserver;
+  std::function<void()> entityTrackingBroadcastObserver;
+  std::function<void(const Entity &)> entityAddedObserver;
+  std::function<void(int)> entityRemovedObserver;
 
   void setPistonEntity(Pos pos,
                        std::shared_ptr<PistonMovingBlockEntity> entity);
   void removePistonEntity(Pos pos);
-  std::map<Pos, std::shared_ptr<PistonMovingBlockEntity>> pistonEntities;
-  std::map<Pos, std::shared_ptr<PistonTickerSlot>> pistonTickerSlots;
-  std::vector<std::shared_ptr<PistonTickerSlot>> pistonEntityOrder;
+  // LevelChunk.blockEntities: the position table is authoritative for queries
+  // (getBlockEntity) and never consulted while ticking.
+  PosMap<std::shared_ptr<PistonMovingBlockEntity>> pistonEntities;
+  // LevelChunk.tickersInLevel: only used to rebind a position that already owns
+  // a ticker, so a same-slot replacement keeps its list slot and order.
+  PosMap<PistonTickerSlot *> pistonTickerSlots;
+  // Level.blockEntityTickers / pendingBlockEntityTickers: one flat list walked
+  // in registration order. Tickers created while the pass runs are appended to
+  // the pending list and merged at the start of the next pass; removed tickers
+  // are skipped by the pass and dropped by sweepPistonTickers().
+  std::vector<std::unique_ptr<PistonTickerSlot>> pistonTickers;
+  std::vector<std::unique_ptr<PistonTickerSlot>> pendingPistonTickers;
+  bool tickingPistonBlockEntities = false;
+  std::size_t pistonTickerCount() const { return pistonTickers.size(); }
+  std::size_t pendingPistonTickerCount() const {
+    return pendingPistonTickers.size();
+  }
+  void mergePendingPistonTickers();
+  void sweepPistonTickers();
   // Entity phase. Java EntityTickList iterates its active insertion-ordered
   // map; entities added during the pass are copied to the next active map and
   // therefore tick on the following tick. tickEntities() uses a snapshot of
@@ -327,10 +373,16 @@ private:
   };
   struct Chunk {
     bool loaded = true;
-    std::vector<std::unique_ptr<Section>> sections;
+    // The sections live inline: one pointer step from the chunk to the section
+    // header, no per-section allocation, and every header of a chunk is
+    // contiguous. A default Section is a single air value with no storage, so
+    // "never written" needs no separate presence flag; Section::set materialises
+    // the palette on the first real write.
+    std::array<Section, kSectionCapacity> sections;
   };
   static int chunkIndex(int v) {
-    return v >= 0 ? v / 16 : -1 - ((-1 - v) / 16);
+    // C++20 arithmetic right shift rounds negative coordinates down.
+    return v >> 4;
   }
   static std::uint64_t chunkKey(int x, int z) {
     return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
@@ -348,8 +400,27 @@ private:
     std::uint64_t key = ~std::uint64_t{0};
     const Chunk *chunk = nullptr;
   };
-  mutable std::array<ChunkCacheSlot, 64> chunkCache_{};
-  Section *sectionAt(Pos p, bool create);
+  struct BlockReadCache {
+    std::array<ChunkCacheSlot, 64> chunks{};
+    std::uint64_t sectionKey = 0;
+    int sectionIndex = -1;
+    const Section *section = nullptr;
+    BlockReadCache() = default;
+    // World moves must not leave either world's read cache pointing into the
+    // other's storage. Both caches are cheap to repopulate after the move.
+    BlockReadCache(BlockReadCache &&other) noexcept { other.reset(); }
+    BlockReadCache &operator=(BlockReadCache &&other) noexcept {
+      reset();
+      other.reset();
+      return *this;
+    }
+    void reset() noexcept {
+      chunks = {};
+      sectionIndex = -1;
+      section = nullptr;
+    }
+  };
+  mutable BlockReadCache blockReadCache_;
   std::unordered_map<std::uint64_t, Chunk> chunks_;
   // EntitySectionStorage: 16^3 sections keyed by SectionPos.asLong (vanilla
   // entity section storage); queries visit only the sections a box overlaps.
@@ -357,6 +428,8 @@ private:
   void entitySectionAdd(Entity &entity);
   void entitySectionRemove(Entity &entity);
   void entitySectionUpdate(Entity &entity);
+  void notifyEntityRemoved(Entity &entity);
+  void broadcastEntityRemovals();
   int minY_, maxY_, maxUpdates_, updateCount_ = 0;
   bool handlingTick_ = false;
   std::int64_t time_ = 0;

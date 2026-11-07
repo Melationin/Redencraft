@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <deque>
 #include <string>
 namespace redstone {
 namespace {
@@ -61,6 +62,13 @@ std::vector<Rect> face(const VoxelShape &shape, Direction d) {
   return r;
 }
 bool covers(const std::vector<Rect> &rs, Rect target) {
+  if (rs.empty())
+    return false;
+  if (rs.size() == 1) {
+    const auto &r = rs.front();
+    return r.a <= target.a && r.b <= target.b && r.c >= target.c &&
+           r.d >= target.d;
+  }
   std::vector<double> xs{target.a, target.c}, ys{target.b, target.d};
   for (auto r : rs) {
     xs.push_back(std::clamp(r.a, target.a, target.c));
@@ -86,6 +94,34 @@ bool covers(const std::vector<Rect> &rs, Rect target) {
     }
   return true;
 }
+bool sturdyShape(const VoxelShape &shape, Direction d) {
+  if (shape.empty())
+    return false;
+  if (shape.size() != 1)
+    return covers(face(shape, d), {0, 0, 16, 16});
+  const auto &b = shape.front();
+  switch (d) {
+  case Direction::Down:
+    return b.y0 <= 0 && b.y1 > 0 && b.x0 <= 0 && b.z0 <= 0 &&
+           b.x1 >= 16 && b.z1 >= 16;
+  case Direction::Up:
+    return b.y0 < 16 && b.y1 >= 16 && b.x0 <= 0 && b.z0 <= 0 &&
+           b.x1 >= 16 && b.z1 >= 16;
+  case Direction::North:
+    return b.z0 <= 0 && b.z1 > 0 && b.x0 <= 0 && b.y0 <= 0 &&
+           b.x1 >= 16 && b.y1 >= 16;
+  case Direction::South:
+    return b.z0 < 16 && b.z1 >= 16 && b.x0 <= 0 && b.y0 <= 0 &&
+           b.x1 >= 16 && b.y1 >= 16;
+  case Direction::West:
+    return b.x0 <= 0 && b.x1 > 0 && b.z0 <= 0 && b.y0 <= 0 &&
+           b.z1 >= 16 && b.y1 >= 16;
+  case Direction::East:
+    return b.x0 < 16 && b.x1 >= 16 && b.z0 <= 0 && b.y0 <= 0 &&
+           b.z1 >= 16 && b.y1 >= 16;
+  }
+  return false;
+}
 const std::array<Direction, 4> dirs{Direction::North, Direction::East,
                                     Direction::South, Direction::West};
 Rect wallTest(Direction d) {
@@ -102,8 +138,8 @@ Rect wallTest(Direction d) {
 }
 // BlockStateBase exposes immutable per-state voxel shapes; cache them by the
 // interned state id so a shape is built at most once.
-std::vector<VoxelShape> &shapeCache() {
-  static std::vector<VoxelShape> cache;
+std::deque<VoxelShape> &shapeCache() {
+  static std::deque<VoxelShape> cache;
   return cache;
 }
 std::vector<bool> &shapeReady() {
@@ -112,6 +148,11 @@ std::vector<bool> &shapeReady() {
 }
 } // namespace
 VoxelShape computeStateShape(const BlockState &s) {
+  if (isFenceGate(s)) {
+    if (s.getView("open", "false") == "true") return {};
+    const auto d = directionFromString(s.getView("facing", "north"));
+    return {orient({0, 0, 6, 16, 24, 10}, d)};
+  }
   if (s.isAir() ||
       isDeadCoralFan(s) || s.is(Blocks::MOVING_PISTON) || isRailBlock(s) ||
       isLiquidBlock(s))
@@ -122,28 +163,35 @@ VoxelShape computeStateShape(const BlockState &s) {
     return {{1, 0, 1, 15, 15, 15}};
   if (wall(s)) {
     VoxelShape out;
-    if (s.get("up", "true") == "true")
+    if (s.getView("up", "true") == "true")
       out.push_back({4, 0, 4, 12, 24, 12});
     for (auto d : dirs)
-      if (s.get(directionName(d), "none") != "none")
+      if (s.getView(directionName(d), "none") != "none")
         out.push_back(orient({5, 0, 0, 11, 24, 11}, d));
     return out;
   }
   if (s.is(Blocks::PISTON) || s.is(Blocks::STICKY_PISTON)) {
-    if (s.get("extended", "false") == "true")
+    if (s.getView("extended", "false") == "true")
       return {orient({0, 0, 4, 16, 16, 16},
-                     directionFromString(s.get("facing", "north")))};
+                     directionFromString(s.getView("facing", "north")))};
     return {{0, 0, 0, 16, 16, 16}};
   }
   if (s.is(Blocks::PISTON_HEAD)) {
-    auto d = directionFromString(s.get("facing", "north"));
+    auto d = directionFromString(s.getView("facing", "north"));
     return {orient({0, 0, 0, 16, 16, 4}, d),
             orient({6, 6, 4, 10, 10,
-                    s.get("short", "false") == "true" ? 16.0 : 20.0},
+                    s.getView("short", "false") == "true" ? 16.0 : 20.0},
                    d)};
   }
   // TODO: unknown blocks require their registered collision shapes.
   return {{0, 0, 0, 16, 16, 16}};
+}
+VoxelShape outlineShape(const BlockState &s) {
+  if (!isFenceGate(s))
+    return collisionShape(s);
+  const auto d = directionFromString(s.getView("facing", "north"));
+  const double bottom = s.getView("in_wall", "false") == "true" ? 13 : 0;
+  return {orient({0, bottom, 6, 16, 16, 10}, d)};
 }
 const VoxelShape &collisionShape(const BlockState &s) {
   const auto id = static_cast<std::size_t>(s.id());
@@ -189,7 +237,8 @@ VoxelShape collisionShape(World &w, Pos p, const BlockState &s) {
                                    ? "true"
                                    : "false")
           : e->movedState;
-  auto parts = collisionShape(moved);
+  const auto &parts = collisionShape(moved);
+  result.reserve(result.size() + parts.size());
   double offset = (e->extending ? e->progress - 1.0 : 1.0 - e->progress) * 16;
   auto next = p.relative(e->direction);
   double dx = (next.x - p.x) * offset, dy = (next.y - p.y) * offset,
@@ -200,14 +249,16 @@ VoxelShape collisionShape(World &w, Pos p, const BlockState &s) {
   return result;
 }
 bool faceSturdy(const BlockState &s, Direction d) {
-  return covers(face(collisionShape(s), d), {0, 0, 16, 16});
+  return sturdyShape(collisionShape(s), d);
 }
 bool faceSturdy(World &w, Pos p, const BlockState &s, Direction d) {
-  return covers(face(collisionShape(w, p, s), d), {0, 0, 16, 16});
+  if (!s.is(Blocks::MOVING_PISTON))
+    return faceSturdy(s, d);
+  return sturdyShape(collisionShape(w, p, s), d);
 }
 bool coralCanSurvive(World &w, Pos p, const BlockState &state) {
   const auto facing = isDeadCoralWallFan(state)
-                          ? directionFromString(state.get("facing", "north"))
+                          ? directionFromString(state.getView("facing", "north"))
                           : Direction::Up;
   const auto support = p.relative(opposite(facing));
   return faceSturdy(w, support, w.getBlock(support), facing);
@@ -225,14 +276,23 @@ BlockState wallUpdateShape(World &w, Pos p, const BlockState &s,
   for (int i = 0; i < 4; ++i) {
     auto d = dirs[i];
     auto n = changed == d ? capturedNeighbor : w.getBlock(p.relative(d));
+    const auto gateFacing = directionFromString(n.getView("facing", "north"));
+    const bool gateConnects = isFenceGate(n) &&
+        ((gateFacing == Direction::North || gateFacing == Direction::South) !=
+         (d == Direction::North || d == Direction::South));
     connections[i] =
-        changed == d ? (wall(n) || faceSturdy(w, p.relative(d), n, opposite(d)))
-                     : s.get(directionName(d), "none") != "none";
+        changed == d ? (wall(n) || gateConnects || faceSturdy(w, p.relative(d), n, opposite(d)))
+                     : s.getView(directionName(d), "none") != "none";
   }
   auto above = changed == Direction::Up ? capturedNeighbor
                                         : w.getBlock(p.relative(Direction::Up));
-  auto coverage = face(collisionShape(w, p.relative(Direction::Up), above),
-                       Direction::Down);
+  VoxelShape movingCoverage;
+  const auto &aboveShape = above.is(Blocks::MOVING_PISTON)
+                               ? (movingCoverage = collisionShape(
+                                      w, p.relative(Direction::Up), above),
+                                  movingCoverage)
+                               : collisionShape(above);
+  auto coverage = face(aboveShape, Direction::Down);
   BlockState out = s;
   for (int i = 0; i < 4; ++i)
     out = out.with(directionName(dirs[i]),
@@ -242,9 +302,9 @@ BlockState wallUpdateShape(World &w, Pos p, const BlockState &s,
   bool n = connections[0], e = connections[1], south = connections[2],
        west = connections[3];
   bool corner = (!n && !e && !south && !west) || (n != south) || (e != west);
-  bool high = (out.get("north") == "tall" && out.get("south") == "tall") ||
-              (out.get("east") == "tall" && out.get("west") == "tall");
-  bool post = (wall(above) && above.get("up", "true") == "true") || corner ||
+  bool high = (out.getView("north") == "tall" && out.getView("south") == "tall") ||
+              (out.getView("east") == "tall" && out.getView("west") == "tall");
+  bool post = (wall(above) && above.getView("up", "true") == "true") || corner ||
               (!high && covers(coverage, {7, 7, 9, 9}));
   return out.with("up", post ? "true" : "false");
 }

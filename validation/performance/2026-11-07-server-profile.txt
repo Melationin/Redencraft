@@ -1,0 +1,470 @@
+Current incremental symbol build
+================================
+import blocks=70111 entities=133 forced_chunks=2916 ticks=3000
+clicks=1 note 0 -> 1 blockEvent=0
+TICK tick=1 ms=0.271 entities=133 scheduled=1 moving_pistons=0 events=0
+TICK tick=2 ms=0.190 entities=133 scheduled=1 moving_pistons=9 events=0
+TICK tick=3 ms=0.136 entities=133 scheduled=1 moving_pistons=9 events=0
+TICK tick=500 ms=0.271 entities=133 scheduled=933 moving_pistons=410 events=0
+TICK tick=1000 ms=4.370 entities=1197 scheduled=1197 moving_pistons=2003 events=0
+TICK tick=1500 ms=4.131 entities=1197 scheduled=1197 moving_pistons=1995 events=0
+TICK tick=2000 ms=4.357 entities=1197 scheduled=1197 moving_pistons=1995 events=0
+TICK tick=2500 ms=4.667 entities=1197 scheduled=1197 moving_pistons=1995 events=0
+TICK tick=3000 ms=4.324 entities=1197 scheduled=1197 moving_pistons=1995 events=0
+FINAL entities=1197 scheduled=1197 moving_pistons=1995 events=0
+clicks_in_total=1 note_after_run=
+
+TIMING ticks=3000 wall_ms=29678 total_ms=29677 mean_ms=9.89 median_ms=8.83 p90_ms=13.53 p95_ms=43.69 p99_ms=47.58 max_ms=77.81
+SAMPLES stacks=13044 pulse_ticks=0.0% pulse_samples=0.0%
+
+== EXCLUSIVE (actual instruction pointer) (13044 samples) ==
+ 20.38%     2658  redstone::World::explode
+ 11.46%     1495  redstone::World::getBlock
+  7.87%     1027  redstone::World::chunkAtCached
+  6.44%      840  redstone::World::setBlock
+  3.53%      461  redstone::StateDefinition::value
+  3.08%      402  redstone::pistonTickBlockEntities
+  2.65%      346  redstone::World::Section::get
+  2.61%      341  std::_Tree<std::_Tmap_traits<redstone::Pos,std::shared_ptr<redstone::PistonTickerSlot>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonTickerSlot> > >,0> >::find
+  2.36%      308  std::_Tree<std::_Tmap_traits<redstone::Pos,std::shared_ptr<redstone::PistonMovingBlockEntity>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonMovingBlockEntity> > >,0> >::_Eqrange<redstone::Pos>
+  2.09%      273  redstone::`anonymous namespace'::forEachEntitySection<`redstone::World::entitiesIn'::`2'::<lambda_1> >
+  2.01%      262  redstone::`anonymous namespace'::entityAt
+  1.81%      236  redstone::collisionShape
+  1.72%      225  redstone::World::getSignal
+  1.68%      219  memcmp
+  1.58%      206  redstone::World::runNext
+  1.50%      196  redstone::World::collectCollisionBoxes
+  1.32%      172  redstone::StateDefinition::find
+  1.07%      139  redstone::World::updateShapeState
+  0.93%      121  std::map<redstone::Pos,std::shared_ptr<redstone::PistonTickerSlot>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonTickerSlot> > > >::_Try_emplace<redstone::Pos const &>
+  0.90%      117  redstone::World::updateNeighbourShapes
+  0.89%      116  ILT+1845(?chunkAtCachedWorldredstoneAEBAPEBUChunk
+  0.80%      105  std::map<redstone::Pos,std::shared_ptr<redstone::PistonMovingBlockEntity>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonMovingBlockEntity> > > >::_Try_emplace<redstone::Pos const &>
+  0.79%      103  redstone::`anonymous namespace'::powered
+  0.74%       96  redstone::`anonymous namespace'::moveCollidedEntities
+  0.67%       88  redstone::Property::indexOf
+  0.64%       84  redstone::World::executeNeighbor
+  0.61%       80  ILT+23870(?getBlockWorldredstoneQEBA?AVBlockState
+  0.55%       72  redstone::World::setPistonEntity
+  0.54%       71  redstone::findBlockByName
+  0.49%       64  je_mallocx
+  0.48%       62  je_dallocx
+  0.47%       61  redstone::BlockState::with
+  0.47%       61  arena_palloc
+  0.44%       58  redstone::World::enqueue
+  0.42%       55  ILT+9290(memcmp)
+  0.38%       49  redstone::Entity::move
+  0.37%       48  ILT+11840(?getSectionWorldredstoneQEBAIHZ)
+  0.36%       47  ILT+59820(__security_check_cookie)
+  0.33%       43  redstone::Pos::relative
+  0.31%       40  arena_slab_reg_alloc_batch
+
+== INCLUSIVE (unique hits per stack, denominator=all stacks) (13044 samples) ==
+ 99.82%    13021  RtlUserThreadStart
+ 99.82%    13021  __scrt_common_main_seh
+ 99.82%    13021  BaseThreadInitThunk
+ 99.82%    13021  main
+ 99.78%    13015  redstone::World::tick
+ 34.21%     4462  redstone::World::tickEntities
+ 31.06%     4051  redstone::PrimedTnt::tick
+ 30.83%     4021  redstone::pistonTickBlockEntities
+ 27.78%     3624  redstone::World::runEvents
+ 27.48%     3585  redstone::pistonBlockEvent
+ 25.60%     3339  redstone::World::setBlock
+ 24.61%     3210  redstone::World::explode
+ 23.34%     3045  redstone::World::enqueue
+ 22.78%     2971  redstone::World::runUpdates
+ 22.40%     2922  redstone::World::runNext
+ 22.22%     2898  redstone::World::getBlock
+ 17.03%     2222  redstone::`anonymous namespace'::moveBlocks
+ 13.64%     1779  redstone::World::executeNeighbor
+ 13.16%     1716  redstone::`anonymous namespace'::check
+ 11.15%     1454  redstone::pistonNeighborChanged
+ 11.05%     1441  redstone::`anonymous namespace'::powered
+ 10.61%     1384  redstone::World::getSignal
+  8.28%     1080  redstone::Entity::move
+  7.87%     1027  redstone::World::chunkAtCached
+  7.59%      990  redstone::World::collectCollisionBoxes
+  6.44%      840  redstone::World::runScheduled
+  6.32%      825  redstone::StateDefinition::value
+  5.14%      671  redstone::World::setPistonEntity
+  4.88%      637  redstone::World::observerNotify
+  4.77%      622  redstone::`anonymous namespace'::moveCollidedEntities
+  4.24%      553  redstone::`anonymous namespace'::finalTick
+  3.96%      516  redstone::World::removePistonEntity
+  3.17%      414  redstone::StateDefinition::find
+  3.15%      411  redstone::World::updateNeighborsAt
+  2.96%      386  redstone::World::updateShapeState
+  2.82%      368  redstone::`anonymous namespace'::forEachEntitySection<`redstone::World::entitiesIn'::`2'::<lambda_1> >
+  2.68%      349  redstone::World::neighborChanged
+  2.65%      346  redstone::World::Section::get
+  2.61%      341  std::_Tree<std::_Tmap_traits<redstone::Pos,std::shared_ptr<redstone::PistonTickerSlot>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonTickerSlot> > >,0> >::find
+  2.50%      326  redstone::Minecart::tick
+
+== LEAF SOURCE LINES (13044 samples) ==
+  5.37%      701  ./src\engine.cpp:1026
+  4.93%      643  <no source line>
+  3.53%      460  ./src\engine.cpp:784
+  3.40%      444  ./src\entity.cpp:1553
+  2.86%      373  ./src\engine.cpp:908
+  2.66%      347  ./src\entity.cpp:1560
+  2.61%      340  C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\include\xtree:1405
+  2.27%      296  ./src\piston.cpp:605
+  2.25%      293  ./src\state.cpp:169
+  1.95%      254  ./src\piston.cpp:75
+  1.79%      233  ./src\entity.cpp:1563
+  1.79%      233  ./src\engine.cpp:907
+  1.78%      232  ./src\engine.cpp:904
+  1.61%      210  C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\include\map:197
+  1.60%      209  ./src\engine.cpp:897
+  1.57%      205  ./src\entity.cpp:1555
+  1.51%      197  ./src\entity.cpp:1554
+  1.49%      195  ./src\entity.cpp:1561
+  1.46%      190  ./src\engine.cpp:814
+  1.28%      167  ./src\engine.cpp:783
+  1.17%      152  ./src\engine.cpp:781
+  1.14%      149  ./src\engine.cpp:815
+  1.14%      149  ./src\shapes.cpp:201
+  1.08%      141  ./src\state.cpp:174
+  1.08%      141  ./src\engine.cpp:782
+  1.05%      137  ./src\state.cpp:113
+  1.01%      132  ./src\engine.cpp:895
+  0.94%      123  ./src\engine.cpp:901
+  0.86%      112  ./src\engine.cpp:1152
+  0.84%      110  ./src\entity.cpp:214
+
+-- callers of World::tick (13015 samples) --
+ 65.72%     8553  main
+ 34.28%     4462  redstone::World::tick
+
+-- callers of tickEntities (4462 samples) --
+100.00%     4462  redstone::World::tick
+
+-- callers of explode (3210 samples) --
+100.00%     3210  redstone::PrimedTnt::tick
+
+-- callers of pistonTickBlockEntities (4021 samples) --
+ 99.20%     3989  redstone::World::tick
+  0.80%       32  redstone::pistonTickBlockEntities
+
+-- callers of runEvents (3624 samples) --
+100.00%     3624  redstone::World::tick
+
+-- callers of runScheduled (840 samples) --
+100.00%      840  redstone::World::tick
+
+-- callers of entitiesIn (376 samples) --
+ 80.32%      302  redstone::World::entitiesIn
+ 16.76%       63  redstone::Minecart::pushAndPickupEntities
+  1.60%        6  redstone::`anonymous namespace'::moveCollidedEntities
+  1.06%        4  redstone::World::explode
+  0.27%        1  redstone::`anonymous namespace'::moveStuckEntities
+
+-- callers of Entity::move (1080 samples) --
+ 72.41%      782  redstone::PrimedTnt::tick
+ 12.87%      139  redstone::`anonymous namespace'::moveEntityByPiston
+  8.52%       92  redstone::Minecart::tickOldBehavior
+  5.74%       62  redstone::Minecart::moveAlongTrack
+  0.46%        5  redstone::FallingBlockEntity::tick
+
+-- callers of moveCollidedEntities (622 samples) --
+100.00%      622  redstone::pistonTickBlockEntities
+
+-- callers of moveStuckEntities (12 samples) --
+100.00%       12  redstone::pistonTickBlockEntities
+
+-- callers of pushAndPickupEntities (69 samples) --
+100.00%       69  redstone::Minecart::tickOldBehavior
+
+-- callers of mergeWithNeighbours (0 samples) --
+
+-- callers of PrimedTnt::tick (4051 samples) --
+100.00%     4051  redstone::World::tickEntities
+
+-- callers of ItemEntity::tick (0 samples) --
+
+-- callers of getBlock (2978 samples) --
+ 28.41%      846  redstone::World::getSignal
+ 23.17%      690  redstone::World::runNext
+ 17.76%      529  redstone::World::collectCollisionBoxes
+  7.12%      212  redstone::World::explode
+  6.35%      189  redstone::World::setBlock
+  2.42%       72  redstone::World::updateFromNeighbourShapes
+
+-- callers of chunkAtCached (1143 samples) --
+ 88.28%     1009  redstone::World::getBlock
+  7.00%       80  redstone::World::isLoaded
+  2.62%       30  redstone::World::isChunkLoaded
+  1.14%       13  redstone::World::setBlock
+  0.35%        4  redstone::World::TickQueue::sortContainersToTick
+  0.35%        4  redstone::World::runEvents
+
+-- callers of StateDefinition::value (825 samples) --
+ 36.48%      301  redstone::World::getSignal
+ 14.91%      123  redstone::World::explode
+ 11.52%       95  redstone::`anonymous namespace'::facing
+  8.73%       72  redstone::pistonIsPushable
+  7.39%       61  redstone::World::updateShapeState
+  4.97%       41  redstone::`anonymous namespace'::check
+
+-- callers of StateDefinition::find (414 samples) --
+ 83.57%      346  redstone::StateDefinition::value
+ 16.43%       68  redstone::BlockState::with
+
+-- callers of Property::indexOf (99 samples) --
+100.00%       99  redstone::BlockState::with
+
+-- callers of collectCollisionBoxes (991 samples) --
+100.00%      991  redstone::Entity::move
+
+-- callers of collisionShape (261 samples) --
+ 88.51%      231  redstone::World::collectCollisionBoxes
+  3.45%        9  redstone::`anonymous namespace'::moveCollidedEntities
+  2.68%        7  redstone::collisionShape
+  1.92%        5  redstone::faceSturdy
+  1.92%        5  redstone::wallUpdateShape
+  1.53%        4  redstone::`anonymous namespace'::fullSupport
+
+-- callers of runUpdates (2982 samples) --
+100.00%     2982  redstone::World::enqueue
+
+-- callers of moveBlocks (2222 samples) --
+100.00%     2222  redstone::pistonBlockEvent
+
+-- callers of je_mallocx (217 samples) --
+100.00%      217  operator new
+
+
+
+No incremental/COMDAT verification
+==================================
+import blocks=70111 entities=133 forced_chunks=2916 ticks=3000
+clicks=1 note 0 -> 1 blockEvent=0
+TICK tick=1 ms=0.256 entities=133 scheduled=1 moving_pistons=0 events=0
+TICK tick=2 ms=0.184 entities=133 scheduled=1 moving_pistons=9 events=0
+TICK tick=3 ms=0.139 entities=133 scheduled=1 moving_pistons=9 events=0
+TICK tick=500 ms=0.279 entities=133 scheduled=933 moving_pistons=410 events=0
+TICK tick=1000 ms=4.349 entities=1197 scheduled=1197 moving_pistons=2003 events=0
+TICK tick=1500 ms=4.517 entities=1197 scheduled=1197 moving_pistons=1995 events=0
+TICK tick=2000 ms=4.366 entities=1197 scheduled=1197 moving_pistons=1995 events=0
+TICK tick=2500 ms=4.437 entities=1197 scheduled=1197 moving_pistons=1995 events=0
+TICK tick=3000 ms=4.206 entities=1197 scheduled=1197 moving_pistons=1995 events=0
+FINAL entities=1197 scheduled=1197 moving_pistons=1995 events=0
+clicks_in_total=1 note_after_run=
+
+TIMING ticks=3000 wall_ms=29603 total_ms=29602 mean_ms=9.87 median_ms=8.70 p90_ms=13.39 p95_ms=44.47 p99_ms=46.84 max_ms=49.48
+SAMPLES stacks=13287 pulse_ticks=0.0% pulse_samples=0.0%
+
+== EXCLUSIVE (actual instruction pointer) (13287 samples) ==
+ 21.10%     2803  redstone::World::explode
+ 12.09%     1607  redstone::World::getBlock
+  8.18%     1087  redstone::World::chunkAtCached
+  6.64%      882  redstone::World::setBlock
+  3.33%      443  redstone::World::Section::get
+  3.24%      431  redstone::StateDefinition::value
+  3.24%      430  redstone::pistonTickBlockEntities
+  2.65%      352  std::_Tree<std::_Tmap_traits<redstone::Pos,std::shared_ptr<redstone::PistonMovingBlockEntity>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonMovingBlockEntity> > >,0> >::_Eqrange<redstone::Pos>
+  2.38%      316  std::_Tree<std::_Tmap_traits<redstone::Pos,std::shared_ptr<redstone::PistonTickerSlot>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonTickerSlot> > >,0> >::find
+  2.23%      296  redstone::World::getSignal
+  2.13%      283  memcmp
+  1.90%      252  redstone::`anonymous namespace'::forEachEntitySection<`redstone::World::entitiesIn'::`2'::<lambda_1> >
+  1.86%      247  redstone::`anonymous namespace'::entityAt
+  1.84%      245  redstone::collisionShape
+  1.80%      239  redstone::World::runNext
+  1.56%      207  redstone::World::collectCollisionBoxes
+  1.52%      202  redstone::StateDefinition::find
+  1.51%      200  std::map<redstone::Pos,std::shared_ptr<redstone::PistonTickerSlot>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonTickerSlot> > > >::_Try_emplace<redstone::Pos const &>
+  1.13%      150  redstone::World::updateShapeState
+  0.96%      128  redstone::`anonymous namespace'::powered
+  0.96%      127  redstone::World::updateNeighbourShapes
+  0.73%       97  redstone::World::executeNeighbor
+  0.73%       97  redstone::findBlockByName
+  0.69%       92  redstone::`anonymous namespace'::moveCollidedEntities
+  0.65%       87  redstone::BlockState::with
+  0.57%       76  je_mallocx
+  0.53%       70  redstone::World::setPistonEntity
+  0.50%       67  __security_check_cookie
+  0.47%       62  redstone::Pos::relative
+  0.45%       60  redstone::Property::indexOf
+  0.45%       60  redstone::World::enqueue
+  0.44%       59  je_dallocx
+  0.41%       55  redstone::World::runUpdates
+  0.41%       54  std::_Tree_val<std::_Tree_simple_types<std::pair<std::basic_string<char,std::char_traits<char>,std::allocator<char> > const ,std::basic_string<char,std::char_traits<char>,std::allocator<char> > > > >::_Insert_node
+  0.41%       54  arena_palloc
+  0.38%       51  std::_Tree_val<std::_Tree_simple_types<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonTickerSlot> > > >::_Extract
+  0.36%       48  arena_slab_reg_alloc_batch
+  0.29%       38  std::_Hash<std::_Umap_traits<std::basic_string_view<char,std::char_traits<char> >,redstone::Block const *,std::_Uhash_compare<std::basic_string_view<char,std::char_traits<char> >,std::hash<std::basic_string_view<char,std::char_traits<char> > >,std::equal_to<std::basic_string_view<char,std::char_traits<char> > > >,std::allocator<std::pair<std::basic_string_view<char,std::char_traits<char> > const ,redstone::Block const *> >,0> >::_Find_last<std::basic_string_view<char,std::char_traits<char> > >
+  0.28%       37  std::remove_if<std::shared_ptr<redstone::PistonTickerSlot> *,`redstone::pistonTickBlockEntities'::`2'::<lambda_1> >
+  0.27%       36  redstone::World::removePistonEntity
+
+== INCLUSIVE (unique hits per stack, denominator=all stacks) (13287 samples) ==
+ 99.80%    13261  main
+ 99.80%    13261  __scrt_common_main_seh
+ 99.80%    13260  redstone::World::tick
+ 99.79%    13259  BaseThreadInitThunk
+ 99.79%    13259  RtlUserThreadStart
+ 33.91%     4505  redstone::World::tickEntities
+ 31.15%     4139  redstone::pistonTickBlockEntities
+ 30.89%     4105  redstone::PrimedTnt::tick
+ 27.55%     3660  redstone::World::runEvents
+ 27.24%     3620  redstone::pistonBlockEvent
+ 26.32%     3497  redstone::World::setBlock
+ 24.91%     3310  redstone::World::enqueue
+ 24.89%     3307  redstone::World::explode
+ 24.26%     3224  redstone::World::runUpdates
+ 23.85%     3169  redstone::World::runNext
+ 22.64%     3008  redstone::World::getBlock
+ 16.49%     2191  redstone::`anonymous namespace'::moveBlocks
+ 14.38%     1911  redstone::World::executeNeighbor
+ 13.60%     1807  redstone::`anonymous namespace'::check
+ 11.75%     1561  redstone::pistonNeighborChanged
+ 11.14%     1480  redstone::`anonymous namespace'::powered
+ 10.72%     1424  redstone::World::getSignal
+  8.18%     1087  redstone::World::chunkAtCached
+  8.05%     1070  redstone::Entity::move
+  7.55%     1003  redstone::World::collectCollisionBoxes
+  6.65%      884  redstone::World::runScheduled
+  5.95%      790  redstone::StateDefinition::value
+  5.02%      667  redstone::World::observerNotify
+  4.83%      642  redstone::World::setPistonEntity
+  4.76%      632  redstone::`anonymous namespace'::moveCollidedEntities
+  4.44%      590  redstone::`anonymous namespace'::finalTick
+  3.73%      495  redstone::World::removePistonEntity
+  3.35%      445  redstone::StateDefinition::find
+  3.33%      443  redstone::World::Section::get
+  3.15%      419  redstone::World::updateNeighborsAt
+  2.79%      371  redstone::World::updateShapeState
+  2.75%      366  redstone::World::neighborChanged
+  2.66%      353  std::map<redstone::Pos,std::shared_ptr<redstone::PistonTickerSlot>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonTickerSlot> > > >::_Try_emplace<redstone::Pos const &>
+  2.65%      352  std::_Tree<std::_Tmap_traits<redstone::Pos,std::shared_ptr<redstone::PistonMovingBlockEntity>,std::less<redstone::Pos>,std::allocator<std::pair<redstone::Pos const ,std::shared_ptr<redstone::PistonMovingBlockEntity> > >,0> >::_Eqrange<redstone::Pos>
+  2.39%      318  redstone::`anonymous namespace'::forEachEntitySection<`redstone::World::entitiesIn'::`2'::<lambda_1> >
+
+== LEAF SOURCE LINES (13287 samples) ==
+  5.19%      689  ./src\engine.cpp:1026
+  4.09%      543  ./src\engine.cpp:784
+  3.92%      521  ./src\entity.cpp:1553
+  3.05%      405  ./src\engine.cpp:908
+  2.45%      326  ./src\piston.cpp:605
+  2.36%      314  C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\include\xtree:1405
+  2.22%      295  ./src\entity.cpp:1560
+  2.02%      269  ./src\state.cpp:169
+  1.94%      258  ./src\entity.cpp:1563
+  1.85%      246  ./src\entity.cpp:1555
+  1.84%      245  ./src\piston.cpp:75
+  1.79%      238  ./src\engine.cpp:904
+  1.68%      223  ./src\entity.cpp:1554
+  1.60%      212  ./src\engine.cpp:897
+  1.43%      190  ./src\engine.cpp:907
+  1.37%      182  C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\include\map:197
+  1.32%      176  ./src\entity.cpp:1561
+  1.30%      173  ./src\engine.cpp:815
+  1.28%      170  ./src\shapes.cpp:201
+  1.23%      164  ./src\engine.cpp:814
+  1.16%      154  ./src\state.cpp:113
+  1.16%      154  ./src\engine.cpp:895
+  1.13%      150  ./src\engine.cpp:894
+  1.09%      145  ./src\engine.cpp:781
+  1.06%      141  ./src\engine.cpp:782
+  0.96%      128  ./src\engine.cpp:780
+  0.93%      124  ./src\engine.cpp:1152
+  0.91%      121  ./src\entity.cpp:1532
+  0.90%      120  ./src\engine.cpp:991
+  0.89%      118  ./src\entity.cpp:1529
+
+-- callers of World::tick (13260 samples) --
+100.00%    13260  main
+
+-- callers of tickEntities (4505 samples) --
+100.00%     4505  redstone::World::tick
+
+-- callers of explode (3307 samples) --
+100.00%     3307  redstone::PrimedTnt::tick
+
+-- callers of pistonTickBlockEntities (4139 samples) --
+100.00%     4139  redstone::World::tick
+
+-- callers of runEvents (3660 samples) --
+100.00%     3660  redstone::World::tick
+
+-- callers of runScheduled (884 samples) --
+100.00%      884  redstone::World::tick
+
+-- callers of entitiesIn (291 samples) --
+ 96.56%      281  redstone::`anonymous namespace'::moveCollidedEntities
+  2.41%        7  redstone::`anonymous namespace'::moveStuckEntities
+  1.03%        3  redstone::`anonymous namespace'::detectorCheckPressed
+
+-- callers of Entity::move (1070 samples) --
+ 69.16%      740  redstone::PrimedTnt::tick
+ 14.67%      157  redstone::`anonymous namespace'::moveEntityByPiston
+  9.16%       98  redstone::Minecart::tickOldBehavior
+  6.54%       70  redstone::Minecart::moveAlongTrack
+  0.47%        5  redstone::FallingBlockEntity::tick
+
+-- callers of moveCollidedEntities (632 samples) --
+100.00%      632  redstone::pistonTickBlockEntities
+
+-- callers of moveStuckEntities (14 samples) --
+100.00%       14  redstone::pistonTickBlockEntities
+
+-- callers of pushAndPickupEntities (44 samples) --
+100.00%       44  redstone::Minecart::tickOldBehavior
+
+-- callers of mergeWithNeighbours (0 samples) --
+
+-- callers of PrimedTnt::tick (4105 samples) --
+100.00%     4105  redstone::World::tickEntities
+
+-- callers of ItemEntity::tick (0 samples) --
+
+-- callers of getBlock (3008 samples) --
+ 28.26%      850  redstone::World::getSignal
+ 25.76%      775  redstone::World::runNext
+ 17.29%      520  redstone::World::collectCollisionBoxes
+  7.11%      214  redstone::World::explode
+  4.12%      124  redstone::World::setBlock
+  2.29%       69  redstone::World::updateFromNeighbourShapes
+
+-- callers of chunkAtCached (1087 samples) --
+ 88.13%      958  redstone::World::getBlock
+  6.81%       74  redstone::World::isLoaded
+  2.94%       32  redstone::World::isChunkLoaded
+  1.75%       19  redstone::World::setBlock
+  0.18%        2  redstone::World::TickQueue::sortContainersToTick
+  0.18%        2  redstone::World::runEvents
+
+-- callers of StateDefinition::value (790 samples) --
+ 34.94%      276  redstone::World::getSignal
+ 12.28%       97  redstone::World::explode
+ 10.51%       83  redstone::`anonymous namespace'::facing
+  7.97%       63  redstone::`anonymous namespace'::check
+  7.59%       60  redstone::pistonIsPushable
+  5.32%       42  redstone::World::updateShapeState
+
+-- callers of StateDefinition::find (445 samples) --
+ 80.67%      359  redstone::StateDefinition::value
+ 19.33%       86  redstone::BlockState::with
+
+-- callers of Property::indexOf (80 samples) --
+100.00%       80  redstone::BlockState::with
+
+-- callers of collectCollisionBoxes (1003 samples) --
+100.00%     1003  redstone::Entity::move
+
+-- callers of collisionShape (266 samples) --
+ 89.85%      239  redstone::World::collectCollisionBoxes
+  3.38%        9  redstone::`anonymous namespace'::moveCollidedEntities
+  2.63%        7  redstone::`anonymous namespace'::fullSupport
+  1.50%        4  redstone::wallUpdateShape
+  1.50%        4  redstone::collisionShape
+  1.13%        3  redstone::faceSturdy
+
+-- callers of runUpdates (3224 samples) --
+100.00%     3224  redstone::World::enqueue
+
+-- callers of moveBlocks (2191 samples) --
+100.00%     2191  redstone::pistonBlockEvent
+
+-- callers of je_mallocx (216 samples) --
+100.00%      216  operator new
+

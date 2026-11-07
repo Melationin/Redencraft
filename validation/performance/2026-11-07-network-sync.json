@@ -1,0 +1,193 @@
+{
+  "date": "2026-11-07",
+  "scope": "Bounded per-connection SPSC handoff, frozen chunk encoding, phase-aligned entity tracking and 1s rolling tick-cost chat reports",
+  "git_head": "c459cbb52b846f5f46d0b546657af92d10a37709",
+  "working_tree_changes": true,
+  "build": {
+    "configuration": "MSVC x64 Release /O2 /MT /Zi, existing incremental symbol link",
+    "allocator": "jemalloc",
+    "optional_client": false,
+    "success": true,
+    "log": "build-symbols/network-final-build.log"
+  },
+  "validation": {
+    "ctest_passed": 14,
+    "ctest_total": 14,
+    "ctest_log": "build-symbols/network-final-ctest-details.log",
+    "backpressure": {
+      "healthy_ping_place_break": true,
+      "healthy_ticks": [
+        20,
+        40,
+        61
+      ],
+      "output_backpressure_disconnects": 1,
+      "server_exit_code": 0,
+      "server_stderr": "",
+      "server_ticks": 160,
+      "slow_requests": 89088,
+      "slow_send_stopped": "ConnectionResetError"
+    },
+    "official_codec": {
+      "packets_verified": 294,
+      "version": "26.1",
+      "protocol": 775,
+      "chunk_sections_decoded_with": "LevelChunkSection.read",
+      "record_sha256": "6654c00a109203734a977d4a4ad67ea911c85711d3b4b2209789085c7fbfcbdd",
+      "server_jar_sha256": "a7fed6f7d88379349e35ae0c6e9881d4484605132f6f620376a3868eea6cce52",
+      "output_directory": "build-symbols/network-codec-export",
+      "fixed_protocol_assets_overwritten": false
+    },
+    "timing_unit_assertions": "Exact 1s average/sample count; excludes completion at cutoff; no catch-up report after long pause",
+    "live_minecraft_client": false,
+    "live_vanilla_26_1_tick_differential": false,
+    "ctest_summary_log": "build-symbols/network-final-ctest.log",
+    "final_build_backpressure": {
+      "healthy_ping_place_break": true,
+      "healthy_ticks": [
+        20,
+        41,
+        62
+      ],
+      "output_backpressure_disconnects": 1,
+      "server_exit_code": 0,
+      "server_stderr": "",
+      "server_ticks": 160,
+      "slow_requests": 89088,
+      "slow_send_stopped": "ConnectionResetError"
+    },
+    "git_diff_check": "passed with repository line-ending settings"
+  },
+  "tcp_smoke": {
+    "ticks_per_version": 100,
+    "runs_per_version": 1,
+    "actions": "Right click at observed tick >=20, move view at observed tick >=40, finish at observed tick >=60 plus far chunk",
+    "before_binary_sha256": "f967fef725d5b69aa64da5b7d114c19ec451ba3b67ec2e9b21e9ea4f0dceaaef",
+    "before": {
+      "source_sha256": "7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52",
+      "imported": {
+        "regions": "410",
+        "blocks": "70111",
+        "anvils_replaced": "28764",
+        "signs_skipped": "1",
+        "sign_block_entities_skipped": "1",
+        "entities": "133",
+        "independent_entity_uuids": "133",
+        "source_data_version": "20060210",
+        "forced_chunks": "2916",
+        "offset": "0,64,0",
+        "spawn": "8.5,151,8.5"
+      },
+      "configuration_packets": 30,
+      "play_packets": 535,
+      "chunks_received": 50,
+      "chunks_forgotten": 25,
+      "far_corner_chunk_received": true,
+      "control_right_click": true,
+      "control_prediction_ack": true,
+      "server_log": [
+        "SCHEMATIC regions=410 blocks=70111 anvils_replaced=28764 signs_skipped=1 sign_block_entities_skipped=1 entities=133 independent_entity_uuids=133 source_data_version=20060210 forced_chunks=2916 offset=0,64,0 spawn=8.5,151,8.5",
+        "LISTENING 127.0.0.1:14844 protocol=775 allocator=jemalloc",
+        "TICK tick=1 ms=0.814 entities=133 scheduled=0 moving_pistons=0",
+        "TICK tick=100 ms=6.565 entities=133 scheduled=136 moving_pistons=1",
+        "STOPPED ticks=100 mean_ms=2.687 max_ms=13.198"
+      ],
+      "stderr": "",
+      "scope": "Native C++ headless TCP test; no Minecraft client, desktop or vanilla mechanism differential.",
+      "tick_chat_sample_count": 60,
+      "mean_tick_ms": 2.687,
+      "max_tick_ms": 13.198
+    },
+    "after": {
+      "source_sha256": "7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52",
+      "imported": {
+        "regions": "410",
+        "blocks": "70111",
+        "anvils_replaced": "28764",
+        "signs_skipped": "1",
+        "sign_block_entities_skipped": "1",
+        "entities": "133",
+        "independent_entity_uuids": "133",
+        "source_data_version": "20060210",
+        "forced_chunks": "2916",
+        "offset": "0,64,0",
+        "spawn": "8.5,151,8.5"
+      },
+      "configuration_packets": 30,
+      "play_packets": 481,
+      "chunks_received": 50,
+      "chunks_forgotten": 25,
+      "far_corner_chunk_received": true,
+      "control_right_click": true,
+      "control_prediction_ack": true,
+      "server_log": [
+        "SCHEMATIC regions=410 blocks=70111 anvils_replaced=28764 signs_skipped=1 sign_block_entities_skipped=1 entities=133 independent_entity_uuids=133 source_data_version=20060210 forced_chunks=2916 offset=0,64,0 spawn=8.5,151,8.5",
+        "LISTENING 127.0.0.1:14861 protocol=775 allocator=jemalloc",
+        "TICK tick=1 ms=0.401 entities=133 scheduled=0 moving_pistons=0",
+        "TICK tick=100 ms=8.344 entities=133 scheduled=136 moving_pistons=1",
+        "STOPPED ticks=100 mean_ms=2.588 max_ms=12.207 backpressure_disconnects=0"
+      ],
+      "stderr": "",
+      "scope": "Native C++ headless TCP test; no Minecraft client, desktop or vanilla mechanism differential.",
+      "tick_chat_sample_count": 3,
+      "tick_chat_samples": [
+        {
+          "tick": 20,
+          "milliseconds": 0.421,
+          "samples": 20
+        },
+        {
+          "tick": 40,
+          "milliseconds": 2.435,
+          "samples": 20
+        },
+        {
+          "tick": 61,
+          "milliseconds": 2.73,
+          "samples": 21
+        }
+      ],
+      "mean_tick_ms": 2.588,
+      "max_tick_ms": 12.207
+    },
+    "limitation": "Single real-time TCP smoke pair. Report frequency, tracking phase and exit tick differ. No claim of stable speedup or full state parity.",
+    "final_build_binary_sha256": "3f71a0d65de732d6911e51dffece84cacadeb7a967ff4b06b83c3ef44d8578f0",
+    "final_build_note": "Smoke used the same functional code before a final rebuild containing comments and direct standard header includes; exact smoke-after binary hash was not retained."
+  },
+  "limits": {
+    "session_staging_charge_bytes": 16777216,
+    "queued_and_encoding_charge_bytes": 16777216,
+    "encoded_unsent_bytes": 16777216,
+    "queued_packets": 65536,
+    "queued_batches": 4096,
+    "soft_encoded_watermark_bytes": 1048576,
+    "per_connection_pass_packets": 64,
+    "per_connection_pass_ms": 2,
+    "note": "Separate admission budgets, not a total connection/process memory cap; retained capacity and encoding temporaries are extra. One packet cannot be preempted."
+  },
+  "remaining_limitations": [
+    "Ordinary payload construction and immutable chunk snapshot capture/protocol mapping still run on the main thread.",
+    "Entity discard is observed at entity cleanup/end of block-entity phase; exact vanilla immediate onRemove intra-phase ordering remains TODO.",
+    "Local backpressure thresholds are not claimed to match Netty defaults.",
+    "No new network allocation profile, p95 latency study or repeated performance trials."
+  ],
+  "source_sha256": {
+    "CMakeLists.txt": "daf8b7b2d3f09a25e45dec6d0edc0fe2f4800978ddd225191e9a1815615957a0",
+    "include/redstone/engine.hpp": "7bce262597fd6eb9927bbdcd0369a64aa460c6d71a0d114e9f792587df265db7",
+    "include/redstone/entity.hpp": "5ab2bb37063ce393179dd9f8a344fa4817e5c4ba5ae0abd14d75826617f439a2",
+    "include/redstone/net/outbox.hpp": "39275cd43f3b72ca7431f0089dfce78317c64c70ce093d8dab87d7decbe763eb",
+    "include/redstone/net/tick_timing.hpp": "bc64d0ca5835ea68ec418383c7ce84b190ab9b82599f06277232f84a5ea9b225",
+    "include/redstone/net/wire.hpp": "cb21d028cea7af5d9161eaf6dadd44757461da4404f5cb516db25aa2844b8a4d",
+    "include/redstone/net/session.hpp": "98cc5a87f969c83f60d079b4ac79680fcb3c913d13add3d3e73bdab7fe19d40b",
+    "src/engine.cpp": "2f9e2e8d2c8564f34a57e990712865b284d3b6f4b42526cee44cca83ed40d255",
+    "src/entity.cpp": "97e8b358d2e0eb307d89987de7f539f761041988b1dce91844872b0b276a6b9b",
+    "src/net/server_main.cpp": "8c6770cb8439dbf63cc0d0dcd53e5bc9a1b45d42bc1f03d100df05ad8589cc9e",
+    "src/net/session.cpp": "2c1d5b072b0753fdd7dbb3a141c95d7197fd8704e92c3a33b6cff9864fcda6ff",
+    "src/net/wire.cpp": "2910c93f071695d37ff4f4e46efbd673e51c24285f8a22e33c192fa44ae94a19",
+    "tests/outbox_tests.cpp": "9739cb7724f6961743b728c8cdc59833e9aed921978851ff9de5305ce9fc0d6a",
+    "tests/protocol_tests.cpp": "e02780f3bc5406987d7079e948750c2fdd41a67a43e236002cdbd810c4c442d7",
+    "tests/wire_tests.cpp": "b069b3ea8bb28d3a2f27807ea843cb751c6283350a418b136c3736fe63e6e370",
+    "validation/protocol775/backpressure_test.py": "206472689225c9702af29f9eb2df544e32003357c0b9babb86bb1ad0f45e2951",
+    "validation/litematic/server_smoke.py": "4e9b554d19dac77c9db9ed9c11b10e4e76d6c455806b5139c5d701267988f1de"
+  }
+}

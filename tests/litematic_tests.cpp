@@ -114,6 +114,38 @@ int main(int argc, char **argv) {
   // Snapshot import preserves unsupported/suspended physics until a saved tick
   // or a real world update reaches it; no onPlace callbacks are invented.
   assert(!world.hasScheduledTick({-17, 64, 0}, "minecraft:sand"));
+  auto modern = doc;
+  modern.compound["Version"] = integer(7);
+  modern.compound["MinecraftDataVersion"] = integer(4435);
+  const auto modernLoaded = loadLitematic(modern);
+  assert(modernLoaded.world.blocks == loaded.world.blocks);
+  assert(modernLoaded.min == loaded.min &&
+         modernLoaded.maxExclusive == loaded.maxExclusive);
+  assert(modernLoaded.world.entities.size() == 2 &&
+         modernLoaded.world.ticks[0].pos == loaded.world.ticks[0].pos);
+  modern.compound["Version"] = integer(8);
+  rejects([&] { loadLitematic(modern); });
+  modern = doc;
+  modern.compound["SubVersion"] = integer(2);
+  rejects([&] { loadLitematic(modern); });
+  // Thousands of disjoint one-block subregions, as used by the v7 projection.
+  auto large = doc;
+  large.compound["Version"] = integer(7);
+  auto &regions = large.compound["Regions"].compound;
+  regions.clear();
+  Tag singleWord;
+  singleWord.type = 12;
+  singleWord.longs = {0};
+  for (int i = 0; i < 4262; ++i)
+    regions.emplace(std::to_string(i), compound({
+        {"Position", vector(i % 100, 0, i / 100)},
+        {"Size", vector(1, 1, 1)},
+        {"BlockStatePalette", list({compound({
+            {"Name", string("minecraft:smooth_stone")}})})},
+        {"BlockStates", singleWord}}));
+  const auto many = loadLitematic(large);
+  assert(many.regionCount == 4262 && many.world.blocks.size() == 4262);
+  assert(many.world.blocks.at({61, 64, 42}).name() == "minecraft:smooth_stone");
   auto malformed = doc;
   malformed.compound["Regions"]
       .compound["one"]

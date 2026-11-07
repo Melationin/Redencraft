@@ -12,6 +12,13 @@
 // Every global new/delete in allocator.cpp goes through this single switch.
 // Keep allocation and deallocation backends paired, including over-aligned new.
 namespace redstone::memory {
+#ifdef REDSTONE_COUNT_ALLOCATIONS
+// Opt-in benchmark instrumentation; normal executables have no counters.
+struct AllocationCounts {
+  std::size_t allocations, requestedBytes;
+};
+AllocationCounts allocationCounts() noexcept;
+#endif
 inline constexpr const char *backend() noexcept {
 #ifdef REDSTONE_USE_JEMALLOC
   return "jemalloc";

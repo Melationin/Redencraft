@@ -26,10 +26,10 @@ constexpr std::array<Direction, 6> shapeOrder{
     Direction::South, Direction::Down, Direction::Up};
 std::string canonical(std::string n) { return canonicalName(std::move(n)); }
 bool fittingBase(const BlockState &head, const BlockState &base) {
-  return (head.get("type", "normal") == "sticky" ? base.is(Blocks::STICKY_PISTON)
+  return (head.getView("type", "normal") == "sticky" ? base.is(Blocks::STICKY_PISTON)
                                                  : base.is(Blocks::PISTON)) &&
-         base.get("extended", "false") == "true" &&
-         base.get("facing", "north") == head.get("facing", "north");
+         base.getView("extended", "false") == "true" &&
+         base.getView("facing", "north") == head.getView("facing", "north");
 }
 bool piston(const BlockState &s) {
   return s.is(Blocks::PISTON) || s.is(Blocks::STICKY_PISTON);
@@ -52,7 +52,7 @@ Direction opposite(Direction d) {
   }
   return Direction::Down;
 }
-Direction directionFromString(const std::string &s) {
+Direction directionFromString(std::string_view s) {
   if (s == "up")
     return Direction::Up;
   if (s == "north")
@@ -225,6 +225,10 @@ const std::vector<ItemType> &itemRegistry() {
       add(std::string("minecraft:dead_") + color + "_coral_fan");
     add("minecraft:cobblestone_wall");
     add("minecraft:stone_brick_wall");
+    add("minecraft:oak_fence_gate");
+    add("minecraft:birch_fence_gate");
+    add("minecraft:moss_block");
+    add("minecraft:stone_bricks");
     add("minecraft:sand");
     add("minecraft:redstone_lamp");
     add("minecraft:obsidian");
@@ -257,7 +261,13 @@ const ItemType *itemType(const std::string &name) {
   return found == registry.end() ? nullptr : &*found;
 }
 World::World(int minY, int maxY, int maxNeighborUpdates)
-    : minY_(minY), maxY_(maxY), maxUpdates_(maxNeighborUpdates) {}
+    : minY_(minY), maxY_(maxY), maxUpdates_(maxNeighborUpdates) {
+  // Chunk section storage is a fixed inline array; reject a taller dimension
+  // instead of silently truncating sections or indexing out of bounds.
+  if (sectionCount() > kSectionCapacity)
+    throw std::invalid_argument(
+        "World: vertical range needs more than kSectionCapacity sections");
+}
 World::~World() = default;
 World::World(World &&) noexcept = default;
 World &World::operator=(World &&) noexcept = default;
@@ -757,29 +767,67 @@ void World::setSeed(std::uint64_t value) {
 }
 void World::setPistonEntity(Pos pos,
                             std::shared_ptr<PistonMovingBlockEntity> entity) {
-  pistonEntities[pos] = entity;
-  auto it = pistonTickerSlots.find(pos);
-  if (it != pistonTickerSlots.end()) {
-    it->second->entity = entity;
-  } else {
-    auto slot = std::make_shared<PistonTickerSlot>();
-    slot->pos = pos;
-    slot->entity = entity;
-    pistonTickerSlots[pos] = slot;
-    pistonEntityOrder.push_back(slot);
+  // LevelChunk.setBlockEntity: replacing an entry marks the previous one
+  // removed, so a stale owner can never be ticked again.
+  auto &current = pistonEntities[pos];
+  if (current && current != entity)
+    current->live = false;
+  current = std::move(entity);
+  // LevelChunk.updateBlockEntityTicker: rebind the ticker that already owns
+  // this position (same list slot, same order) instead of appending a new one.
+  if (auto it = pistonTickerSlots.find(pos); it != pistonTickerSlots.end()) {
+    it->second->entity = current;
+    return;
   }
+  auto slot = std::make_unique<PistonTickerSlot>();
+  slot->pos = pos;
+  slot->entity = current;
+  PistonTickerSlot *raw = slot.get();
+  pistonTickerSlots[pos] = raw;
+  // Level.addBlockEntityTicker: a ticker created while the pass runs waits in
+  // the pending list and first ticks on the following pass.
+  (tickingPistonBlockEntities ? pendingPistonTickers : pistonTickers)
+      .push_back(std::move(slot));
 }
 void World::removePistonEntity(Pos pos) {
-  pistonEntities.erase(pos);
-  auto it = pistonTickerSlots.find(pos);
-  if (it != pistonTickerSlots.end()) {
-    it->second->entity.reset();
-    pistonTickerSlots.erase(it);
+  // LevelChunk.removeBlockEntity: the position table drops the entity at once.
+  if (auto it = pistonEntities.find(pos); it != pistonEntities.end()) {
+    if (it->second)
+      it->second->live = false;
+    pistonEntities.erase(pos);
   }
+  // removeBlockEntityTicker: rebind the ticker to nothing. The list slot stays
+  // until sweepPistonTickers(), and it keeps owning the entity until then, so
+  // a pass that already referenced it cannot see it freed.
+  if (auto it = pistonTickerSlots.find(pos); it != pistonTickerSlots.end()) {
+    it->second->removed = true;
+    pistonTickerSlots.erase(pos);
+  }
+}
+void World::mergePendingPistonTickers() {
+  if (pendingPistonTickers.empty())
+    return;
+  pistonTickers.reserve(pistonTickers.size() + pendingPistonTickers.size());
+  for (auto &slot : pendingPistonTickers)
+    pistonTickers.push_back(std::move(slot));
+  pendingPistonTickers.clear();
+}
+void World::sweepPistonTickers() {
+  // Level.tickBlockEntities' iterator.remove(), as one compaction: surviving
+  // tickers keep their relative registration order.
+  std::size_t kept = 0;
+  for (std::size_t i = 0; i < pistonTickers.size(); ++i) {
+    if (pistonTickers[i]->removed)
+      continue;
+    if (kept != i)
+      pistonTickers[kept] = std::move(pistonTickers[i]);
+    ++kept;
+  }
+  pistonTickers.resize(kept);
 }
 const World::Chunk *World::chunkAtCached(int x, int z) const {
   const auto key = chunkKey(x, z);
-  ChunkCacheSlot &slot = chunkCache_[(key * 0x9E3779B97F4A7C15ull) >> 58];
+  ChunkCacheSlot &slot = blockReadCache_.chunks[(key * 0x9E3779B97F4A7C15ull) >> 58];
   if (slot.key == key)
     return slot.chunk && slot.chunk->loaded ? slot.chunk : nullptr;
   auto it = chunks_.find(key);
@@ -792,18 +840,6 @@ World::Chunk *World::chunkAt(int x, int z) {
 }
 const World::Chunk *World::chunkAt(int x, int z) const {
   return chunkAtCached(x, z);
-}
-World::Section *World::sectionAt(Pos p, bool create) {
-  Chunk *c = chunkAt(chunkIndex(p.x), chunkIndex(p.z));
-  if (!c)
-    return nullptr;
-  const auto index = static_cast<std::size_t>(sectionIndex(p.y));
-  if (index >= c->sections.size())
-    return nullptr;
-  auto &slot = c->sections[index];
-  if (!slot && create)
-    slot = std::make_unique<Section>();
-  return slot.get();
 }
 BlockState::Id World::Section::get(int index) const {
   // PalettedContainer.get: palette entry of the stored index (bits == 0 means
@@ -867,20 +903,20 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
   return previous;
 }
 void World::loadChunk(int x, int z) {
+  blockReadCache_.sectionIndex = -1;
   const auto key = chunkKey(x, z);
   auto &c = chunks_[key];
   c.loaded = true;
   // Publish the fresh node so a cached miss cannot mask the load.
-  ChunkCacheSlot &slot = chunkCache_[(key * 0x9E3779B97F4A7C15ull) >> 58];
+  ChunkCacheSlot &slot = blockReadCache_.chunks[(key * 0x9E3779B97F4A7C15ull) >> 58];
   slot.key = key;
   slot.chunk = &c;
-  if (c.sections.size() != static_cast<std::size_t>(sectionCount()))
-    c.sections.resize(static_cast<std::size_t>(sectionCount()));
   // LevelTicks.addContainer: every ticking chunk owns exactly one tick
   // container. Reloading a chunk keeps the pending ticks it already had.
   tickQueue_->addContainer(chunkKey(x, z));
 }
 void World::unloadChunk(int x, int z) {
+  blockReadCache_.sectionIndex = -1;
   auto it = chunks_.find(chunkKey(x, z));
   if (it != chunks_.end())
     it->second.loaded = false;
@@ -894,14 +930,23 @@ bool World::isLoaded(Pos p) const {
 BlockState World::getBlock(Pos p) const {
   if (p.y < minY_ || p.y >= maxY_)
     return airState();
-  const Chunk *c = chunkAt(chunkIndex(p.x), chunkIndex(p.z));
-  if (!c)
-    return airState();
-  const auto index = static_cast<std::size_t>(sectionIndex(p.y));
-  if (index >= c->sections.size())
-    return airState();
-  const Section *s = c->sections[index].get();
-  if (!s || s->hasOnlyAir())
+  const int x = chunkIndex(p.x), z = chunkIndex(p.z);
+  const auto key = chunkKey(x, z);
+  const int index = sectionIndex(p.y);
+  auto &cache = blockReadCache_;
+  const Section *s;
+  if (cache.sectionIndex == index && cache.sectionKey == key) {
+    s = cache.section;
+  } else {
+    const Chunk *c = chunkAt(x, z);
+    if (!c || index >= sectionCount())
+      return airState();
+    s = &c->sections[index];
+    cache.sectionKey = key;
+    cache.sectionIndex = index;
+    cache.section = s;
+  }
+  if (s->hasOnlyAir())
     return airState();
   const int cell = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
   return BlockState::fromId(s->get(cell));
@@ -912,19 +957,18 @@ ChunkSnapshot World::snapshotChunk(int chunkX, int chunkZ) const {
   snapshot.maxY = maxY_;
   snapshot.sections.resize(static_cast<std::size_t>(sectionCount()));
   if (const Chunk *chunk = chunkAt(chunkX, chunkZ)) {
-    for (std::size_t i = 0; i < chunk->sections.size() &&
-                            i < snapshot.sections.size();
-         ++i) {
-      const Section *section = chunk->sections[i].get();
-      if (!section)
-        continue;
+    for (std::size_t i = 0;
+         i < snapshot.sections.size() && i < chunk->sections.size(); ++i) {
+      // An untouched section is a default Section (single air, no storage), so
+      // it copies over the snapshot's default entry without any branch.
+      const Section &section = chunk->sections[i];
       SectionSnapshot &out = snapshot.sections[i];
-      out.nonEmpty = section->nonEmpty;
-      out.bits = section->bits;
-      out.single = section->single;
-      out.palette = section->palette;
-      out.indices8 = section->indices8;
-      out.indices16 = section->indices16;
+      out.nonEmpty = section.nonEmpty;
+      out.bits = section.bits;
+      out.single = section.single;
+      out.palette = section.palette;
+      out.indices8 = section.indices8;
+      out.indices16 = section.indices16;
     }
   }
   for (const auto &[pos, entity] : pistonEntities)
@@ -933,21 +977,25 @@ ChunkSnapshot World::snapshotChunk(int chunkX, int chunkZ) const {
       snapshot.pistons.push_back(
           PistonSnapshot{pos, entity->movedState, entity->direction,
                          entity->progressO, entity->extending, entity->source});
+  // The position table is a flat hash and iterates in bucket order; the
+  // snapshot is a wire-visible list, so keep the previous Pos-ascending order.
+  std::sort(snapshot.pistons.begin(), snapshot.pistons.end(),
+            [](const PistonSnapshot &a, const PistonSnapshot &b) {
+              return a.pos < b.pos;
+            });
   return snapshot;
 }
 void World::rawSetBlock(Pos p, BlockState state) {
   if (p.y < minY_ || p.y >= maxY_)
     return;
-  Section *s = sectionAt(p, false);
-  if (!s) {
-    if (state.isAir())
-      return;
-    s = sectionAt(p, true);
-    if (!s)
-      return;
-  }
+  Chunk *c = chunkAt(chunkIndex(p.x), chunkIndex(p.z));
+  if (!c)
+    return;
+  // Writing the value a fresh section already holds (air, state id 0) is a
+  // no-op in Section::set, so an untouched section never materialises storage.
+  Section &section = c->sections[sectionIndex(p.y)];
   const int index = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
-  s->set(index, state.id());
+  section.set(index, state.id());
 }
 std::map<Pos, BlockState> World::allBlocks() const {
   std::map<Pos, BlockState> result;
@@ -956,12 +1004,12 @@ std::map<Pos, BlockState> World::allBlocks() const {
       continue;
     const int chunkX = static_cast<int>(key >> 32);
     const int chunkZ = static_cast<int>(key & 0xffffffffu);
-    for (std::size_t si = 0; si < c.sections.size(); ++si) {
-      const Section *s = c.sections[si].get();
-      if (!s || s->hasOnlyAir())
+    for (int si = 0; si < sectionCount(); ++si) {
+      const Section &s = c.sections[si];
+      if (s.hasOnlyAir())
         continue;
       for (int i = 0; i < 4096; ++i) {
-        const auto id = s->get(i);
+        const auto id = s.get(i);
         BlockState state = BlockState::fromId(id);
         if (state.isAir())
           continue;
@@ -1002,7 +1050,7 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
     if (state.is(Blocks::SAND) && !old.sameBlock(state))
       scheduleTick(p, state.block(), 2);
     if (state.is(Blocks::OBSERVER) && !old.sameBlock(state) &&
-        state.get("powered", "false") == "true" &&
+        state.getView("powered", "false") == "true" &&
         !hasScheduledTick(p, state.block())) {
       setBlock(p, state.with("powered", "false"), 18);
       observerNotify(p, state.with("powered", "false"));
@@ -1063,7 +1111,7 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
   if (isDeadCoralFan(state)) {
     const auto supportDirection =
         isDeadCoralWallFan(state)
-            ? opposite(directionFromString(state.get("facing", "north")))
+            ? opposite(directionFromString(state.getView("facing", "north")))
             : Direction::Down;
     if (direction == supportDirection && !coralCanSurvive(*this, p, state))
       return airState();
@@ -1074,27 +1122,38 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
                        neighbor.is(Blocks::POWDER_SNOW);
     return state.with("snowy", snowy ? "true" : "false");
   }
+  if (isFenceGate(state)) {
+    const auto facing = directionFromString(state.getView("facing", "north"));
+    const bool facingZ = facing == Direction::North || facing == Direction::South;
+    const bool directionX = direction == Direction::East || direction == Direction::West;
+    const bool directionZ = direction == Direction::North || direction == Direction::South;
+    if ((facingZ && directionX) || (!facingZ && directionZ)) {
+      const bool inWall = isWallBlock(neighbor) ||
+          isWallBlock(getBlock(p.relative(opposite(direction))));
+      return state.with("in_wall", inWall ? "true" : "false");
+    }
+  }
   // Water simulation is outside the current scope; waterlogged values persist.
   if (isWallBlock(state) && direction != Direction::Down)
     return wallUpdateShape(*this, p, state, direction, neighbor);
   if (state.is(Blocks::PISTON_HEAD) &&
       opposite(direction) ==
-          directionFromString(state.get("facing", "north"))) {
+          directionFromString(state.getView("facing", "north"))) {
     const auto base = getBlock(neighborPos);
     if (!fittingBase(state, base) &&
         !(base.is(Blocks::MOVING_PISTON) &&
-          base.get("facing", "north") == state.get("facing", "north")))
+          base.getView("facing", "north") == state.getView("facing", "north")))
       return airState();
   }
   if (state.is(Blocks::OBSERVER) &&
-      directionFromString(state.get("facing", "south")) == direction &&
-      state.get("powered", "false") == "false" &&
+      directionFromString(state.getView("facing", "south")) == direction &&
+      state.getView("powered", "false") == "false" &&
       !hasScheduledTick(p, state.block()))
     scheduleTick(p, state.block(), 2);
   if (state.is(Blocks::NOTE_BLOCK) &&
       (direction == Direction::Up || direction == Direction::Down)) {
     const auto below = getBlock(p.relative(Direction::Down));
-    std::string instrument = "harp";
+    std::string_view instrument = "harp";
     if (below.is(Blocks::GLASS))
       instrument = "hat";
     else if (below.is(Blocks::SAND))
@@ -1102,9 +1161,9 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
     else if (below.is(Blocks::SMOOTH_STONE) || isWallBlock(below) ||
              below.is(Blocks::WHITE_TERRACOTTA) || below.is(Blocks::BEDROCK) ||
              below.is(Blocks::OBSIDIAN) || below.is(Blocks::OBSERVER) ||
-             isDeadCoralFan(below))
+             below.is(Blocks::STONE_BRICKS) || isDeadCoralFan(below))
       instrument = "basedrum";
-    else if (below.is(Blocks::NOTE_BLOCK))
+    else if (below.is(Blocks::NOTE_BLOCK) || isFenceGate(below))
       instrument = "bass";
     // TODO: unknown instrument overrides and skull-backed sounds need registry
     // data.
@@ -1157,14 +1216,14 @@ void World::updateIndirectNeighbourShapes(
 void World::affectNeighborsAfterRemoval(Pos p, const BlockState &state, bool) {
   if (state.is(Blocks::PISTON_HEAD)) {
     auto q =
-        p.relative(opposite(directionFromString(state.get("facing", "north"))));
+        p.relative(opposite(directionFromString(state.getView("facing", "north"))));
     if (fittingBase(state, getBlock(q))) {
       for (const auto &drop : blockDrops(getBlock(q)))
         spawnItem(q, drop.id, drop.count);
       setBlock(q, airState(), 3);
     }
   }
-  if (state.is(Blocks::OBSERVER) && state.get("powered", "false") == "true" &&
+  if (state.is(Blocks::OBSERVER) && state.getView("powered", "false") == "true" &&
       hasScheduledTick(p, state.block()))
     observerNotify(p, state.with("powered", "false"));
 }
@@ -1283,28 +1342,39 @@ void World::executeNeighbor(Pos p, const BlockState &state,
   if (piston(state))
     pistonNeighborChanged(*this, p, state);
   else if (state.is(Blocks::PISTON_HEAD)) {
-    auto d = directionFromString(state.get("facing", "north"));
+    auto d = directionFromString(state.getView("facing", "north"));
     auto basePos = p.relative(opposite(d));
     auto base = getBlock(basePos);
     if (fittingBase(state, base) ||
         (base.is(Blocks::MOVING_PISTON) &&
-         base.get("facing", "north") == state.get("facing", "north")))
+         base.getView("facing", "north") == state.getView("facing", "north")))
       neighborChanged(basePos, source.str());
   } else if (state.is(Blocks::TNT) && hasNeighborSignal(p) && tntExplodes) {
     primeTntBlock(p);
   } else if (isRailBlock(state)) {
     railNeighborChanged(*this, p, state, source, movedByPiston);
   } else if (state.is(Blocks::REDSTONE_LAMP)) {
-    const bool lit = state.get("lit", "false") == "true";
+    const bool lit = state.getView("lit", "false") == "true";
     if (lit != hasNeighborSignal(p)) {
       if (lit)
         scheduleTick(p, state.block(), 4);
       else
         setBlock(p, state.with("lit", "true"), 2);
     }
+  } else if (isFenceGate(state)) {
+    const bool signal = hasNeighborSignal(p);
+    const bool powered = state.getView("powered", "false") == "true";
+    if (signal != powered) {
+      setBlock(p, state.with("powered", signal ? "true" : "false")
+                           .with("open", signal ? "true" : "false"), 2);
+      if ((state.getView("open", "false") == "true") != signal) {
+        (void)random.nextFloat();
+        // TODO: fence gate sound and BLOCK_OPEN/BLOCK_CLOSE game events.
+      }
+    }
   } else if (state.is(Blocks::NOTE_BLOCK)) {
     bool signal = hasNeighborSignal(p),
-         powered = state.get("powered", "false") == "true";
+         powered = state.getView("powered", "false") == "true";
     if (signal != powered) {
       if (signal && getBlock(p.relative(Direction::Up)).isAir())
         blockEvent(p, state.block(), 0, 0);
@@ -1316,8 +1386,8 @@ int World::getSignal(Pos p, Direction d) const {
   auto s = getBlock(p);
   if (s.is(Blocks::REDSTONE_BLOCK))
     return 15;
-  if (s.is(Blocks::OBSERVER) && s.get("powered", "false") == "true" &&
-      directionFromString(s.get("facing", "south")) == d)
+  if (s.is(Blocks::OBSERVER) && s.getView("powered", "false") == "true" &&
+      directionFromString(s.getView("facing", "south")) == d)
     return 15;
   if (isRailBlock(s) && railSignal(s) > 0)
     return railSignal(s);
@@ -1326,14 +1396,14 @@ int World::getSignal(Pos p, Direction d) const {
     for (auto n : neighborOrder) {
       auto q = p.relative(n);
       auto x = getBlock(q);
-      if (x.is(Blocks::OBSERVER) && x.get("powered", "false") == "true" &&
-          directionFromString(x.get("facing", "south")) == n)
+      if (x.is(Blocks::OBSERVER) && x.getView("powered", "false") == "true" &&
+          directionFromString(x.getView("facing", "south")) == n)
         return 15;
       // DetectorRailBlock.getDirectSignal returns 15 only toward UP. With the
       // SignalGetter convention (direction from the conductor to the source),
       // this reaches the block below a powered detector rail.
       if (n == Direction::Up && x.is(Blocks::DETECTOR_RAIL) &&
-          x.get("powered", "false") == "true")
+          x.getView("powered", "false") == "true")
         return 15;
     }
   }
@@ -1405,7 +1475,7 @@ std::vector<BlockEvent> World::pendingBlockEvents() const {
   return blockEventQueue_->snapshot();
 }
 void World::observerNotify(Pos p, const BlockState &s) {
-  auto d = directionFromString(s.get("facing", "south"));
+  auto d = directionFromString(s.getView("facing", "south"));
   auto q = p.relative(opposite(d));
   neighborChanged(q, s.block());
   updateNeighborsAt(q, s.block(), d);
@@ -1417,7 +1487,7 @@ void World::runScheduled(const ScheduledTick &t) {
   if (t.block.block() != s.blockOrNull())
     return;
   if (s.is(Blocks::OBSERVER)) {
-    bool on = s.get("powered", "false") == "true";
+    bool on = s.getView("powered", "false") == "true";
     setBlock(t.pos, s.with("powered", on ? "false" : "true"), 2);
     if (!on)
       scheduleTick(t.pos, s.block(), 2);
@@ -1425,7 +1495,7 @@ void World::runScheduled(const ScheduledTick &t) {
   } else if (isRailBlock(s)) {
     railScheduledTick(*this, t.pos, s);
   } else if (s.is(Blocks::REDSTONE_LAMP)) {
-    if (s.get("lit", "false") == "true" && !hasNeighborSignal(t.pos))
+    if (s.getView("lit", "false") == "true" && !hasNeighborSignal(t.pos))
       setBlock(t.pos, s.with("lit", "false"), 2);
   } else if (s.is(Blocks::SAND)) {
     // TODO: FIRE tags and replaceable blocks outside the implemented registry.
@@ -1478,6 +1548,10 @@ void World::tick() {
   // source changes stay pending until the following chunk broadcast phase.
   if (blockUpdatesBroadcastObserver)
     blockUpdatesBroadcastObserver();
+  // ServerChunkCache.tick: ChunkMap.tick/ServerEntity.sendChanges follows
+  // chunk broadcasts and precedes block events and this tick's entity motion.
+  if (entityTrackingBroadcastObserver)
+    entityTrackingBroadcastObserver();
   runEvents();
   handlingTick_ = false;
   // ServerLevel.tick: entities, then block entities.
@@ -1487,5 +1561,8 @@ void World::tick() {
   pistonTickBlockEntities(*this);
   if (blockEntityTicker)
     blockEntityTicker(*this);
+  // Observe removals caused by block entities without altering the core's
+  // existing cleanup timing. Network trackers must not wait one more tick.
+  broadcastEntityRemovals();
 }
 } // namespace redstone

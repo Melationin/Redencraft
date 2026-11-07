@@ -1,0 +1,42 @@
+{
+  "date": "2026-11-07",
+  "workload": "Same 3000-tick offline schematic activation as preceding allocation/profile runs",
+  "method": "Temporary engine object overrides archive engine object; counters reset after import and activation. Production sources and libraries unchanged.",
+  "scope": "chunkAtCached counters include calls from getBlock and other APIs; locality counts consecutive getBlock requests, before bounds/loading checks. No fingerprint observer enabled.",
+  "counts": {
+    "chunk_calls": 829823066,
+    "chunk_cache_hits": 827465430,
+    "chunk_map_lookups": 2357636,
+    "block_calls": 723717136,
+    "consecutive_chunk": 663370625,
+    "consecutive_section": 636690817
+  },
+  "ratios": {
+    "chunk_cache_hit_percent": 99.71588690449826,
+    "chunk_map_lookup_percent": 0.28411309550173436,
+    "consecutive_same_chunk_percent": 91.66158876193862,
+    "consecutive_same_section_percent": 87.97509210836208
+  },
+  "timing_usable_for_speedup": false,
+  "final": {
+    "entities": 1197,
+    "scheduled": 1197,
+    "moving_pistons": 1995,
+    "events": 0
+  },
+  "layout_probe": {
+    "compiler": "MSVC /O2 /MT /std:c++20",
+    "explosion_cache_entry_current_bytes": 24,
+    "without_unused_state_field_bytes": 16,
+    "entries": 512,
+    "current_array_bytes": 12288,
+    "trimmed_array_bytes": 8192,
+    "coordinate_index_assembly": "Standalone noinline experiment: current expression retains sign branch and negative adjustment; v >> 4 compiles to sar + mov + ret. Caller-inlined assembly/performance not measured."
+  },
+  "production_source_hashes_match_previous_record": true,
+  "local_sources": {
+    "build-symbols/engine_access_probe.cpp": "329e994b81ed41db41e2ab92f7f37866adfe2572d088d47bb09cbe98e07a2741",
+    "build-symbols/bench_access_probe.cpp": "affc04255897e49a75acd1accb806a07c62596e17dcd707652b3f70d7ec177ac",
+    "build-symbols/access-layout.cpp": "7997a7b343ce9d978d4210669b4302d5538604657a8350822f650b7f9d2ccd48"
+  }
+}

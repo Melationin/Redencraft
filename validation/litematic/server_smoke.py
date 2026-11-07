@@ -91,21 +91,21 @@ def run(args):
                     length = struct.unpack('>H', payload[1:3])[0]
                     text = payload[3:3 + length].decode('utf-8')
                     assert len(payload) == length + 4 and payload[-1] == 0, 'Timing must be chat'
-                    match = re.fullmatch(r'Tick (\d+): (\d+\.\d{3}) ms', text)
+                    match = re.fullmatch(r'Tick (\d+): (\d+\.\d{3}) ms(?: \(1s avg, (\d+) ticks\))?', text)
                     assert match, text
-                    messages.append({'tick': int(match[1]), 'milliseconds': float(match[2])})
-                    if len(messages) == 3 and args.activate_control and not activated:
+                    messages.append({'tick': int(match[1]), 'milliseconds': float(match[2]), 'samples': int(match[3]) if match[3] else 1})
+                    if messages[-1]['tick'] >= 20 and args.activate_control and not activated:
                         send(connection, server('move_player_pos'),
                              struct.pack('>dddB', 2.5, 102, -1.5, 0))
                         send(connection, server('use_item_on'),
                              vint(0) + position(2, 101, 3) + vint(1) +
                              struct.pack('>fff??', .5, 1, .5, False, False) + vint(1))
                         activated = True
-                    if len(messages) == (10 if args.activate_control else 3) and not moved:
+                    if messages[-1]['tick'] >= (40 if args.activate_control else 20) and not moved:
                         send(connection, server('move_player_pos'),
                              struct.pack('>dddB', 792.5, 151, 8.5, 0))
                         moved = True
-                    if len(messages) >= (13 if args.activate_control else 6) and saw_far_chunk:
+                    if messages[-1]['tick'] >= (60 if args.activate_control else 40) and saw_far_chunk:
                         break
             else:
                 raise AssertionError('Schematic view/timing packets missing')

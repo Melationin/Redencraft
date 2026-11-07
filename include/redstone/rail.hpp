@@ -16,7 +16,7 @@ enum class RailShape {
   NorthWest,
   NorthEast
 };
-RailShape railShapeFromName(const std::string &name);
+RailShape railShapeFromName(std::string_view name);
 std::string railShapeName(RailShape shape);
 bool railShapeIsSlope(RailShape shape);
 RailShape railShapeOf(const BlockState &state);
