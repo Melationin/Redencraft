@@ -1,4 +1,4 @@
-# Minecraft 26.1 红石模拟器（C++20）
+# Minecraft 26.1 服务端模拟器（C++20）
 
 已新增带原版纹理的 Windows 极轻量 3D 调试客户端及 16 色羊毛地毯；使用方式见 [客户端说明](docs/client.md)。
 

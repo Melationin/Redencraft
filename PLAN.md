@@ -2,7 +2,7 @@
 
 目标形态见 [AGENTS.md](AGENTS.md) 第 1 节。本文件只定义任务顺序与验收口径；**进度不写在这里**，进度只写在 [task/TASKS.md](task/TASKS.md)。
 
-规则：coder 按本文件的顺序领取「第一个还没有被 reviewer 判定 `任务已完成` 的任务」，一个任务一次提交。
+规则：coder 按本文件的顺序领取「第一个还没有被 reviewer 判定 `任务已完成` 的任务」。每个任务一次**主提交**；把 commit hash 与末行状态写回 `task/TASKS.md` 的**状态记录提交**不计入「一次提交」限制。
 
 ## 阶段 0 — 文档与流程对齐
 
@@ -16,33 +16,36 @@
 
 - **F-1 流体状态模型**
   `Fluid` / `FluidState` / `Fluids` 三个概念：`minecraft:empty`、`water`、`flowing_water`、`lava`、`flowing_lava`；`amount`、`isSource`、`isFull`、`isSame`、`getOwnHeight`、`createLegacyBlock`、`getLegacyLevel`。
-  给 `water` / `lava` 补 `falling` 属性，并核对 `level` 的值域与默认值。
-  源码：`world/level/material/{Fluid,FluidState,Fluids,WaterFluid,LavaFluid}.java`、`world/level/block/LiquidBlock.java`。
-  验收：状态与流体的双向映射（含 `level=8..15` 的 `falling`）有断言；`level=9..15` 仍保留方块属性不被截断。
+  `falling` 属于 `FluidState`。水和岩浆的方块状态保留原版 `level=0..15`，默认 `0`。读取时 `8..15` 都解码成 amount 8 的 falling 流体，重新生成的 legacy 方块为 `level=8`。原先读取的方块状态保留自己的 `level`，协议和 Anvil schema 沿用 26.1 导出。
+  依据 `world/level/material/{Fluid,FluidState,Fluids,FlowingFluid,WaterFluid,LavaFluid}.java` 和 `world/level/block/LiquidBlock.java`。执行 [流体测试规格](docs/fluid-testing.md#41-状态和调度) 的 F-01/F-02 中的状态映射部分，枚举两种方块的全部 16 档，比较源/流动的精确身份、同族关系、amount、`isSource`、`isFull`、`falling`、固有高度和 legacy 映射。跨格高度随 F-3，含水宿主随 F-5。
 
 - **F-2 流体计划刻队列**
   独立的 `LevelTicks` 容器，与方块刻分开收集/执行，共享 `Level.nextSubTickCount`；`ServerLevel.tick` 中位于方块刻之后、区块阶段之前；各自 65536 上限。
-  源码：`ServerLevel.java`、`LevelTicks.java`、`LevelChunkTicks.java`、`ScheduledTickAccess.java`。
-  验收：两条队列互不串扰、同一位置同类型去重、到期顺序与 `subTickOrder` 有断言。
+  依据 `ServerLevel.java`、`LevelTicks.java`、`LevelChunkTicks.java`、`ScheduledTickAccess.java`。执行 Q-01…Q-06，覆盖源与流动类型共存、陈旧刻按精确身份跳过、跨队列同刻收集、积压区块队首和各自上限。
 
 - **F-3 `FlowingFluid` 传播**
-  `spread`、`spreadToSides`、`getNewLiquid`、`getSpread`、`getSlopeDistance`、`canPassThroughWall`（含 200 项遮挡缓存）、`SpreadContext`、`isWaterHole`、`getFlow`。
-  验收：退流、坡度优先、瀑布、独立水源三种最小场景逐刻断言。
+  实现 `FlowingFluid.java` 的 `spread`、`spreadToSides`、`getNewLiquid`、`getSpread`、`getSlopeDistance`、`canPassThroughWall`、`SpreadContext`、`isWaterHole`、`getHeight` 和 `getFlow`。以预置方块和显式流体刻隔离算法。F-5 接通自然更新后用同一夹具复验。
+  执行 W-01…W-07，验证水平扩散、退流、瀑布、源转换、坡度同距写序、共享面和动态形状。若引入原版 200 项遮挡缓存，另证实冷/热缓存结果相同且动态形状不复用静态缓存。
 
 - **F-4 水与岩浆参数差异**
-  water：delay 5、dropOff 1、slopeFindDistance 4、`canConvertToSource=true`；lava：30 / 2 / 2、`canConvertToSource=false`、遇水成石（黑曜石/圆石）。
-  验收：参数驱动的行为差异有断言，且参数不硬编码在传播逻辑里。
+  依据 `WaterFluid.java`、`LavaFluid.java`、`LiquidBlock.java`。主世界水 delay/dropOff/slope 为 5/1/4，岩浆为 30/2/2。水源转换规则默认开、岩浆默认关，分别验证规则开关。岩浆液面抬升的随机延迟、水接触方向、下落成石及魂土/蓝冰成玄武岩都有独立用例。
+  执行 L-01…L-03 和 M-01…M-03。L-04 的 `FAST_LAVA` 使用原版扩展对照，项目支持随维度环境属性接入。
 
 - **F-5 方块侧接线与排水**
-  `LiquidBlock.onPlace` / `neighborChanged` / `updateShape` 的流体刻请求；`LiquidBlockContainer` 的放入/排出（`waterlogged` 方块、铁轨、墙、珊瑚扇、栅栏门）。
-  验收：放置/破坏带水方块的状态变化与流体刻请求顺序有断言。
+  依据 `LiquidBlock.java`、`SimpleWaterloggedBlock.java`、`BaseRailBlock.java` 和各宿主源码。分别接通放置、`neighborChanged`、`updateShape` 的流体刻请求，以及铁轨、墙、珊瑚扇等原版支持宿主的含水与排水。栅栏门用于开闭时的流体阻挡对照。
+  执行 H-01…H-03、P-01…P-04 和 W-01 的正常放置路径，断言含水属性、排水或保水、队列请求、活塞普通/提前完成和干态回归。桶交互与实体推流继续按测试规格的 P1 分项交付。
 
 - **F-6 存档与投影的流体刻**
-  导入 `fluid_ticks`（相对延迟 + priority + 容器 `-n..-1` 基准）；litematic 的 `PendingFluidTicks` 不再跳过。
-  验收：导入后的出队时刻与原版重启一致。
+  依据 `SavedTick.java`、`LevelChunkTicks.java`、`SerializableChunkData.java` 和对应版本的 Litematica 格式实现。导入 `fluid_ticks` 的精确流体标识、相对延迟与优先级，按每个区块的独立流体列表恢复 `-n..-1`。投影 `PendingFluidTicks` 单独按格式夹具验证位置变换、字段与错误路径。
+  执行 A-01…A-04。Anvil 以同一存档副本的原版重启为基准。投影用经格式核对的夹具和原版运行快照作对照。验证 C++ 只读输入。
 
 - **F-7 验收与差分**
-  按 [docs/fluid-testing.md](docs/fluid-testing.md) 的 P0 用例建 CTest；在授权后跑真实 26.1 服务端差分。未跑差分时只能标「源码对照 + C++ 回归通过」。
+  汇总 F-1…F-6 的聚焦用例，按 [流体测试规格](docs/fluid-testing.md) 补齐 P0 集成对照，包含 A-05 的稳定窗口、湿态与干态红石对比，以及已实现协议路径的 N-01/N-02/N-04。缺失依赖分别登记。
+  区分源码对照、C++ CTest、原版 JAR 离线探针、真实 26.1 服务端差分四种证据。真实差分使用官方 JAR、隔离世界、同输入逐刻 trace 与原版生成的黄金文件；只在具备运行授权时执行。
+
+- **M0-2 交接与定位文档校正**
+  在流体验收之后单独校正文档。`AGENTS.md` 的角色切换和验收统一以唯一的末行状态为准，时间目标对齐 26.1 World Clocks 与 `advance_time`。修复 `docs/compatibility.md` 的路线图链接及命令边界，`docs/handover.md` 区分历史段落与当前流体路线。
+  剩余待办（M0-1 审查遗留）：`AGENTS.md` 中主智能体的纠错写入、返工内容追加位置、reviewer「只读代码」措辞；`docs/handover.md` 历史段落与阶段 1 的交叉引用；`README.md` 与协议文档中残留的「红石模拟器」「流体排除」表述。
 
 ## 阶段 2 — 光照
 
@@ -53,7 +56,7 @@
 
 ## 阶段 3 — 时间与世界保存
 
-- **W-1 时间**：`gameTime` / `dayTime` 分离、`doDaylightCycle`、睡眠、命令 `/time` 语义。
+- **W-1 时间**：对齐 26.1 的 `gameTime` 与 World Clocks，包括默认时钟、`advance_time`、睡眠跳转、命令 `/time` 及实际持久化路径。依据 `ServerLevel.tickTime`、`ServerClockManager` 和 `TimeCommand`。
 - **W-2 世界保存骨架**：`level.dat` 写回、Anvil `.mca` 写出（含压缩版本）、区块 palette 序列化。
 - **W-3 持久化内容**：方块刻/流体刻、方块实体、实体、强加载列表、gamerules。
 - **W-4 保存-重启差分**：写盘后重启读回，逐区块/逐刻对照。
