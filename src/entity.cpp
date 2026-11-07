@@ -1593,18 +1593,16 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
   std::vector<Pos> &toBlow = explosionTargets_;
   toBlow.clear();
   ++explosionStats.explosions;
-  // Lithium-style direct-mapped cache: the ray shell samples the same block
-  // positions many times, so the state/fluid/resistance lookup is memoised
-  // instead of hitting the chunk map on every step. The table outlives a single
-  // explosion, so a generation stamp replaces the per-call zero fill.
-  if (++explosionGeneration_ == 0) {
-    for (auto &entry : explosionCache_)
-      entry.generation = 0;
-    explosionGeneration_ = 1;
-  }
-  const std::uint32_t generation = explosionGeneration_;
-  auto &blockCache = explosionCache_;
-  constexpr std::uint64_t kBlockCacheShift = 55; // 64 - 9
+  // ServerExplosion's ray shell visits the same cells from many directions and
+  // most of them are air. Air is the only answer that costs nothing downstream
+  // (no resistance, no fluid, no destruction entry), so only that fact is
+  // memoised: one value bit per slot plus the tag that proves the slot belongs
+  // to this position. Anything not marked air is read again through the section
+  // cache below.
+  auto &airBits = explosionAirBits_;
+  auto &airTags = explosionAirTags_;
+  airBits.fill(0);
+  constexpr std::uint64_t kAirBitShift = 55; // top 9 bits of the hashed key
   const auto blockKey = [](Pos p) {
     return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.x)) &
             0x3FFFFFFull)
@@ -1615,6 +1613,42 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.y)) &
             0xFFFull);
   };
+  // Level.getChunk / Level.getBlockState with a one-entry chunk + section cache
+  // (lithium's prevChunk/prevChunkX/prevChunkZ): a ray walks a run of
+  // neighbouring cells, so both lookups are almost always repeats.
+  int cachedChunkX = std::numeric_limits<int>::min();
+  int cachedChunkZ = std::numeric_limits<int>::min();
+  const Chunk *cachedChunk = nullptr;
+  const Section *cachedSection = nullptr;
+  int cachedSectionIndex = -1;
+  // False when the ray left the world height or a loaded chunk: vanilla stops
+  // the ray there instead of treating the block as air.
+  const auto readBlock = [&](Pos pos, BlockState &out) {
+    if (pos.y < minY_ || pos.y >= maxY_)
+      return false;
+    const int chunkX = chunkIndex(pos.x);
+    const int chunkZ = chunkIndex(pos.z);
+    if (chunkX != cachedChunkX || chunkZ != cachedChunkZ) {
+      cachedChunk = chunkAt(chunkX, chunkZ);
+      cachedChunkX = chunkX;
+      cachedChunkZ = chunkZ;
+      cachedSectionIndex = -1;
+    }
+    if (!cachedChunk)
+      return false;
+    const int index = sectionIndex(pos.y);
+    if (index != cachedSectionIndex) {
+      cachedSection = &cachedChunk->sections[index];
+      cachedSectionIndex = index;
+    }
+    if (cachedSection->hasOnlyAir())
+      out = airState();
+    else
+      out = BlockState::fromId(cachedSection->get(((pos.y & 15) << 8) |
+                                                  ((pos.z & 15) << 4) |
+                                                  (pos.x & 15)));
+    return true;
+  };
   for (const auto &step : explosionSteps()) {
     const double stepX = step.x;
     const double stepY = step.y;
@@ -1622,8 +1656,8 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
     double remainingPower = radius * (0.7f + random.nextFloat() * 0.6f);
     double xp = center.x, yp = center.y, zp = center.z;
     // A 0.3 step usually stays inside the same block. Reuse the previous
-    // block's resistance and air flags instead of probing the cache again
-    // (lithium's prevX/prevY/prevZ shortcut).
+    // block's resistance and air flags instead of probing again (lithium's
+    // prevX/prevY/prevZ shortcut).
     int prevX = std::numeric_limits<int>::min();
     int prevY = std::numeric_limits<int>::min();
     int prevZ = std::numeric_limits<int>::min();
@@ -1639,31 +1673,37 @@ void World::explode(Entity *source, Vec3 center, float radius, bool fire) {
       if (!sameBlock) {
         const Pos pos{blockX, blockY, blockZ};
         const std::uint64_t key = blockKey(pos);
-        ExplosionCacheEntry &cached =
-            blockCache[(key * 0x9E3779B97F4A7C15ull) >> kBlockCacheShift];
-        if (cached.generation != generation || cached.key != key) {
+        const std::uint64_t slot = (key * 0x9E3779B97F4A7C15ull) >> kAirBitShift;
+        std::uint64_t &word = airBits[slot >> 6];
+        const std::uint64_t mask = std::uint64_t{1} << (slot & 63);
+        if ((word & mask) != 0 && airTags[slot] == key) {
+          ++explosionStats.airHits;
+          prevAir = true;
+          prevFluid = false;
+          prevResistance = 0.0f;
+        } else {
           ++explosionStats.probes;
-          const auto state = getBlock(pos);
-          const bool fluid = isLiquidBlock(state) || waterloggedOf(state);
-          const float blast = static_cast<float>(std::max(
-              static_cast<double>(blockMetadata(state).explosionResistance),
-              fluid ? 100.0 : 0.0));
-          cached.key = key;
-          cached.generation = generation;
-          cached.air = state.isAir();
-          cached.fluid = fluid;
-          // Cache the per-step loss, (resistance + 0.3) * 0.3.
-          cached.resistance = (blast + 0.3f) * 0.3f;
-          cached.loaded = isLoaded(pos);
+          BlockState state;
+          if (!readBlock(pos, state))
+            break;
+          prevAir = state.isAir();
+          if (prevAir) {
+            airTags[slot] = key;
+            word |= mask;
+            prevFluid = false;
+            prevResistance = 0.0f;
+          } else {
+            prevFluid = isLiquidBlock(state) || waterloggedOf(state);
+            const float blast = static_cast<float>(std::max(
+                static_cast<double>(blockMetadata(state).explosionResistance),
+                prevFluid ? 100.0 : 0.0));
+            // Per-step loss, (resistance + 0.3) * 0.3.
+            prevResistance = (blast + 0.3f) * 0.3f;
+          }
         }
-        if (!cached.loaded)
-          break;
         prevX = blockX;
         prevY = blockY;
         prevZ = blockZ;
-        prevResistance = cached.resistance;
-        prevAir = cached.air;
-        prevFluid = cached.fluid;
       }
       if (!prevAir || prevFluid)
         remainingPower -= prevResistance;

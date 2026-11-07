@@ -322,6 +322,34 @@ void tntExplosion() {
   require(dropped, "destroyed blocks produce real item entities");
   require(!world.log.empty(), "explosion is observable");
 }
+void denseExplosion() {
+  // Low-resistance solid in every direction: the ray shell then covers ~1,400
+  // distinct cells, far more than the 512 slots of the explosion air filter.
+  // Without a tag, a slot colliding with an air cell would answer "air" for
+  // stone and the rays would run straight through it, so the destroyed count
+  // guards the filter against that.
+  World world;
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z)
+      world.loadChunk(x, z);
+  for (int x = -8; x <= 8; ++x)
+    for (int y = 56; y <= 72; ++y)
+      for (int z = -8; z <= 8; ++z)
+        world.rawSetBlock({x, y, z}, defaultState("sand"));
+  world.setSeed(4242);
+  world.explode(nullptr, {0.5, 64.5, 0.5}, 4.0f, false);
+  int removed = 0;
+  for (int x = -8; x <= 8; ++x)
+    for (int y = 56; y <= 72; ++y)
+      for (int z = -8; z <= 8; ++z)
+        removed += isAirState(world.getBlock({x, y, z})) ? 1 : 0;
+  require(isAirState(world.getBlock({0, 64, 0})),
+          "an explosion inside sand destroys the cell it starts in");
+  // 180 cells on this seed; the band tolerates float drift, not a filter that
+  // misreads stone as air (which would leave the count in the single digits).
+  require(removed > 150 && removed < 220,
+          "an explosion inside sand destroys the expected ball of blocks");
+}
 void explosionRayRandomConsumption() {
   World world;
   world.setSeed(123);
@@ -918,6 +946,7 @@ int main() {
     tntBlockPriming();
     tntDisabledRule();
     tntExplosion();
+    denseExplosion();
     explosionRayRandomConsumption();
     tntChain();
     itemExplosionDamage();
