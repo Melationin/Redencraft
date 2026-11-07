@@ -1,6 +1,6 @@
 # SafeSave2 顺序场景与 C++ / 原版 26.1 对比
 
-2026-11-06，读取 `D:/Java/SafeSave2/tests/server`，未修改或运行该工作目录。取其中与当前单维度、无水模型相关的运行时场景，分别执行 C++ 探针和原版 26.1 Java 代码。不是运行完整 SafeSave 保存/重启矩阵，也没有把安装了 SafeSave 的 `reference` 当成无模组原版。
+2026-11-06，读取 `D:/Java/SafeSave2/tests/server`，未修改或运行该工作目录。取其中与当前单维度、无流体模拟的实现相关的运行时场景，分别执行 C++ 探针和原版 26.1 Java 代码。不是运行完整 SafeSave 保存/重启矩阵，也没有把安装了 SafeSave 的 `reference` 当成无模组原版。这里记录的是**当时的实现边界**，不是项目目标形态（见 [AGENTS.md](../../AGENTS.md) 第 1 节）。
 
 **最终：7 项对比一致。初始发现 1 处实际错误，已修复。** [机器可读结果](comparison.json)；[修复前结果](comparison.before_signed_fix.json)。C++ 客户端与 CLI 已重新链接修复后的核心。
 
@@ -28,7 +28,7 @@ C++ 原先把 ScheduledTick.order 存为 uint64_t；Java 使用有符号 long。
 - 所有参与区块同时达到 BLOCK_TICKING 且 areEntitiesLoaded 后才建立场景。lastTicked 以建立时的游戏时间为 0；其他数组次序不排序，无浮点容差。
 - [原版探针说明](vanilla/README.md)、vanilla-order.json、vanilla-server-order.json 和 exact-server-trace.log 保存源码和原始结果。早期未等远端就绪的 server-trace.log 仅为诊断，不作为通过证据。
 - observer_reschedule 只有 C++ 输出，比较器明确列为尚未经原版验证，没有算入七项。
-- 漏斗、实体、流体、多维度、加载票，以及 SafeSave 的保存/重启恢复、序号合并、时间重基尚未实现或不在当前目标内，不标为通过，也不标为顺序失败。这不代表通过整个 SafeSave 测试集。
+- 漏斗、实体、流体、多维度、加载票，以及 SafeSave 的保存/重启恢复、序号合并、时间重基当时尚未实现，不标为通过，也不标为顺序失败；它们中的流体、保存、加载票、多维度已列入 [PLAN.md](../../PLAN.md)，不属于本次对照的通过范围。这不代表通过整个 SafeSave 测试集。
 - Java 哈希表迭代顺序仍按原约定豁免；本次记录到的序列均逐项比较。
 
 ## 重跑
