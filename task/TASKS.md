@@ -89,6 +89,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 ### 提交
 
 - 主提交：`ba6484c` — Add fluid tags, source-conversion switches and the lava reaction rules（11 个文件，+424 / -13）
+- 返工提交：`454a5b8` — Fix the F-4 review findings: stone on water, ordering, RNG and basalt axis（7 个文件，+230 / -13）
 
 ### 审查记录（`ba6484c`）
 
