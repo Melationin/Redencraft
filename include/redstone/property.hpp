@@ -34,6 +34,8 @@ enum class PropertyKind : std::uint8_t {
   WallNorth,
   WallSouth,
   WallWest,
+  // RotatedPillarBlock.AXIS: x / y / z. basalt is the first user (F-4).
+  Axis,
   Count
 };
 inline constexpr std::size_t kPropertyKindCount =

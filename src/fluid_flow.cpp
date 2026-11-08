@@ -367,7 +367,15 @@ int sourceNeighborCount(World &world, const Fluid &self, Pos pos) {
 
 void spreadTo(World &world, Pos pos, const BlockState &state,
               Direction direction, const FluidState &target, const Fluid &self) {
-  (void)direction;
+  // LavaFluid.spreadTo: lava falling onto water turns the water into stone and
+  // stops there instead of writing lava (LavaFluid.java:202-216).
+  if (direction == Direction::Down && fluidHasTag(self, FluidTag::Lava) &&
+      fluidHasTag(fluidStateOf(world.getBlock(pos)).getType(), FluidTag::Water)) {
+    if (isLiquidBlock(state))
+      world.setBlock(pos, Blocks::STONE.defaultState(), 3);
+    // TODO: fizz (levelEvent 1501) needs the event/sound layer.
+    return;
+  }
   // TODO: LiquidBlockContainer.placeLiquid (waterlogged hosts) is task F-5.
   if (!state.isAir()) {
     // FlowingFluid.beforeDestroyingBlock. Water drops the block's loot before
@@ -561,20 +569,32 @@ bool liquidShouldSpreadLiquid(World &world, Pos pos, const BlockState &state) {
     return true;
   const bool overSoulSoil = world.getBlock(pos.relative(Direction::Down))
                                 .is(Blocks::SOUL_SOIL);
-  for (Direction direction : {Direction::Down, Direction::North, Direction::South,
-                              Direction::West, Direction::East}) {
+  // LiquidBlock.POSSIBLE_FLOW_DIRECTIONS is {DOWN, SOUTH, NORTH, EAST, WEST}
+  // (LiquidBlock.java:55-57) and the loop visits `pos.relative(getOpposite())`,
+  // so the neighbour order is up, north, south, west, east. The N/S and E/W
+  // order decides which conversion wins when both are possible.
+  for (Direction direction : {Direction::Down, Direction::South, Direction::North,
+                              Direction::East, Direction::West}) {
     const Pos neighborPos = pos.relative(opposite(direction));
     if (fluidHasTag(fluidStateOf(world.getBlock(neighborPos)).getType(),
                     FluidTag::Water)) {
-      const BlockState convertTo = fluid.isSource() ? Blocks::OBSIDIAN.defaultState()
-                                                    : Blocks::COBBLESTONE.defaultState();
+      // LiquidBlock.java:220 reads the world's current lava state, not the state
+      // captured when the tick was queued.
+      const FluidState current = fluidStateOf(world.getBlock(pos));
+      const BlockState convertTo = current.isSource()
+                                       ? Blocks::OBSIDIAN.defaultState()
+                                       : Blocks::COBBLESTONE.defaultState();
       world.setBlock(pos, convertTo, 3);
       // TODO: fizz (levelEvent 1501) needs the event/sound layer.
       return false;
     }
     if (overSoulSoil &&
         world.getBlock(neighborPos).is(Blocks::BLUE_ICE)) {
-      world.setBlock(pos, Blocks::BASALT.defaultState(), 3);
+      // RotatedPillarBlock.BASALT.defaultBlockState(): axis = y.
+      world.setBlock(pos,
+                     Blocks::BASALT.defaultState().with(
+                         PropertyKind::Axis, std::uint8_t{1}),
+                     3);
       // TODO: fizz (levelEvent 1501) needs the event/sound layer.
       return false;
     }
@@ -589,6 +609,11 @@ void fluidTick(World &world, Pos pos, const BlockState &blockState,
   if (!current.isSource()) {
     const FluidState newFluidState =
         fluidNewLiquid(world, pos, world.getBlock(pos), current.getType());
+    // FlowingFluid.tick computes the spread delay *before* writing the block
+    // (FlowingFluid.java:444-456), so the random draw for a rising lava surface
+    // happens ahead of setBlock and its callbacks.
+    const int tickDelay = computeSpreadDelay(world, pos, current.getType(), state,
+                                             newFluidState);
     if (newFluidState.isEmpty()) {
       current = newFluidState;
       currentBlock = Blocks::AIR.defaultState();
@@ -597,10 +622,7 @@ void fluidTick(World &world, Pos pos, const BlockState &blockState,
       current = newFluidState;
       currentBlock = newFluidState.getType().createLegacyBlock(current);
       world.setBlock(pos, currentBlock, 3);
-      world.scheduleFluidTick(
-          pos, FluidRef(current.getType()),
-          computeSpreadDelay(world, pos, current.getType(), state,
-                             newFluidState));
+      world.scheduleFluidTick(pos, FluidRef(current.getType()), tickDelay);
     }
   }
   fluidSpread(world, pos, currentBlock, current);

@@ -101,7 +101,8 @@ bool propertyKindFromName(std::string_view name, PropertyKind &out) {
       "facing",   "type",     "shape",      "instrument", "note",
       "level",    "extended", "in_wall",    "lit",        "open",
       "powered",  "short",    "snowy",      "unstable",   "up",
-      "waterlogged", "east",  "north",      "south",      "west"};
+      "waterlogged", "east",  "north",      "south",      "west",
+      "axis"};
   static_assert(std::size(names) == kPropertyKindCount);
   for (std::size_t i = 0; i < std::size(names); ++i)
     if (names[i] == name) {
@@ -121,6 +122,11 @@ bool propertyValueFromName(PropertyKind kind, std::string_view value,
   }
   case PropertyKind::Type: {
     static constexpr std::string_view names[] = {"normal", "sticky"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Axis: {
+    // RotatedPillarBlock.AXIS.
+    static constexpr std::string_view names[] = {"x", "y", "z"};
     return lookupName(names, value, out);
   }
   case PropertyKind::Shape: {

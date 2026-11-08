@@ -90,4 +90,39 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 - 主提交：`ba6484c` — Add fluid tags, source-conversion switches and the lava reaction rules（11 个文件，+424 / -13）
 
+### 审查记录（`ba6484c`）
+
+1. **阻塞｜M-02 的岩浆下落遇水成石未实现。** `src/fluid_flow.cpp:368–382` 丢弃 `direction`，通过替换判定后直接写入岩浆。26.1 `LavaFluid.java:202–216` 在向下且目标流体有水标签时，把普通液体方块替换成 `minecraft:stone` 并结束这次写入。这发生在流体传播路径内，不依赖 F-5 的方块回调。建议在实际 `spreadTo` 接上该分支，注册原版 `stone`，由显式流体刻验证源水、流动水目标均变成石头；含水宿主与 fizz 保留各自的后续边界。
+2. **阻塞｜M-03 的水和蓝冰会按错误顺序竞争。** `src/fluid_flow.cpp:564–566` 的反向遍历实际检查上、南、北、东、西；26.1 `LiquidBlock.java:55–57,213–231` 检查上、北、南、西、东。下方有灵魂土、北侧蓝冰且南侧水时，原版先命中蓝冰生成玄武岩，C++ 先命中水生成黑曜石。建议按原版顺序检查并加上交换两侧后的反例，同时对 M-01 验证仅上方接触及仅下方接触的区别。选择黑曜石/圆石时按原版 `LiquidBlock.java:220` 读取世界中岩浆的实际当前态。
+3. **阻塞｜液面抬升的 RNG 取值晚于方块写入和回调。** `src/fluid_flow.cpp:590–603` 先 `setBlock` 再算延迟；26.1 `FlowingFluid.java:444–456` 在写入之前计算，此时上方流体和世界 RNG 都未受到本次写入回调的影响。建议先确定 `tickDelay`，再写入并用该值排刻。`tests/fluid_params_tests.cpp:115–180` 只直接测延迟辅助函数；名为 `replacementRules` 的用例也只检查水的 5 刻延迟。请走实际排刻验证 30/120、非随机分支不推进 RNG，以及向下/横向和岩浆高度阈值两侧的替换结果。
+4. **应修｜玄武岩的反应产物缺少 `axis=y`。** `src/blocks.cpp:197–198` 将玄武岩注册为无属性方块，26.1 `Blocks.java:2009–2018` 注册 `RotatedPillarBlock`，其 `RotatedPillarBlock.java:21–24,49–50` 声明轴且默认 Y。仓库的 26.1 导出 `assets/protocol775/block_states.tsv:7001–7003` 也只含有轴的三种状态。建议复用属性系统注册 `axis`，让反应写出 Y 轴态，并断言实际产物和协议状态可解析。
+
+独立 MSVC Release 构建通过，CTest **19/19 通过**（8.70 s）。未运行真实 26.1 服务端差分。本轮先退回修正 F-4 的行为与覆盖缺口，未重跑世吞基准。
+
+审查结束
+
+### 返工（回应复审：3 阻塞 + 1 应修）
+
+**阻塞 1 — 岩浆下落遇水未成石。** 属实：`spreadTo` 把 `direction` 直接 `(void)` 掉，替换判定通过后就写岩浆。已按 `LavaFluid.java:202-216` 在 `spreadTo` 开头加分支：向下 + 自身是岩浆 + 目标格流体在水标签时，若目标方块是液体则以 flags 3 写 `minecraft:stone`（新注册）并返回，不再写岩浆。`lavaFallsOntoWater` 用源水与流动水两种目标各验一次，另断言落在空气上仍写岩浆。
+
+**阻塞 2 — 水与蓝冰的竞争顺序错。** 属实：原版 `LiquidBlock.POSSIBLE_FLOW_DIRECTIONS` 是 `{DOWN, SOUTH, NORTH, EAST, WEST}`（`LiquidBlock.java:55-57`），循环按 `getOpposite()` 取邻居，等效顺序是 上/北/南/西/东；我写成了 上/南/北/东/西。已改正，并把黑曜石/圆石的判定改成读**世界中岩浆的当前态**而不是入队时缓存的状态（`LiquidBlock.java:220`）。`lavaReactionOrder` 用两组互为镜像的布局（北蓝冰+南水 → 玄武岩；北水+南蓝冰 → 黑曜石）钉住顺序。
+
+**阻塞 3 — 液面抬升的 RNG 取值晚于写入。** 属实：`setBlock` 在 `computeSpreadDelay` 之前。已按 `FlowingFluid.java:444-456` 把延迟计算提到写盘之前——注意原版是**无条件**先算 `getSpreadDelay`，所以岩浆的随机抽样现在发生在 `setBlock` 与其回调之前。`spreadDelayThroughTick` 走 `fluidTick` 的实际排刻路径断言 30/120 两种取值都能出现；`nonRandomDelayKeepsRng` 用两个同种子世界对比，断言无随机分支（falling、液面下降、水）不推进 RNG。
+
+**应修 — 玄武岩缺 `axis=y`。** 属实。已给 `PropertyKind` 增加 `Axis`（x/y/z），`BASALT` 注册为带 `axis` 默认 `y` 的柱状方块，反应写 `axis=y` 态。`basaltAxis` 断言产物是 `axis=y`、`isSchemaState()`、`stateCount()==3`（与 `block_states.tsv` 的三条一致）、默认态为 `y`。
+
+**变异验证**：
+
+| 变异 | 结果 |
+|---|---|
+| 关掉「向下遇水成石」分支 | `lava falling onto water leaves stone, got lava` |
+| 邻居顺序退回 上/南/北/东/西 | `north blue ice wins over the south water` |
+| 玄武岩写 `axis=x` | `basalt is written with axis=y` |
+
+三条都被拒绝。
+
+**一处如实记录未覆盖**：把 `computeSpreadDelay` 挪回 `setBlock` **之后**在当前注册表下**行为等价**——没有任何方块的 `setBlock` 回调会消费世界 RNG，所以顺序差异不可观测。我是按源码顺序实现的，但不声称该顺序有回归保护；等有回调消费 RNG 的方块（或 F-7 的真实差分）才可能暴露。
+
+**返工后的构建与测试**：全量构建通过，**CTest 19/19 通过**（12.90 s）。
+
 任务已完成

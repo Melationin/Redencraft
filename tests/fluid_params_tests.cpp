@@ -233,6 +233,147 @@ void lavaMeetsBlueIce() {
           "blue ice alone does not convert the lava");
   require(plain.getBlock(lavaPos).is(Blocks::LAVA), "the lava stays lava");
 }
+
+// The basalt product carries RotatedPillarBlock's AXIS, defaulting to y, and the
+// resulting state must stay inside the registered schema (and therefore inside
+// the exported protocol table).
+void basaltAxis() {
+  World world;
+  flatFloor(world);
+  const Pos lavaPos{0, 64, 0};
+  world.rawSetBlock(lavaPos, lavaLevel(0));
+  world.rawSetBlock({0, 63, 0}, Blocks::SOUL_SOIL.defaultState());
+  world.rawSetBlock({1, 64, 0}, Blocks::BLUE_ICE.defaultState());
+  require(!liquidShouldSpreadLiquid(world, lavaPos, world.getBlock(lavaPos)),
+          "the lava converted");
+  const BlockState basalt = world.getBlock(lavaPos);
+  require(basalt.is(Blocks::BASALT), "the product is basalt");
+  require(basalt.get("axis") == "y", "basalt is written with axis=y");
+  require(basalt.isSchemaState(), "basalt axis=y is a registered state");
+  require(Blocks::BASALT.stateCount() == 3,
+          "basalt declares the three axis states the export lists");
+  require(Blocks::BASALT.defaultState().get("axis") == "y",
+          "basalt defaults to axis=y");
+}
+
+// M-03 ordering: LiquidBlock's direction list is {DOWN, SOUTH, NORTH, EAST,
+// WEST} visited through getOpposite(), i.e. up, north, south, west, east. With a
+// north blue ice and a south water the north one wins, and swapping the two
+// sides must flip the product.
+void lavaReactionOrder() {
+  const Pos pos{0, 64, 0};
+
+  // North blue ice, south water -> basalt (north is visited first).
+  World northIce;
+  flatFloor(northIce);
+  northIce.rawSetBlock(pos, lavaLevel(0));
+  northIce.rawSetBlock({0, 63, 0}, Blocks::SOUL_SOIL.defaultState());
+  northIce.rawSetBlock({0, 64, -1}, Blocks::BLUE_ICE.defaultState());
+  northIce.rawSetBlock({0, 64, 1}, waterLevel(0));
+  require(!liquidShouldSpreadLiquid(northIce, pos, northIce.getBlock(pos)),
+          "the north blue ice case converted");
+  require(northIce.getBlock(pos).is(Blocks::BASALT),
+          "north blue ice wins over the south water");
+
+  // North water, south blue ice -> obsidian (north is visited first).
+  World northWater;
+  flatFloor(northWater);
+  northWater.rawSetBlock(pos, lavaLevel(0));
+  northWater.rawSetBlock({0, 63, 0}, Blocks::SOUL_SOIL.defaultState());
+  northWater.rawSetBlock({0, 64, -1}, waterLevel(0));
+  northWater.rawSetBlock({0, 64, 1}, Blocks::BLUE_ICE.defaultState());
+  require(!liquidShouldSpreadLiquid(northWater, pos, northWater.getBlock(pos)),
+          "the north water case converted");
+  require(northWater.getBlock(pos).is(Blocks::OBSIDIAN),
+          "north water wins over the south blue ice");
+}
+
+// LavaFluid.spreadTo: lava falling onto water turns the water into stone instead
+// of writing lava, for both a source and a flowing water target.
+void lavaFallsOntoWater() {
+  for (int level : {0, 3}) {
+    World world;
+    flatFloor(world);
+    const Pos above{0, 65, 0};
+    const Pos target{0, 64, 0};
+    world.rawSetBlock(above, lavaLevel(0));
+    world.rawSetBlock(target, waterLevel(level));
+    fluidSpread(world, above, world.getBlock(above),
+                fluidStateOf(world.getBlock(above)));
+    require(world.getBlock(target).is(Blocks::STONE),
+            "lava falling onto water leaves stone, got " +
+                std::string(world.getBlock(target).shortName()));
+  }
+
+  // Lava falling onto air still writes lava.
+  World air;
+  flatFloor(air);
+  const Pos above{0, 65, 0};
+  const Pos target{0, 64, 0};
+  air.rawSetBlock(above, lavaLevel(0));
+  fluidSpread(air, above, air.getBlock(above),
+              fluidStateOf(air.getBlock(above)));
+  require(air.getBlock(target).is(Blocks::LAVA),
+          "lava falling onto air still places lava");
+}
+
+// The spread delay must come out of the real tick path, with both values reached.
+void spreadDelayThroughTick() {
+  auto sawBase = 0;
+  auto sawQuadrupled = 0;
+  for (int seed = 0; seed < 128; ++seed) {
+    World world;
+    flatFloor(world);
+    const Pos pos{0, 64, 0};
+    // Lava at amount 2 next to a source: the surface rises to amount 6.
+    world.rawSetBlock(pos, lavaLevel(6));
+    world.rawSetBlock({1, 64, 0}, lavaLevel(0));
+    world.setSeed(seed);
+    // Warm the stream: the first draw after a small seed is heavily biased in
+    // its high bits, so advance twice before the tick's own draw.
+    (void)world.random.nextInt(16);
+    (void)world.random.nextInt(16);
+    fluidTick(world, pos, world.getBlock(pos),
+              fluidStateOf(world.getBlock(pos)));
+    const auto ticks = world.fluidTicks();
+    require(!ticks.empty(), "the tick re-scheduled itself");
+    const int delay =
+        static_cast<int>(ticks.front().first.trigger - world.gameTime());
+    require(delay == 30 || delay == 120,
+            "the tick schedules 30 or 120, got " + std::to_string(delay));
+    if (delay == 30)
+      ++sawBase;
+    if (delay == 120)
+      ++sawQuadrupled;
+  }
+  require(sawBase > 0, "the tick path reaches the base delay");
+  require(sawQuadrupled > 0, "the tick path reaches the quadrupled delay");
+}
+
+// A branch that takes no random draw must leave the level RNG untouched.
+void nonRandomDelayKeepsRng() {
+  World withCalls;
+  flatFloor(withCalls);
+  withCalls.setSeed(99);
+  World without;
+  flatFloor(without);
+  without.setSeed(99);
+
+  const Pos pos{0, 64, 0};
+  const FluidState low = fluidStateOf(lavaLevel(6));
+  const FluidState high = fluidStateOf(lavaLevel(2));
+  const FluidState falling = fluidStateOf(lavaLevel(8));
+  for (int i = 0; i < 8; ++i) {
+    require(fluidSpreadDelay(withCalls, pos, Fluids::lava(), low, falling) == 30,
+            "a falling new state keeps the base delay");
+    require(fluidSpreadDelay(withCalls, pos, Fluids::lava(), high, low) == 30,
+            "a shrinking surface keeps the base delay");
+    require(fluidSpreadDelay(withCalls, pos, Fluids::water(), low, high) == 5,
+            "water ignores the lava rule");
+  }
+  require(withCalls.random.nextInt(100000) == without.random.nextInt(100000),
+          "branches without a random draw leave the level RNG untouched");
+}
 } // namespace
 
 int main() {
@@ -244,6 +385,11 @@ int main() {
     lavaRandomDelay();
     lavaMeetsWater();
     lavaMeetsBlueIce();
+    basaltAxis();
+    lavaReactionOrder();
+    lavaFallsOntoWater();
+    spreadDelayThroughTick();
+    nonRandomDelayKeepsRng();
     std::cout << "fluid parameter tests passed\n";
     return 0;
   } catch (const std::exception &error) {
