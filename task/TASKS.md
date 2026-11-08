@@ -238,6 +238,8 @@ reviewer 要求扩展 `validation/protocol775/backpressure_test.py`，走真实 
 
 **上述 2 条阻塞未解决，F-7 不应判定通过。**
 
+返工提交：`dc1b3ea`（本轮），基线 `99c52a2`。
+
 ### 构建与测试
 
 - 构建：MSVC Release + jemalloc 通过。
