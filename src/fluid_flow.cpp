@@ -67,17 +67,36 @@ bool isSolid(const BlockState &state) {
 // isSolid()`. Neither excluded block is registered, so this is isSolid().
 bool blocksMotion(const BlockState &state) { return isSolid(state); }
 
-// FlowingFluid.canHoldAnyFluid. A LiquidBlockContainer always holds fluid; that
-// interface arrives with the waterlogged hosts in F-5.
+// FlowingFluid.canHoldAnyFluid (FlowingFluid.java:410-427): a
+// LiquidBlockContainer always holds fluid whatever its collision shape says,
+// otherwise a non-blocking-motion state does, minus the block classes the
+// vanilla test excludes. Doors, signs, ladders, sugar cane, bubble columns,
+// portals and structure voids are not registered here, so the exclusion list
+// has no member in this subset yet.
 bool canHoldAnyFluid(const BlockState &state) {
-  // TODO: LiquidBlockContainer hosts (waterlogged blocks) belong to F-5.
+  if (state.block().isLiquidContainer())
+    return true;
   return !blocksMotion(state);
 }
 
-// FlowingFluid.canHoldSpecificFluid: without LiquidBlockContainer every block
-// that can hold any fluid can hold this one.
-bool canHoldSpecificFluid(World &, Pos, const BlockState &state, const Fluid &) {
-  return canHoldAnyFluid(state);
+// FlowingFluid.canHoldSpecificFluid (FlowingFluid.java:433-435): a container
+// answers for itself through canPlaceLiquid, every other block that holds any
+// fluid holds this one.
+bool canHoldSpecificFluid(World &, Pos, const BlockState &state,
+                          const Fluid &newFluid) {
+  if (!state.block().isLiquidContainer())
+    return true;
+  // SimpleWaterloggedBlock.canPlaceLiquid(level, pos, state, type) is
+  // `type == Fluids.WATER`, independent of the state and of the level.
+  return newFluid.is(Fluids::water());
+}
+
+// FlowingFluid.canHoldFluid: canHoldAnyFluid(state) && canHoldSpecificFluid
+// (FlowingFluid.java:429-431), used by isWaterHole.
+bool canHoldFluid(World &world, Pos pos, const BlockState &state,
+                  const Fluid &newFluid) {
+  return canHoldAnyFluid(state) &&
+         canHoldSpecificFluid(world, pos, state, newFluid);
 }
 
 // Shapes.mergedFaceOccludes for the axis-aligned shapes this registry uses.
@@ -308,9 +327,11 @@ bool isWaterHoleImpl(World &world, const Fluid &self, Pos topPos,
   const FluidState below = fluidStateOf(bottomState);
   if (below.getType().isSame(self))
     return true;
+  // FlowingFluid.java:313-319 tests canHoldFluid(level, bottomPos,
+  // bottomState, this.getFlowing()), i.e. canHoldAnyFluid followed by the
+  // container's own canPlaceLiquid for the FLOWING variant of this family.
   const FluidPair pair = familyOf(self);
-  return canHoldAnyFluid(bottomState) &&
-         canHoldSpecificFluid(world, bottomPos, bottomState, *pair.flowing);
+  return canHoldFluid(world, bottomPos, bottomState, *pair.flowing);
 }
 
 bool SpreadContext::isWaterHole(Pos topPos, const BlockState &topState,
@@ -376,7 +397,15 @@ void spreadTo(World &world, Pos pos, const BlockState &state,
     // TODO: fizz (levelEvent 1501) needs the event/sound layer.
     return;
   }
-  // TODO: LiquidBlockContainer.placeLiquid (waterlogged hosts) is task F-5.
+  // FlowingFluid.java:271-281: a LiquidBlockContainer takes the fluid through
+  // placeLiquid and the block survives; only every other state goes through
+  // beforeDestroyingBlock and the legacy write. A container that refuses the
+  // fluid (a wet host, or anything but the exact water source) leaves the
+  // block untouched.
+  if (state.block().isLiquidContainer()) {
+    placeLiquid(world, pos, state, target);
+    return;
+  }
   if (!state.isAir()) {
     // FlowingFluid.beforeDestroyingBlock. Water drops the block's loot before
     // the fluid is written; lava only fizzles (WaterFluid.java:81-85,
@@ -709,8 +738,12 @@ namespace redstone {
 // has its own trigger condition.
 // ---------------------------------------------------------------------------
 namespace {
-void requestFluidTick(World &world, Pos pos) {
-  const FluidState fluid = fluidStateOf(world.getBlock(pos));
+// LevelAccessor.createTick + ScheduledTickAccess.scheduleTick: the identity of
+// the queued entry is the fluid the CALLBACK saw, never a fresh read of the
+// world at pos. The three callers below each pass the state their vanilla
+// overload was handed, so a synchronous write during the callbacks cannot
+// retarget the request (LiquidBlock.java:148-151,167-179,194-198).
+void requestFluidTick(World &world, Pos pos, const FluidState &fluid) {
   if (fluid.isEmpty())
     return;
   world.scheduleFluidTick(pos, FluidRef(fluid.getType()),
@@ -724,6 +757,26 @@ bool isWaterloggedHost(const BlockState &state) {
   return state.hasProperty("waterlogged");
 }
 
+bool canPlaceLiquid(const BlockState &, const Fluid &type) {
+  // SimpleWaterloggedBlock.canPlaceLiquid ignores the level and the current
+  // waterlogged value: any water source may fill any waterlogged host, and
+  // nothing else may. The dry/wet decision belongs to placeLiquid.
+  return type.is(Fluids::water());
+}
+
+bool placeLiquid(World &world, Pos pos, const BlockState &state,
+                 const FluidState &fluidState) {
+  if (waterloggedOf(state) || !fluidState.is(Fluids::water()))
+    return false;
+  world.setBlock(pos,
+                 state.with(PropertyKind::Waterlogged, std::uint8_t{1}), 3);
+  // SimpleWaterloggedBlock.java:29 schedules through the level, with the
+  // incoming fluid state's own type and tick delay.
+  world.scheduleFluidTick(pos, FluidRef(fluidState.getType()),
+                          fluidState.getType().tickDelay());
+  return true;
+}
+
 void liquidOnPlace(World &world, Pos pos, const BlockState &state) {
   if (!isLiquidBlock(state))
     return;
@@ -731,7 +784,7 @@ void liquidOnPlace(World &world, Pos pos, const BlockState &state) {
   // obsidian in place, in which case no tick is requested.
   if (!liquidShouldSpreadLiquid(world, pos, state))
     return;
-  requestFluidTick(world, pos);
+  requestFluidTick(world, pos, fluidStateOf(state));
 }
 
 void liquidNeighborChanged(World &world, Pos pos, const BlockState &state) {
@@ -739,7 +792,7 @@ void liquidNeighborChanged(World &world, Pos pos, const BlockState &state) {
     return;
   if (!liquidShouldSpreadLiquid(world, pos, state))
     return;
-  requestFluidTick(world, pos);
+  requestFluidTick(world, pos, fluidStateOf(state));
 }
 
 void liquidUpdateShape(World &world, Pos pos, const BlockState &state,
@@ -747,8 +800,10 @@ void liquidUpdateShape(World &world, Pos pos, const BlockState &state,
   if (!isLiquidBlock(state))
     return;
   // LiquidBlock.updateShape schedules only when one side is a source.
-  if (!fluidStateOf(state).isSource() && !fluidStateOf(neighbor).isSource())
+  const FluidState self = fluidStateOf(state);
+  if (!self.isSource() && !fluidStateOf(neighbor).isSource())
     return;
-  requestFluidTick(world, pos);
+  // ...and it schedules the tile's own fluid state, not the source it found.
+  requestFluidTick(world, pos, self);
 }
 } // namespace redstone

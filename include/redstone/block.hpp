@@ -219,6 +219,12 @@ struct BlockMetadata {
   // moving_piston, so an opened gate still blocks fluid and a moving piston is
   // never treated as an empty cell.
   bool forceSolid = false;
+  // Block instanceof LiquidBlockContainer. Every block declaring the
+  // waterlogged property in this registry subset is a SimpleWaterloggedBlock,
+  // which is the only LiquidBlockContainer that exists here; the flag keeps the
+  // instanceof test a single load instead of a string compare on the property
+  // declaration (FlowingFluid.java:410-435).
+  bool liquidContainer = false;
 };
 struct BlockRegistration {
   std::string name;
@@ -258,6 +264,9 @@ public:
   bool isWall() const { return wall_; }
   bool isCoralFan() const { return coralFan_; }
   bool isCoralWallFan() const { return coralWallFan_; }
+  // LiquidBlockContainer: the block can hold its own fluid independent of the
+  // blocksMotion test (SimpleWaterloggedBlock.java:18-36).
+  bool isLiquidContainer() const { return metadata_.liquidContainer; }
 
 private:
   friend void detail::registerBlock(Block &block);

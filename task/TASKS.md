@@ -96,6 +96,57 @@
 
 - 主提交：`f4f1b2c` — Wire the liquid block request paths and waterlogged hosts（12 个文件，+339 / -20）
 
+
+### 返工（针对 `f4f1b2c` 的四条阻塞）
+
+**阻塞 4 — 同种液体改 level 漏 `onPlace`，排刻身份偏离回调状态**
+
+- `src/engine.cpp` 的 `setBlock`：`onPlace` 条件从 `isLiquidBlock(state) && !old.sameBlock(state)` 改为 `isLiquidBlock(state)`，与 `LevelChunk.java:339-341`（除 flags 512 外每次写入都调 `onPlace`，`LiquidBlock.java:148-151` 无同类型早退）一致。去重仍由 `LevelChunkTicks.schedule` 的 (位置, 精确流体) 键负责（`LevelChunkTicks.java:54-59`）。
+- `src/fluid_flow.cpp`：`requestFluidTick` 改为接收入参 `const FluidState &`，三条入口（`liquidOnPlace` / `liquidNeighborChanged` / `liquidUpdateShape`）分别传 `fluidStateOf(state)`、`fluidStateOf(state)`、`self`（回调状态），不再重读 `world.getBlock(pos)`。
+- 测试：`callbackStateDecidesIdentity`（回调给流水但世界是源 → 队列里是 `flowing_water`；反向亦然）、`sameFluidLevelChangeRunsOnPlace`（同级改 level 排刻、flags 512 不排、同状态写入不排）。
+
+**阻塞 1 — 含水容器没接进传播路径**
+
+- `include/redstone/block.hpp`：`BlockMetadata` 新增 `liquidContainer`，`Block::isLiquidContainer()`。`src/state.cpp` 在注册时对铁轨 / 墙 / 枯珊瑚扇置位（本注册表内声明 `waterlogged` 的方块恰好就是这些 `SimpleWaterloggedBlock`）。
+- `src/fluid_flow.cpp`：`canHoldAnyFluid` 对宿主恒真；新增 `canHoldSpecificFluid`（宿主走 `canPlaceLiquid`，其余恒真）与 `canHoldFluid`（`FlowingFluid.java:429-431`），`isWaterHole` 改用它；`spreadTo` 对宿主调 `placeLiquid` 并直接返回，不再 `beforeDestroyingBlock` + 写 legacy 方块。
+- 新增公开 `canPlaceLiquid(const BlockState&, const Fluid&)` 与 `placeLiquid(World&, Pos, const BlockState&, const FluidState&)`，对应 `SimpleWaterloggedBlock.java:20-36`：只接受精确 `minecraft:water`；已含水则拒绝；成功时写 `waterlogged=true`（flags 3）并排自己的水刻。
+- **一处由测试纠正的实现认知**：`getSpread` 用目标格**新算出的流体**调 `canHoldSpecificFluid`（`FlowingFluid.java:378-403`），单源侧流得到的是 `flowing_water`，容器拒绝；只有双源转源得到的精确水源才会注入宿主。测试按这个真实语义写（`spreadFillsHosts`：双源夹格成功、单源侧流不注入）。
+
+**阻塞 2 — 含水宿主的形状排刻与移除保水缺失**
+
+- `src/engine.cpp` 的 `updateShapeState`：铁轨 / 墙 / 枯珊瑚扇在 `waterlogged=true` 时排自己的水刻，对应 `BaseRailBlock.java:283-299`、`WallBlock.java:134-156`、`BaseCoralPlantTypeBlock.java:69-87`、`BaseCoralWallFanBlock.java:57-73`。四个入口保持分离，只共享「是否含水」的判断。
+- 新增 `World::removeBlock(pos, movedByPiston)`（`Level.java:276-280`）：写回**当前流体的 legacy 方块**而非空气，`movedByPiston` 置 flags 64。`src/rail.cpp` 的断支撑移除与 `src/net/session.cpp` 的创造破坏改走它。
+- `World::updateOrDestroy` 的空气分支改为写 `fluidStateOf(current)` 的 legacy 方块（`Level.destroyBlock` 语义，`Level.java:288,298`），珊瑚扇失去支撑时保留水。
+- `World::coralPlacementState` 按目标格现有流体初始化 `waterlogged`（满态水源才为 true），不再硬写 `false`。
+- 测试：`hostDrainOnSupportLoss`（湿珊瑚扇保留水源 / 干珊瑚扇变空气）、`railDrainKeepsWater`、`hostUpdateShapeSchedulesWater`（铁轨 / 墙 / 珊瑚扇各自排刻，干宿主不排）、`pistonMovesWaterloggedHost`（P-01：活塞搬运动力完成后清 `waterlogged`）。
+- `tests/engine_tests.cpp` 的珊瑚用例断言随之从「变空气」改为「变水」，并补了干态对照组。
+
+**阻塞 3 — 玩家放置宿主时强制清除含水初态**
+
+- `src/net/session.cpp` 的 `useItemOn`：读**目标格**（`BlockPlaceContext.getClickedPos()`，`BlockPlaceContext.java:48-51`）的原有流体，按 `BaseRailBlock.java:139-147` / `WallBlock.java:112-131`（精确水源）与 `BaseCoralPlantTypeBlock.java:57-62`（水标签 + 满态）初始化 `waterlogged`。
+
+**测试与变异验证**
+
+`tests/fluid_block_tests.cpp` 由 6 个场景扩到 12 个，新增 `containerFillRules`、`spreadFillsHosts`、`flowingWaterDoesNotFillHosts`、`hostDrainOnSupportLoss`、`railDrainKeepsWater`、`hostUpdateShapeSchedulesWater`、`callbackStateDecidesIdentity`、`sameFluidLevelChangeRunsOnPlace`、`pistonMovesWaterloggedHost`。
+
+| 变异 | 结果（均被抓到） |
+|---|---|
+| `onPlace` 恢复 `!old.sameBlock(state)` 早退 | `re-levelling water onto water requests a tick` |
+| `canHoldAnyFluid` 去掉宿主分支 | `the spread waterlogs the wall` |
+| `updateOrDestroy` 空气分支写回空气 | `the drained cell keeps the water source` |
+| 三条入口改回重读世界位置 | `the entry carries the callback's flowing_water, not the world's water source` |
+
+每次变异后都从源码恢复并确认 `git diff` 只剩预期改动。
+
+**`tests/fluid_params_tests.cpp` 的既有断言随行为改变而修正**（不是放宽）：岩浆液面抬升的 120 延迟现在总是先被 `setBlock` 里 `onPlace` 请求的 30 抢到队列槽，`LevelChunkTicks` 去重后只留一条。用例改为断言「恰好一条、且是 30」，4 倍分支本身由同文件直接调 `fluidSpreadDelay` 的用例覆盖。
+
+**明确没有做的事**：桶交互（`BucketItem` / `pickupBlock`）仍属 P1；实体推流仍属 P1；活珊瑚的死亡逻辑（`tryScheduleDieTick` / `scanForWater`）未接；`WallBlock` 的活珊瑚墙形态未注册；没有跑真实 26.1 服务端差分。
+
+### 构建与测试（返工后）
+
+- 构建：MSVC Release + jemalloc（`build-jemalloc`）通过，无新增警告。
+- CTest：**20/20 通过**。
+- 证据口径：**源码对照 + C++ 回归测试**，未跑真实 26.1 服务端差分，因此不声称原版等价。
 ### 审查记录（`f4f1b2c`）
 
 1. **阻塞｜含水容器仍未接到实际流体传播。** `src/fluid_flow.cpp:70–81,368–390` 仍按普通方块判断能否容纳并直接替换目标；新增的 `isWaterloggedHost` 未用于这两处。原版 `FlowingFluid.java:410–435,271–279` 先识别容器、调用 `canPlaceLiquid` 和 `placeLiquid`。`SimpleWaterloggedBlock.java:18–35` 允许精确的源水身份，实际注水成功时保留宿主、置 `waterlogged=true` 并排水刻。当前流动水可能直接冲掉干铁轨，墙和枯珊瑚扇也无法通过容器接收源水。按 H-01/H-03 增加实际传播的源水成功、流水与岩浆拒绝、重复注水不重写和去重断言。

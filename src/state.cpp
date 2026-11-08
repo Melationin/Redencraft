@@ -422,6 +422,12 @@ void registerBlock(Block &block) {
         name == "minecraft:stone_brick_wall" || block.coralFan_ ||
         block.coralWallFan_)
       block.metadata_.forceSolid = true;
+    // LiquidBlockContainer: in this registry subset exactly the blocks that
+    // declare BlockStateProperties.WATERLOGGED through SimpleWaterloggedBlock.
+    // Blocks.java marks the rails, the walls, the dead coral fans and the fence
+    // gates this way; nothing else in the subset has the property.
+    block.metadata_.liquidContainer = block.rail_ || block.wall_ ||
+                                      block.coralFan_ || block.coralWallFan_;
     if (name == "minecraft:slime_block")
       block.metadata_.friction = 0.8f;
     if (name == "minecraft:honey_block")

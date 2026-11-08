@@ -216,6 +216,10 @@ public:
   // Copy of one chunk's paletted sections (mutable state is never exported).
   ChunkSnapshot snapshotChunk(int chunkX, int chunkZ) const;
   bool setBlock(Pos pos, BlockState state, int flags = 3, int limit = 512);
+  // Level.removeBlock: write back the position's CURRENT fluid legacy block
+  // instead of air, so a waterlogged host leaves its water behind
+  // (Level.java:276-280). `movedByPiston` sets flag 64 exactly like vanilla.
+  bool removeBlock(Pos pos, bool movedByPiston = false);
   void rawSetBlock(Pos pos, BlockState state);
   std::map<Pos, BlockState> allBlocks() const;
   int minY() const { return minY_; }

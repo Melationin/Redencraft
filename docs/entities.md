@@ -109,9 +109,9 @@
 - 已注册 `rail`、`powered_rail`、`detector_rail`、`activator_rail`，状态包含 `shape`、`powered`（动力/探测/激活）和 `waterlogged`。
 - 碰撞形状为空（原版 `noCollision`）；放置、支撑检查、直角/坡道自动连接、邻居变化、支撑移除掉落、动力铁轨更新、探测铁轨计划刻均已实现。
 - `RailState` 的连接判定、软连接移除、直角选择、坡道选择和放置后邻居重连按源码移植。玩家放置朝向由客户端编辑器提供初始 `shape`，随后 `onPlace` 自动连接。
-- `waterlogged` 只保留属性；流体刻和排水当前仍未实现（[路线图](../PLAN.md) 阶段 1 的 F-5）。
+- `waterlogged` 已接通语义（F-5）：源水可经 `LiquidBlockContainer.placeLiquid` 注入干宿主，失去支撑或玩家破坏时经 `Level.removeBlock`/`destroyBlock` 保水，含水时由铁轨自己的 `updateShape` 排水刻。
 
-未实现：实验性矿车改进（`NewMinecartBehavior`）、箱子/漏斗/熔炉/命令方块/生成器/TNT 矿车、矿车乘客与碰撞伤害、矿车与粘液块/蜂蜜块的实体互动、铁轨的水流冲刷和完整含水逻辑。
+未实现：实验性矿车改进（`NewMinecartBehavior`）、箱子/漏斗/熔炉/命令方块/生成器/TNT 矿车、矿车乘客与碰撞伤害、矿车与粘液块/蜂蜜块的实体互动、铁轨被水流冲毁的掉落路径（`BaseRailBlock` 之外的冲毁入口）。
 
 ## 物品与掉落
 

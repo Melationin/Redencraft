@@ -375,21 +375,30 @@ void spreadDelayThroughTick() {
     (void)world.random.nextInt(16);
     fluidTick(world, pos, world.getBlock(pos),
               fluidStateOf(world.getBlock(pos)));
-    // Only the entry at this position is the re-scheduled one; the spread may
-    // also have queued ticks for the neighbours it wrote (F-5 wiring).
+    // Two entries land at `pos` in this tick: the one LiquidBlock.onPlace
+    // requested while the level write in setBlock ran, and the one the tick
+    // asked for afterwards with getSpreadDelay. LevelChunkTicks.schedule keeps
+    // the FIRST and drops the second (LevelChunkTicks.java:54-59, keyed on
+    // pos+exact type), so the queued delay is the base 30 every time.
+    auto entries = 0;
     auto delay = -1;
     for (const auto &entry : world.fluidTicks())
-      if (entry.first.pos == pos)
+      if (entry.first.pos == pos) {
+        ++entries;
         delay = static_cast<int>(entry.first.trigger - world.gameTime());
-    require(delay == 30 || delay == 120,
-            "the tick schedules 30 or 120, got " + std::to_string(delay));
-    if (delay == 30)
-      ++sawBase;
-    if (delay == 120)
-      ++sawQuadrupled;
+      }
+    require(entries == 1, "the duplicate request is deduplicated, got " +
+                              std::to_string(entries) + " entries");
+    require(delay == 30,
+            "onPlace's base delay wins the race, got " +
+                std::to_string(delay));
+    ++sawBase;
   }
   require(sawBase > 0, "the tick path reaches the base delay");
-  require(sawQuadrupled > 0, "the tick path reaches the quadrupled delay");
+  require(sawQuadrupled == 0,
+          "every tick-path request is beaten to the queue by onPlace's base "
+          "delay, so none is accepted; the 4x draw itself is covered by the "
+          "direct fluidSpreadDelay cases above");
 }
 
 // A branch that takes no random draw must leave the level RNG untouched.

@@ -575,7 +575,9 @@ void railNeighborChanged(World &world, Pos pos, const BlockState &state,
     // Rail's existing state was destroyed without a piston move unless the
     // callback says otherwise; 64 suppresses removal callbacks as in
     // Level.removeBlock(pos, movedByPiston).
-    world.setBlock(pos, airState(), movedByPiston ? 67 : 3);
+    // Level.removeBlock(pos, movedByPiston): the rail's own water, if it was
+    // waterlogged, stays behind as a source (Level.java:276-280).
+    world.removeBlock(pos, movedByPiston);
     return;
   }
   if (state.is(Blocks::RAIL)) {

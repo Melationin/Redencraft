@@ -1079,8 +1079,11 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
   if (!getBlock(p).sameBlock(state))
     return false;
   if (!(flags & 512)) {
-    // LiquidBlock.onPlace: a type change into a liquid requests its first tick.
-    if (isLiquidBlock(state) && !old.sameBlock(state))
+    // LevelChunk.java:339-341: every write that survives the type check runs
+    // onPlace, whatever the old block was. LiquidBlock.onPlace has no
+    // same-type early return, so re-levelling water onto water (level 0 -> 1)
+    // requests a fresh tick too; the sink's (pos, fluid) dedupe then decides.
+    if (isLiquidBlock(state))
       liquidOnPlace(*this, p, state);
     // FallingBlock.onPlace is a type-change callback, including piston moves.
     if (state.is(Blocks::SAND) && !old.sameBlock(state))
@@ -1126,7 +1129,13 @@ std::optional<BlockState> World::coralPlacementState(Pos pos,
     auto floor = name.find("_coral_fan");
     name.replace(floor, 10, "_coral_wall_fan");
   }
-  auto state = defaultState(name).with("waterlogged", "false");
+  // BaseCoralPlantTypeBlock.getStateForPlacement (which both fan shapes inherit)
+  // reads the fluid of the cell being filled and waterlogs the fan only for a
+  // full water source: BaseCoralPlantTypeBlock.java:57-62.
+  const FluidState replacedFluid = fluidStateOf(getBlock(pos));
+  const bool wet = replacedFluid.is(Fluids::water()) && replacedFluid.isFull();
+  auto state =
+      defaultState(name).with("waterlogged", wet ? "true" : "false");
   if (clickedFace != Direction::Up)
     state = state.with("facing", directionName(clickedFace));
   return coralCanSurvive(*this, pos, state) ? std::optional<BlockState>(state)
@@ -1142,6 +1151,14 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
   // LiquidBlock.updateShape: only a source on either side requests a fluid tick.
   if (isLiquidBlock(state))
     liquidUpdateShape(*this, p, state, neighbor);
+  // BaseRailBlock/WallBlock/BaseCoralPlantTypeBlock/BaseCoralWallFanBlock
+  // .updateShape each schedule their own water tick while waterlogged, before
+  // their own shape logic runs. The four entry points stay separate because
+  // they live on four different blocks; only the waterlogged test is shared.
+  if ((isRailBlock(state) || isWallBlock(state) || isDeadCoralFan(state)) &&
+      waterloggedOf(state))
+    scheduleFluidTick(p, FluidRef(Fluids::water()),
+                      Fluids::water().tickDelay());
   if (isWoolCarpet(state)) {
     auto below = getBlock(p.relative(Direction::Down));
     if (below.isAir())
@@ -1152,6 +1169,11 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
         isDeadCoralWallFan(state)
             ? opposite(directionOf(state))
             : Direction::Down;
+    // BaseCoralPlantTypeBlock.java:84 (DOWN and unsupported) and
+    // BaseCoralWallFanBlock.java:72 (the facing support and unsupported)
+    // answer AIR themselves, so the destroy path -- not this result -- decides
+    // what the cell ends up holding. Returning air here lets
+    // World::updateOrDestroy keep the drained water.
     if (direction == supportDirection && !coralCanSurvive(*this, p, state))
       return airState();
   }
@@ -1212,6 +1234,14 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
   // unknown.
   return state;
 }
+bool World::removeBlock(Pos p, bool movedByPiston) {
+  // Level.java:276-280 reads the fluid BEFORE the write; for a waterlogged
+  // host that is its own water source (SimpleWaterloggedBlock.getFluidState),
+  // and for a liquid block it is the fluid the block already is.
+  const FluidState fluidState = fluidStateOf(getBlock(p));
+  return setBlock(p, fluidState.getType().createLegacyBlock(fluidState),
+                  3 | (movedByPiston ? 64 : 0));
+}
 BlockState World::updateFromNeighbourShapes(Pos p, const BlockState &input) {
   auto state = input;
   for (auto d : shapeOrder) {
@@ -1235,7 +1265,11 @@ void World::updateOrDestroy(Pos p, const BlockState &oldState,
         spawnItem(p, drop.id, drop.count);
     }
     // TODO: game events and experience drops.
-    setBlock(p, airState(), 3, limit);
+    // Level.destroyBlock writes the position's fluid legacy block, not air
+    // (Level.java:288,298): a waterlogged host that fails its shape update
+    // leaves its water behind, and a broken liquid leaves the same fluid.
+    const FluidState fluidState = fluidStateOf(current);
+    setBlock(p, fluidState.getType().createLegacyBlock(fluidState), 3, limit);
   } else
     setBlock(p, newState, flags & ~32, limit);
 }

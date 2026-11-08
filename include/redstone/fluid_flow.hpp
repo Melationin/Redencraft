@@ -31,7 +31,9 @@ FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
 
 // LiquidBlock.onPlace / neighborChanged: run shouldSpreadLiquid and, if the
 // liquid survived, request a fluid tick. The two are separate entry points
-// because vanilla calls them from different places.
+// because vanilla calls them from different places. Both queue the fluid of
+// the state the callback was handed, exactly like LiquidBlock.java:148-151
+// and 194-198, which read the captured BlockState instead of the world.
 void liquidOnPlace(World &world, Pos pos, const BlockState &state);
 void liquidNeighborChanged(World &world, Pos pos, const BlockState &state);
 
@@ -42,6 +44,18 @@ void liquidUpdateShape(World &world, Pos pos, const BlockState &state,
 
 // SimpleWaterloggedBlock: a waterlogged host reports a water source.
 bool isWaterloggedHost(const BlockState &state);
+
+// LiquidBlockContainer.canPlaceLiquid: only an exact water source may fill a
+// waterlogged host (SimpleWaterloggedBlock.java:20-22 tests type == Fluids.WATER,
+// so flowing_water and both lava variants are rejected).
+bool canPlaceLiquid(const BlockState &state, const Fluid &type);
+
+// LiquidBlockContainer.placeLiquid: a dry host turns waterlogged under flags 3
+// and schedules its own water tick. Returns false for a wet host or a fluid
+// that is not the exact water source, leaving the block untouched
+// (SimpleWaterloggedBlock.java:24-36).
+bool placeLiquid(World &world, Pos pos, const BlockState &state,
+                 const FluidState &fluidState);
 
 // FlowingFluid.getSpreadDelay: the tick delay to re-schedule with, including
 // LavaFluid's x4 when the surface rises without falling.

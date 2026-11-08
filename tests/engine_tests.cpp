@@ -351,7 +351,19 @@ int main() {
   coral.rawSetBlock({0, 0, 0}, defaultState("smooth_stone"));
   coral.rawSetBlock({0, 1, 0}, defaultState("dead_tube_coral_fan"));
   coral.setBlock({0, 0, 0}, defaultState("air"));
-  assert(coral.getBlock({0, 1, 0}).name() == "minecraft:air");
+  // BaseCoralPlantTypeBlock.updateShape answers AIR and Level.destroyBlock then
+  // writes the position's fluid legacy block, not air (Level.java:288,298).
+  // The fan defaults to waterlogged, so the cell keeps a water source.
+  assert(coral.getBlock({0, 1, 0}).name() == "minecraft:water");
+  assert(fluidStateOf(coral.getBlock({0, 1, 0})).isSource());
+  World dryCoral;
+  dryCoral.loadChunk(0, 0);
+  dryCoral.rawSetBlock({0, 0, 0}, defaultState("smooth_stone"));
+  dryCoral.rawSetBlock({0, 1, 0},
+                       defaultState("dead_tube_coral_fan")
+                           .with("waterlogged", "false"));
+  dryCoral.setBlock({0, 0, 0}, defaultState("air"));
+  assert(dryCoral.getBlock({0, 1, 0}).isAir());
   World events;
   events.loadChunk(0, 0);
   events.rawSetBlock({0, 0, 0}, defaultState("note_block"));
