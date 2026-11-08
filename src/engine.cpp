@@ -276,34 +276,39 @@ World &World::operator=(World &&) noexcept = default;
 // ints plus a pointer: no string, no ownership, no allocation.
 // ---------------------------------------------------------------------------
 namespace {
-struct TickKey {
+// ScheduledTick.UNIQUE_TICK_HASH hashes the position and the ticked object's
+// identity. The target type is the queue's template parameter: Block for block
+// ticks and Fluid for fluid ticks, both interned singletons.
+template <class Target> struct TickKey {
   Pos pos;
-  const Block *block = nullptr;
+  const Target *target = nullptr;
 };
-std::size_t tickKeyHash(const TickKey &key) {
+template <class Target>
+std::size_t tickKeyHash(const TickKey<Target> &key) {
   auto hash = static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.pos.x)) *
               0x9E3779B97F4A7C15ull;
   hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.pos.y)) *
           0xC2B2AE3D27D4EB4Full;
   hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.pos.z)) *
           0x165667B19E3779F9ull;
-  hash ^= static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(key.block)) *
+  hash ^= static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(key.target)) *
           0x9E3779B185EBCA87ull;
   hash ^= hash >> 29;
   hash *= 0x9E3779B97F4A7C15ull;
   hash ^= hash >> 32;
   return static_cast<std::size_t>(hash);
 }
-bool tickKeyEquals(const TickKey &a, const TickKey &b) {
-  return a.pos == b.pos && a.block == b.block;
+template <class Target>
+bool tickKeyEquals(const TickKey<Target> &a, const TickKey<Target> &b) {
+  return a.pos == b.pos && a.target == b.target;
 }
 // Open-addressed set of (position, block) keys with tombstone deletion and a
 // capacity-preserving clear, replacing a node-allocating std::unordered_set.
-class TickKeySet {
+template <class Target> class TickKeySet {
 public:
   std::size_t size() const { return count_; }
-  bool contains(const TickKey &key) const { return slotOf(key) != kNone; }
-  bool insert(const TickKey &key) {
+  bool contains(const TickKey<Target> &key) const { return slotOf(key) != kNone; }
+  bool insert(const TickKey<Target> &key) {
     if (slots_.empty())
       rehash(64);
     if (slotOf(key) != kNone)
@@ -327,7 +332,7 @@ public:
       index = (index + 1) & mask_;
     }
   }
-  void erase(const TickKey &key) {
+  void erase(const TickKey<Target> &key) {
     const auto index = slotOf(key);
     if (index == kNone)
       return;
@@ -348,7 +353,7 @@ private:
       power <<= 1;
     return power;
   }
-  std::size_t slotOf(const TickKey &key) const {
+  std::size_t slotOf(const TickKey<Target> &key) const {
     if (slots_.empty())
       return kNone;
     std::size_t index = tickKeyHash(key) & mask_;
@@ -361,9 +366,9 @@ private:
     }
   }
   void rehash(std::size_t capacity) {
-    std::vector<TickKey> oldSlots = std::move(slots_);
+    std::vector<TickKey<Target>> oldSlots = std::move(slots_);
     std::vector<std::uint8_t> oldState = std::move(state_);
-    slots_.assign(capacity, TickKey{});
+    slots_.assign(capacity, TickKey<Target>{});
     state_.assign(capacity, static_cast<std::uint8_t>(kEmpty));
     mask_ = capacity - 1;
     count_ = used_ = 0;
@@ -371,7 +376,7 @@ private:
       if (oldState[i] == kUsed)
         insert(oldSlots[i]);
   }
-  std::vector<TickKey> slots_;
+  std::vector<TickKey<Target>> slots_;
   std::vector<std::uint8_t> state_;
   std::size_t mask_ = 0;
   std::size_t count_ = 0, used_ = 0;
@@ -491,59 +496,80 @@ private:
 
 // ---------------------------------------------------------------------------
 // LevelChunkTicks<ScheduledTick>: per-chunk DRAIN_ORDER heap plus the
-// (position, block identity) dedupe set of ScheduledTick.UNIQUE_TICK_HASH.
+// (position, target identity) dedupe set of ScheduledTick.UNIQUE_TICK_HASH.
+// Target is Block for the block queue and Fluid for the fluid queue, so the
+// ticked object stays a typed pointer instead of an erased one.
 // ---------------------------------------------------------------------------
-struct World::ChunkTicks {
-  std::vector<ScheduledTick> heap; // min-heap under ScheduledTickDrainOrder
-  TickKeySet ticksPerPosition;
-
-  const ScheduledTick *peek() const { return heap.empty() ? nullptr : &heap.front(); }
-  std::size_t count() const { return heap.size(); }
-  bool has(Pos pos, const BlockRef &block) const {
-    return ticksPerPosition.contains(TickKey{pos, block.block()});
+template <class Target> struct QueuedTick {
+  ScheduledTick tick;
+  const Target *target = nullptr;
+};
+template <class Target> struct QueuedDrainOrder {
+  bool operator()(const QueuedTick<Target> &a, const QueuedTick<Target> &b) const {
+    return ScheduledTickDrainOrder{}(a.tick, b.tick);
   }
-  void push(const ScheduledTick &tick) {
-    heap.push_back(tick);
-    std::push_heap(heap.begin(), heap.end(), ScheduledTickDrainOrder{});
-  }
-  bool schedule(const ScheduledTick &tick) {
-    if (!ticksPerPosition.insert(TickKey{tick.pos, tick.block.block()}))
-      return false;
-    push(tick);
-    return true;
-  }
-  void scheduleUnchecked(const ScheduledTick &tick) {
-    // LevelChunkTicks.scheduleUnchecked: saved lists may repeat an entry; the
-    // duplicates stay in the queue while the set records one of them.
-    ticksPerPosition.insert(TickKey{tick.pos, tick.block.block()});
-    push(tick);
-  }
-  ScheduledTick poll() {
-    std::pop_heap(heap.begin(), heap.end(), ScheduledTickDrainOrder{});
-    ScheduledTick tick = std::move(heap.back());
-    heap.pop_back();
-    ticksPerPosition.erase(TickKey{tick.pos, tick.block.block()});
-    return tick;
+};
+template <class Target> struct QueuedIntraOrder {
+  bool operator()(const QueuedTick<Target> &a, const QueuedTick<Target> &b) const {
+    return ScheduledTickIntraOrder{}(a.tick, b.tick);
   }
 };
 
+template <class Target> struct ChunkTicksOf {
+  std::vector<QueuedTick<Target>> heap; // min-heap under QueuedDrainOrder
+  TickKeySet<Target> ticksPerPosition;
+
+  const QueuedTick<Target> *peek() const {
+    return heap.empty() ? nullptr : &heap.front();
+  }
+  std::size_t count() const { return heap.size(); }
+  bool has(Pos pos, const Target *target) const {
+    return ticksPerPosition.contains(TickKey<Target>{pos, target});
+  }
+  void push(const ScheduledTick &tick, const Target *target) {
+    heap.push_back(QueuedTick<Target>{tick, target});
+    std::push_heap(heap.begin(), heap.end(), QueuedDrainOrder<Target>{});
+  }
+  bool schedule(const ScheduledTick &tick, const Target *target) {
+    if (!ticksPerPosition.insert(TickKey<Target>{tick.pos, target}))
+      return false;
+    push(tick, target);
+    return true;
+  }
+  void scheduleUnchecked(const ScheduledTick &tick, const Target *target) {
+    // LevelChunkTicks.scheduleUnchecked: saved lists may repeat an entry; the
+    // duplicates stay in the queue while the set records one of them.
+    ticksPerPosition.insert(TickKey<Target>{tick.pos, target});
+    push(tick, target);
+  }
+  QueuedTick<Target> poll() {
+    std::pop_heap(heap.begin(), heap.end(), QueuedDrainOrder<Target>{});
+    QueuedTick<Target> entry = heap.back();
+    heap.pop_back();
+    ticksPerPosition.erase(TickKey<Target>{entry.tick.pos, entry.target});
+    return entry;
+  }
+};
 // ---------------------------------------------------------------------------
 // LevelTicks<ScheduledTick>: chunk containers, nextTickForContainer index and
 // the containersToTick / toRunThisTick drain state of
-// LevelTicks.collectTicks/drainContainers/runCollectedTicks.
+// LevelTicks.collectTicks/drainContainers/runCollectedTicks. ServerLevel keeps
+// one instance for Block and one for Fluid (`blockTicks` / `fluidTicks`), each
+// with its own 65536 budget, so this is templated on the ticked object type.
 // ---------------------------------------------------------------------------
-struct World::TickQueue {
+template <class Target> struct TickQueueOf {
+  using ChunkTicks = ChunkTicksOf<Target>;
   struct Entry {
     std::uint64_t key = 0;
     ChunkTicks *container = nullptr;
   };
   struct EntryOrder {
     bool operator()(const Entry &a, const Entry &b) const {
-      const ScheduledTick *left = a.container->peek();
-      const ScheduledTick *right = b.container->peek();
+      const QueuedTick<Target> *left = a.container->peek();
+      const QueuedTick<Target> *right = b.container->peek();
       if (!left || !right)
         return left == nullptr && right != nullptr;
-      return ScheduledTickIntraOrder{}(*left, *right);
+      return QueuedIntraOrder<Target>{}(*left, *right);
     }
   };
   // Containers live in a deque so their addresses stay stable; the maps only
@@ -552,7 +578,7 @@ struct World::TickQueue {
   FlatChunkMap<ChunkTicks *> containers;
   FlatChunkMap<std::int64_t> nextTickForContainer;
   std::vector<Entry> containersToTick; // min-heap under EntryOrder
-  std::deque<ScheduledTick> toRunThisTick;
+  std::deque<QueuedTick<Target>> toRunThisTick;
   std::vector<std::uint64_t> dueScratch;
 
   // LevelTicks.addContainer: one empty container per ticking chunk.
@@ -567,27 +593,29 @@ struct World::TickQueue {
   }
   // LevelChunkTicks.onTickAdded: only a new queue head changes the index.
   void onTickAdded(std::uint64_t key, ChunkTicks &container,
-                   const ScheduledTick &tick) {
-    const ScheduledTick *head = container.peek();
-    if (head && *head == tick)
-      updateContainerScheduling(key, head->trigger);
+                   const QueuedTick<Target> &tick) {
+    const QueuedTick<Target> *head = container.peek();
+    if (head && head->tick == tick.tick && head->target == tick.target)
+      updateContainerScheduling(key, head->tick.trigger);
   }
   // LevelTicks.schedule: drop ticks whose chunk has no container.
-  bool schedule(std::uint64_t key, const ScheduledTick &tick) {
+  bool schedule(std::uint64_t key, const ScheduledTick &tick,
+                const Target *target) {
     auto *container = containers.find(key);
     if (!container)
       return false; // "Trying to schedule tick in not loaded position"
-    if (!(*container)->schedule(tick))
+    if (!(*container)->schedule(tick, target))
       return false;
-    onTickAdded(key, **container, tick);
+    onTickAdded(key, **container, QueuedTick<Target>{tick, target});
     return true;
   }
-  bool restore(std::uint64_t key, const ScheduledTick &tick) {
+  bool restore(std::uint64_t key, const ScheduledTick &tick,
+               const Target *target) {
     auto *container = containers.find(key);
     if (!container)
       return false;
-    (*container)->scheduleUnchecked(tick);
-    onTickAdded(key, **container, tick);
+    (*container)->scheduleUnchecked(tick, target);
+    onTickAdded(key, **container, QueuedTick<Target>{tick, target});
     return true;
   }
   std::size_t count() const {
@@ -612,12 +640,15 @@ struct World::TickQueue {
     containersToTick.pop_back();
     return entry;
   }
-  void tick(World &world, std::int64_t gameTime, int maxTicks) {
+  // `run` is ServerLevel.tickBlock / tickFluid: it re-reads the block or fluid
+  // state at the position and only dispatches when the identity still matches.
+  template <class Run>
+  void tick(World &world, std::int64_t gameTime, int maxTicks, Run &&run) {
     collectTicks(world, gameTime, maxTicks);
     while (!toRunThisTick.empty()) {
-      ScheduledTick tick = std::move(toRunThisTick.front());
+      QueuedTick<Target> entry = std::move(toRunThisTick.front());
       toRunThisTick.pop_front();
-      world.runScheduled(tick);
+      run(entry.tick.pos, entry.target);
     }
     cleanupAfterTick();
   }
@@ -639,18 +670,18 @@ struct World::TickQueue {
         nextTickForContainer.erase(key);
         continue;
       }
-      const ScheduledTick *head = (*container)->peek();
+      const QueuedTick<Target> *head = (*container)->peek();
       if (!head) {
         nextTickForContainer.erase(key);
         continue;
       }
-      if (head->trigger > gameTime) {
-        updateContainerScheduling(key, head->trigger);
+      if (head->tick.trigger > gameTime) {
+        updateContainerScheduling(key, head->tick.trigger);
         continue;
       }
       // LevelTicks tickCheck: chunks that are not ticking keep their container
       // registered (pending ticks resume when the chunk ticks again).
-      if (!world.isChunkLoaded(chunkIndex(head->pos.x), chunkIndex(head->pos.z)))
+      if (!world.isChunkLoaded(head->tick.pos.x >> 4, head->tick.pos.z >> 4))
         continue;
       nextTickForContainer.erase(key);
       pushContainer(Entry{key, *container});
@@ -662,12 +693,12 @@ struct World::TickQueue {
       ChunkTicks &container = *entry.container;
       toRunThisTick.push_back(container.poll());
       drainFromCurrentContainer(world, container, gameTime, maxTicks);
-      const ScheduledTick *next = container.peek();
+      const QueuedTick<Target> *next = container.peek();
       if (next) {
-        if (next->trigger <= gameTime && canScheduleMoreTicks(maxTicks))
+        if (next->tick.trigger <= gameTime && canScheduleMoreTicks(maxTicks))
           pushContainer(entry);
         else
-          updateContainerScheduling(entry.key, next->trigger);
+          updateContainerScheduling(entry.key, next->tick.trigger);
       }
     }
   }
@@ -676,14 +707,14 @@ struct World::TickQueue {
     (void)world;
     if (!canScheduleMoreTicks(maxTicks))
       return;
-    const ScheduledTick *nextFromNextContainer =
+    const QueuedTick<Target> *nextFromNextContainer =
         containersToTick.empty() ? nullptr : containersToTick.front().container->peek();
     while (canScheduleMoreTicks(maxTicks)) {
-      const ScheduledTick *next = current.peek();
+      const QueuedTick<Target> *next = current.peek();
       // ScheduledTick.INTRA_TICK_DRAIN_ORDER.compare(next, nextOfNext) > 0
-      if (!next || next->trigger > gameTime ||
+      if (!next || next->tick.trigger > gameTime ||
           (nextFromNextContainer &&
-           ScheduledTickIntraOrder{}(*next, *nextFromNextContainer)))
+           QueuedIntraOrder<Target>{}(*next, *nextFromNextContainer)))
         break;
       toRunThisTick.push_back(current.poll());
     }
@@ -691,9 +722,9 @@ struct World::TickQueue {
   void rescheduleLeftoverContainers() {
     // LevelTicks.rescheduleLeftoverContainers iterates the queue in place.
     for (const Entry &entry : containersToTick) {
-      const ScheduledTick *head = entry.container->peek();
+      const QueuedTick<Target> *head = entry.container->peek();
       if (head)
-        updateContainerScheduling(entry.key, head->trigger);
+        updateContainerScheduling(entry.key, head->tick.trigger);
     }
   }
   void cleanupAfterTick() {
@@ -911,8 +942,10 @@ void World::loadChunk(int x, int z) {
   slot.key = key;
   slot.chunk = &c;
   // LevelTicks.addContainer: every ticking chunk owns exactly one tick
-  // container. Reloading a chunk keeps the pending ticks it already had.
+  // container in each queue. Reloading a chunk keeps the pending ticks it
+  // already had.
   tickQueue_->addContainer(chunkKey(x, z));
+  fluidTickQueue_->addContainer(chunkKey(x, z));
 }
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
@@ -1432,16 +1465,16 @@ void World::scheduleTick(Pos p, const BlockRef &block, int delay,
 }
 bool World::scheduleTick(const ScheduledTick &tick) {
   const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
-  return tickQueue_->schedule(key, tick);
+  return tickQueue_->schedule(key, tick, tick.block.block());
 }
 bool World::restoreScheduledTick(const ScheduledTick &tick) {
   const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
-  return tickQueue_->restore(key, tick);
+  return tickQueue_->restore(key, tick, tick.block.block());
 }
 bool World::hasScheduledTick(Pos p, const BlockRef &block) const {
   const auto key = chunkKey(chunkIndex(p.x), chunkIndex(p.z));
   auto *container = tickQueue_->containers.find(key);
-  return container && (*container)->has(p, block);
+  return container && (*container)->has(p, block.block());
 }
 std::size_t World::scheduledTickCount() const { return tickQueue_->count(); }
 std::vector<ScheduledTick> World::scheduledTicks() const {
@@ -1449,17 +1482,65 @@ std::vector<ScheduledTick> World::scheduledTicks() const {
   std::vector<std::uint64_t> keys;
   keys.reserve(tickQueue_->containers.size());
   tickQueue_->containers.forEach(
-      [&](std::uint64_t key, ChunkTicks *) { keys.push_back(key); });
+      [&](std::uint64_t key, BlockTickQueue::ChunkTicks *) { keys.push_back(key); });
   std::sort(keys.begin(), keys.end());
   std::vector<ScheduledTick> ticks;
   for (auto key : keys) {
     auto ordered = (*tickQueue_->containers.find(key))->heap;
     std::sort(ordered.begin(), ordered.end(),
-              [](const ScheduledTick &x, const ScheduledTick &y) {
-                return std::tie(x.trigger, x.priority, x.order) <
-                       std::tie(y.trigger, y.priority, y.order);
+              [](const QueuedTick<Block> &x, const QueuedTick<Block> &y) {
+                return std::tie(x.tick.trigger, x.tick.priority, x.tick.order) <
+                       std::tie(y.tick.trigger, y.tick.priority, y.tick.order);
               });
-    ticks.insert(ticks.end(), ordered.begin(), ordered.end());
+    for (const auto &entry : ordered)
+      ticks.push_back(entry.tick);
+  }
+  return ticks;
+}
+// ---------------------------------------------------------------------------
+// ServerLevel.fluidTicks: same LevelTicks structure, keyed on the Fluid
+// identity instead of the Block identity.
+// ---------------------------------------------------------------------------
+bool World::scheduleFluidTick(Pos p, const FluidRef &fluid, int delay,
+                              int priority) {
+  // LevelAccessor.createTick: trigger = gameTime + delay and the same monotonic
+  // subTickOrder counter the block queue uses (Level.nextSubTickCount).
+  if (!isLoaded(p) || fluid.empty())
+    return false;
+  return scheduleFluidTick(ScheduledTick{p, BlockRef{}, time_ + delay, priority,
+                                         nextSubTickCount()},
+                           fluid);
+}
+bool World::scheduleFluidTick(const ScheduledTick &tick, const FluidRef &fluid) {
+  const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
+  return fluidTickQueue_->schedule(key, tick, fluid.fluid());
+}
+bool World::restoreFluidTick(const ScheduledTick &tick, const FluidRef &fluid) {
+  const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
+  return fluidTickQueue_->restore(key, tick, fluid.fluid());
+}
+bool World::hasFluidTick(Pos p, const FluidRef &fluid) const {
+  const auto key = chunkKey(chunkIndex(p.x), chunkIndex(p.z));
+  auto *container = fluidTickQueue_->containers.find(key);
+  return container && (*container)->has(p, fluid.fluid());
+}
+std::size_t World::fluidTickCount() const { return fluidTickQueue_->count(); }
+std::vector<std::pair<ScheduledTick, FluidRef>> World::fluidTicks() const {
+  std::vector<std::uint64_t> keys;
+  keys.reserve(fluidTickQueue_->containers.size());
+  fluidTickQueue_->containers.forEach(
+      [&](std::uint64_t key, FluidTickQueue::ChunkTicks *) { keys.push_back(key); });
+  std::sort(keys.begin(), keys.end());
+  std::vector<std::pair<ScheduledTick, FluidRef>> ticks;
+  for (auto key : keys) {
+    auto ordered = (*fluidTickQueue_->containers.find(key))->heap;
+    std::sort(ordered.begin(), ordered.end(),
+              [](const QueuedTick<Fluid> &x, const QueuedTick<Fluid> &y) {
+                return std::tie(x.tick.trigger, x.tick.priority, x.tick.order) <
+                       std::tie(y.tick.trigger, y.tick.priority, y.tick.order);
+              });
+    for (const auto &entry : ordered)
+      ticks.emplace_back(entry.tick, FluidRef(*entry.target));
   }
   return ticks;
 }
@@ -1483,29 +1564,51 @@ void World::observerNotify(Pos p, const BlockState &s) {
   neighborChanged(q, s.block());
   updateNeighborsAt(q, s.block(), d);
 }
-void World::runScheduled(const ScheduledTick &t) {
+// ServerLevel.tickBlock: re-read the position and only dispatch when the block
+// identity still matches. A stale tick silently does nothing.
+void World::tickBlockAt(Pos pos, const Block *expected) {
   if (traceUpdates)
-    log.push_back({"scheduled_tick", t.pos, t.block.str()});
-  auto s = getBlock(t.pos);
-  if (t.block.block() != s.blockOrNull())
+    log.push_back({"scheduled_tick", pos,
+                   expected ? expected->name() : std::string{}});
+  const auto s = getBlock(pos);
+  if (s.blockOrNull() != expected)
     return;
   if (s.is(Blocks::OBSERVER)) {
     bool on = poweredOf(s);
-    setBlock(t.pos, s.with(PropertyKind::Powered, on ? std::uint8_t{0} : std::uint8_t{1}), 2);
+    setBlock(pos, s.with(PropertyKind::Powered, on ? std::uint8_t{0} : std::uint8_t{1}), 2);
     if (!on)
-      scheduleTick(t.pos, s.block(), 2);
-    observerNotify(t.pos, s);
+      scheduleTick(pos, s.block(), 2);
+    observerNotify(pos, s);
   } else if (isRailBlock(s)) {
-    railScheduledTick(*this, t.pos, s);
+    railScheduledTick(*this, pos, s);
   } else if (s.is(Blocks::REDSTONE_LAMP)) {
-    if (litOf(s) && !hasNeighborSignal(t.pos))
-      setBlock(t.pos, s.with("lit", "false"), 2);
+    if (litOf(s) && !hasNeighborSignal(pos))
+      setBlock(pos, s.with("lit", "false"), 2);
   } else if (s.is(Blocks::SAND)) {
     // TODO: FIRE tags and replaceable blocks outside the implemented registry.
-    if (t.pos.y >= minY_ &&
-        isReplaceable(getBlock(t.pos.relative(Direction::Down))))
-      FallingBlockEntity::fall(*this, t.pos, s);
+    if (pos.y >= minY_ &&
+        isReplaceable(getBlock(pos.relative(Direction::Down))))
+      FallingBlockEntity::fall(*this, pos, s);
   }
+}
+// ServerLevel.tickFluid: `fluidState.is(type)` is the exact identity test, not
+// the "is a source" test, so a flowing tick must not run source logic and vice
+// versa. Flow behaviour itself is task F-3; until then a due tick only records
+// itself so the queue can be exercised.
+void World::tickFluidAt(Pos pos, const Fluid *expected) {
+  if (!expected)
+    return;
+  const auto state = getBlock(pos);
+  const FluidState fluidState = fluidStateOf(state);
+  // The queue dispatched an entry; only the identity check decides whether the
+  // fluid's tick logic runs, so trace both outcomes distinctly.
+  if (traceUpdates)
+    log.push_back({fluidState.is(*expected) ? "fluid_tick" : "fluid_tick_skipped",
+                   pos, expected->name()});
+  if (!fluidState.is(*expected))
+    return;
+  // TODO: fluidState.tick(level, pos, blockState) lands with F-3 (spread,
+  // getNewLiquid, getFlow). This stage only proves the queue and dispatch.
 }
 // TODO: note particles, sound, game events, skull sounds and event broadcasts.
 void World::runEvents() {
@@ -1538,14 +1641,23 @@ void World::runEvents() {
   for (auto &e : blockEventsToReschedule_)
     blockEventQueue_->add(e);
 }
-// TODO: random ticks, fluid ticks, weather, and world systems are absent.
+// TODO: random ticks, weather, and the remaining world systems are absent.
 void World::tick() {
   ++time_;
   handlingTick_ = true;
   // ServerLevel.tick: blockTicks.tick(gameTime, 65536, this::tickBlock).
   // LevelTicks collects the due ticks first, then runs them; ticks scheduled
   // during execution stay pending for the next tick.
-  tickQueue_->tick(*this, time_, 65536);
+  tickQueue_->tick(*this, time_, 65536,
+                   [this](Pos pos, const Block *block) {
+                     tickBlockAt(pos, block);
+                   });
+  // ServerLevel.tick: fluidTicks.tick(gameTime, 65536, this::tickFluid) runs
+  // right after blockTicks and before ChunkSource.tick, with its own budget.
+  fluidTickQueue_->tick(*this, time_, 65536,
+                        [this](Pos pos, const Fluid *fluid) {
+                          tickFluidAt(pos, fluid);
+                        });
   // ServerChunkCache.tick broadcasts ChunkHolder's dirty block positions
   // after scheduled ticks and before block events. Event-induced piston
   // source changes stay pending until the following chunk broadcast phase.

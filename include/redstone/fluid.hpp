@@ -146,4 +146,23 @@ inline bool FluidState::is(const Fluid &type) const {
   return getType().is(type);
 }
 
+// Fluid object handle (ScheduledTick<Fluid> target / save round-trip). Copying
+// and comparing a handle is a pointer copy, exactly like BlockRef: vanilla
+// stores the Fluid object itself in the tick queue.
+class FluidRef {
+public:
+  FluidRef() = default;
+  FluidRef(const Fluid &fluid) : fluid_(&fluid) {}
+  FluidRef(std::string_view name); // resolves, never registers
+  const Fluid *fluid() const { return fluid_; }
+  const Fluid &operator*() const { return *fluid_; }
+  const std::string &str() const;
+  std::string_view view() const { return str(); }
+  bool empty() const { return fluid_ == nullptr; }
+  bool operator==(const FluidRef &other) const = default;
+
+private:
+  const Fluid *fluid_ = nullptr;
+};
+
 } // namespace redstone

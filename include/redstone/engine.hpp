@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "redstone/block.hpp"
+#include "redstone/fluid.hpp"
 #include "redstone/flat_hash_map.hpp"
 
 namespace redstone {
@@ -189,6 +190,15 @@ struct ChunkSnapshot {
   std::vector<SectionSnapshot> sections;
   std::vector<PistonSnapshot> pistons;
 };
+// LevelTicks<ScheduledTick> holds one container per ticking chunk. ServerLevel
+// keeps two instances, keyed on Block and on Fluid, so the queue is a template
+// over the ticked object type. Both are completed in engine.cpp: the header only
+// needs the names for World's unique_ptr members.
+template <class Target> struct ChunkTicksOf;
+template <class Target> struct TickQueueOf;
+using BlockTickQueue = TickQueueOf<Block>;
+using FluidTickQueue = TickQueueOf<Fluid>;
+
 class World {
 public:
   explicit World(int minY = -64, int maxY = 320,
@@ -243,6 +253,17 @@ public:
   std::size_t scheduledTickCount() const;
   // Deterministic snapshot in drain order, for logs, tools and tests.
   std::vector<ScheduledTick> scheduledTicks() const;
+  // ServerLevel.fluidTicks: a separate LevelTicks container per fluid identity.
+  // Scheduling is deduplicated by (pos, fluid) exactly like block ticks, and the
+  // two queues never share container state.
+  bool scheduleFluidTick(Pos pos, const FluidRef &fluid, int delay,
+                         int priority = 0);
+  bool scheduleFluidTick(const ScheduledTick &tick, const FluidRef &fluid);
+  // LevelChunkTicks.scheduleUnchecked for restored fluid lists.
+  bool restoreFluidTick(const ScheduledTick &tick, const FluidRef &fluid);
+  bool hasFluidTick(Pos pos, const FluidRef &fluid) const;
+  std::size_t fluidTickCount() const;
+  std::vector<std::pair<ScheduledTick, FluidRef>> fluidTicks() const;
   void blockEvent(Pos pos, const BlockRef &block, int type, int data);
   std::size_t blockEventCount() const;
   std::vector<BlockEvent> pendingBlockEvents() const;
@@ -384,7 +405,8 @@ private:
   void observerNotify(Pos pos, const BlockState &state);
   void shapeUpdate(Pos pos, Direction direction, Pos neighborPos,
                    const BlockState &neighbor, int flags, int limit);
-  void runScheduled(const ScheduledTick &tick);
+  void tickBlockAt(Pos pos, const Block *expected);
+  void tickFluidAt(Pos pos, const Fluid *expected);
   void runEvents();
   // LevelChunkSection: a paletted container of block states. An empty section
   // is a single air value (PalettedContainer bits=0) and needs no storage.
@@ -466,12 +488,16 @@ private:
   std::int64_t subTickCount_ = 0;
   std::vector<Update> stack_, added_;
   // LevelChunkTicks<ScheduledTick>: per-chunk priority queue (DRAIN_ORDER) plus
-  // a hash set of (pos, block) for ScheduledTick.UNIQUE_TICK_HASH dedupe.
-  struct ChunkTicks;
+  // a hash set of (pos, target) for ScheduledTick.UNIQUE_TICK_HASH dedupe.
   // LevelTicks<ScheduledTick>: chunk containers, nextTickForContainer index and
-  // the containersToTick/toRunThisTick drain state.
-  struct TickQueue;
-  std::unique_ptr<TickQueue> tickQueue_ = std::make_unique<TickQueue>();
+  // the containersToTick/toRunThisTick drain state. ServerLevel keeps one pair
+  // for Block and one for Fluid, so both are templates; they are completed in
+  // engine.cpp so the containers stay out of the header.
+  std::unique_ptr<BlockTickQueue> tickQueue_ = std::make_unique<BlockTickQueue>();
+  // ServerLevel.fluidTicks: a second LevelTicks with its own 65536 budget,
+  // collected and drained after blockTicks and before the chunk stage.
+  std::unique_ptr<FluidTickQueue> fluidTickQueue_ =
+      std::make_unique<FluidTickQueue>();
   // ServerLevel.blockEvents (ObjectLinkedOpenHashSet) + reschedule list.
   struct BlockEventQueue;
   std::unique_ptr<BlockEventQueue> blockEventQueue_ =

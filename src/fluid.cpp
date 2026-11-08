@@ -1,4 +1,4 @@
-﻿#include "redstone/fluid.hpp"
+#include "redstone/fluid.hpp"
 
 #include <algorithm>
 #include <string>
@@ -194,6 +194,16 @@ FluidState fluidStateOf(const BlockState &state) {
   }
   return water ? FluidState(Fluids::flowingWater(), 8, true)
                : FluidState(Fluids::flowingLava(), 8, true);
+}
+
+// ---------------------------------------------------------------------------
+// FluidRef: a Fluid pointer plus a name resolver. Unlike blockByName it never
+// registers an unknown fluid; an unknown name stays null so F-6 can report it.
+// ---------------------------------------------------------------------------
+FluidRef::FluidRef(std::string_view name) : fluid_(findFluidByName(name)) {}
+const std::string &FluidRef::str() const {
+  static const std::string kEmpty;
+  return fluid_ ? fluid_->name() : kEmpty;
 }
 
 } // namespace redstone
