@@ -1,12 +1,14 @@
 #include "redstone/fluid.hpp"
 #include "redstone/engine.hpp"
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace redstone;
@@ -204,6 +206,75 @@ void fluidRegistry() {
           "findFluidByName flowing_lava");
   require(findFluidByName("minecraft:stone") == nullptr,
           "findFluidByName misses an unknown name");
+}
+
+// F-8: the five process-wide objects have one owner each, stable addresses, and
+// remain reachable through both the public registry and the default FluidState
+// fallback. The second thread fills its own thread-local decode cache, proving
+// cache ownership is separate from the fluid singleton lifetime.
+void singletonOwnershipAndLifetime() {
+  const std::array<const Fluid *, 5> instances = {
+      &Fluids::empty(), &Fluids::flowingWater(), &Fluids::water(),
+      &Fluids::flowingLava(), &Fluids::lava()};
+  const std::array<const char *, 5> names = {
+      "minecraft:empty", "minecraft:flowing_water", "minecraft:water",
+      "minecraft:flowing_lava", "minecraft:lava"};
+
+  for (std::size_t i = 0; i < instances.size(); ++i) {
+    require(instances[i]->name() == names[i],
+            "the owned fluid registry keeps its name");
+    require(findFluidByName(names[i]) == instances[i],
+            "name lookup returns the owned singleton");
+    for (std::size_t j = 0; j < i; ++j)
+      require(instances[i] != instances[j],
+              "fluid singleton identities are distinct");
+  }
+
+  require(&Fluids::empty() == &Fluids::empty(),
+          "empty has one stable address");
+  require(&Fluids::flowingWater() == &Fluids::flowingWater(),
+          "flowing_water has one stable address");
+  require(&Fluids::water() == &Fluids::water(),
+          "water has one stable address");
+  require(&Fluids::flowingLava() == &Fluids::flowingLava(),
+          "flowing_lava has one stable address");
+  require(&Fluids::lava() == &Fluids::lava(), "lava has one stable address");
+
+  const FluidRef waterRef(Fluids::water());
+  require(waterRef.fluid() == &Fluids::water() && !waterRef.empty(),
+          "FluidRef keeps the registered observer identity");
+  const FluidRef namedWater("minecraft:water");
+  require(&*namedWater == &Fluids::water(),
+          "FluidRef name resolution keeps the registered observer identity");
+
+  // Fill this thread's state cache, then make the default fallback observable.
+  (void)fluidStateOf(levelState(Blocks::WATER, 2));
+  (void)fluidStateOf(levelState(Blocks::LAVA, 8));
+  require(&FluidState().getType() == &Fluids::empty(),
+          "default FluidState reaches the owned empty singleton");
+
+  bool workerOk = false;
+  std::string workerError;
+  std::thread worker([&]() {
+    try {
+      const FluidState flowing = fluidStateOf(levelState(Blocks::WATER, 3));
+      require(flowing.is(Fluids::flowingWater()),
+              "worker cache resolves flowing_water");
+      require(&flowing.getType() == &Fluids::flowingWater(),
+              "worker cache uses the owned flowing_water singleton");
+      require(&FluidState().getType() == &Fluids::empty(),
+              "worker default reaches the owned empty singleton");
+      require(findFluidByName("minecraft:lava") == &Fluids::lava(),
+              "worker registry lookup is stable");
+      workerOk = true;
+    } catch (const std::exception &error) {
+      workerError = error.what();
+    }
+  });
+  worker.join();
+  require(workerOk, workerError.empty()
+                        ? std::string("worker failed without an error")
+                        : workerError);
 }
 
 void emptyFluidState() {
@@ -500,6 +571,7 @@ int main(int argc, char **argv) {
     const std::filesystem::path assets = argv[1];
 
     fluidRegistry();
+    singletonOwnershipAndLifetime();
     identityTests();
     emptyFluidState();
     levels();

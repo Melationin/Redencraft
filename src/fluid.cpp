@@ -115,31 +115,35 @@ public:
 };
 } // namespace
 
-// Fluids.java's static fields never terminate, so the five singletons are
-// intentionally leaked: a function-local static would be destroyed at exit, and
-// any later FluidState::getType() (which falls back to Fluids::empty()) would
-// then read a destroyed object. Do not turn these into stack or scoped statics.
+namespace {
+struct FluidInstances {
+  EmptyFluid empty;
+  FlowingWater flowingWater;
+  SourceWater water;
+  FlowingLava flowingLava;
+  SourceLava lava;
+};
+
+// One function-local static owns all five process-wide identities. Construction
+// is thread-safe and happens before any accessor can return a reference. At
+// process termination the members are destroyed in reverse declaration order;
+// their destructors only release their own strings. FluidState's thread-local
+// decode cache and FluidRef store non-owning pointers, and neither destructor
+// dereferences them, so cache teardown cannot call back into a destroyed fluid.
+// This replaces the previous permanently leaked `new` objects without changing
+// any identity or lookup path.
+const FluidInstances &fluidInstances() {
+  static const FluidInstances instances;
+  return instances;
+}
+} // namespace
+
 namespace Fluids {
-const Fluid &empty() {
-  static const EmptyFluid *instance = new EmptyFluid();
-  return *instance;
-}
-const WaterFluid &flowingWater() {
-  static const FlowingWater *instance = new FlowingWater();
-  return *instance;
-}
-const WaterFluid &water() {
-  static const SourceWater *instance = new SourceWater();
-  return *instance;
-}
-const LavaFluid &flowingLava() {
-  static const FlowingLava *instance = new FlowingLava();
-  return *instance;
-}
-const LavaFluid &lava() {
-  static const SourceLava *instance = new SourceLava();
-  return *instance;
-}
+const Fluid &empty() { return fluidInstances().empty; }
+const WaterFluid &flowingWater() { return fluidInstances().flowingWater; }
+const WaterFluid &water() { return fluidInstances().water; }
+const LavaFluid &flowingLava() { return fluidInstances().flowingLava; }
+const LavaFluid &lava() { return fluidInstances().lava; }
 } // namespace Fluids
 
 const Fluid *findFluidByName(std::string_view name) {
