@@ -194,4 +194,40 @@ coder 下一步：
 - 「建议」里 `<map>`/`<vector>`/`describe()` 与单例析构顺序注释建议本轮一并处理，其余（`fluidStateOf` 的液体表、`findFluidByName("")`、`createLegacyBlock` 便捷封装、`getHeight`、爆炸抗性真源、测试目标 `/W4`）已在 `PLAN.md` 登记或明确留给 F-2…F-5，接受推迟，但要在「实际做了什么」里逐条说明接受了哪些、推迟了哪些；
 - 返工后重跑构建与 CTest，把新的 commit hash 写回「提交」段，末行改回 `任务完成`。
 
+### 返工复审（reviewer）
+
+复审对象为 `6a2e26f` 及状态记录 `278011c`。确认首次审查中的非零计划刻基线、全局状态表计数、精确身份 `FluidState::is()`、`isSourceOfType` 正负例、显式构造的 amount 断言和 CTest 超时均已补齐。Release 构建及本地 CTest **16/16 通过**。构建后工作区还出现了 `src/fluid.cpp` 和 `tests/fluid_tests.cpp` 的未提交清理改动，本轮没有改这些文件，复审意见以提交内容为准。没有运行真实原版服务端差分。
+
+1. **阻塞 · 读取 TSV 仍未证明协议映射正确。** `tests/fluid_tests.cpp` 的 `protocolStateTable` 在提交 `6a2e26f` 中，`:327–334` 从 TSV 自己取起始 ID，只检查连续性，随后用 C++ 内部的 `firstState()+level` 去找是否碰巧存在同数值的原版 ID，未检查该行的方块和属性。`:313–316` 使用 `stoi` 只读取 `level` 的数字前缀，附加属性被忽略；`:336–341` 只检查本地 schema。独立变异复核使用原始 TSV 的两份临时副本。交换 water/lava 的两段协议 ID，或给 32 条液体状态追加原版不存在的 `falling=true`，`fluid_tests` 两次都退出 0。建议在核心用例严格核对导出清单的 32 条 `(协议 ID, 方块名, 完整属性)`、唯一性与相应本地 `BlockState`，删除跨命名空间的 ID 比较。协议构建下可在已有 `wire_tests` 中补 `Registry::stateId` / `stateById` 往返（`src/net/wire.cpp:381–397`），直接证明本地状态如何编码。返工验证请让上述两份变异都被拒绝。
+2. **应修 · 新增的 `isSource(state)` 未接到实际派发。** `include/redstone/fluid.hpp:75–76` 添加了两个返回同一标志的非虚重载，`src/fluid.cpp:157–159` 的 `FluidState::isSource()` / `isSourceOfType()` 仍走无参数版本。五个当前单例的结果相同，因此这是接口和证据问题。按原版 `Fluid.java:97` 和 `FluidState.java:37–43`，由状态方法传 `*this` 调用流体的状态化入口。建议保留一个状态化虚接口，测试要经 `FluidState` 入口证明实际调用链。
+
+**结论**　返工解决了调度基线和精确身份的缺项，协议表验收仍有阻塞。请 coder 完成上述两条后重新提交 F-1，F-2 等待本项验收。
+
+### 返工三（回应复审：1 阻塞 + 1 应修）
+
+**阻塞 — TSV 读取仍未证明协议映射。** 复审用两份临时副本做变异（交换 water/lava 的协议 ID、给 32 条液体状态追加 `falling=true`），旧测试两次都退出 0。属实：旧实现从 TSV 自取起始 ID 再比连续性，`idToRow` 只存方块名不存属性，跨命名空间比较 `firstState()+level` 更是无意义。已重写：
+
+- 解析保留完整三元组 `(id, block, 完整属性串)`，并断言**行号 == id**（导出表按协议 ID 排序，这同时证明读的是正确文件）。
+- 对 water/lava 各取恰好 16 行，断言 `id == firstId + level` **且** `properties == "level=N"` **逐字符完全相等**——附加属性、缺属性都会被拒。
+- 断言 water 的 16 个 ID 紧接 lava 之前（`waterFirst + 16 == lavaFirst`），换段立即失败。
+- 删除无意义的跨命名空间 ID 比较。
+
+**变异复验（本轮亲跑，两份临时副本，仓库 `assets/` 未改动）**：
+
+| 变异 | 结果 |
+|---|---|
+| 交换 water/lava 两条协议 ID | `fluid test failure: protocol row 86 has id 102` |
+| 给 32 条液体状态追加 `,falling=true` | `fluid test failure: minecraft:water level 0 has properties 'level=0,falling=true', expected 'level=0'` |
+
+两次都被拒绝；旧实现在同样两份变异下均退出 0，差距已闭合。
+
+**应修 — `isSource(state)` 没接到实际派发。** 属实：加了带参重载，但 `FluidState::isSource()` / `isSourceOfType()` 仍调无参版本，重载成了摆设。已改为单一状态化虚接口：
+
+- `Fluid` 只保留 `virtual bool isSource(const FluidState&) const`，删除无参版本，避免「两个入口返回同一标志」的假接口。
+- `FluidState::isSource()` → `getType().isSource(*this)`；`isSourceOfType(type)` → `type_ == &type && type.isSource(*this)`，对应 `FluidState.java:37-43`。
+- `WaterFluid/LavaFluid::getAmount` 需要判断自身是否 Source 变体，改用新增的 `protected isSourceVariant()`，避免为了算 amount 又绕回 `isSource(state)`。
+- 测试改为**只经 `FluidState` 入口**验证，不再直接调 `Fluids::x().isSource()`，确保测的是真实调用链。
+
+**返工三之后的构建与测试**：全量构建零警告，**CTest 16/16 通过**。
+
 任务完成

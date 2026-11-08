@@ -1,8 +1,8 @@
-#include "redstone/fluid.hpp"
+﻿#include "redstone/fluid.hpp"
 
 #include <algorithm>
-#include <map>
-#include <vector>
+#include <string>
+#include <utility>
 
 namespace redstone {
 namespace {
@@ -54,7 +54,7 @@ std::uint8_t WaterFluid::getAmount(const FluidState &state) const {
   // WaterFluid.Source.getAmount is the constant 8; Flowing reads the property.
   // It must read the raw property, since FluidState::getAmount dispatches back
   // into this function.
-  return isSource() ? std::uint8_t{8} : state.rawAmount();
+  return isSourceVariant() ? std::uint8_t{8} : state.rawAmount();
 }
 
 BlockState WaterFluid::createLegacyBlock(const FluidState &state) const {
@@ -73,7 +73,7 @@ bool LavaFluid::isSame(const Fluid &other) const {
 }
 
 std::uint8_t LavaFluid::getAmount(const FluidState &state) const {
-  return isSource() ? std::uint8_t{8} : state.rawAmount();
+  return isSourceVariant() ? std::uint8_t{8} : state.rawAmount();
 }
 
 BlockState LavaFluid::createLegacyBlock(const FluidState &state) const {
@@ -114,26 +114,30 @@ public:
 };
 } // namespace
 
+// Fluids.java's static fields never terminate, so the five singletons are
+// intentionally leaked: a function-local static would be destroyed at exit, and
+// any later FluidState::getType() (which falls back to Fluids::empty()) would
+// then read a destroyed object. Do not turn these into stack or scoped statics.
 namespace Fluids {
 const Fluid &empty() {
-  static const EmptyFluid instance;
-  return instance;
+  static const EmptyFluid *instance = new EmptyFluid();
+  return *instance;
 }
 const WaterFluid &flowingWater() {
-  static const FlowingWater instance;
-  return instance;
+  static const FlowingWater *instance = new FlowingWater();
+  return *instance;
 }
 const WaterFluid &water() {
-  static const SourceWater instance;
-  return instance;
+  static const SourceWater *instance = new SourceWater();
+  return *instance;
 }
 const LavaFluid &flowingLava() {
-  static const FlowingLava instance;
-  return instance;
+  static const FlowingLava *instance = new FlowingLava();
+  return *instance;
 }
 const LavaFluid &lava() {
-  static const SourceLava instance;
-  return instance;
+  static const SourceLava *instance = new SourceLava();
+  return *instance;
 }
 } // namespace Fluids
 
@@ -154,9 +158,11 @@ const Fluid *findFluidByName(std::string_view name) {
 const Fluid &FluidState::getType() const {
   return type_ ? *type_ : Fluids::empty();
 }
-bool FluidState::isSource() const { return getType().isSource(); }
+// FluidState.java:37-43: both entry points hand the state to the fluid, so the
+// stateful isSource(FluidState) overload is the one actually exercised.
+bool FluidState::isSource() const { return getType().isSource(*this); }
 bool FluidState::isSourceOfType(const Fluid &type) const {
-  return type_ == &type && type.isSource();
+  return type_ == &type && type.isSource(*this);
 }
 bool FluidState::isEmpty() const { return getType().isEmpty(); }
 std::uint8_t FluidState::getAmount() const {

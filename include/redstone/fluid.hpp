@@ -68,12 +68,12 @@ public:
   bool is(const Fluid &other) const { return this == &other; }
   // Fluid.isEmpty: only minecraft:empty.
   bool isEmpty() const { return empty_; }
-  // Fluid.isSource(FluidState): vanilla takes the state as the argument. A
-  // Source variant always answers true; a Flowing variant always answers false,
-  // so the constant is equivalent for the five registered fluids, but the pair
-  // overload keeps the vanilla call shape for FluidState:
-  bool isSource() const { return source_; }
-  bool isSource(const FluidState &) const { return source_; }
+  // Fluid.isSource(FluidState): the single stateful entry point. Source
+  // variants answer true and Flowing variants false, independent of the state,
+  // but the state is part of the signature so a state-dependent fluid can be
+  // added later without changing every call site (FlowingFluid.isSourceBlockOf
+  // ThisType and the tick dispatch both go through it).
+  virtual bool isSource(const FluidState &) const { return source_; }
   // Fluid.isSame: the family test used by flowing logic and mixing.
   virtual bool isSame(const Fluid &other) const { return this == &other; }
   // Fluid.getAmount: 8 for a Source, the flowing level otherwise.
@@ -90,6 +90,10 @@ public:
 
 protected:
   Fluid(std::string_view name, bool empty, bool source, std::string bucketItem);
+  // The Source/Flowing split of this instance. getAmount() needs it, and it
+  // must not go through isSource(state) because that is what the amount is
+  // being computed for.
+  bool isSourceVariant() const { return source_; }
 
 private:
   std::string name_;

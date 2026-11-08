@@ -153,11 +153,13 @@ if(BUILD_TESTING)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_core redstone_allocator)
-      # Behavior assertions must remain active in Release, too.
+      # Behavior assertions must remain active in Release, too, and the tests
+      # get the same warning level as the core library so dead code in a test
+      # is reported instead of silently kept.
       if(MSVC)
-        target_compile_options(${name}_tests PRIVATE /UNDEBUG)
+        target_compile_options(${name}_tests PRIVATE /UNDEBUG /W4 /utf-8)
       else()
-        target_compile_options(${name}_tests PRIVATE -UNDEBUG)
+        target_compile_options(${name}_tests PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic)
       endif()
       add_test(NAME ${name} COMMAND ${name}_tests)
     endif()

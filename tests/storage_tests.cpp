@@ -22,7 +22,7 @@ static void str(Bytes &b, const std::string &s) {
   b.insert(b.end(), s.begin(), s.end());
 }
 static void tag(Bytes &b, int t, const std::string &n) {
-  b.push_back(t);
+  b.push_back(uint8_t(t));
   str(b, n);
 }
 static void integer(Bytes &b, const std::string &n, int v) {

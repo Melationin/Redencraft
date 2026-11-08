@@ -21,10 +21,6 @@ void require(bool condition, const std::string &message) {
     throw std::runtime_error(message);
 }
 
-std::string describe(const BlockState &state) {
-  return state.shortName().empty() ? std::string("?") : std::string(state.shortName());
-}
-
 BlockState levelState(const Block &block, int level) {
   return block.defaultState().with(PropertyKind::Level,
                                    static_cast<std::uint8_t>(level));
@@ -54,6 +50,24 @@ void identityTests() {
           "flowing water is not a source of water");
   require(!waterSource.isSourceOfType(Fluids::lava()),
           "source water is not a source of lava");
+
+  // Lava covers the same three cases so the rule is not water-specific.
+  const FluidState lavaSource = fluidStateOf(levelState(Blocks::LAVA, 0));
+  const FluidState lavaFlow = fluidStateOf(levelState(Blocks::LAVA, 2));
+  require(lavaSource.isSourceOfType(Fluids::lava()),
+          "source lava is a source of lava");
+  require(!lavaFlow.isSourceOfType(Fluids::flowingLava()),
+          "flowing lava is not a source of flowing_lava");
+  require(!lavaSource.isSourceOfType(Fluids::water()),
+          "source lava is not a source of water");
+  require(!FluidState().isSourceOfType(Fluids::water()),
+          "empty is not a source of anything");
+
+  // F-2 must dispatch with is(), never isSourceOfType(): a flowing state is not
+  // a source, so isSourceOfType would skip every flowing fluid tick.
+  require(waterFlow.is(Fluids::flowingWater()) &&
+              !waterFlow.isSourceOfType(Fluids::flowingWater()),
+          "identity and source-of differ for flowing water");
 
   // Fluid.isSource(FluidState) keeps the vanilla call shape.
   require(Fluids::water().isSource(waterSource), "water.isSource(state)");
@@ -155,13 +169,18 @@ void checkLevels(const Block &block, bool water, const char *label) {
 
 void fluidRegistry() {
   require(Fluids::empty().isEmpty(), "empty fluid is empty");
-  require(!Fluids::empty().isSource(), "empty fluid is not a source");
   require(Fluids::empty().getAmount(FluidState()) == 0, "empty amount is 0");
 
-  require(Fluids::water().isSource(), "water is a source");
-  require(!Fluids::flowingWater().isSource(), "flowing_water is not a source");
-  require(Fluids::lava().isSource(), "lava is a source");
-  require(!Fluids::flowingLava().isSource(), "flowing_lava is not a source");
+  // isSource() is only reachable through FluidState (Fluid.java:97 takes the
+  // state), so the dispatch chain is exercised instead of the raw flag.
+  require(!FluidState(Fluids::empty(), 0, false).isSource(),
+          "empty fluid is not a source");
+  require(FluidState(Fluids::water(), 8, false).isSource(), "water is a source");
+  require(!FluidState(Fluids::flowingWater(), 8, false).isSource(),
+          "flowing_water is not a source");
+  require(FluidState(Fluids::lava(), 8, false).isSource(), "lava is a source");
+  require(!FluidState(Fluids::flowingLava(), 8, false).isSource(),
+          "flowing_lava is not a source");
 
   require(Fluids::water().isSame(Fluids::flowingWater()),
           "water family matches flowing_water");
@@ -291,9 +310,15 @@ void protocolStateTable(const std::filesystem::path &assets) {
   std::ifstream in(path, std::ios::binary);
   require(in.good(), "open " + path.string());
 
-  // Parse "id<TAB>block<TAB>[key=value,...]".
-  auto rowsByBlock = std::map<std::string, std::map<int, int>>{};
-  auto idToRow = std::map<int, std::string>{};
+  // Parse "id<TAB>block<TAB>key=value,...". Every field is kept: the point of
+  // this test is to pin the exact exported (id, block, properties) rows, not
+  // just to notice that some id exists.
+  struct ProtocolRow {
+    int id = 0;
+    std::string block;
+    std::string properties;
+  };
+  auto rows = std::vector<ProtocolRow>{};
   std::string line;
   while (std::getline(in, line)) {
     if (!line.empty() && line.back() == '\r')
@@ -302,52 +327,84 @@ void protocolStateTable(const std::filesystem::path &assets) {
       continue;
     const auto firstTab = line.find('\t');
     require(firstTab != std::string::npos, "TSV row has an id field: " + line);
-    const int id = std::stoi(line.substr(0, firstTab));
     const auto secondTab = line.find('\t', firstTab + 1);
-    const std::string block =
-        line.substr(firstTab + 1, secondTab == std::string::npos
-                                      ? std::string::npos
-                                      : secondTab - firstTab - 1);
-    const std::string properties =
-        secondTab == std::string::npos ? std::string{} : line.substr(secondTab + 1);
-    idToRow[id] = block;
-    if (block != "minecraft:water" && block != "minecraft:lava")
-      continue;
-    const auto key = properties.find("level=");
-    require(key != std::string::npos,
-            block + " row has a level property: " + line);
-    const int level = std::stoi(properties.substr(key + 6));
-    rowsByBlock[block][level] = id;
+    ProtocolRow row;
+    row.id = std::stoi(line.substr(0, firstTab));
+    row.block = line.substr(firstTab + 1, secondTab == std::string::npos
+                                               ? std::string::npos
+                                               : secondTab - firstTab - 1);
+    row.properties = secondTab == std::string::npos ? std::string{}
+                                                    : line.substr(secondTab + 1);
+    rows.push_back(std::move(row));
   }
+  require(!rows.empty(), "the protocol table is not empty");
 
-  for (const auto &[blockName, levels] :
+  // The exported table is ordered by protocol state id, so the row index must
+  // equal the id. Asserting it also proves the file is the table we think.
+  for (std::size_t i = 0; i < rows.size(); ++i)
+    require(rows[i].id == static_cast<int>(i),
+            "protocol row " + std::to_string(i) + " has id " +
+                std::to_string(rows[i].id));
+
+  // Select the 32 water/lava liquid states and require an exact match against
+  // the properties this build produces, including that nothing else is present.
+  const auto expectedProperties = [](int level) {
+    return "level=" + std::to_string(level);
+  };
+  for (const auto &[blockName, block] :
        {std::pair<std::string, const Block *>{"minecraft:water", &Blocks::WATER},
         std::pair<std::string, const Block *>{"minecraft:lava", &Blocks::LAVA}}) {
-    require(levels->stateCount() == 16,
-            blockName + " keeps 16 level states");
-    require(rowsByBlock[blockName].size() == 16,
-            blockName + " has 16 rows in the protocol table");
-    // Registry ids are contiguous per block, and the first row is level 0.
-    const int firstId = rowsByBlock[blockName].at(0);
+    require(block->stateCount() == 16, blockName + " keeps 16 level states");
+
+    auto matched = std::vector<const ProtocolRow *>{};
+    for (const auto &row : rows)
+      if (row.block == blockName)
+        matched.push_back(&row);
+    require(matched.size() == 16,
+            blockName + " has exactly 16 rows in the protocol table");
+
+    // Contiguity is asserted against the *table*, and the first id is recorded
+    // so a swapped water/lava block is rejected by the level ordering below.
+    const int firstId = matched.front()->id;
     for (int level = 0; level <= 15; ++level) {
-      const int protocolId = rowsByBlock[blockName].at(level);
-      require(protocolId == firstId + level,
+      const ProtocolRow &row = *matched[static_cast<std::size_t>(level)];
+      require(row.id == firstId + level,
               blockName + " level " + std::to_string(level) +
-                  " has a contiguous protocol id");
-      const int localId = static_cast<int>(levels->firstState()) + level;
-      require(idToRow.count(localId) == 1,
-              "local state id " + std::to_string(localId) + " exists in the table");
-      // The block's own dense variant order must line up with the TSV order.
-      const BlockState state = levelState(*levels, level);
+                  " is not the expected contiguous id " +
+                  std::to_string(firstId + level));
+      // Full property string, so an extra falling=true is rejected.
+      require(row.properties == expectedProperties(level),
+              blockName + " level " + std::to_string(level) +
+                  " has properties '" + row.properties + "', expected '" +
+                  expectedProperties(level) + "'");
+
+      // The local state must exist and carry the same level.
+      const BlockState state = levelState(*block, level);
       require(state.isSchemaState(),
               blockName + " level " + std::to_string(level) +
                   " stays inside the StateDefinition");
+      require(state.get("level") == std::to_string(level),
+              blockName + " level " + std::to_string(level) +
+                  " round-trips its level property");
       require(!state.hasProperty("falling"),
               blockName + " has no falling block property");
     }
-    require(levels->defaultState().get("level") == "0",
+    require(block->defaultState().get("level") == "0",
             blockName + " default level is 0");
   }
+
+  // Water and lava must not share ids, and water must precede lava.
+  int waterFirst = -1, lavaFirst = -1;
+  for (const auto &row : rows) {
+    if (row.block == "minecraft:water" &&
+        row.properties == expectedProperties(0))
+      waterFirst = row.id;
+    if (row.block == "minecraft:lava" && row.properties == expectedProperties(0))
+      lavaFirst = row.id;
+  }
+  require(waterFirst >= 0 && lavaFirst >= 0, "both fluid blocks are exported");
+  require(waterFirst + 16 == lavaFirst,
+          "the water block states immediately precede the lava block states");
 }
 } // namespace
 
