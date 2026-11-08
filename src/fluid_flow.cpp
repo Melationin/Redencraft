@@ -1,9 +1,9 @@
 #include "redstone/fluid_flow.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
-#include <map>
-#include <vector>
+#include <cstdint>
 
 #include "redstone/entity.hpp"
 #include "redstone/shapes.hpp"
@@ -192,6 +192,40 @@ bool isFullCube(const VoxelShape &shape) {
          shape[0].z1 == 16;
 }
 
+// FlowingFluid.OCCLUSION_CACHE: immutable state pairs are keyed by both ids and
+// the directed face. The Java map is a bounded ThreadLocal LRU; a fixed direct
+// mapped table gives the same safe memoization with constant-time probing and no
+// allocation. Moving pistons depend on position/progress and never enter it.
+struct SharedFaceCacheEntry {
+  BlockState::Id source = 0;
+  BlockState::Id target = 0;
+  Direction direction = Direction::Down;
+  bool pass = false;
+  bool valid = false;
+};
+
+inline constexpr std::size_t kSharedFaceCacheSize = 256;
+
+std::array<SharedFaceCacheEntry, kSharedFaceCacheSize> &
+sharedFaceCache() {
+  static thread_local std::array<SharedFaceCacheEntry, kSharedFaceCacheSize>
+      cache{};
+  return cache;
+}
+
+std::size_t sharedFaceSlot(BlockState::Id source, BlockState::Id target,
+                           Direction direction) {
+  std::uint64_t key = static_cast<std::uint64_t>(source) *
+                      0x9E3779B185EBCA87ULL;
+  key ^= static_cast<std::uint64_t>(target) + 0x517CC1B727220A95ULL +
+         (key << 6) + (key >> 2);
+  key ^= static_cast<std::uint64_t>(direction) * 0x94D049BB133111EBULL;
+  key ^= key >> 30;
+  key *= 0xBF58476D1CE4E5B9ULL;
+  key ^= key >> 27;
+  return static_cast<std::size_t>(key) & (kSharedFaceCacheSize - 1);
+}
+
 // FlowingFluid.isSourceBlockOfThisType.
 bool isSourceBlockOfThisType(const FluidState &state, const Fluid &self) {
   return state.getType().isSame(self) && state.isSource();
@@ -246,41 +280,68 @@ bool fluidCanConvertToSource(World &world, const Fluid &self) {
   return false;
 }
 
-// FlowingFluid.SpreadContext: the short-keyed caches keyed on the offset from
-// the spread origin. Vanilla uses a Short2ObjectMap; a small map is enough here
-// because the radius is bounded by getSlopeFindDistance + 1.
+// FlowingFluid.getSlopeDistance visits at most one cell beyond the registered
+// slope radius (the hole test happens before the pass bound). Water's radius 4
+// is the largest current fluid, so a 11x11 table covers every cache key without
+// allocating a node or a map. The vanilla short key packs x/z + 128; here the
+// same relative-coordinate identity is used directly, which also keeps negative
+// world coordinates unambiguous.
+inline constexpr int kMaxSlopeFindDistance = 4;
+inline constexpr int kSpreadCacheRadius = kMaxSlopeFindDistance + 1;
+inline constexpr int kSpreadCacheWidth = kSpreadCacheRadius * 2 + 1;
+inline constexpr std::size_t kSpreadCacheCells =
+    static_cast<std::size_t>(kSpreadCacheWidth * kSpreadCacheWidth);
+
 class SpreadContext {
 public:
   SpreadContext(World &world, Pos origin, const Fluid &self)
-      : world_(world), origin_(origin), self_(self) {}
+      : world_(world), origin_(origin), self_(self),
+        radius_(slopeFindDistance(self) + 1) {
+    knownStates_.fill(false);
+    knownHoles_.fill(false);
+  }
 
   const BlockState &getBlockState(Pos pos) {
-    const auto key = keyOf(pos);
-    auto found = states_.find(key);
-    if (found != states_.end())
-      return found->second;
-    return states_.emplace(key, world_.getBlock(pos)).first->second;
+    const int index = indexOf(pos);
+    if (index < 0) {
+      fallbackState_ = world_.getBlock(pos);
+      return fallbackState_;
+    }
+    const auto cell = static_cast<std::size_t>(index);
+    if (!knownStates_[cell]) {
+      states_[cell] = world_.getBlock(pos);
+      knownStates_[cell] = true;
+    }
+    return states_[cell];
   }
 
   bool isHole(Pos pos) {
-    const auto key = keyOf(pos);
-    auto found = holes_.find(key);
-    if (found != holes_.end())
-      return found->second;
+    const int index = indexOf(pos);
+    if (index >= 0) {
+      const auto cell = static_cast<std::size_t>(index);
+      if (knownHoles_[cell])
+        return holes_[cell];
+    }
     const BlockState &state = getBlockState(pos);
     const Pos below = pos.relative(Direction::Down);
     const BlockState &belowState = world_.getBlock(below);
     const bool hole = isWaterHole(pos, state, below, belowState);
-    holes_.emplace(key, hole);
+    if (index >= 0) {
+      const auto cell = static_cast<std::size_t>(index);
+      holes_[cell] = hole;
+      knownHoles_[cell] = true;
+    }
     return hole;
   }
 
 private:
-  // FlowingFluid.SpreadContext.getCacheKey packs (dx+128, dz+128) into a short.
-  std::uint16_t keyOf(Pos pos) const {
-    const int dx = (pos.x - origin_.x + 128) & 0xFF;
-    const int dz = (pos.z - origin_.z + 128) & 0xFF;
-    return static_cast<std::uint16_t>((dx << 8) | dz);
+  int indexOf(Pos pos) const {
+    const int dx = pos.x - origin_.x;
+    const int dz = pos.z - origin_.z;
+    if (radius_ > kSpreadCacheRadius || dx < -radius_ || dx > radius_ ||
+        dz < -radius_ || dz > radius_)
+      return -1;
+    return (dx + radius_) * kSpreadCacheWidth + (dz + radius_);
   }
   // Declared below; the context only forwards.
   bool isWaterHole(Pos topPos, const BlockState &topState, Pos bottomPos,
@@ -289,8 +350,12 @@ private:
   World &world_;
   Pos origin_;
   const Fluid &self_;
-  std::map<std::uint16_t, BlockState> states_;
-  std::map<std::uint16_t, bool> holes_;
+  int radius_;
+  std::array<BlockState, kSpreadCacheCells> states_{};
+  std::array<bool, kSpreadCacheCells> knownStates_{};
+  std::array<bool, kSpreadCacheCells> holes_{};
+  std::array<bool, kSpreadCacheCells> knownHoles_{};
+  BlockState fallbackState_;
 };
 
 bool canMaybePassThrough(World &world, const Fluid &self, Pos sourcePos,
@@ -419,10 +484,32 @@ void spreadTo(World &world, Pos pos, const BlockState &state,
   world.setBlock(pos, target.getType().createLegacyBlock(target), 3);
 }
 
+// FlowingFluid.getSpread uses an EnumMap. The only populated directions are
+// NORTH, SOUTH, WEST and EAST, visited and emitted in that order, so four inline
+// slots preserve EnumMap's observable iteration order without tree allocation.
+class SpreadResult {
+public:
+  void clear() { size_ = 0; }
+  void append(Direction direction, const FluidState &fluid) {
+    if (size_ == directions_.size())
+      return;
+    directions_[size_] = direction;
+    fluids_[size_] = fluid;
+    ++size_;
+  }
+  std::size_t size() const { return size_; }
+  Direction direction(std::size_t i) const { return directions_[i]; }
+  const FluidState &fluid(std::size_t i) const { return fluids_[i]; }
+
+private:
+  std::array<Direction, 4> directions_{};
+  std::array<FluidState, 4> fluids_{};
+  std::size_t size_ = 0;
+};
+
 // FlowingFluid.getSpread.
-std::map<Direction, FluidState> getSpread(World &world, Pos pos,
-                                          const BlockState &state,
-                                          const Fluid &self);
+SpreadResult getSpread(World &world, Pos pos, const BlockState &state,
+                       const Fluid &self);
 
 void spreadToSides(World &world, Pos pos, const FluidState &state,
                    const BlockState &blockState, const Fluid &self) {
@@ -432,20 +519,20 @@ void spreadToSides(World &world, Pos pos, const FluidState &state,
   if (neighbor <= 0)
     return;
   const auto spreads = getSpread(world, pos, blockState, self);
-  for (const auto &[spread, newNeighborFluid] : spreads) {
+  for (std::size_t i = 0; i < spreads.size(); ++i) {
+    const Direction spread = spreads.direction(i);
+    const FluidState &newNeighborFluid = spreads.fluid(i);
     const Pos neighborPos = pos.relative(spread);
     spreadTo(world, neighborPos, world.getBlock(neighborPos), spread,
              newNeighborFluid, self);
   }
 }
 
-std::map<Direction, FluidState> getSpread(World &world, Pos pos,
-                                          const BlockState &state,
-                                          const Fluid &self) {
+SpreadResult getSpread(World &world, Pos pos, const BlockState &state,
+                       const Fluid &self) {
   int lowest = 1000;
-  std::map<Direction, FluidState> result;
-  SpreadContext *context = nullptr;
-  std::unique_ptr<SpreadContext> owned;
+  SpreadResult result;
+  SpreadContext context(world, pos, self);
   for (Direction direction : {Direction::North, Direction::South,
                               Direction::West, Direction::East}) {
     const Pos testPos = pos.relative(direction);
@@ -457,22 +544,18 @@ std::map<Direction, FluidState> getSpread(World &world, Pos pos,
     const FluidState newFluid = fluidNewLiquid(world, testPos, testState, self);
     if (!canHoldSpecificFluid(world, testPos, testState, newFluid.getType()))
       continue;
-    if (!context) {
-      owned = std::make_unique<SpreadContext>(world, pos, self);
-      context = owned.get();
-    }
     int distance;
-    if (context->isHole(testPos))
+    if (context.isHole(testPos))
       distance = 0;
     else
       distance = getSlopeDistance(world, self, testPos, 1, opposite(direction),
-                                  testState, *context);
+                                  testState, context);
     if (distance < lowest)
       result.clear();
     if (distance <= lowest) {
       if (canBeReplacedWith(testFluidState, world, testPos,
                             newFluid.getType(), direction))
-        result.emplace(direction, newFluid);
+        result.append(direction, newFluid);
       lowest = distance;
     }
   }
@@ -487,27 +570,44 @@ std::map<Direction, FluidState> getSpread(World &world, Pos pos,
 bool fluidCanPassThroughWall(World &world, Direction direction, Pos sourcePos,
                              const BlockState &sourceState, Pos targetPos,
                              const BlockState &targetState) {
-  // Only a moving piston needs the position-aware query, because its shape
-  // depends on the block entity's progress (MovingPistonBlock.java:105-108).
-  // Every other state borrows the cached shape, so the hot path copies nothing.
+  // FlowingFluid.canPassThroughWall queries the target shape first and returns
+  // immediately for a full target. Only a moving piston has a position-aware
+  // shape, so every other state uses its cached immutable shape.
+  const bool sourceDynamic = sourceState.is(Blocks::MOVING_PISTON);
+  const bool targetDynamic = targetState.is(Blocks::MOVING_PISTON);
   VoxelShape sourceTmp, targetTmp;
-  const VoxelShape *sourceShape = &collisionShape(sourceState);
-  if (sourceState.is(Blocks::MOVING_PISTON)) {
-    sourceTmp = collisionShape(world, sourcePos, sourceState);
-    sourceShape = &sourceTmp;
-  }
   const VoxelShape *targetShape = &collisionShape(targetState);
-  if (targetState.is(Blocks::MOVING_PISTON)) {
+  if (targetDynamic) {
     targetTmp = collisionShape(world, targetPos, targetState);
     targetShape = &targetTmp;
   }
   if (isFullCube(*targetShape))
     return false;
+  const VoxelShape *sourceShape = &collisionShape(sourceState);
+  if (sourceDynamic) {
+    sourceTmp = collisionShape(world, sourcePos, sourceState);
+    sourceShape = &sourceTmp;
+  }
   if (isFullCube(*sourceShape))
     return false;
   if (sourceShape->empty() && targetShape->empty())
     return true;
-  return !mergedFaceOccludes(*sourceShape, *targetShape, direction);
+
+  const bool cacheable = !sourceDynamic && !targetDynamic;
+  SharedFaceCacheEntry *entry = nullptr;
+  if (cacheable) {
+    entry = &sharedFaceCache()[sharedFaceSlot(sourceState.id(), targetState.id(),
+                                              direction)];
+    if (entry->valid && entry->source == sourceState.id() &&
+        entry->target == targetState.id() && entry->direction == direction)
+      return entry->pass;
+  }
+  const bool pass = !mergedFaceOccludes(*sourceShape, *targetShape, direction);
+  if (entry) {
+    *entry = SharedFaceCacheEntry{sourceState.id(), targetState.id(), direction,
+                                  pass, true};
+  }
+  return pass;
 }
 
 bool fluidShapesSealSharedFace(const VoxelShape &source,
@@ -530,7 +630,6 @@ float fluidHeight(World &world, Pos pos, const FluidState &state) {
 
 FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
                           const Fluid &self) {
-  (void)blockState;
   int highestNeighbor = 0;
   int neighbourSources = 0;
   for (Direction direction : {Direction::North, Direction::South,
@@ -540,7 +639,7 @@ FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
     const FluidState fluidState = fluidStateOf(neighborState);
     if (!fluidState.getType().isSame(self))
       continue;
-    if (!fluidCanPassThroughWall(world, direction, pos, world.getBlock(pos),
+    if (!fluidCanPassThroughWall(world, direction, pos, blockState,
                                  relativePos, neighborState))
       continue;
     if (fluidState.isSource())
@@ -557,7 +656,7 @@ FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
   const BlockState aboveState = world.getBlock(abovePos);
   const FluidState aboveFluid = fluidStateOf(aboveState);
   if (!aboveFluid.isEmpty() && aboveFluid.getType().isSame(self) &&
-      fluidCanPassThroughWall(world, Direction::Up, pos, world.getBlock(pos),
+      fluidCanPassThroughWall(world, Direction::Up, pos, blockState,
                               abovePos, aboveState))
     return getFlowing(self, 8, true);
   const int amount = highestNeighbor - dropOff(self);

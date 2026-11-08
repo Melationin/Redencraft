@@ -302,6 +302,79 @@ void queriesAreSideEffectFree() {
   }
 }
 
+// BlockBehaviour.BlockStateBase caches its FluidState at state initialization.
+// Exercise the id cache through schema states, a block registered after the
+// static table, and imported extension states with an extra property.
+void cachedFluidStateDecode() {
+  for (int level = 0; level <= 15; ++level) {
+    const BlockState water = levelState(Blocks::WATER, level);
+    const BlockState lava = levelState(Blocks::LAVA, level);
+    const FluidState waterFirst = fluidStateOf(water);
+    const FluidState waterSecond = fluidStateOf(water);
+    const FluidState lavaFirst = fluidStateOf(lava);
+    const FluidState lavaSecond = fluidStateOf(lava);
+    require(waterFirst == waterSecond, "water cache keeps the exact state");
+    require(lavaFirst == lavaSecond, "lava cache keeps the exact state");
+    require(waterFirst.is(Fluids::water()) ||
+                waterFirst.is(Fluids::flowingWater()),
+            "water cache keeps the water family");
+    require(lavaFirst.is(Fluids::lava()) ||
+                lavaFirst.is(Fluids::flowingLava()),
+            "lava cache keeps the lava family");
+  }
+
+  // A block registered after startup is a fresh, higher state id. Its default
+  // state is dry, and repeated lookup must not intern another state.
+  const Block &late = blockByName("minecraft:future_cache_probe");
+  const BlockState lateState = late.defaultState();
+  const auto before = registeredStateCount();
+  require(fluidStateOf(lateState).isEmpty(),
+          "a post-registration dry block has the empty fluid");
+  require(fluidStateOf(lateState).isEmpty(),
+          "the post-registration dry result is cached");
+  require(registeredStateCount() == before,
+          "fluid lookup does not intern post-registration states");
+
+  // An unknown imported property makes the whole state an extension. Its map,
+  // rather than packed(), still has to decode flowing/falling and waterlogged
+  // exactly as the schema state would.
+  const BlockState waterExtension(
+      "minecraft:water", {{"level", "5"}, {"future_state", "kept"}});
+  require(!waterExtension.isSchemaState(), "the water state is an extension");
+  const FluidState flowing = fluidStateOf(waterExtension);
+  require(flowing.is(Fluids::flowingWater()) && flowing.getAmount() == 3 &&
+              !flowing.isFalling(),
+          "an extended water level decodes as flowing amount 3");
+  require(fluidStateOf(waterExtension) == flowing,
+          "the extended water result is cached by its new id");
+
+  const BlockState fallingExtension(
+      "minecraft:water", {{"level", "15"}, {"future_state", "kept"}});
+  const FluidState falling = fluidStateOf(fallingExtension);
+  require(falling.is(Fluids::flowingWater()) && falling.getAmount() == 8 &&
+              falling.isFalling(),
+          "an extended water level 15 decodes as falling full");
+
+  const BlockState lavaExtension(
+      "minecraft:lava", {{"level", "2"}, {"future_state", "kept"}});
+  const FluidState lava = fluidStateOf(lavaExtension);
+  require(lava.is(Fluids::flowingLava()) && lava.getAmount() == 6 &&
+              !lava.isFalling(),
+          "an extended lava level decodes in the lava family");
+
+  const BlockState wetRailExtension(
+      "minecraft:rail",
+      {{"shape", "north_south"}, {"waterlogged", "true"},
+       {"future_state", "kept"}});
+  require(!wetRailExtension.isSchemaState(),
+          "the waterlogged rail is an extension state");
+  const FluidState wetRail = fluidStateOf(wetRailExtension);
+  require(wetRail.is(Fluids::water()) && wetRail.isSource(),
+          "an extended waterlogged host reports a water source");
+  require(fluidStateOf(wetRailExtension) == wetRail,
+          "the waterlogged extension result is cached");
+}
+
 // The 32 water/lava states must match the 26.1 exported protocol table: the
 // JSON-derived TSV lists every block state in registry-id order, so the rows at
 // the water/lava block states pin both the ids and the property values.
@@ -418,6 +491,7 @@ int main(int argc, char **argv) {
     emptyFluidState();
     levels();
     queriesAreSideEffectFree();
+    cachedFluidStateDecode();
     protocolStateTable(assets);
     std::cout << "fluid tests passed\n";
     return 0;

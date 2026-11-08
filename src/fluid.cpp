@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace redstone {
 namespace {
@@ -175,18 +176,48 @@ bool FluidState::operator==(const FluidState &other) const {
          falling_ == other.falling_;
 }
 
-// LiquidBlock.getFluidState: `level` is clamped onto the 9-entry state cache
-// (Math.min(level, 8)), so levels 8..15 all read the falling full state while
-// the block state keeps its own property value.
-FluidState fluidStateOf(const BlockState &state) {
+namespace {
+// BlockBehaviour.BlockStateBase.initCache calls owner.getFluidState once for
+// every registered state. The C++ registry publishes immutable state ids, so a
+// per-thread dense id table provides the same cached lookup without changing
+// BlockState's two-word layout. Imported extension states receive new ids after
+// startup and are therefore decoded on their first lookup too.
+struct FluidStateCacheEntry {
+  FluidState fluid;
+  bool ready = false;
+};
+
+std::vector<FluidStateCacheEntry> &fluidStateCache() {
+  static thread_local std::vector<FluidStateCacheEntry> cache;
+  return cache;
+}
+
+FluidState decodeFluidState(const BlockState &state) {
   if (!isLiquidBlock(state)) {
     // SimpleWaterloggedBlock.getFluidState: a waterlogged host reports a water
     // source even though its own block is not a liquid (F-5).
-    if (waterloggedOf(state))
+    bool waterlogged = waterloggedOf(state);
+    if (!state.isSchemaState() && state.hasProperty("waterlogged")) {
+      std::uint8_t value = 0;
+      waterlogged = propertyValueFromName(
+                        PropertyKind::Waterlogged,
+                        state.getView("waterlogged", "false"), value) &&
+                    value != 0;
+    }
+    if (waterlogged)
       return FluidState(Fluids::water(), 8, false);
     return FluidState();
   }
-  const int level = static_cast<int>(propertyValue(state, PropertyKind::Level));
+  int level = static_cast<int>(propertyValue(state, PropertyKind::Level));
+  if (!state.isSchemaState()) {
+    // An extension state has no packed schema field, but its imported property
+    // map still carries the LiquidBlock level. Decode that value before caching.
+    std::uint8_t value = 0;
+    if (!propertyValueFromName(PropertyKind::Level,
+                               state.getView("level", "0"), value))
+      return FluidState();
+    level = value;
+  }
   const int clamped = std::min(level, 8);
   const bool water = state.is(Blocks::WATER);
   if (clamped == 0)
@@ -199,6 +230,23 @@ FluidState fluidStateOf(const BlockState &state) {
   }
   return water ? FluidState(Fluids::flowingWater(), 8, true)
                : FluidState(Fluids::flowingLava(), 8, true);
+}
+} // namespace
+
+// LiquidBlock.getFluidState: `level` is clamped onto the 9-entry state cache
+// (Math.min(level, 8)), so levels 8..15 all read the falling full state while
+// the block state keeps its own property value.
+FluidState fluidStateOf(const BlockState &state) {
+  const auto id = static_cast<std::size_t>(state.id());
+  auto &cache = fluidStateCache();
+  if (id >= cache.size())
+    cache.resize(id + 1);
+  FluidStateCacheEntry &entry = cache[id];
+  if (!entry.ready) {
+    entry.fluid = decodeFluidState(state);
+    entry.ready = true;
+  }
+  return entry.fluid;
 }
 
 // ---------------------------------------------------------------------------

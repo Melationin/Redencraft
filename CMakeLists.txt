@@ -62,6 +62,8 @@ option(REDSTONE_BENCHMARK_COUNT_ALLOCATIONS "Count global new allocations in the
 if(REDSTONE_BUILD_BENCHMARKS)
   add_executable(redstone_tick_benchmark benchmarks/tick_benchmark.cpp)
   target_link_libraries(redstone_tick_benchmark PRIVATE redstone_core)
+  add_executable(redstone_fluid_perf_benchmark benchmarks/fluid_perf_benchmark.cpp)
+  target_link_libraries(redstone_fluid_perf_benchmark PRIVATE redstone_core redstone_allocator)
   if(REDSTONE_BENCHMARK_COUNT_ALLOCATIONS)
     add_library(redstone_counted_allocator OBJECT src/allocator.cpp)
     target_include_directories(redstone_counted_allocator PUBLIC include)

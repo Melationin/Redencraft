@@ -162,6 +162,26 @@ build-f7-nmake\redstone_tick_benchmark.exe build-review-f2\workload.litematic 30
 
 三次同机重复的 `TOTAL`：`mean_ms=12.176/13.051/12.230`，`median_ms=6.807/9.299/7.551`，`p95_ms=60.286/65.448/63.323`；`FINAL entities=1197 scheduled=1197 moving_pistons=1995 events=0`。这是历史干态投影的 C++ 基线，**不是**与原版同阶段的对跑；机器负载和投影输入未做逐项校正，不能据此声称 5% 回归/提升。
 
+### 4.4 F-7 纯服务端热路径 A/B
+
+本节比较 `96fcafd` 基线与本轮流体热路径候选。两边使用同一份基准源码、MSVC 19.51、NMake、Release、jemalloc、CPU affinity=4、High 优先级，交替运行三次。干态输入 SHA-256 为 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。
+
+```powershell
+build-*/redstone_tick_benchmark.exe build-review-f2/workload.litematic 1000
+build-*/redstone_fluid_perf_benchmark.exe 1000
+```
+
+湿态驱动每刻显式派发一个位于开阔石底平台上的源水，使侧向搜索重复执行；两版均得到 `dispatches=1192`、`writes=112`、`pending=0`，终态指纹均为 `d0d9a2212b8f161d`。
+
+| 组 | mean_ms（三次） | median_ms（三次） | P95_ms（三次） |
+|---|---:|---:|---:|
+| 湿态基线 | 0.0614 / 0.0503 / 0.0508 | 0.0494 / 0.0399 / 0.0405 | 0.0545 / 0.0447 / 0.0450 |
+| 湿态候选 | 0.0261 / 0.0295 / 0.0281 | 0.0215 / 0.0242 / 0.0233 | 0.0240 / 0.0254 / 0.0242 |
+| 干态基线 | 3.841 / 3.851 / 3.913 | 2.783 / 2.901 / 2.964 | 8.111 / 8.167 / 8.380 |
+| 干态候选 | 3.848 / 3.860 / 3.779 | 3.054 / 3.064 / 2.728 | 8.121 / 8.074 / 7.922 |
+
+湿态是 `World::tick` 的固定工作量 A/B，候选的中位数均值从约 0.0405 ms 降到约 0.0233 ms。干态三组逐次指标互有高低，均值中位均为 3.85 ms、P95 中位从 8.17 ms 到 8.07 ms；本轮不把这一差异归因成流体优化或回归。两边终态均为 `entities=1197 scheduled=1197 moving_pistons=2003 events=0`，1000 刻指纹完全一致。上述只是同阶段 C++ 对照，没有与原版服务端同工作量对跑，不构成原版性能结论。
+
 ## 5. 已知依赖与未跑项（逐项）
 
 1. **Q-01…Q-06**：需要 Java agent 在 `LevelTicks.schedule` / `tickFluid` 注入并记录，纯 console 无法构造任意 due/priority/subTick；现有 `validation/safesave_order/vanilla/ExactAgent` 可扩展，但本轮未改 agent。
@@ -186,13 +206,15 @@ build-f7-nmake\redstone_tick_benchmark.exe build-review-f2\workload.litematic 30
 | 观察者行为 | `ObserverBlock.tick/updateShape` | 正常放置持续振荡 | D（20 刻）+B |
 | 光源/保存/网络 event loop | 原版整服 | C++ 无光照、无写回、网络只在本仓库 | 推断：C++ dedicated tick 不能与整服直接比 |
 
-可能高于原版的热路径（本轮没有逐项采样，均标“推断”，除 W-01 的 `World::tick` 实测）：
+可能高于原版的热路径（本轮没有逐项采样，均标“推断”，除 §4.4 的固定工作量 A/B）：
 
 - `Session::flushBlockUpdates` 每 broadcast 对 `changedBlocks_` 做一次 `std::sort`（`src/net/session.cpp:665-680`），再逐 section 建 `SectionChanges`；原版 ChunkHolder 用 fastutil 每 section `ShortOpenHashSet`。大量脏格时 C++ 的 `O(n log n)` 排序和 `ChangedBlock` 结构复制可能更贵。本轮 N-02 的夹具只覆盖小数百格，未做量化。
 - `World::setBlock` 的观察器/`Update` 队列与 `BlockState` 复制（`src/engine.cpp:1059-1126`）；干态 3000 tick 基准包含此路径，但没有与原版拆分比较。
 - `prepareChunkSnapshot`/`snapshotChunk` 对区块 palette 的复制（`src/net/wire.cpp`、`src/net/session.cpp`）；只在发区块时发生，本轮未计时。
 - `tickFluidAt` 当前只在 `traceUpdates` 时写 log（`src/engine.cpp:1655-1691`）；常规路径不分配 trace，但每次派发仍有函数调用/队列遍历，W-01 实测 1000 tick 的 `World::tick` 已包含它。
 - `PistonTickerSlot`/`PosMap` 的每 tick 扫描（`src/piston.cpp:600-653`）；干态投影有 1995 个移动活塞，属于实测负载的一部分。
+- `fluidStateOf` 使用每线程按 state ID 索引的缓存（`src/fluid.cpp`）；首次遇到新 ID 可能扩容，重复查询不分配。
+- 静态共享面缓存是 256 项直接映射表（`src/fluid_flow.cpp`），冲突时会重算，但没有堆节点；移动活塞始终绕过缓存。
 
 ## 7. 构建与 CTest
 

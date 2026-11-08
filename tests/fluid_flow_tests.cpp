@@ -208,6 +208,64 @@ void slopePreference() {
           "the opposite flat neighbour gets nothing");
 }
 
+// The slope search visits one cell past the four-block search distance so it can
+// recognize a hole at radius five. Put that hole on the negative side of a
+// negative-coordinate source; only the direction containing it may spread.
+void maximumSlopeAtNegativeCoordinates() {
+  World world;
+  flatFloor(world);
+  const Pos source{-10, 64, -10};
+  const Pos eastNeighbor{-9, 64, -10};
+  world.rawSetBlock(source, waterLevel(0));
+  // Five cells east of the source is the last hole probe of getSlopeDistance at
+  // pass 4. The floor at that cell is the only opening in the four arms.
+  world.rawSetBlock({-5, 63, -10}, Blocks::AIR.defaultState());
+
+  fluidSpread(world, source, world.getBlock(source),
+              fluidStateOf(world.getBlock(source)));
+  require(levelOf(world, eastNeighbor) == 1,
+          "the maximum-radius hole attracts water east");
+  require(world.getBlock({-10, 64, -9}).is(Blocks::AIR),
+          "north is not on the winning slope");
+  require(world.getBlock({-10, 64, -11}).is(Blocks::AIR),
+          "south is not on the winning slope");
+  require(world.getBlock({-11, 64, -10}).is(Blocks::AIR),
+          "west is not on the winning slope");
+
+  // One cell farther outside the bound is not searched. With no winning slope,
+  // all four equal directions spread, including east.
+  World beyond;
+  flatFloor(beyond);
+  beyond.rawSetBlock(source, waterLevel(0));
+  beyond.rawSetBlock({-4, 63, -10}, Blocks::AIR.defaultState());
+  fluidSpread(beyond, source, beyond.getBlock(source),
+              fluidStateOf(beyond.getBlock(source)));
+  for (const Pos neighbour : {Pos{-9, 64, -10}, Pos{-10, 64, -9},
+                              Pos{-10, 64, -11}, Pos{-11, 64, -10}})
+    require(levelOf(beyond, neighbour) == 1,
+            "a hole beyond the radius does not choose a side");
+}
+
+// FlowingFluid.getNewLiquid receives the state at the visited position and
+// passes that same state to canPassThroughWall. It must not re-read the world at
+// the source cell, where the caller's state is the evidence for the wall test.
+void newLiquidUsesPassedState() {
+  World world;
+  flatFloor(world);
+  const Pos target{0, 64, 0};
+  world.rawSetBlock(target, Blocks::AIR.defaultState());
+  world.rawSetBlock({1, 64, 0}, waterLevel(0));
+
+  const FluidState blocked = fluidNewLiquid(
+      world, target, Blocks::SMOOTH_STONE.defaultState(), Fluids::water());
+  require(blocked.isEmpty(),
+          "the supplied full-cube source state blocks the wall test");
+  const FluidState open = fluidNewLiquid(world, target, world.getBlock(target),
+                                         Fluids::water());
+  require(open.getAmount() == 7,
+          "the real air source lets the adjacent source contribute amount 7");
+}
+
 // 5b. W-05: equal-distance directions are all kept and written in the enum order
 // the spread map iterates (North, South, West, East), which is what
 // EnumMap(Direction) gives vanilla.
@@ -433,6 +491,22 @@ void wallFaceSides() {
                                   world.getBlock(carpetPos)),
           "downward flow leaves the carpet through its inset top face");
 
+  // The cache key includes the direction, not just the ordered state pair.
+  for (int repeat = 0; repeat < 8; ++repeat) {
+    require(!fluidCanPassThroughWall(world, Direction::Up, below,
+                                     world.getBlock(below), carpetPos,
+                                     world.getBlock(carpetPos)),
+            "repeated Up lookup stays sealed");
+    require(fluidCanPassThroughWall(world, Direction::Down, above,
+                                    world.getBlock(above), carpetPos,
+                                    world.getBlock(carpetPos)),
+            "Down lookup is not conflated with Up");
+    require(fluidCanPassThroughWall(world, Direction::East, below,
+                                    world.getBlock(below), carpetPos,
+                                    world.getBlock(carpetPos)),
+            "the horizontal face is independently open");
+  }
+
   // A water source behaves like air here: water's shape is empty.
   world.rawSetBlock(below, waterLevel(0));
   require(!fluidCanPassThroughWall(world, Direction::Up, below,
@@ -488,6 +562,26 @@ void movingPistonShapeDependsOnProgress() {
   require(atStart != atEnd,
           "the same moving_piston state id gives different wall results at "
           "different progress values");
+
+  // The source side is equally dynamic. Its collision shape moves toward the
+  // target cell as progress advances, and must bypass the static-pair cache too.
+  const Pos movingSource{0, 66, 0};
+  const Pos aboveMoving{0, 67, 0};
+  world.rawSetBlock(movingSource, Blocks::MOVING_PISTON.defaultState());
+  world.rawSetBlock(aboveMoving, Blocks::AIR.defaultState());
+  const auto sourceShapeAt = [&](float progress) {
+    auto entity = std::make_shared<PistonMovingBlockEntity>(
+        PistonMovingBlockEntity{movingSource, Blocks::SMOOTH_STONE.defaultState(),
+                                Direction::Down, true, false});
+    entity->progress = progress;
+    world.setPistonEntity(movingSource, entity);
+    return fluidCanPassThroughWall(world, Direction::Up, movingSource,
+                                   world.getBlock(movingSource), aboveMoving,
+                                   world.getBlock(aboveMoving));
+  };
+  require(sourceShapeAt(0.0f), "the source piston starts clear of the face");
+  require(!sourceShapeAt(1.0f),
+          "the source piston fills the face at full progress");
 }
 
 // fluidTick on a non-source rewrites the level and re-schedules itself.
@@ -559,10 +653,11 @@ void complementarySharedFace() {
   //    the same z=6..10 strip, so the x edges stay open and fluid still passes.
   //    This is the control that rules out 'two partial blocks always seal'.
   world.rawSetBlock(air, gateNorth);
-  require(fluidCanPassThroughWall(world, Direction::East, left,
-                                  world.getBlock(left), air,
-                                  world.getBlock(air)),
-          "two gates on the same axis still leave the face open");
+  for (int repeat = 0; repeat < 8; ++repeat)
+    require(fluidCanPassThroughWall(world, Direction::East, left,
+                                    world.getBlock(left), air,
+                                    world.getBlock(air)),
+            "two gates on the same axis still leave the face open");
   world.rawSetBlock(air, Blocks::AIR.defaultState());
 
   // 3. A gate meeting a wall post: the post occupies x/z 4..12, i.e. a
@@ -1191,8 +1286,10 @@ int main() {
     waterfall();
     sourceConversion();
     slopePreference();
+    maximumSlopeAtNegativeCoordinates();
     equalDistanceWriteOrder();
     levelRecomputation();
+    newLiquidUsesPassedState();
     height();
     flowVector();
     queriesDoNotMutate();
