@@ -85,6 +85,13 @@ public:
   virtual BlockState createLegacyBlock(const FluidState &state) const = 0;
   // FlowingFluid.getLegacyLevel.
   virtual int getLegacyLevel(const FluidState &state) const;
+  // FlowingFluid.getDropOff / getSlopeFindDistance / getTickDelay and
+  // canConvertToSource. The environment-dependent variants (fast lava, the
+  // water/lava source gamerules) are task F-4; these are the base values.
+  virtual int dropOff() const { return 0; }
+  virtual int slopeFindDistance() const { return 0; }
+  virtual int tickDelay() const { return 0; }
+  virtual bool canConvertToSource() const { return false; }
   // Registered bucket item name; empty for the empty fluid.
   const std::string &bucketItem() const { return bucketItem_; }
 
@@ -109,6 +116,12 @@ public:
   bool isSame(const Fluid &other) const override;
   std::uint8_t getAmount(const FluidState &state) const override;
   BlockState createLegacyBlock(const FluidState &state) const override;
+  // WaterFluid.getSlopeFindDistance / getDropOff / getTickDelay return the
+  // constants 4 / 1 / 5; canConvertToSource follows the water source gamerule.
+  int dropOff() const override { return 1; }
+  int slopeFindDistance() const override { return 4; }
+  int tickDelay() const override { return 5; }
+  bool canConvertToSource() const override { return true; }
 
 protected:
   WaterFluid(std::string_view name, bool source);
@@ -119,6 +132,12 @@ public:
   bool isSame(const Fluid &other) const override;
   std::uint8_t getAmount(const FluidState &state) const override;
   BlockState createLegacyBlock(const FluidState &state) const override;
+  // LavaFluid's overworld constants are 2 / 2 / 30 and source conversion is off;
+  // the fast-lava variant (1 / 4 / 10) is task F-4.
+  int dropOff() const override { return 2; }
+  int slopeFindDistance() const override { return 2; }
+  int tickDelay() const override { return 30; }
+  bool canConvertToSource() const override { return false; }
 
 protected:
   LavaFluid(std::string_view name, bool source);

@@ -1,5 +1,6 @@
-#include "redstone/engine.hpp"
+﻿#include "redstone/engine.hpp"
 #include "redstone/entity.hpp"
+#include "redstone/fluid_flow.hpp"
 #include "redstone/piston.hpp"
 #include "redstone/rail.hpp"
 #include "redstone/shapes.hpp"
@@ -1614,8 +1615,8 @@ void World::tickFluidAt(Pos pos, const Fluid *expected) {
                    pos, expected->name()});
   if (!fluidState.is(*expected))
     return;
-  // TODO: fluidState.tick(level, pos, blockState) lands with F-3 (spread,
-  // getNewLiquid, getFlow). This stage only proves the queue and dispatch.
+  // FlowingFluid.tick: recompute a non-source level, then spread.
+  fluidTick(*this, pos, state, fluidState);
 }
 // TODO: note particles, sound, game events, skull sounds and event broadcasts.
 void World::runEvents() {
