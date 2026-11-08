@@ -507,6 +507,18 @@ void wallFaceSides() {
             "the horizontal face is independently open");
   }
 
+  // The cache key is ordered by source/target state. With the SAME direction,
+  // the carpet as source exposes its inset top (open), while as target it exposes
+  // its full bottom (sealed).
+  require(fluidCanPassThroughWall(world, Direction::Up, carpetPos,
+                                  world.getBlock(carpetPos), above,
+                                  world.getBlock(above)),
+          "a carpet source does not seal its own top face");
+  require(!fluidCanPassThroughWall(world, Direction::Up, above,
+                                   world.getBlock(above), carpetPos,
+                                   world.getBlock(carpetPos)),
+          "swapping the same state pair makes the carpet a sealing target");
+
   // A water source behaves like air here: water's shape is empty.
   world.rawSetBlock(below, waterLevel(0));
   require(!fluidCanPassThroughWall(world, Direction::Up, below,
@@ -536,52 +548,67 @@ void forceSolidGate() {
 
 // The moving piston's shape depends on its block entity progress, so the same
 // state id must produce different wall results at different progress values.
+// A horizontal carpet keeps both sampled shapes non-empty and non-full, avoiding
+// canPassThroughWall's full-cube short circuit.
 void movingPistonShapeDependsOnProgress() {
   World world;
   flatFloor(world);
   const Pos pistonPos{0, 65, 0};
   const Pos below{0, 64, 0};
+  const BlockState movingState = Blocks::MOVING_PISTON.defaultState();
   world.rawSetBlock(pistonPos, Blocks::MOVING_PISTON.defaultState());
   world.rawSetBlock(below, waterLevel(0));
 
-  const auto shapeAt = [&](float progress) {
+  const auto requireNonFull = [&](float progress,
+                                  const VoxelShape &shape) {
+    const bool full = shape.size() == 1 && shape[0].x0 == 0 &&
+                      shape[0].y0 == 0 && shape[0].z0 == 0 &&
+                      shape[0].x1 == 16 && shape[0].y1 == 16 &&
+                      shape[0].z1 == 16;
+    require(!shape.empty() && !full,
+            "the dynamic carpet at progress " + std::to_string(progress) +
+                " is non-empty and non-full");
+  };
+  const auto targetShapeAt = [&](float progress) {
     auto entity = std::make_shared<PistonMovingBlockEntity>(
-        PistonMovingBlockEntity{pistonPos, Blocks::SMOOTH_STONE.defaultState(),
+        PistonMovingBlockEntity{pistonPos, Blocks::WHITE_CARPET.defaultState(),
                                 Direction::Down, false, false});
     entity->progress = progress;
     world.setPistonEntity(pistonPos, entity);
+    requireNonFull(progress, collisionShape(world, pistonPos, movingState));
     return fluidCanPassThroughWall(world, Direction::Up, below,
                                    world.getBlock(below), pistonPos,
                                    world.getBlock(pistonPos));
   };
 
-  // At progress 0 the moved stone sits at the far end and leaves the cell open
-  // enough for the wall test; at progress 1 it fills the cell and blocks.
-  const bool atStart = shapeAt(0.0f);
-  const bool atEnd = shapeAt(1.0f);
-  require(atStart != atEnd,
-          "the same moving_piston state id gives different wall results at "
-          "different progress values");
+  // At 0.5 the carpet's bottom is still at local y=8; at 1.0 it reaches y=0 and
+  // its full horizontal face seals an otherwise empty water source.
+  require(targetShapeAt(0.5f),
+          "the half-progress target carpet leaves the shared face open");
+  require(!targetShapeAt(1.0f),
+          "the full-progress target carpet seals the shared face");
 
   // The source side is equally dynamic. Its collision shape moves toward the
   // target cell as progress advances, and must bypass the static-pair cache too.
-  const Pos movingSource{0, 66, 0};
-  const Pos aboveMoving{0, 67, 0};
+  const Pos movingSource{0, 65, 0};
+  const Pos belowMoving{0, 64, 0};
   world.rawSetBlock(movingSource, Blocks::MOVING_PISTON.defaultState());
-  world.rawSetBlock(aboveMoving, Blocks::AIR.defaultState());
+  world.rawSetBlock(belowMoving, Blocks::AIR.defaultState());
   const auto sourceShapeAt = [&](float progress) {
     auto entity = std::make_shared<PistonMovingBlockEntity>(
-        PistonMovingBlockEntity{movingSource, Blocks::SMOOTH_STONE.defaultState(),
-                                Direction::Down, true, false});
+        PistonMovingBlockEntity{movingSource, Blocks::WHITE_CARPET.defaultState(),
+                                Direction::Down, false, false});
     entity->progress = progress;
     world.setPistonEntity(movingSource, entity);
-    return fluidCanPassThroughWall(world, Direction::Up, movingSource,
-                                   world.getBlock(movingSource), aboveMoving,
-                                   world.getBlock(aboveMoving));
+    requireNonFull(progress, collisionShape(world, movingSource, movingState));
+    return fluidCanPassThroughWall(world, Direction::Down, movingSource,
+                                   world.getBlock(movingSource), belowMoving,
+                                   world.getBlock(belowMoving));
   };
-  require(sourceShapeAt(0.0f), "the source piston starts clear of the face");
+  require(sourceShapeAt(0.5f),
+          "the half-progress source carpet leaves the shared face open");
   require(!sourceShapeAt(1.0f),
-          "the source piston fills the face at full progress");
+          "the full-progress source carpet seals the shared face");
 }
 
 // fluidTick on a non-source rewrites the level and re-schedules itself.

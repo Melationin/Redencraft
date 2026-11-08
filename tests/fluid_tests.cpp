@@ -335,32 +335,33 @@ void cachedFluidStateDecode() {
   require(registeredStateCount() == before,
           "fluid lookup does not intern post-registration states");
 
-  // An unknown imported property makes the whole state an extension. Its map,
-  // rather than packed(), still has to decode flowing/falling and waterlogged
-  // exactly as the schema state would.
+  // An unknown imported property makes the whole state an extension. Baseline
+  // decodeFluidState reads packed() through propertyValue, so an extension has
+  // no LEVEL/WATERLOGGED field and uses the same defaults as before caching.
   const BlockState waterExtension(
       "minecraft:water", {{"level", "5"}, {"future_state", "kept"}});
   require(!waterExtension.isSchemaState(), "the water state is an extension");
-  const FluidState flowing = fluidStateOf(waterExtension);
-  require(flowing.is(Fluids::flowingWater()) && flowing.getAmount() == 3 &&
-              !flowing.isFalling(),
-          "an extended water level decodes as flowing amount 3");
-  require(fluidStateOf(waterExtension) == flowing,
-          "the extended water result is cached by its new id");
+  const FluidState extensionSource = fluidStateOf(waterExtension);
+  require(extensionSource.is(Fluids::water()) && extensionSource.isSource(),
+          "an extended water level keeps the baseline level-0 source fallback");
+  require(fluidStateOf(waterExtension) == extensionSource,
+          "the extended water fallback is stable on repeat");
 
   const BlockState fallingExtension(
       "minecraft:water", {{"level", "15"}, {"future_state", "kept"}});
-  const FluidState falling = fluidStateOf(fallingExtension);
-  require(falling.is(Fluids::flowingWater()) && falling.getAmount() == 8 &&
-              falling.isFalling(),
-          "an extended water level 15 decodes as falling full");
+  require(fluidStateOf(fallingExtension).is(Fluids::water()),
+          "an extended level 15 also keeps the baseline source fallback");
 
   const BlockState lavaExtension(
       "minecraft:lava", {{"level", "2"}, {"future_state", "kept"}});
   const FluidState lava = fluidStateOf(lavaExtension);
-  require(lava.is(Fluids::flowingLava()) && lava.getAmount() == 6 &&
-              !lava.isFalling(),
-          "an extended lava level decodes in the lava family");
+  require(lava.is(Fluids::lava()) && lava.isSource(),
+          "an extended lava level keeps the baseline source fallback");
+
+  const BlockState malformedLevel(
+      "minecraft:water", {{"level", "not-a-level"}, {"future_state", "kept"}});
+  require(fluidStateOf(malformedLevel).is(Fluids::water()),
+          "an invalid extended level still uses the packed-property fallback");
 
   const BlockState wetRailExtension(
       "minecraft:rail",
@@ -369,10 +370,22 @@ void cachedFluidStateDecode() {
   require(!wetRailExtension.isSchemaState(),
           "the waterlogged rail is an extension state");
   const FluidState wetRail = fluidStateOf(wetRailExtension);
-  require(wetRail.is(Fluids::water()) && wetRail.isSource(),
-          "an extended waterlogged host reports a water source");
-  require(fluidStateOf(wetRailExtension) == wetRail,
-          "the waterlogged extension result is cached");
+  require(wetRail.isEmpty(),
+          "an extended waterlogged property keeps the dry fallback");
+
+  const BlockState unknownWet(
+      "minecraft:future_unknown_wet_probe", {{"waterlogged", "true"}});
+  require(!unknownWet.isSchemaState(), "the unknown block is an extension");
+  require(fluidStateOf(unknownWet).isEmpty(),
+          "an unknown block does not become a fluid from its property map");
+
+  const BlockState schemaWet = Blocks::RAIL.defaultState().with(
+      PropertyKind::Waterlogged, std::uint8_t{1});
+  require(schemaWet.isSchemaState(), "the rail state uses its schema");
+  require(fluidStateOf(schemaWet).is(Fluids::water()),
+          "normal schema waterlogged hosts still report a water source");
+  require(fluidStateOf(levelState(Blocks::WATER, 8)).isFalling(),
+          "normal schema falling states are unchanged");
 }
 
 // The 32 water/lava states must match the 26.1 exported protocol table: the

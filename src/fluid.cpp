@@ -180,8 +180,8 @@ namespace {
 // BlockBehaviour.BlockStateBase.initCache calls owner.getFluidState once for
 // every registered state. The C++ registry publishes immutable state ids, so a
 // per-thread dense id table provides the same cached lookup without changing
-// BlockState's two-word layout. Imported extension states receive new ids after
-// startup and are therefore decoded on their first lookup too.
+// BlockState's two-word layout. Only states that can carry a fluid enter this
+// table; ordinary dry blocks take the allocation-free path in fluidStateOf.
 struct FluidStateCacheEntry {
   FluidState fluid;
   bool ready = false;
@@ -196,28 +196,14 @@ FluidState decodeFluidState(const BlockState &state) {
   if (!isLiquidBlock(state)) {
     // SimpleWaterloggedBlock.getFluidState: a waterlogged host reports a water
     // source even though its own block is not a liquid (F-5).
-    bool waterlogged = waterloggedOf(state);
-    if (!state.isSchemaState() && state.hasProperty("waterlogged")) {
-      std::uint8_t value = 0;
-      waterlogged = propertyValueFromName(
-                        PropertyKind::Waterlogged,
-                        state.getView("waterlogged", "false"), value) &&
-                    value != 0;
-    }
-    if (waterlogged)
+    if (waterloggedOf(state))
       return FluidState(Fluids::water(), 8, false);
     return FluidState();
   }
-  int level = static_cast<int>(propertyValue(state, PropertyKind::Level));
-  if (!state.isSchemaState()) {
-    // An extension state has no packed schema field, but its imported property
-    // map still carries the LiquidBlock level. Decode that value before caching.
-    std::uint8_t value = 0;
-    if (!propertyValueFromName(PropertyKind::Level,
-                               state.getView("level", "0"), value))
-      return FluidState();
-    level = value;
-  }
+  // Keep the registry property semantics exactly as before the cache: an
+  // out-of-schema state has no packed LEVEL/WATERLOGGED field and therefore uses
+  // propertyValue's default, rather than decoding its extension property map.
+  const int level = static_cast<int>(propertyValue(state, PropertyKind::Level));
   const int clamped = std::min(level, 8);
   const bool water = state.is(Blocks::WATER);
   if (clamped == 0)
@@ -237,6 +223,10 @@ FluidState decodeFluidState(const BlockState &state) {
 // (Math.min(level, 8)), so levels 8..15 all read the falling full state while
 // the block state keeps its own property value.
 FluidState fluidStateOf(const BlockState &state) {
+  // Preserve the pre-cache fast path and avoid a thread-local vector allocation
+  // for the overwhelmingly common air/ordinary dry-block query.
+  if (!isLiquidBlock(state) && !waterloggedOf(state))
+    return FluidState();
   const auto id = static_cast<std::size_t>(state.id());
   auto &cache = fluidStateCache();
   if (id >= cache.size())

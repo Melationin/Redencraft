@@ -301,12 +301,13 @@ public:
     knownHoles_.fill(false);
   }
 
-  const BlockState &getBlockState(Pos pos) {
+  // Return by value. Out-of-table coordinates are a correctness fallback for a
+  // future fluid with a larger radius; a shared mutable scratch reference would
+  // alias the parent state when recursion overwrites it.
+  BlockState getBlockState(Pos pos) {
     const int index = indexOf(pos);
-    if (index < 0) {
-      fallbackState_ = world_.getBlock(pos);
-      return fallbackState_;
-    }
+    if (index < 0)
+      return world_.getBlock(pos);
     const auto cell = static_cast<std::size_t>(index);
     if (!knownStates_[cell]) {
       states_[cell] = world_.getBlock(pos);
@@ -322,9 +323,9 @@ public:
       if (knownHoles_[cell])
         return holes_[cell];
     }
-    const BlockState &state = getBlockState(pos);
+    const BlockState state = getBlockState(pos);
     const Pos below = pos.relative(Direction::Down);
-    const BlockState &belowState = world_.getBlock(below);
+    const BlockState belowState = world_.getBlock(below);
     const bool hole = isWaterHole(pos, state, below, belowState);
     if (index >= 0) {
       const auto cell = static_cast<std::size_t>(index);
@@ -355,7 +356,6 @@ private:
   std::array<bool, kSpreadCacheCells> knownStates_{};
   std::array<bool, kSpreadCacheCells> holes_{};
   std::array<bool, kSpreadCacheCells> knownHoles_{};
-  BlockState fallbackState_;
 };
 
 bool canMaybePassThrough(World &world, const Fluid &self, Pos sourcePos,
@@ -415,7 +415,7 @@ int getSlopeDistance(World &world, const Fluid &self, Pos pos, int pass,
     if (direction == from)
       continue;
     const Pos testPos = pos.relative(direction);
-    const BlockState &testState = context.getBlockState(testPos);
+    const BlockState testState = context.getBlockState(testPos);
     const FluidState testFluidState = fluidStateOf(testState);
     if (!canPassThrough(world, self, pos, state, direction, testPos, testState,
                         testFluidState))
@@ -740,6 +740,11 @@ void fluidTick(World &world, Pos pos, const BlockState &blockState,
   FluidState current = state;
   BlockState currentBlock = blockState;
   if (!current.isSource()) {
+    // FlowingFluid.java:446 deliberately re-reads level.getBlockState(pos) here
+    // instead of reusing the BlockState passed to tick. Keep that read: the
+    // argument is the dispatch-time snapshot, while getNewLiquid's contract uses
+    // the world state at the start of the flow computation. Once spreadTo starts
+    // writing, it still reads each target again before replacing it (line 161).
     const FluidState newFluidState =
         fluidNewLiquid(world, pos, world.getBlock(pos), current.getType());
     // FlowingFluid.tick computes the spread delay *before* writing the block
