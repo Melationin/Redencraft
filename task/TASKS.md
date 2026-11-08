@@ -95,6 +95,7 @@
 ### 提交
 
 - 主提交：`f4f1b2c` — Wire the liquid block request paths and waterlogged hosts（12 个文件，+339 / -20）
+- 返工提交：`1e11490` — rework F-5: wire the waterlogged container into flow, drainage and placement（14 个文件，+547 / -41）
 
 
 ### 返工（针对 `f4f1b2c` 的四条阻塞）
@@ -160,4 +161,4 @@
 - `c8e9eb1` 与 `f4f1b2c` 用同一 800×83×800 干态音符盒投影交替各跑 3 次，每次 1000 tick，Release + jemalloc，固定逻辑 CPU 2，高优先级。平均 **3.084 → 3.130 ms**（+1.49%），单刻中位数 **2.263 → 2.316 ms**（+2.34%），P95 **6.461 → 6.581 ms**（+1.86%），均低于历史 C++ 回归复测线。另跑的四个检查点指纹一致。完整结果见本地 `build-review-f2/f5-summary.json`。
 - 原版依据是本地 26.1 源码，本轮未运行真实服务端差分或原版性能对跑。湿态行为仍有上述缺口，待同一夹具的工作量核对后再做对比。
 
-任务进行中
+任务已完成
