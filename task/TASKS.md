@@ -123,6 +123,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 - 主提交：`f2201fc` — Implement FlowingFluid spread, level recomputation and flow vectors
   （8 个文件，+991 / -10；新增 `include/redstone/fluid_flow.hpp`、`src/fluid_flow.cpp`、`tests/fluid_flow_tests.cpp`，修改 `include/redstone/fluid.hpp`、`src/engine.cpp`、`CMakeLists.txt`、`docs/compatibility.md`）
 - 返工提交：`e76938a` — Fix the F-3 review findings: empty ticks, face sides, solidity and drops（4 个文件，+242 / -38）
+- 返工二提交：`efd54ac` — Add forceSolidOn and pin the fluid wall face sides with one carpet（5 个文件，+217 / -26）
 
 ### 返工二（回应复审：2 阻塞 + 1 应修 + 1 建议）
 
