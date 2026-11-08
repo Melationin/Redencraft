@@ -38,6 +38,7 @@
 - **F-5 方块侧接线与排水**
   依据 `LiquidBlock.java`、`SimpleWaterloggedBlock.java`、`BaseRailBlock.java` 和各宿主源码。分别接通放置、`neighborChanged`、`updateShape` 的流体刻请求，以及铁轨、墙、珊瑚扇等原版支持宿主的含水与排水。栅栏门用于开闭时的流体阻挡对照。
   执行 H-01…H-03、P-01…P-04 和 W-01 的正常放置路径，断言含水属性、排水或保水、队列请求、活塞普通/提前完成和干态回归。桶交互与实体推流继续按测试规格的 P1 分项交付。
+  补齐已注册墙与枯珊瑚扇的 `forceSolidOn`（26.1 `Blocks.java:2600,4835–4889,4915–4969,5110`）。分别验证 `LiquidBlockContainer` 容纳水的优先规则，以及该宿主作为双源转换支撑时的 `isSolid()` 判定，覆盖无碰撞或空碰撞状态。
 
 - **F-6 存档与投影的流体刻**
   依据 `SavedTick.java`、`LevelChunkTicks.java`、`SerializableChunkData.java` 和对应版本的 Litematica 格式实现。导入 `fluid_ticks` 的精确流体标识、相对延迟与优先级，按每个区块的独立流体列表恢复 `-n..-1`。投影 `PendingFluidTicks` 单独按格式夹具验证位置变换、字段与错误路径。
@@ -45,6 +46,7 @@
 
 - **F-7 验收与差分**
   汇总 F-1…F-6 的聚焦用例，按 [流体测试规格](docs/fluid-testing.md) 补齐 P0 集成对照，包含 A-05 的稳定窗口、湿态与干态红石对比，以及已实现协议路径的 N-01/N-02/N-04。缺失依赖分别登记。
+  补验 W-06 的互补共享面，使用原版半砖或台阶夹具，分别断言单侧不封面、两侧合并封面。C++ 侧尚未注册的形状按依赖缺口记录。补回已消费的显式空流体刻和读到空气的陈旧刻的派发 trace，分别检查 `fluid_tick`、`fluid_tick_skipped`，两者均不得写方块。
   区分源码对照、C++ CTest、原版 JAR 离线探针、真实 26.1 服务端差分四种证据。真实差分使用官方 JAR、隔离世界、同输入逐刻 trace 与原版生成的黄金文件；只在具备运行授权时执行。
   协议回归使用固定 26.1 导出中的水、岩浆 32 条完整 `(协议 ID, 方块, 属性)`，在 `wire_tests` 核对 `Registry::stateId` 和 `stateById`。变异测试将两段整体移动并重排成连续 ID，仍应被拒绝。
   复审时与流体前的固定基线重跑干态基准，并把已实现的动态流体负载单独建基线。记录可比的 tick 耗时分布和工作量，按 [性能回归](docs/fluid-testing.md#72-性能基准) 判定。
