@@ -5,6 +5,7 @@
 #include <map>
 #include <vector>
 
+#include "redstone/entity.hpp"
 #include "redstone/shapes.hpp"
 
 // net/minecraft/world/level/material/FlowingFluid.java
@@ -36,14 +37,34 @@ int dropOff(const Fluid &fluid) { return fluid.dropOff(); }
 int slopeFindDistance(const Fluid &fluid) { return fluid.slopeFindDistance(); }
 int tickDelay(const Fluid &fluid) { return fluid.tickDelay(); }
 
-// BlockBehaviour.blocksMotion is `block != COBWEB && block != BAMBOO_SAPLING &&
-// isSolid()`. Neither cobweb nor bamboo sapling is registered, and for the
-// blocks in this registry "has a collision shape" matches isSolid() closely
-// enough: fluids and rails have none, every solid block has one.
-// TODO: replace with the real legacySolid flag once more blocks land.
-bool blocksMotion(const BlockState &state) {
-  return !collisionShape(state).empty();
+// BlockBehaviour.calculateSolid: a state is solid when its collision shape's
+// bounding box has an average extent >= 0.7291666 or a height >= 1.0. This is
+// what makes glass solid (full box) while a 1/16 carpet is not
+// ((1 + 1/16 + 1) / 3 = 0.6875).
+// TODO: BlockBehaviour.Properties.forceSolid{On,Off} are not modelled because no
+// registered block sets them.
+bool isSolid(const BlockState &state) {
+  const VoxelShape &shape = collisionShape(state);
+  if (shape.empty())
+    return false;
+  double x0 = 16.0, y0 = 16.0, z0 = 16.0, x1 = 0.0, y1 = 0.0, z1 = 0.0;
+  for (const ShapeBox &box : shape) {
+    x0 = std::min(x0, box.x0);
+    y0 = std::min(y0, box.y0);
+    z0 = std::min(z0, box.z0);
+    x1 = std::max(x1, box.x1);
+    y1 = std::max(y1, box.y1);
+    z1 = std::max(z1, box.z1);
+  }
+  const double xs = (x1 - x0) / 16.0;
+  const double ys = (y1 - y0) / 16.0;
+  const double zs = (z1 - z0) / 16.0;
+  return (xs + ys + zs) / 3.0 >= 0.7291666666666666 || ys >= 1.0;
 }
+
+// BlockBehaviour.blocksMotion: `block != COBWEB && block != BAMBOO_SAPLING &&
+// isSolid()`. Neither excluded block is registered, so this is isSolid().
+bool blocksMotion(const BlockState &state) { return isSolid(state); }
 
 // FlowingFluid.canHoldAnyFluid. A LiquidBlockContainer always holds fluid; that
 // interface arrives with the waterlogged hosts in F-5.
@@ -64,16 +85,15 @@ bool canHoldSpecificFluid(World &, Pos, const BlockState &state, const Fluid &) 
 // of that face is covered. Boxes that do not touch the face do not contribute.
 bool mergedFaceOccludes(const VoxelShape &source, const VoxelShape &target,
                         Direction direction) {
-  // In-plane axes: (u, v) in the face's own coordinates.
-  const bool vertical = direction == Direction::Up || direction == Direction::Down;
-  const bool northSouth =
-      direction == Direction::North || direction == Direction::South;
+  // The source contributes the face on `direction`; the target contributes the
+  // face on the opposite side, so the two meet on the shared plane
+  // (Shapes.java:236-252 picks which shape is "first" by the axis direction).
   bool covered[16][16] = {};
 
-  const auto mark = [&](const VoxelShape &shape) {
+  const auto mark = [&](const VoxelShape &shape, Direction faceDir) {
     for (const ShapeBox &box : shape) {
       double face = 0.0, u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
-      switch (direction) {
+      switch (faceDir) {
       case Direction::Up:
         face = box.y1;
         u0 = box.x0;
@@ -119,14 +139,12 @@ bool mergedFaceOccludes(const VoxelShape &source, const VoxelShape &target,
       }
       // Only boxes touching this side of the block occlude the face.
       const double limit =
-          (direction == Direction::Up || direction == Direction::South ||
-           direction == Direction::East)
+          (faceDir == Direction::Up || faceDir == Direction::South ||
+           faceDir == Direction::East)
               ? 16.0
               : 0.0;
       if (std::abs(face - limit) > 1e-6)
         continue;
-      (void)vertical;
-      (void)northSouth;
       for (int i = 0; i < 16; ++i) {
         const double cu = i + 0.5;
         if (cu < u0 || cu > u1)
@@ -139,8 +157,8 @@ bool mergedFaceOccludes(const VoxelShape &source, const VoxelShape &target,
       }
     }
   };
-  mark(source);
-  mark(target);
+  mark(source, direction);
+  mark(target, opposite(direction));
   for (int i = 0; i < 16; ++i)
     for (int j = 0; j < 16; ++j)
       if (!covered[i][j])
@@ -318,11 +336,16 @@ int sourceNeighborCount(World &world, const Fluid &self, Pos pos) {
 void spreadTo(World &world, Pos pos, const BlockState &state,
               Direction direction, const FluidState &target, const Fluid &self) {
   (void)direction;
-  (void)self;
   // TODO: LiquidBlockContainer.placeLiquid (waterlogged hosts) is task F-5.
   if (!state.isAir()) {
-    // TODO: FlowingFluid.beforeDestroyingBlock. Water is a no-op; LavaFluid
-    // fizzles and ignites. Both are F-4/F-5.
+    // FlowingFluid.beforeDestroyingBlock. Water drops the block's loot before
+    // the fluid is written; lava only fizzles (WaterFluid.java:81-85,
+    // LavaFluid.java:144-146).
+    if (self.isSame(Fluids::water())) {
+      for (const auto &drop : blockDrops(state))
+        world.spawnItem(pos, drop.id, drop.count);
+    }
+    // TODO: lava's fizz (levelEvent 1501) needs the event/sound layer.
   }
   world.setBlock(pos, target.getType().createLegacyBlock(target), 3);
 }
@@ -395,21 +418,25 @@ std::map<Direction, FluidState> getSpread(World &world, Pos pos,
 bool fluidCanPassThroughWall(World &world, Direction direction, Pos sourcePos,
                              const BlockState &sourceState, Pos targetPos,
                              const BlockState &targetState) {
-  const VoxelShape &targetShape = collisionShape(targetState);
+  // Position-aware query: a moving piston's shape depends on its block entity
+  // progress, so the cached per-state shape would read as empty
+  // (MovingPistonBlock.java:105-108).
+  const VoxelShape &targetShape = collisionShape(world, targetPos, targetState);
   if (isFullCube(targetShape))
     return false;
-  const VoxelShape &sourceShape = collisionShape(sourceState);
+  const VoxelShape &sourceShape = collisionShape(world, sourcePos, sourceState);
   if (isFullCube(sourceShape))
     return false;
   if (sourceShape.empty() && targetShape.empty())
     return true;
-  (void)world;
-  (void)sourcePos;
-  (void)targetPos;
   return !mergedFaceOccludes(sourceShape, targetShape, direction);
 }
 
 float fluidHeight(World &world, Pos pos, const FluidState &state) {
+  // EmptyFluid.getHeight is the constant 0.0F, so an empty state never reports a
+  // full block just because the block above is also empty.
+  if (state.isEmpty())
+    return 0.0f;
   // FlowingFluid.hasSameAbove: a same-family fluid directly above makes the
   // surface a full block.
   const FluidState above = fluidStateOf(world.getBlock(pos.relative(Direction::Up)));
@@ -440,7 +467,7 @@ FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
   if (neighbourSources >= 2 && self.canConvertToSource()) {
     const BlockState belowState = world.getBlock(pos.relative(Direction::Down));
     const FluidState belowFluid = fluidStateOf(belowState);
-    if (isRedstoneConductor(belowState) || isSourceBlockOfThisType(belowFluid, self))
+    if (isSolid(belowState) || isSourceBlockOfThisType(belowFluid, self))
       return getSource(self, false);
   }
   const Pos abovePos = pos.relative(Direction::Up);

@@ -1,4 +1,4 @@
-﻿#include "redstone/engine.hpp"
+#include "redstone/engine.hpp"
 #include "redstone/entity.hpp"
 #include "redstone/fluid_flow.hpp"
 #include "redstone/piston.hpp"
@@ -1608,6 +1608,12 @@ void World::tickFluidAt(Pos pos, const Fluid *expected) {
     return;
   const auto state = getBlock(pos);
   const FluidState fluidState = fluidStateOf(state);
+  // An empty fluid has an empty tick (Fluid.java:61-62). A tick registered for
+  // minecraft:empty -- which the queue accepts, since it is a real identity --
+  // must be consumed without touching the block, otherwise the recompute would
+  // see "no neighbours" and write air over whatever is there.
+  if (expected->isEmpty() || fluidState.isEmpty())
+    return;
   // The queue dispatched an entry; only the identity check decides whether the
   // fluid's tick logic runs, so trace both outcomes distinctly.
   if (traceUpdates)

@@ -1,4 +1,6 @@
-﻿#include "redstone/engine.hpp"
+#include "redstone/engine.hpp"
+#include "redstone/entity.hpp"
+#include "redstone/shapes.hpp"
 #include "redstone/fluid.hpp"
 #include "redstone/fluid_flow.hpp"
 
@@ -66,6 +68,29 @@ void stepFluids(World &world, int rounds) {
   }
 }
 
+// Step through the real scheduling path instead: schedule a fluid tick and let
+// World::tick collect and dispatch it. Use `follow` to queue the ticks that the
+// previous round created, which is what F-5 will do from setBlock.
+void stepScheduled(World &world, int rounds) {
+  const auto follow = [&world] {
+    for (int x = -16; x <= 15; ++x)
+      for (int z = -16; z <= 15; ++z)
+        for (int y = 60; y <= 67; ++y) {
+          const Pos pos{x, y, z};
+          const BlockState state = world.getBlock(pos);
+          if (!isLiquidBlock(state))
+            continue;
+          const FluidState fluid = fluidStateOf(state);
+          if (!world.hasFluidTick(pos, FluidRef(fluid.getType())))
+            world.scheduleFluidTick(pos, FluidRef(fluid.getType()), 0);
+        }
+  };
+  for (int round = 0; round < rounds; ++round) {
+    follow();
+    world.tick();
+  }
+}
+
 // 1. Horizontal spread: a source on the floor spreads 8-level in each of the
 // four directions and stops after the seventh step.
 void horizontalSpread() {
@@ -103,22 +128,39 @@ void drainAfterSourceRemoved() {
           "the flowing water drains to air");
 }
 
-// 3. Waterfall: a source with a hole below produces a falling full column.
+// 3. Waterfall: a source over a drop forms a falling column that lands on the
+// platform below and spreads out along it.
 void waterfall() {
   World world;
-  flatFloor(world);
-  // A one-block hole directly under the source position.
-  world.rawSetBlock({0, 63, 0}, Blocks::AIR.defaultState());
-  world.rawSetBlock({0, 62, 0}, Blocks::AIR.defaultState());
+  // A platform at y=62 with open air above, so the column lands on it and has
+  // room to spread sideways at y=63.
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z)
+      world.loadChunk(x, z);
+  for (int x = -16; x <= 15; ++x)
+    for (int z = -16; z <= 15; ++z)
+      world.rawSetBlock({x, 62, z}, Blocks::SMOOTH_STONE.defaultState());
+
   const Pos source{0, 64, 0};
   world.rawSetBlock(source, waterLevel(0));
 
+  // One spread puts the falling column into the cell directly below.
   fluidSpread(world, source, world.getBlock(source), fluidStateOf(world.getBlock(source)));
   require(levelOf(world, {0, 63, 0}) == 8,
-          "the falling block below is level 8");
+          "the block below the source is level 8");
   const FluidState below = fluidStateOf(world.getBlock({0, 63, 0}));
   require(below.isFalling(), "the block below is a falling fluid");
   require(below.getAmount() == 8, "the falling fluid is full");
+
+  // Continue through the real scheduling path: the column lands on the platform
+  // and spreads horizontally along y=63.
+  stepScheduled(world, 8);
+  require(isLiquidBlock(world.getBlock({1, 63, 0})),
+          "the landed water spreads east along the platform");
+  require(isLiquidBlock(world.getBlock({0, 63, 1})),
+          "the landed water spreads south along the platform");
+  require(world.getBlock({0, 62, 0}).is(Blocks::SMOOTH_STONE),
+          "the platform is not replaced by the fluid");
 }
 
 // 4. Source conversion: two adjacent sources around an empty cell make it a
@@ -240,7 +282,8 @@ void queriesDoNotMutate() {
   world.rawSetBlock(pos, waterLevel(3));
   world.rawSetBlock({-1, 64, 0}, waterLevel(0));
   const BlockState before = world.getBlock(pos);
-  const auto ticks = world.scheduledTickCount();
+  const auto blockTicks = world.scheduledTickCount();
+  const auto fluidTicks = world.fluidTickCount();
   for (int i = 0; i < 32; ++i) {
     const FluidState state = fluidStateOf(world.getBlock(pos));
     (void)fluidFlow(world, pos, state);
@@ -248,7 +291,81 @@ void queriesDoNotMutate() {
     (void)fluidNewLiquid(world, pos, world.getBlock(pos), Fluids::water());
   }
   require(world.getBlock(pos) == before, "queries do not rewrite the block");
-  require(world.scheduledTickCount() == ticks, "queries do not schedule ticks");
+  require(world.scheduledTickCount() == blockTicks,
+          "queries schedule no block ticks");
+  require(world.fluidTickCount() == fluidTicks,
+          "queries schedule no fluid ticks");
+}
+
+// An explicit tick for minecraft:empty must be consumed without touching the
+// block. EmptyFluid.tick is a no-op and its height is the constant 0.
+void emptyFluidTickIsInert() {
+  World world;
+  flatFloor(world);
+  const Pos stonePos{0, 64, 0};
+  world.rawSetBlock(stonePos, Blocks::SMOOTH_STONE.defaultState());
+  const Pos airPos{1, 64, 0};
+
+  // Height of an empty state next to other empty states stays zero.
+  require(fluidHeight(world, airPos, fluidStateOf(world.getBlock(airPos))) == 0.0f,
+          "an empty fluid's height is zero, even with empty above");
+
+  require(world.scheduleFluidTick(stonePos, FluidRef(Fluids::empty()), 0),
+          "an empty-fluid tick can be queued");
+  world.tick();
+  require(world.fluidTickCount() == 0, "the empty tick was consumed");
+  require(world.getBlock(stonePos).is(Blocks::SMOOTH_STONE),
+          "an empty-fluid tick does not delete the stone");
+
+  // The same for a water tick pointing at a position that holds no water.
+  require(world.scheduleFluidTick(airPos, FluidRef(Fluids::water()), 0),
+          "a water tick against air is queued");
+  world.tick();
+  require(world.getBlock(airPos).is(Blocks::AIR),
+          "a stale water tick does not turn air into water");
+}
+
+// 3b. Glass is a solid support for source conversion even though it is not a
+// redstone conductor; a 1/16 carpet is not solid, so it does not block sideways
+// flow the way a stone wall would.
+void soliditySemantics() {
+  World world;
+  flatFloor(world);
+  // Two sources around a gap whose support is glass (solid, non-conductor).
+  world.rawSetBlock({0, 64, 3}, waterLevel(0));
+  world.rawSetBlock({2, 64, 3}, waterLevel(0));
+  world.rawSetBlock({1, 63, 3}, Blocks::GLASS.defaultState());
+  const Pos gap{1, 64, 3};
+  const FluidState converted =
+      fluidNewLiquid(world, gap, world.getBlock(gap), Fluids::water());
+  require(converted.isSource(),
+          "glass under the gap lets two sources convert it");
+
+  // A carpet is only 1/16 tall, so it is not solid: water flowing from a
+  // neighbour must replace it, and replacing it must drop its loot first
+  // (WaterFluid.beforeDestroyingBlock -> Block.dropResources).
+  World carpet;
+  flatFloor(carpet);
+  const Pos carpetSource{0, 64, 8};
+  const Pos carpetCell{1, 64, 8};
+  carpet.rawSetBlock(carpetSource, waterLevel(0));
+  carpet.rawSetBlock(carpetCell, Blocks::WHITE_CARPET.defaultState());
+  fluidSpread(carpet, carpetSource, carpet.getBlock(carpetSource),
+              fluidStateOf(carpet.getBlock(carpetSource)));
+  require(carpet.getBlock(carpetCell).is(Blocks::WATER),
+          std::string("a 1/16 carpet does not block the fluid and is replaced by it, got ") +
+              std::string(carpet.getBlock(carpetCell).shortName()));
+
+  // The carpet dropped its item before the fluid was written.
+  bool dropped = false;
+  for (const auto &entity : carpet.entities) {
+    if (!entity || entity->isRemoved())
+      continue;
+    if (auto *item = dynamic_cast<ItemEntity *>(entity.get()))
+      if (item->item.id == "minecraft:white_carpet")
+        dropped = true;
+  }
+  require(dropped, "the replaced carpet drops its item before the fluid lands");
 }
 
 // fluidTick on a non-source rewrites the level and re-schedules itself.
@@ -292,6 +409,8 @@ int main() {
     height();
     flowVector();
     queriesDoNotMutate();
+    emptyFluidTickIsInert();
+    soliditySemantics();
     tickReschedulesNonSource();
     std::cout << "fluid flow tests passed\n";
     return 0;
