@@ -277,9 +277,26 @@ LitematicImport loadLitematic(const nbt::Tag &root,
                    std::numeric_limits<int>::max()),
            bounded(numeric(tick, "Priority"), -3, 3), false});
     }
-    if (!list(region, "PendingFluidTicks").empty())
-      throw nbt::Error(
-          "schematic fluid ticks are excluded"); // TODO: fluid ticks.
+    // PendingFluidTicks shares the PendingBlockTicks record shape (Block/Time/
+    // Priority) but the type names a Fluid, not a Block. The coordinate is
+    // transformed through the same projection offset, and the fluid identity is
+    // carried through to the world's own fluid tick queue on import.
+    for (const auto &tick : list(region, "PendingFluidTicks")) {
+      const auto pos = add(lo, vector(tick), options);
+      const auto &type = required(tick, "Block", 8).text;
+      const auto canonical =
+          type.find(':') == std::string::npos ? "minecraft:" + type : type;
+      if (FluidRef(canonical).empty()) {
+        if (!options.substituteUnsupported)
+          throw nbt::Error("unsupported schematic fluid tick: " + canonical);
+        continue;
+      }
+      result.world.ticks.push_back(
+          {pos, canonical,
+           bounded(numeric(tick, "Time"), std::numeric_limits<int>::min(),
+                   std::numeric_limits<int>::max()),
+           bounded(numeric(tick, "Priority"), -3, 3), true});
+    }
   }
   const auto minX = chunkCoord(result.min.x),
              maxX = chunkCoord(result.maxExclusive.x - 1);

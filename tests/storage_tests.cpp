@@ -407,6 +407,19 @@ int main() {
   World restored;
   importWorld(saved, restored);
   assert(restored.scheduledTickCount() == 5);
+  // A-02: the fluid queue is a SEPARATE LevelTicks container, so the saved
+  // fluid_ticks entry above (chunk 0) restores with its own -N..-1 base and
+  // keeps its exact fluid identity instead of being dropped.
+  assert(restored.fluidTickCount() == 1);
+  assert(restored.hasFluidTick({2, 82, 5}, FluidRef(Fluids::water())));
+  // Exact identity: water and flowing_water never match each other.
+  assert(!restored.hasFluidTick({2, 82, 5}, FluidRef(Fluids::flowingWater())));
+  {
+    const auto fluidTicks = restored.fluidTicks();
+    assert(fluidTicks.size() == 1);
+    assert(fluidTicks[0].first.trigger == 102);
+    assert(fluidTicks[0].first.order == -1);
+  }
   // LevelChunkTicks.unpack gives each chunk -N..-1 in saved-list order, so the
   // restored subTickOrders are negative and chunk 0 keeps both duplicates.
   std::vector<std::int64_t> restoredOrders;
@@ -481,6 +494,70 @@ int main() {
     failed = true;
   }
   assert(failed);
+  // A-02: the two tick families get independent -N..-1 bases per saved list.
+  {
+    LoadedWorld mixed;
+    mixed.gameTime = 100;
+    mixed.chunks = {{0, 0}};
+    mixed.ticks = {
+        {{1, 70, 1}, "minecraft:smooth_stone", 3, 0, false},
+        {{2, 70, 1}, "minecraft:smooth_stone", 4, 0, false},
+        {{3, 70, 1}, "minecraft:water", 5, 0, true},
+        {{4, 70, 1}, "minecraft:flowing_lava", 6, 1, true},
+    };
+    World world2;
+    importWorld(mixed, world2);
+    assert(world2.scheduledTickCount() == 2);
+    assert(world2.fluidTickCount() == 2);
+    // Block ticks are {-2,-1}; fluid ticks restart at {-2,-1} in their own
+    // container rather than continuing the block counter.
+    std::vector<std::int64_t> blockOrders, fluidOrders;
+    for (const auto &tick : world2.scheduledTicks())
+      blockOrders.push_back(tick.order);
+    for (const auto &entry : world2.fluidTicks())
+      fluidOrders.push_back(entry.first.order);
+    std::sort(blockOrders.begin(), blockOrders.end());
+    std::sort(fluidOrders.begin(), fluidOrders.end());
+    assert((blockOrders == std::vector<std::int64_t>{-2, -1}));
+    assert((fluidOrders == std::vector<std::int64_t>{-2, -1}));
+    // Each entry keeps its own exact fluid and delay.
+    assert(world2.hasFluidTick({3, 70, 1}, FluidRef(Fluids::water())));
+    assert(world2.hasFluidTick({4, 70, 1}, FluidRef(Fluids::flowingLava())));
+    assert(!world2.hasFluidTick({3, 70, 1}, FluidRef(Fluids::flowingWater())));
+    for (const auto &entry : world2.fluidTicks()) {
+      const auto delay = entry.first.trigger - 100;
+      if (entry.first.pos == Pos{3, 70, 1})
+        assert(delay == 5);
+      else
+        assert(delay == 6);
+    }
+  }
+  // An explicit minecraft:empty saved entry is a real identity and restores.
+  {
+    LoadedWorld empties;
+    empties.gameTime = 7;
+    empties.chunks = {{0, 0}};
+    empties.ticks = {{{5, 70, 5}, "minecraft:empty", 1, 0, true}};
+    World world3;
+    importWorld(empties, world3);
+    assert(world3.fluidTickCount() == 1);
+    assert(world3.hasFluidTick({5, 70, 5}, FluidRef(Fluids::empty())));
+  }
+  // Unknown and empty fluid names are data errors, not silent drops.
+  for (const char *bad : {"minecraft:not_a_fluid", ""}) {
+    LoadedWorld rejects;
+    rejects.gameTime = 7;
+    rejects.chunks = {{0, 0}};
+    rejects.ticks = {{{5, 70, 5}, bad, 1, 0, true}};
+    World world4;
+    bool rejected = false;
+    try {
+      importWorld(rejects, world4);
+    } catch (const nbt::Error &) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
   entityStorageFixtures(p / "entity_world");
   entityNumericImport();
   std::filesystem::remove_all(p);

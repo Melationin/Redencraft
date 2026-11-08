@@ -76,7 +76,15 @@ static Tag fixture() {
                         {"z", integer(0)},
                         {"Block", string("minecraft:sand")},
                         {"Time", integer(2)},
-                        {"Priority", integer(-1)}})})}});
+                        {"Priority", integer(-1)}})})},
+       // PendingFluidTicks shares the record shape, but Block names a Fluid.
+       {"PendingFluidTicks",
+        list({compound({{"x", integer(2)},
+                        {"y", integer(0)},
+                        {"z", integer(0)},
+                        {"Block", string("minecraft:flowing_water")},
+                        {"Time", integer(5)},
+                        {"Priority", integer(0)}})})}});
   return compound({{"Version", integer(6)},
                    {"SubVersion", integer(1)},
                    {"MinecraftDataVersion", integer(20060210)},
@@ -108,9 +116,20 @@ int main(int argc, char **argv) {
   assert(loaded.world.entities[0].get("UUID")->ints !=
          loaded.world.entities[1].get("UUID")->ints);
   assert(loaded.world.ticks[0].pos == (Pos{-19, 64, 0}));
+  // A-04: the fluid tick keeps the projection offset and its exact identity.
+  assert(loaded.world.ticks.size() == 2);
+  assert(loaded.world.ticks[1].fluid);
+  assert(loaded.world.ticks[1].pos == (Pos{-18, 64, 0}));
+  assert(loaded.world.ticks[1].type == "minecraft:flowing_water");
+  assert(loaded.world.ticks[1].delay == 5 &&
+         loaded.world.ticks[1].priority == 0);
   World world;
   importWorld(loaded.world, world);
   assert(world.entities.size() == 2 && world.scheduledTickCount() == 1);
+  assert(world.fluidTickCount() == 1);
+  assert(world.hasFluidTick({-18, 64, 0}, FluidRef(Fluids::flowingWater())));
+  // Exact identity again: the source entry must not match a flowing one.
+  assert(!world.hasFluidTick({-18, 64, 0}, FluidRef(Fluids::water())));
   // Snapshot import preserves unsupported/suspended physics until a saved tick
   // or a real world update reaches it; no onPlace callbacks are invented.
   assert(!world.hasScheduledTick({-17, 64, 0}, "minecraft:sand"));
@@ -146,6 +165,22 @@ int main(int argc, char **argv) {
   const auto many = loadLitematic(large);
   assert(many.regionCount == 4262 && many.world.blocks.size() == 4262);
   assert(many.world.blocks.at({61, 64, 42}).name() == "minecraft:smooth_stone");
+  // A-04: an unknown fluid name in PendingFluidTicks is a data error by
+  // default and is only skipped when substitution is explicitly allowed.
+  {
+    auto unknownFluid = doc;
+    auto &ticks = unknownFluid.compound["Regions"]
+                       .compound["one"]
+                       .compound["PendingFluidTicks"]
+                       .list;
+    ticks[0].compound["Block"].text = "minecraft:not_a_fluid";
+    rejects([&] { loadLitematic(unknownFluid); });
+    LitematicOptions lenient;
+    lenient.substituteUnsupported = true;
+    const auto skipped = loadLitematic(unknownFluid, lenient);
+    assert(skipped.world.ticks.size() == 1);
+    assert(!skipped.world.ticks[0].fluid);
+  }
   auto malformed = doc;
   malformed.compound["Regions"]
       .compound["one"]

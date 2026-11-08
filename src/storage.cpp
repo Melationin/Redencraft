@@ -507,8 +507,8 @@ LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
                 });
   return w;
 }
-// TODO: Fluid ticks and non-piston block entities remain in LoadedWorld for
-// reporting; their simulation is not implemented.
+// TODO: non-piston block entities remain in LoadedWorld for reporting; their
+// simulation is not implemented.
 void importWorld(const LoadedWorld &input, World &world) {
   world.setGameTime(input.gameTime);
   world.setSeed(static_cast<std::uint64_t>(input.seed));
@@ -519,24 +519,47 @@ void importWorld(const LoadedWorld &input, World &world) {
   // LevelChunkTicks.unpack assigns -N..-1 in saved-list order per chunk.
   // Its scheduleUnchecked path preserves duplicate saved entries. Unknown
   // vanilla block IDs cannot yet be validated against the complete registry.
-  std::map<std::pair<int, int>, std::int64_t> counts;
-  for (const auto &tick : input.ticks)
-    if (!tick.fluid && world.isLoaded(tick.pos))
-      ++counts[{chunkCoord(tick.pos.x), chunkCoord(tick.pos.z)}];
-  std::map<std::pair<int, int>, std::int64_t> next;
-  for (const auto &[chunk, count] : counts)
-    next[chunk] = -count;
+  //
+  // LevelChunk.java:639-641 unpacks blockTicks and fluidTicks as two separate
+  // containers, so each family gets its OWN -N..-1 base: a chunk with two saved
+  // block ticks and one saved fluid tick yields block orders {-2,-1} and a
+  // fluid order {-1}, not one shared counter.
+  const auto chunkOf = [](const SavedTickData &tick) {
+    return std::make_pair(chunkCoord(tick.pos.x), chunkCoord(tick.pos.z));
+  };
+  std::map<std::pair<int, int>, std::int64_t> blockNext, fluidNext;
   for (const auto &tick : input.ticks) {
-    if (tick.fluid || !world.isLoaded(tick.pos))
+    if (!world.isLoaded(tick.pos))
       continue;
-    const auto chunk =
-        std::make_pair(chunkCoord(tick.pos.x), chunkCoord(tick.pos.z));
+    auto &table = tick.fluid ? fluidNext : blockNext;
+    ++table[chunkOf(tick)];
+  }
+  for (auto &[chunk, count] : blockNext)
+    count = -count;
+  for (auto &[chunk, count] : fluidNext)
+    count = -count;
+  for (const auto &tick : input.ticks) {
+    if (!world.isLoaded(tick.pos))
+      continue;
+    const auto chunk = chunkOf(tick);
     const auto name = tick.type.find(':') == std::string::npos
                           ? "minecraft:" + tick.type
                           : tick.type;
+    if (tick.fluid) {
+      // ServerLevel.fluidTicks stores the Fluid identity itself, so an unknown
+      // or empty name is a data error rather than a silent drop. The explicit
+      // minecraft:empty entry is a real identity and is restored as one.
+      const auto fluid = FluidRef(name);
+      if (fluid.empty())
+        throw nbt::Error("unknown fluid in fluid_ticks: " + name);
+      world.restoreFluidTick({tick.pos, BlockRef{}, input.gameTime + tick.delay,
+                              tick.priority, fluidNext[chunk]++},
+                             fluid);
+      continue;
+    }
     // LevelChunkTicks.unpack: scheduleUnchecked keeps duplicate saved entries.
     world.restoreScheduledTick({tick.pos, name, input.gameTime + tick.delay,
-                                tick.priority, next[chunk]++});
+                                tick.priority, blockNext[chunk]++});
   }
   for (auto &tag : input.blockEntities) {
     auto id = tag.get("id");
