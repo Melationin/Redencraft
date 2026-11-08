@@ -204,6 +204,21 @@ private:
   std::array<PropertyLayout, kPropertyKindCount> layout_{};
 };
 
+// BlockBehaviour.BlockStateBase light fields. canOcclude and
+// useShapeForLightOcclusion intentionally remain separate from collision
+// geometry. Face masks reserve exact directional occlusion data for L-2a.
+struct BlockLightProperties {
+  std::uint8_t emission = 0;
+  std::uint8_t dampening = 0;
+  bool canOcclude = false;
+  bool useShapeForLightOcclusion = false;
+  bool propagatesSkylightDown = true;
+  bool supported = false;
+  std::array<std::uint16_t, 6> occlusionFace{};
+  std::uint8_t occlusionFaceValidMask = 0;
+  bool operator==(const BlockLightProperties &) const = default;
+};
+
 // BlockBehaviour.Properties subset (see docs/compatibility.md).
 struct BlockMetadata {
   float hardness;
@@ -226,6 +241,15 @@ struct BlockMetadata {
   // declaration (FlowingFluid.java:410-435).
   bool liquidContainer = false;
 };
+
+// Placeholder identity used for imported states outside the official metadata
+// table. Unknown states are never assigned guessed light values.
+const BlockLightProperties &unsupportedLightProperties() noexcept;
+const BlockLightProperties &lightPropertiesOf(const BlockState &state);
+BlockLightProperties officialLightProperties(
+    std::string_view blockName, std::string_view properties);
+// BlockBehaviour.BlockStateBase.blocksMotion for the registered subset.
+bool blocksMotion(const BlockState &state);
 struct BlockRegistration {
   std::string name;
   BlockMetadata metadata;
@@ -267,6 +291,7 @@ public:
   // LiquidBlockContainer: the block can hold its own fluid independent of the
   // blocksMotion test (SimpleWaterloggedBlock.java:18-36).
   bool isLiquidContainer() const { return metadata_.liquidContainer; }
+  const BlockLightProperties &lightProperties(std::uint32_t variant) const;
 
 private:
   friend void detail::registerBlock(Block &block);
@@ -284,6 +309,7 @@ private:
   bool wall_ = false;
   bool coralFan_ = false;
   bool coralWallFan_ = false;
+  std::vector<BlockLightProperties> lightProperties_;
 };
 
 // Block object handle (ScheduledTick.block / BlockEvent.block / update source).
@@ -424,6 +450,9 @@ inline bool shortOf(const BlockState &state) {
 // BlockBehaviour.Properties subset of a state: per-block data, no cache.
 inline const BlockMetadata &blockMetadata(const BlockState &state) {
   return state.block().metadata();
+}
+inline const BlockLightProperties &blockLightProperties(const BlockState &state) {
+  return lightPropertiesOf(state);
 }
 
 // ---------------------------------------------------------------------------

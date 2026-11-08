@@ -1,6 +1,7 @@
 #include "redstone/engine.hpp"
 #include "redstone/entity.hpp"
 #include "redstone/fluid_flow.hpp"
+#include "redstone/light.hpp"
 #include "redstone/piston.hpp"
 #include "redstone/rail.hpp"
 #include "redstone/shapes.hpp"
@@ -268,7 +269,7 @@ World::World(int minY, int maxY, int maxNeighborUpdates)
     throw std::invalid_argument(
         "World: vertical range needs more than kSectionCapacity sections");
 }
-World::~World() = default;
+World::~World() { disableLighting(); }
 World::World(World &&) noexcept = default;
 World &World::operator=(World &&) noexcept = default;
 // ---------------------------------------------------------------------------
@@ -938,6 +939,8 @@ void World::loadChunk(int x, int z) {
   const auto key = chunkKey(x, z);
   auto &c = chunks_[key];
   c.loaded = true;
+  if (!c.heightmaps)
+    c.heightmaps = std::make_unique<ChunkHeightmaps>(minY_, sectionCount() * 16);
   // Publish the fresh node so a cached miss cannot mask the load.
   ChunkCacheSlot &slot = blockReadCache_.chunks[(key * 0x9E3779B97F4A7C15ull) >> 58];
   slot.key = key;
@@ -947,18 +950,117 @@ void World::loadChunk(int x, int z) {
   // already had.
   tickQueue_->addContainer(chunkKey(x, z));
   fluidTickQueue_->addContainer(chunkKey(x, z));
+  if (lightService_)
+    lightService_->submitChunk(std::move(*makeLightChunkInput(x, z)));
 }
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
   auto it = chunks_.find(chunkKey(x, z));
   if (it != chunks_.end())
     it->second.loaded = false;
+  if (lightService_)
+    lightService_->unloadChunk(x, z);
 }
+
+std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const {
+  const Chunk *chunk = chunkAt(x, z);
+  if (!chunk)
+    return nullptr;
+  auto input = std::make_unique<LightChunkInput>();
+  input->chunkX = x;
+  input->chunkZ = z;
+  input->minBlockSectionY = minY_ >> 4;
+  input->blockSectionCount = sectionCount();
+
+  const auto air = lightPropertiesOf(airState());
+  std::vector<std::uint16_t> airCells(kLightVolume, 0);
+  input->sections.push_back(std::make_shared<const LightSectionSnapshot>(
+      input->minBlockSectionY - 1, true,
+      std::vector<BlockLightProperties>{air}, airCells));
+
+  for (int section = 0; section < sectionCount(); ++section) {
+    const Section &data = chunk->sections[section];
+    std::vector<BlockLightProperties> palette;
+    std::vector<std::uint16_t> cells(kLightVolume);
+    std::unordered_map<BlockState::Id, std::uint16_t> byState;
+    for (int index = 0; index < kLightVolume; ++index) {
+      const BlockState::Id state = data.get(index);
+      auto found = byState.find(state);
+      std::uint16_t paletteIndex;
+      if (found == byState.end()) {
+        paletteIndex = static_cast<std::uint16_t>(palette.size());
+        byState.emplace(state, paletteIndex);
+        palette.push_back(lightPropertiesOf(BlockState::fromId(state)));
+      } else {
+        paletteIndex = found->second;
+      }
+      cells[index] = paletteIndex;
+    }
+    input->sections.push_back(std::make_shared<const LightSectionSnapshot>(
+        input->minBlockSectionY + section, data.hasOnlyAir(), std::move(palette),
+        std::move(cells)));
+  }
+  input->sections.push_back(std::make_shared<const LightSectionSnapshot>(
+      input->minBlockSectionY + sectionCount(), true,
+      std::vector<BlockLightProperties>{air}, airCells));
+  return input;
+}
+
+void World::enableLighting() {
+  if (lightService_)
+    return;
+  lightService_ =
+      std::make_unique<LightService>(minY_ >> 4, sectionCount());
+  std::vector<std::uint64_t> keys;
+  keys.reserve(chunks_.size());
+  for (const auto &[key, chunk] : chunks_)
+    if (chunk.loaded)
+      keys.push_back(key);
+  std::sort(keys.begin(), keys.end());
+  for (std::uint64_t key : keys) {
+    const int chunkX = static_cast<int>(key >> 32);
+    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+    lightService_->submitChunk(std::move(*makeLightChunkInput(chunkX, chunkZ)));
+  }
+}
+
+void World::disableLighting() { lightService_.reset(); }
 bool World::isChunkLoaded(int x, int z) const { return chunkAt(x, z) != nullptr; }
 bool World::isLoaded(Pos p) const {
   // Level.getBlockState: bounds check, then the chunk cache (hash) lookup.
   return p.y >= minY_ && p.y < maxY_ &&
          chunkAt(chunkIndex(p.x), chunkIndex(p.z)) != nullptr;
+}
+const Heightmap *World::heightmap(int chunkX, int chunkZ,
+                                  HeightmapType type) const {
+  const Chunk *chunk = chunkAt(chunkX, chunkZ);
+  return chunk && chunk->heightmaps ? chunk->heightmaps->find(type) : nullptr;
+}
+int World::height(HeightmapType type, int blockX, int blockZ) const {
+  const Heightmap *map = heightmap(chunkIndex(blockX), chunkIndex(blockZ), type);
+  return map ? map->height(blockX & 15, blockZ & 15) : minY_ - 1;
+}
+void World::primeHeightmaps() {
+  for (auto &[key, chunk] : chunks_) {
+    if (!chunk.loaded)
+      continue;
+    const int chunkX = static_cast<int>(key >> 32);
+    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+    if (!chunk.heightmaps)
+      chunk.heightmaps = std::make_unique<ChunkHeightmaps>(
+          minY_, sectionCount() * 16);
+    int highestSectionPosition = minY_;
+    for (int section = sectionCount(); section-- > 0;) {
+      if (!chunk.sections[section].hasOnlyAir()) {
+        highestSectionPosition = (minY_ >> 4) * 16 + section * 16 + 16;
+        break;
+      }
+    }
+    chunk.heightmaps->prime(
+        highestSectionPosition, [this, chunkX, chunkZ](int x, int y, int z) {
+          return getBlock({chunkX * 16 + x, y, chunkZ * 16 + z});
+        });
+  }
 }
 BlockState World::getBlock(Pos p) const {
   if (p.y < minY_ || p.y >= maxY_)
@@ -1062,10 +1164,45 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
   auto old = getBlock(p);
   if (old == state)
     return false;
+  const bool wasSectionEmpty =
+      chunkAt(chunkIndex(p.x), chunkIndex(p.z))
+          ->sections[sectionIndex(p.y)]
+          .hasOnlyAir();
   rawSetBlock(p, state);
-  // TODO: reproduce chunk heightmaps, lighting, dirty/client notifications,
-  // POI, and generic block-entity pre-removal/creation for supported entity
-  // blocks.
+  if (Chunk *changedChunk = chunkAt(chunkIndex(p.x), chunkIndex(p.z))) {
+    if (!changedChunk->heightmaps)
+      changedChunk->heightmaps = std::make_unique<ChunkHeightmaps>(
+          minY_, sectionCount() * 16);
+    const int chunkX = chunkIndex(p.x), chunkZ = chunkIndex(p.z);
+    changedChunk->heightmaps->update(
+        p.x & 15, p.y, p.z & 15, state,
+        [this, chunkX, chunkZ](int x, int y, int z) {
+          return getBlock({chunkX * 16 + x, y, chunkZ * 16 + z});
+        });
+  }
+  if (lightService_) {
+    const bool isEmpty = chunkAt(chunkIndex(p.x), chunkIndex(p.z))
+                             ->sections[sectionIndex(p.y)]
+                             .hasOnlyAir();
+    if (hasDifferentSectionLightProperties(wasSectionEmpty, isEmpty))
+      lightService_->reportSectionStatus(chunkIndex(p.x), chunkIndex(p.z),
+                                         p.y >> 4, isEmpty);
+    if (hasDifferentLightProperties(old, state)) {
+      LightBlockChange change;
+      change.chunkX = chunkIndex(p.x);
+      change.chunkZ = chunkIndex(p.z);
+      change.sectionY = p.y >> 4;
+      change.localIndex = static_cast<std::uint16_t>(lightIndex(p.x, p.y, p.z));
+      change.oldProperties = lightPropertiesOf(old);
+      change.newProperties = lightPropertiesOf(state);
+      change.wasEmpty = wasSectionEmpty;
+      change.isEmpty = isEmpty;
+      lightService_->reportBlockChange(change);
+    }
+  }
+  // TODO: reproduce dirty/client notifications, POI, and generic block-entity
+  // pre-removal/creation for supported entity blocks.
+  // The opt-in L-1 light handoff is below; propagation remains TODO(L-2a/L-2b).
   if (!old.sameBlock(state) && old.is(Blocks::MOVING_PISTON)) {
     if (!(flags & 256))
       pistonPreRemoveSideEffects(*this, p);

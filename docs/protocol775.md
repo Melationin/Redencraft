@@ -23,13 +23,13 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 `--chunk` 可重复；未指定则选择存档中已读取的全部区块。指定的区块必须存在，当前阶段不会因玩家移动或放置自动加载/生成区块（目标形态是加载票驱动，见 [PLAN.md](../PLAN.md) 阶段 4）。`--view-distance 3` 控制网络视野半径（2–10），独立于模拟强加载；客户端移动时发送新的中心和区块、卸载旧视野。大世界每批最多 2 区块，小场景最多 9 区块，等待 `chunk_batch_received` 再继续。当前视野为方形边界，原版圆角边界和客户端距离协商仍为 TODO。协议维度目前固定原版 overworld 高度 [-64,320)，存档仍要求 DataVersion 4786；当前阶段没有保存（目标形态见 [PLAN.md](../PLAN.md) 阶段 3）。`--port 0` 自动分配本地端口，`--ticks N` 用于有限时长自动测试，`--assets` 可选择导出资产目录。Ctrl+C 正常结束；不执行自动客户端启动。
 
-协议里的时间字段只反映当前内存 `gameTime`。26.1 World Clocks、`world_clocks`、`advance_time`、睡眠跳转和 `/time` 的时钟语义尚未实现；`/tick freeze/step/sprint` 只是测试控制入口。两者都不写回 `level.dat`。
+协议里的时间字段只反映当前内存 `gameTime`。26.1 World Clocks、`world_clocks`、`advance_time`、睡眠跳转和 `/time` 的时钟语义尚未实现；`/tick freeze/step/sprint` 只是测试控制入口。两者都不写回 `level.dat`。L-1 的 live heightmap 数据也尚未替换当前区块包在编码时计算的三组高度表。
 
 ## 连接与同步
 
 - 实现 handshake/status ping、离线 UUID v3 登录、login acknowledgement、空 known-packs 协商、完整 registry/tags 配置及 finish acknowledgement。
 - Play 发送创造玩家登录、玩家信息、能力、出生点、区块中心、chunk batch、时间、初始九格、传送确认和 keepalive。
-- 区块采用 26.1 的 section 双计数（non-empty、fluid）、palette 固定 long 存储、原版状态标志计算的高度图及移动活塞 NBT（ByteTag facing、progressO）。流体状态、流体刻传播和自然方块状态更新已经参与核心模拟和区块/单格广播；协议光照段仍由占位值填充。块/物品/实体等 ID 使用完整原版导出表，而非 C++ 子集的注册顺序。
+- 区块采用 26.1 的 section 双计数（non-empty、fluid）、palette 固定 long 存储、原版状态标志计算的高度图及移动活塞 NBT（ByteTag facing、progressO）。流体状态、流体刻传播和自然方块状态更新已经参与核心模拟和区块/单格广播。L-1 已准备独立的双层光数据与后台交接，但尚未传播且没有接入本协议；协议光照段仍由占位值填充，边界见[光照底座](light-engine.md)。块/物品/实体等 ID 使用完整原版导出表，而非 C++ 子集的注册顺序。
 - 创造放置与破坏经过距离、范围、已加载区块、物品、支撑及当前玩家/简单实体碰撞检查；处理珊瑚地面/挂墙候选、活塞和侦测器方向、铁轨方向、草/墙/音符盒初始属性、音符盒右键调音、创造破坏活塞头关联基座、矿车坡道放置。侦测器放置不得调用会调度计划刻的通用 updateShape 查询。
 - 输入预测 sequence 在修改世界之前校验，修正包和 block_changed_ack 回传；负序列不会先编辑再断开。创造丢弃限制堆叠/频率，不向未加载区块生成暂停实体。
 - 物品、TNT、下落方块、矿车生成时用包组发送实体和非默认元数据。跟踪采用原版 `VecDeltaCodec` 的 1/4096 位移及 `Mth.packDegrees` 的 1/256 圈旋转。位移超出 short、着地变化或超过重同步阈值时发送 `entity_position_sync`。同一轮更新先发变化的速度，再发位置或旋转，最后发变化的 TNT 元数据。TNT 引信每刻变化，因此也会每刻进入跟踪更新。实体受推力时可以提前进入更新。矿车轨迹插值、物品后续元数据更新与原版受击专用速度同步仍待实现。

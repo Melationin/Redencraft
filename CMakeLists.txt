@@ -3,6 +3,7 @@ project(redstone_cpp VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+find_package(Threads REQUIRED)
 set(REDSTONE_ALLOCATOR "jemalloc" CACHE STRING "Allocation backend: jemalloc or system")
 set_property(CACHE REDSTONE_ALLOCATOR PROPERTY STRINGS jemalloc system)
 option(REDSTONE_FETCH_ZLIB "Fetch pinned zlib if not installed" ON)
@@ -46,10 +47,12 @@ if(REDSTONE_ALLOCATOR STREQUAL "jemalloc")
 elseif(NOT REDSTONE_ALLOCATOR STREQUAL "system")
   message(FATAL_ERROR "Unknown allocator: ${REDSTONE_ALLOCATOR}")
 endif()
-add_library(redstone_core src/state.cpp src/blocks.cpp src/fluid.cpp src/fluid_flow.cpp src/engine.cpp src/entity.cpp src/rail.cpp src/piston.cpp src/shapes.cpp src/nbt.cpp src/storage.cpp src/litematic.cpp src/command.cpp vendor/lz4/lz4.c vendor/lz4/xxhash.c)
+add_library(redstone_core src/state.cpp src/blocks.cpp src/fluid.cpp src/fluid_flow.cpp src/light.cpp src/heightmap.cpp src/engine.cpp src/entity.cpp src/rail.cpp src/piston.cpp src/shapes.cpp src/nbt.cpp src/storage.cpp src/litematic.cpp src/command.cpp vendor/lz4/lz4.c vendor/lz4/xxhash.c)
+set_source_files_properties(src/light.cpp PROPERTIES
+  OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/light_metadata.inc")
 target_include_directories(redstone_core PUBLIC include)
 target_include_directories(redstone_core PUBLIC vendor/lz4)
-target_link_libraries(redstone_core PUBLIC ZLIB::ZLIB)
+target_link_libraries(redstone_core PUBLIC ZLIB::ZLIB Threads::Threads)
 if(MSVC)
   target_compile_options(redstone_core PRIVATE /W4 /utf-8)
 else()
@@ -175,8 +178,14 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid_fixture_differential_test.py"
       --probe "$<TARGET_FILE:fluid_fixture_probe>"
       --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid-relative-golden.json")
+    add_test(NAME light_metadata_asset COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/validation/light_metadata/check.py"
+      --tsv "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_light.tsv"
+      --names "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_names.txt"
+      --manifest "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/manifest.json"
+      --source "${CMAKE_CURRENT_SOURCE_DIR}/src/light_metadata.inc")
   endif()
-  foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block)
+  foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_core redstone_allocator)
@@ -191,6 +200,17 @@ if(BUILD_TESTING)
       add_test(NAME ${name} COMMAND ${name}_tests)
     endif()
   endforeach()
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/light_tests.cpp")
+    add_executable(light_tests tests/light_tests.cpp)
+    target_link_libraries(light_tests PRIVATE redstone_core redstone_allocator)
+    if(MSVC)
+      target_compile_options(light_tests PRIVATE /UNDEBUG /W4 /utf-8)
+    else()
+      target_compile_options(light_tests PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME light COMMAND light_tests "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1")
+    set_tests_properties(light PROPERTIES TIMEOUT 60)
+  endif()
   # fluid_tests reads the exported 26.1 block-state table to pin the water/lava
   # protocol ids, so it takes the assets directory as its argument. The timeout
   # turns the FluidState::getAmount() dispatch recursion into a failure instead

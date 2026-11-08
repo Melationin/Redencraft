@@ -6,6 +6,30 @@
 #include <deque>
 #include <string>
 namespace redstone {
+bool blocksMotion(const BlockState &state) {
+  // BlockBehaviour.calculateSolid: forceSolidOn wins, then the collision
+  // shape's bounding box decides. COBWEB and BAMBOO_SAPLING are not in the
+  // registered subset.
+  if (blockMetadata(state).forceSolid)
+    return true;
+  // TODO: forceSolidOff has no registered user yet.
+  const VoxelShape &shape = collisionShape(state);
+  if (shape.empty())
+    return false;
+  double x0 = 16.0, y0 = 16.0, z0 = 16.0, x1 = 0.0, y1 = 0.0, z1 = 0.0;
+  for (const ShapeBox &box : shape) {
+    x0 = std::min(x0, box.x0);
+    y0 = std::min(y0, box.y0);
+    z0 = std::min(z0, box.z0);
+    x1 = std::max(x1, box.x1);
+    y1 = std::max(y1, box.y1);
+    z1 = std::max(z1, box.z1);
+  }
+  const double xs = (x1 - x0) / 16.0;
+  const double ys = (y1 - y0) / 16.0;
+  const double zs = (z1 - z0) / 16.0;
+  return (xs + ys + zs) / 3.0 >= 0.7291666666666666 || ys >= 1.0;
+}
 namespace {
 bool wall(const BlockState &s) { return isWallBlock(s); }
 ShapeBox orient(ShapeBox b, Direction d) {

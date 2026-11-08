@@ -533,6 +533,7 @@ void importWorld(const LoadedWorld &input, World &world) {
     world.loadChunk(x, z);
   for (auto &[pos, block] : input.blocks)
     world.rawSetBlock(pos, block);
+  world.primeHeightmaps();
   // LevelChunkTicks.unpack assigns -N..-1 in saved-list order per chunk.
   // Its scheduleUnchecked path preserves duplicate saved entries. Unknown
   // vanilla block IDs cannot yet be validated against the complete registry.

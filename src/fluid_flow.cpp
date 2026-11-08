@@ -37,36 +37,6 @@ int dropOff(const Fluid &fluid) { return fluid.dropOff(); }
 int slopeFindDistance(const Fluid &fluid) { return fluid.slopeFindDistance(); }
 int tickDelay(const Fluid &fluid) { return fluid.tickDelay(); }
 
-// BlockBehaviour.calculateSolid: forceSolidOn wins, then the collision shape's
-// bounding box decides — solid when its average extent >= 0.7291666 or its
-// height >= 1.0. That makes glass solid (full box) while a 1/16 carpet is not
-// ((1 + 1/16 + 1) / 3 = 0.6875).
-bool isSolid(const BlockState &state) {
-  if (blockMetadata(state).forceSolid)
-    return true;
-  // TODO: forceSolidOff has no registered user yet.
-  const VoxelShape &shape = collisionShape(state);
-  if (shape.empty())
-    return false;
-  double x0 = 16.0, y0 = 16.0, z0 = 16.0, x1 = 0.0, y1 = 0.0, z1 = 0.0;
-  for (const ShapeBox &box : shape) {
-    x0 = std::min(x0, box.x0);
-    y0 = std::min(y0, box.y0);
-    z0 = std::min(z0, box.z0);
-    x1 = std::max(x1, box.x1);
-    y1 = std::max(y1, box.y1);
-    z1 = std::max(z1, box.z1);
-  }
-  const double xs = (x1 - x0) / 16.0;
-  const double ys = (y1 - y0) / 16.0;
-  const double zs = (z1 - z0) / 16.0;
-  return (xs + ys + zs) / 3.0 >= 0.7291666666666666 || ys >= 1.0;
-}
-
-// BlockBehaviour.blocksMotion: `block != COBWEB && block != BAMBOO_SAPLING &&
-// isSolid()`. Neither excluded block is registered, so this is isSolid().
-bool blocksMotion(const BlockState &state) { return isSolid(state); }
-
 // FlowingFluid.canHoldAnyFluid (FlowingFluid.java:410-427): a
 // LiquidBlockContainer always holds fluid whatever its collision shape says,
 // otherwise a non-blocking-motion state does, minus the block classes the
@@ -649,7 +619,8 @@ FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
   if (neighbourSources >= 2 && fluidCanConvertToSource(world, self)) {
     const BlockState belowState = world.getBlock(pos.relative(Direction::Down));
     const FluidState belowFluid = fluidStateOf(belowState);
-    if (isSolid(belowState) || isSourceBlockOfThisType(belowFluid, self))
+    if (blocksMotion(belowState) ||
+        isSourceBlockOfThisType(belowFluid, self))
       return getSource(self, false);
   }
   const Pos abovePos = pos.relative(Direction::Up);

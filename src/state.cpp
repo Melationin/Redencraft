@@ -466,6 +466,19 @@ void registerBlock(Block &block) {
   block.firstState_ = gStateCount;
   block.stateCount_ = block.definition_.stateCount();
   block.defaultStateId_ = block.firstState_ + block.definition_.defaultVariant();
+  block.lightProperties_.reserve(block.stateCount_);
+  for (std::uint32_t variant = 0; variant < block.stateCount_; ++variant) {
+    std::string properties;
+    for (const Property &property : block.definition_.properties()) {
+      if (!properties.empty())
+        properties.push_back(',');
+      properties += property.name();
+      properties.push_back('=');
+      properties += block.definition_.value(variant, property.name());
+    }
+    block.lightProperties_.push_back(
+        officialLightProperties(block.name_, properties));
+  }
   table.blocks.push_back(&block);
   table.byName.emplace(std::string_view(block.name_), &block);
   for (std::uint32_t variant = 0; variant < block.stateCount_; ++variant)
@@ -484,6 +497,16 @@ std::uint32_t internState(const Block *block) {
   return id;
 }
 } // namespace detail
+
+const BlockLightProperties &Block::lightProperties(
+    std::uint32_t variant) const {
+  return variant < lightProperties_.size() ? lightProperties_[variant]
+                                            : unsupportedLightProperties();
+}
+
+const BlockLightProperties &lightPropertiesOf(const BlockState &state) {
+  return state.block().lightProperties(state.variant());
+}
 
 const Block *findBlockByName(std::string_view name) {
   auto &table = detail::tables();

@@ -17,6 +17,7 @@
 #include "redstone/block.hpp"
 #include "redstone/fluid.hpp"
 #include "redstone/flat_hash_map.hpp"
+#include "redstone/heightmap.hpp"
 
 namespace redstone {
 enum class Direction { Down, Up, North, South, West, East };
@@ -167,6 +168,8 @@ struct PistonTickerSlot {
   bool removed = false;
 };
 class Entity;
+class LightService;
+struct LightChunkInput;
 // Chunk data exported for the network encoder: palette + index copies and the
 // moving piston block entities, so wire encoding can run off the tick thread.
 struct SectionSnapshot {
@@ -212,7 +215,19 @@ public:
   void unloadChunk(int x, int z);
   bool isChunkLoaded(int x, int z) const;
   bool isLoaded(Pos pos) const;
+  // Opt-in L-1 handoff. Production servers currently leave this disabled; the
+  // profile still has neither propagation nor a protocol-ready light snapshot.
+  void enableLighting();
+  void disableLighting();
+  bool lightingEnabled() const { return lightService_ != nullptr; }
+  LightService *lightService() const { return lightService_.get(); }
   BlockState getBlock(Pos pos) const;
+  // Heightmap.Types final maps. The four live maps are primed on import or
+  // explicitly after raw construction; normal setBlock updates them in the
+  // LevelChunk.setBlockState order.
+  const Heightmap *heightmap(int chunkX, int chunkZ, HeightmapType type) const;
+  int height(HeightmapType type, int blockX, int blockZ) const;
+  void primeHeightmaps();
   // Copy of one chunk's paletted sections (mutable state is never exported).
   ChunkSnapshot snapshotChunk(int chunkX, int chunkZ) const;
   bool setBlock(Pos pos, BlockState state, int flags = 3, int limit = 512);
@@ -420,6 +435,7 @@ private:
                    const BlockState &neighbor, int flags, int limit);
   void tickBlockAt(Pos pos, const Block *expected);
   void tickFluidAt(Pos pos, const Fluid *expected);
+  std::unique_ptr<LightChunkInput> makeLightChunkInput(int x, int z) const;
   void runEvents();
   // LevelChunkSection: a paletted container of block states. An empty section
   // is a single air value (PalettedContainer bits=0) and needs no storage.
@@ -442,6 +458,7 @@ private:
     // "never written" needs no separate presence flag; Section::set materialises
     // the palette on the first real write.
     std::array<Section, kSectionCapacity> sections;
+    std::unique_ptr<ChunkHeightmaps> heightmaps;
   };
   static int chunkIndex(int v) {
     // C++20 arithmetic right shift rounds negative coordinates down.
@@ -513,6 +530,7 @@ private:
   // collected and drained after blockTicks and before the chunk stage.
   std::unique_ptr<FluidTickQueue> fluidTickQueue_ =
       std::make_unique<FluidTickQueue>();
+  std::unique_ptr<LightService> lightService_;
   // ServerLevel.blockEvents (ObjectLinkedOpenHashSet) + reschedule list.
   struct BlockEventQueue;
   std::unique_ptr<BlockEventQueue> blockEventQueue_ =

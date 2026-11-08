@@ -4,10 +4,10 @@
 
 本项目目标是实现对齐 Minecraft Java Edition 26.1 的 C++ 服务端，不是把历史阶段中「单维度 / 只读 / 无生成 / 无光照」等描述当作项目定义。目标范围见 [AGENTS.md](../AGENTS.md) 第 1 节，唯一任务顺序与验收口径见 [PLAN.md](../PLAN.md)，角色切换和状态唯一写入 [task/TASKS.md](../task/TASKS.md) 的末行。
 
-F-1…F-8 已按当前任务定义验收。最近可复验代码基线是实现提交 `4ee4ad6`（F-8 流体单例所有权）及其交接记录 `dcfbe6e`：MSVC Release + jemalloc 构建通过，CTest **23/23**（21.93 s）。M0-2 完成本次文档校正后，路线中的下一代码任务是 L-1 光照数据与线程交接；仍须按 `TASKS.md` 的实际末行决定动作。
+F-1…F-8 与 M0-2 已按当前任务定义验收。L-1 的光照数据、官方光学元数据与 opt-in 单写者交接已实现并进入本轮审查；它不包含传播、协议光照或 Anvil 光照写回。最近已验收代码基线是 F-8 实现 `4ee4ad6` 及其交接 `dcfbe6e`（MSVC Release + jemalloc，CTest 23/23）；L-1 的新构建/测试结果以其 TASKS 交接为准，仍须按 `TASKS.md` 末行决定动作。
 
 - 当前流体：状态、计划刻、传播、参数、宿主、存档读入和单例所有权已实现；W-01、W-02、M-01、M-03、H-01 与双观察者已有对应真实差分。未跑分支及同阶段性能补证归 [F-9a/F-9b](../PLAN.md#阶段-25--流体补充验收)，见[流体验收证据](fluid-acceptance.md)与[测试规格](fluid-testing.md)。
-- 当前光照：没有天空光/方块光传播，协议区块光照段仍是占位。任务与性能边界见 [PLAN.md](../PLAN.md#阶段-2--光照)。
+- 当前光照：L-1 双层数据、官方状态光学元数据、四张 final-chunk 高度图和 opt-in 后台交接已实现；天空光/方块光传播仍未实现，协议区块光照段仍是占位，默认生产不提供“已照明”数据。详见[光照底座](light-engine.md)；任务与性能边界见 [PLAN.md](../PLAN.md#阶段-2--光照)。
 - 当前时间与保存：`gameTime` 只从 `level.dat` 的 `Time` 恢复并在内存递增；26.1 World Clocks、`world_clocks`、`advance_time`、睡眠跳转、`/time` 语义和时钟持久化尚未实现。Anvil 仍只读，不写回 `level.dat`、`.mca`、方块刻/流体刻或实体。目标见 [PLAN.md](../PLAN.md#阶段-3--时间与世界保存)。
 - 当前加载与世界：区块仍由显式选择/加载强加载控制，没有原版加载票和 ticking 等级；没有世界生成、缺失区块自动生成或完整多维度。原生协议 775 服务端是可选的创造编辑入口，不是完整原版多人服务端，详见[原版连接说明](protocol775.md)。
 - 当前能力边界以[兼容性边界](compatibility.md)为准；本文件从“历史交接追加”起的未提交状态、测试数字和 TODO 都是带日期的历史快照，不再代表当前工作区。
@@ -280,6 +280,7 @@ GCC 15.2 的 system Debug 构建目录存在，但本机 `g++` 当前连空程�
 | 调试客户端 | `src/client_win32.cpp`、`src/client_inventory.hpp`、`src/client_textures.hpp` |
 | 流体状态、计划刻、传播与所有权 | `include/redstone/fluid.hpp`、`include/redstone/fluid_flow.hpp`、`src/fluid.cpp`、`src/fluid_flow.cpp` |
 | 流体验收与测试规格 |[流体证据](fluid-acceptance.md)、[测试规格](fluid-testing.md) |
+| L-1 光照层、光学元数据、高度图与后台交接 |[光照底座](light-engine.md)、`include/redstone/light.hpp`、`src/light.cpp`、`include/redstone/heightmap.hpp`、`src/heightmap.cpp`、`src/light_metadata.inc` |
 | 原生协议入口 | `include/redstone/net/`、`src/net/`、[协议说明](protocol775.md) |
 | 实体测试 | `tests/entity_tests.cpp` |
 | 活塞/粘液块测试 | `tests/piston_tests.cpp` |
