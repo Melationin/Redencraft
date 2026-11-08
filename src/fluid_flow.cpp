@@ -37,13 +37,14 @@ int dropOff(const Fluid &fluid) { return fluid.dropOff(); }
 int slopeFindDistance(const Fluid &fluid) { return fluid.slopeFindDistance(); }
 int tickDelay(const Fluid &fluid) { return fluid.tickDelay(); }
 
-// BlockBehaviour.calculateSolid: a state is solid when its collision shape's
-// bounding box has an average extent >= 0.7291666 or a height >= 1.0. This is
-// what makes glass solid (full box) while a 1/16 carpet is not
+// BlockBehaviour.calculateSolid: forceSolidOn wins, then the collision shape's
+// bounding box decides — solid when its average extent >= 0.7291666 or its
+// height >= 1.0. That makes glass solid (full box) while a 1/16 carpet is not
 // ((1 + 1/16 + 1) / 3 = 0.6875).
-// TODO: BlockBehaviour.Properties.forceSolid{On,Off} are not modelled because no
-// registered block sets them.
 bool isSolid(const BlockState &state) {
+  if (blockMetadata(state).forceSolid)
+    return true;
+  // TODO: forceSolidOff has no registered user yet.
   const VoxelShape &shape = collisionShape(state);
   if (shape.empty())
     return false;
@@ -418,18 +419,27 @@ std::map<Direction, FluidState> getSpread(World &world, Pos pos,
 bool fluidCanPassThroughWall(World &world, Direction direction, Pos sourcePos,
                              const BlockState &sourceState, Pos targetPos,
                              const BlockState &targetState) {
-  // Position-aware query: a moving piston's shape depends on its block entity
-  // progress, so the cached per-state shape would read as empty
-  // (MovingPistonBlock.java:105-108).
-  const VoxelShape &targetShape = collisionShape(world, targetPos, targetState);
-  if (isFullCube(targetShape))
+  // Only a moving piston needs the position-aware query, because its shape
+  // depends on the block entity's progress (MovingPistonBlock.java:105-108).
+  // Every other state borrows the cached shape, so the hot path copies nothing.
+  VoxelShape sourceTmp, targetTmp;
+  const VoxelShape *sourceShape = &collisionShape(sourceState);
+  if (sourceState.is(Blocks::MOVING_PISTON)) {
+    sourceTmp = collisionShape(world, sourcePos, sourceState);
+    sourceShape = &sourceTmp;
+  }
+  const VoxelShape *targetShape = &collisionShape(targetState);
+  if (targetState.is(Blocks::MOVING_PISTON)) {
+    targetTmp = collisionShape(world, targetPos, targetState);
+    targetShape = &targetTmp;
+  }
+  if (isFullCube(*targetShape))
     return false;
-  const VoxelShape &sourceShape = collisionShape(world, sourcePos, sourceState);
-  if (isFullCube(sourceShape))
+  if (isFullCube(*sourceShape))
     return false;
-  if (sourceShape.empty() && targetShape.empty())
+  if (sourceShape->empty() && targetShape->empty())
     return true;
-  return !mergedFaceOccludes(sourceShape, targetShape, direction);
+  return !mergedFaceOccludes(*sourceShape, *targetShape, direction);
 }
 
 float fluidHeight(World &world, Pos pos, const FluidState &state) {

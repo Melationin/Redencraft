@@ -124,6 +124,40 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
   （8 个文件，+991 / -10；新增 `include/redstone/fluid_flow.hpp`、`src/fluid_flow.cpp`、`tests/fluid_flow_tests.cpp`，修改 `include/redstone/fluid.hpp`、`src/engine.cpp`、`CMakeLists.txt`、`docs/compatibility.md`）
 - 返工提交：`e76938a` — Fix the F-3 review findings: empty ticks, face sides, solidity and drops（4 个文件，+242 / -38）
 
+### 返工二（回应复审：2 阻塞 + 1 应修 + 1 建议）
+
+**阻塞 1 — `forceSolidOn` 未实现，水会冲毁开启的栅栏门。** 属实。`Blocks.java` 给橡木/白桦栅栏门和 `moving_piston` 设了 `forceSolidOn`，而 `BlockBehaviour.calculateSolid` 优先读它；C++ 只按碰撞形状判断，开门形状为空 → `isSolid` 为假 → 水替换门。已修：
+
+- `BlockMetadata` 增加 `forceSolid`，`registerBlock` 按名字给 `oak_fence_gate`、`birch_fence_gate`、`moving_piston` 置位（`Blocks.java:2383-2392,3852-3861,814-823`）。
+- `isSolid` 先读 `forceSolid`，再走形状包围盒；`forceSolidOff` 没有注册使用者，留 TODO。
+- 移动活塞因此不再被当作可容纳流体的空格——`canHoldAnyFluid` 经 `blocksMotion → isSolid` 拒绝它。
+
+**阻塞 2 — W-06 的反向取面与动态形状缺回归。** 我上一轮判断「没有两个注册形状能互补覆盖一个面，只能交 F-7」是**错的**：reviewer 指出单个地毯就够——向上取目标满底面则阻挡，向下取目标非贴边顶面则通过，变异会颠倒这两个结果。已补：
+
+- `wallFaceSides` 直接测 `fluidCanPassThroughWall`：空气源 + 地毯目标，`Up` 被地毯底面遮挡 → 阻挡；空源在上、地毯在下走 `Down` → 地毯顶面在 y=1 不贴边 → 通过；再把源换成水重复一次 `Up`。
+- `movingPistonShapeDependsOnProgress`：同一个 `moving_piston` 状态 ID，用 `setPistonEntity` 造两个不同 `progress` 的方块实体，断言 `fluidCanPassThroughWall` 结果不同。
+
+**应修 — 测试未覆盖声称的写入顺序。** 属实，两处：
+
+- 新增 `equalDistanceWriteOrder`：用 `blockUpdateObserver` 记录等距四方向的**实际写序**，断言 `North → South → West → East`（与 `EnumMap(Direction)` 的迭代顺序一致）。
+- 地毯掉落断言改成在 `blockUpdateObserver` 里检查：观察者在地毯格**写水那一刻**触发，此时物品必须已存在。之前的写法在 `fluidSpread` 返回后检查，把掉落移到写水之后也能通过。
+
+**建议 — 静态形状的堆复制。** 属实：`fluidCanPassThroughWall` 对所有状态调用返回值类型的位置重载，普通状态会复制缓存形状。已改为普通状态借用 `collisionShape(state)` 的引用，只有 `moving_piston` 才构造临时形状。
+
+**变异验证（每条独立恢复）**：
+
+| 变异 | 结果 |
+|---|---|
+| 目标也按同一方向取面（撤销分向） | `upward flow is blocked by the carpet's bottom face` |
+| `forceSolid` 置位改成 false | `water does not replace an opened fence gate` |
+| 掉落移到写水之后 | `the carpet's item already exists at the moment the water is written` |
+
+第一条正是上一轮漏掉的变异，这次被单地毯用例拒绝。
+
+**返工二之后的构建与测试**：全量构建通过，**CTest 18/18 通过**（12.19 s）。`fluid_flow` 组新增 4 个用例。
+
+**没有做的事**：半砖等尚未注册的互补夹具仍留 F-7；F-5 的含水宿主接线、F-4 的参数专项验证、F-6 的存档流体刻均未触碰。
+
 ### 返工（回应审查：4 阻塞）
 
 **阻塞 1 — 空流体刻会删掉普通方块。** 属实：`tickFluidAt` 在身份匹配后就调 `fluidTick`，而石头等非液体方块的 `fluidStateOf` 是 `minecraft:empty`，能与 F-2 允许的空流体刻匹配；随后 `fluidTick` 因「无邻居」把方块写成空气。已修：
@@ -175,5 +209,15 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 4. **阻塞｜现有传播用例没有验证计划刻派发写方块，副作用断言读错队列。** `tests/fluid_flow_tests.cpp:50–65,107–121,236–280` 直接调用算法，瀑布只检查第一格 falling，未覆盖落地后横流；`queriesDoNotMutate` 只查看 `scheduledTickCount()`。建议至少把一个水平或瀑布传播用例改为显式 `scheduleFluidTick` 后由 `World::tick()` 推进，按 F-3 的边界人工安排新格后续刻，并断言落地横流、W-05 的并列写序及查询前后两条队列都不变。F-5 的自然触发与 F-7 的真实原版差分仍各自验收。
 
 独立 MSVC Release 构建和 CTest **18/18 通过**（8.29 s）。以上差异来自本地 26.1 源码对照，未运行真实服务端差分。当前先退回纠正行为及覆盖缺口；本轮未重跑世吞性能基准。
+
+### 返工复审（`e76938a`）
+
+- **已解决｜空流体刻破坏方块、空流体高度、玻璃支撑、薄地毯和调度路径。** 空刻在 `World::tick()` 中安全消费，空高度为零；玻璃支撑允许双源转换，地毯可被水替换。瀑布用例已用计划刻验证落地横流，查询用例检查了两条队列。
+- **阻塞｜已注册的方块使用 `forceSolidOn`，几何推导会让水误冲毁开启的栅栏门。** `src/fluid_flow.cpp:40–73` 假定注册表没有强制实体性，但 26.1 `Blocks.java:2383–2392,3852–3861` 给橡木和白桦栅栏门设置了 `forceSolidOn`，移动活塞也有该属性（`:814–823`）。`BlockBehaviour.java:486–492` 优先读它。C++ 开门的碰撞形状为空（`src/shapes.cpp:150–154`），当前 `isSolid` 因而返回假，接下来 `canHoldAnyFluid` 接受该格，水可把门替换掉。建议为已注册状态补强制实体性，保留 F-5 含水宿主的接线边界，并用开门横向传播负例验证门保留。移动活塞不应仅凭静态空碰撞被当成可容纳流体。
+- **阻塞｜W-06 的反向取面和动态形状仍缺少可实现的回归。** `src/fluid_flow.cpp:160–161,418–432` 已改为对向取面并查动态形状。单个白地毯就能拒绝返工里未被捕获的变异，不需要互补方块。以空气或水作源，地毯作目标，向上应取目标满底面并阻挡，向下应取目标非贴边顶面并通过；变异会颠倒这两个结果。请直接测 `fluidCanPassThroughWall`，再用现有活塞 BE 夹具断言同 state ID 在不同进度下得到不同结果。半砖等尚未注册的互补夹具可留待 F-7。
+- **应修｜测试断言未覆盖声称的写入顺序。** `tests/fluid_flow_tests.cpp:193–207` 只检查一个最短坡度方向，缺少 W-05 等距并列时的写序；`tests/fluid_flow_tests.cpp:355–373` 只在传播返回后检查掉落，若把掉落移到写水后仍可通过。建议用 `World::blockUpdateObserver` 记录等距方向的实际写序，并在地毯格首次写水时观察掉落是否已出现。
+- **建议｜避免静态形状的堆复制。** `src/fluid_flow.cpp:424–427` 对所有状态调用返回值类型 `VoxelShape` 的位置重载；`src/shapes.cpp:210–212` 在静态路径复制已缓存的形状。普通状态可直接借用静态查询的引用，仅在移动活塞分支构造位置相关的临时形状。
+
+独立 MSVC Release 构建通过，CTest **18/18 通过**（8.33 s）。本次未重跑世吞性能基准，未运行真实 26.1 服务端差分。按当前状态表，复审未通过，交回 coder 修正上述阻塞。
 
 任务已完成

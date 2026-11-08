@@ -214,6 +214,11 @@ struct BlockMetadata {
   float speedFactor = 1.0f;
   float explosionResistance = 0.0f;
   bool liquid = false;
+  // BlockBehaviour.Properties.forceSolidOn(): the state counts as solid no
+  // matter what its collision shape says. 26.1 sets it on the fence gates and on
+  // moving_piston, so an opened gate still blocks fluid and a moving piston is
+  // never treated as an empty cell.
+  bool forceSolid = false;
 };
 struct BlockRegistration {
   std::string name;

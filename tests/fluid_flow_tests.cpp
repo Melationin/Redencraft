@@ -1,5 +1,6 @@
 #include "redstone/engine.hpp"
 #include "redstone/entity.hpp"
+#include "redstone/piston.hpp"
 #include "redstone/shapes.hpp"
 #include "redstone/fluid.hpp"
 #include "redstone/fluid_flow.hpp"
@@ -206,6 +207,32 @@ void slopePreference() {
           "the opposite flat neighbour gets nothing");
 }
 
+// 5b. W-05: equal-distance directions are all kept and written in the enum order
+// the spread map iterates (North, South, West, East), which is what
+// EnumMap(Direction) gives vanilla.
+void equalDistanceWriteOrder() {
+  World world;
+  flatFloor(world);
+  const Pos source{0, 64, 0};
+  world.rawSetBlock(source, waterLevel(0));
+
+  auto written = std::vector<Pos>{};
+  world.blockUpdateObserver = [&written](Pos pos, const BlockState &state,
+                                         int) {
+    if (state.is(Blocks::WATER))
+      written.push_back(pos);
+  };
+  fluidSpread(world, source, world.getBlock(source),
+              fluidStateOf(world.getBlock(source)));
+
+  require(written.size() == 4,
+          "all four equal-distance neighbours are written");
+  require(written[0] == Pos{0, 64, -1}, "north is written first");
+  require(written[1] == Pos{0, 64, 1}, "then south");
+  require(written[2] == Pos{-1, 64, 0}, "then west");
+  require(written[3] == Pos{1, 64, 0}, "then east");
+}
+
 // 6. Level recomputation: a flowing fluid takes the highest neighbour minus the
 // drop-off, and a same-family fluid above forces the falling full state.
 void levelRecomputation() {
@@ -342,30 +369,124 @@ void soliditySemantics() {
           "glass under the gap lets two sources convert it");
 
   // A carpet is only 1/16 tall, so it is not solid: water flowing from a
-  // neighbour must replace it, and replacing it must drop its loot first
-  // (WaterFluid.beforeDestroyingBlock -> Block.dropResources).
+  // neighbour must replace it, and replacing it must drop its loot **before** the
+  // fluid is written (WaterFluid.beforeDestroyingBlock -> Block.dropResources).
+  // The observer fires at the write itself, so checking there is what proves the
+  // ordering; checking after the spread returns would pass either way.
   World carpet;
   flatFloor(carpet);
   const Pos carpetSource{0, 64, 8};
   const Pos carpetCell{1, 64, 8};
   carpet.rawSetBlock(carpetSource, waterLevel(0));
   carpet.rawSetBlock(carpetCell, Blocks::WHITE_CARPET.defaultState());
+
+  bool sawDropAtWrite = false;
+  bool sawWrite = false;
+  carpet.blockUpdateObserver = [&](Pos pos, const BlockState &state, int) {
+    if (pos != carpetCell || !state.is(Blocks::WATER))
+      return;
+    sawWrite = true;
+    for (const auto &entity : carpet.entities) {
+      if (!entity || entity->isRemoved())
+        continue;
+      if (auto *item = dynamic_cast<ItemEntity *>(entity.get()))
+        if (item->item.id == "minecraft:white_carpet")
+          sawDropAtWrite = true;
+    }
+  };
   fluidSpread(carpet, carpetSource, carpet.getBlock(carpetSource),
               fluidStateOf(carpet.getBlock(carpetSource)));
   require(carpet.getBlock(carpetCell).is(Blocks::WATER),
           std::string("a 1/16 carpet does not block the fluid and is replaced by it, got ") +
               std::string(carpet.getBlock(carpetCell).shortName()));
+  require(sawWrite, "the carpet cell's water write was observed");
+  require(sawDropAtWrite,
+          "the carpet's item already exists at the moment the water is written");
+}
 
-  // The carpet dropped its item before the fluid was written.
-  bool dropped = false;
-  for (const auto &entity : carpet.entities) {
-    if (!entity || entity->isRemoved())
-      continue;
-    if (auto *item = dynamic_cast<ItemEntity *>(entity.get()))
-      if (item->item.id == "minecraft:white_carpet")
-        dropped = true;
-  }
-  require(dropped, "the replaced carpet drops its item before the fluid lands");
+// W-06: the two shapes contribute opposite faces of the shared plane. A single
+// 1/16 carpet is enough to pin this down: from below (Up) the carpet's full
+// bottom face occludes the wall, while from above (Down) its top face sits at
+// y=1 and does not reach the shared plane, so fluid passes.
+void wallFaceSides() {
+  World world;
+  flatFloor(world);
+  const Pos below{0, 64, 0};
+  const Pos carpetPos{0, 65, 0};
+  world.rawSetBlock(below, Blocks::AIR.defaultState());
+  world.rawSetBlock(carpetPos, Blocks::WHITE_CARPET.defaultState());
+
+  // Air source, carpet target, moving Up: blocked by the carpet's bottom face.
+  require(!fluidCanPassThroughWall(world, Direction::Up, below,
+                                   world.getBlock(below), carpetPos,
+                                   world.getBlock(carpetPos)),
+          "upward flow is blocked by the carpet's bottom face");
+
+  // Keep the source as air and flip the direction instead: air above, carpet
+  // below, moving Down. The carpet's top face is at y=1, which does not reach the
+  // shared plane, so it contributes nothing and the wall is open.
+  const Pos above{0, 66, 0};
+  world.rawSetBlock(above, Blocks::AIR.defaultState());
+  require(fluidCanPassThroughWall(world, Direction::Down, above,
+                                  world.getBlock(above), carpetPos,
+                                  world.getBlock(carpetPos)),
+          "downward flow leaves the carpet through its inset top face");
+
+  // A water source behaves like air here: water's shape is empty.
+  world.rawSetBlock(below, waterLevel(0));
+  require(!fluidCanPassThroughWall(world, Direction::Up, below,
+                                   world.getBlock(below), carpetPos,
+                                   world.getBlock(carpetPos)),
+          "a water source is equally blocked by the carpet's bottom face");
+}
+
+// Property forceSolidOn: an opened fence gate has an empty collision shape but is
+// still solid in 26.1, so water must not replace it.
+void forceSolidGate() {
+  World world;
+  flatFloor(world);
+  const Pos source{0, 64, 0};
+  const Pos gateCell{1, 64, 0};
+  world.rawSetBlock(source, waterLevel(0));
+  world.rawSetBlock(gateCell,
+                    Blocks::OAK_FENCE_GATE.defaultState().with("open", "true"));
+  require(collisionShape(world.getBlock(gateCell)).empty(),
+          "an opened gate has no collision shape");
+
+  fluidSpread(world, source, world.getBlock(source),
+              fluidStateOf(world.getBlock(source)));
+  require(world.getBlock(gateCell).is(Blocks::OAK_FENCE_GATE),
+          "water does not replace an opened fence gate");
+}
+
+// The moving piston's shape depends on its block entity progress, so the same
+// state id must produce different wall results at different progress values.
+void movingPistonShapeDependsOnProgress() {
+  World world;
+  flatFloor(world);
+  const Pos pistonPos{0, 65, 0};
+  const Pos below{0, 64, 0};
+  world.rawSetBlock(pistonPos, Blocks::MOVING_PISTON.defaultState());
+  world.rawSetBlock(below, waterLevel(0));
+
+  const auto shapeAt = [&](float progress) {
+    auto entity = std::make_shared<PistonMovingBlockEntity>(
+        PistonMovingBlockEntity{pistonPos, Blocks::SMOOTH_STONE.defaultState(),
+                                Direction::Down, false, false});
+    entity->progress = progress;
+    world.setPistonEntity(pistonPos, entity);
+    return fluidCanPassThroughWall(world, Direction::Up, below,
+                                   world.getBlock(below), pistonPos,
+                                   world.getBlock(pistonPos));
+  };
+
+  // At progress 0 the moved stone sits at the far end and leaves the cell open
+  // enough for the wall test; at progress 1 it fills the cell and blocks.
+  const bool atStart = shapeAt(0.0f);
+  const bool atEnd = shapeAt(1.0f);
+  require(atStart != atEnd,
+          "the same moving_piston state id gives different wall results at "
+          "different progress values");
 }
 
 // fluidTick on a non-source rewrites the level and re-schedules itself.
@@ -405,12 +526,16 @@ int main() {
     waterfall();
     sourceConversion();
     slopePreference();
+    equalDistanceWriteOrder();
     levelRecomputation();
     height();
     flowVector();
     queriesDoNotMutate();
     emptyFluidTickIsInert();
     soliditySemantics();
+    wallFaceSides();
+    forceSolidGate();
+    movingPistonShapeDependsOnProgress();
     tickReschedulesNonSource();
     std::cout << "fluid flow tests passed\n";
     return 0;

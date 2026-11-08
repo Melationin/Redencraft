@@ -405,6 +405,13 @@ void registerBlock(Block &block) {
   block.coralWallFan_ = endsWith("_coral_wall_fan");
   block.coralFan_ = endsWith("_coral_fan");
   if (block.metadata_.supported) {
+    // BlockBehaviour.Properties.forceSolidOn(): Blocks.java sets it on the fence
+    // gates (so an opened gate still counts as solid) and on moving_piston (so a
+    // moving block is never mistaken for an empty, fluid-holding cell).
+    if (name == "minecraft:oak_fence_gate" ||
+        name == "minecraft:birch_fence_gate" ||
+        name == "minecraft:moving_piston")
+      block.metadata_.forceSolid = true;
     if (name == "minecraft:slime_block")
       block.metadata_.friction = 0.8f;
     if (name == "minecraft:honey_block")
