@@ -94,6 +94,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 - 主提交：`53a5d20` — Add the fluid state model with water and lava level decoding
   （7 个文件，+624 / -90；新增 `include/redstone/fluid.hpp`、`src/fluid.cpp`、`tests/fluid_tests.cpp`，修改 `CMakeLists.txt`、`docs/compatibility.md`、`docs/entities.md`）
 - 状态记录提交：本行之后的 bookkeeping 提交（只改本文件的「提交」段与末尾状态）。
+- 返工提交：`6a2e26f` — Make the fluid tests prove the protocol table and the tick baseline（5 个文件，+282 / -19）
 
 ### 返工（回应审查：2 阻塞 + 3 应修）
 
