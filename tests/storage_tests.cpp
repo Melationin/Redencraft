@@ -372,7 +372,40 @@ int main() {
   tag(c, 1, "source");
   c.push_back(0);
   c.push_back(0);
-  c.push_back(0);
+  // The real .mca payload carries the tick lists, so the disk reader path is
+  // exercised rather than only the in-memory restore function. They are
+  // siblings of block_entities inside the chunk compound.
+  {
+    auto tick = [&](const char *type, int x, int y, int z, int delay,
+                    int priority) {
+      stringtag(c, "i", type);
+      integer(c, "x", x);
+      integer(c, "y", y);
+      integer(c, "z", z);
+      integer(c, "t", delay);
+      integer(c, "p", priority);
+      c.push_back(0);
+    };
+    tag(c, 9, "block_ticks");
+    c.push_back(10);
+    u32(c, 1);
+    tick("minecraft:smooth_stone", -16, -16, -16, 5, 0);
+    tag(c, 9, "fluid_ticks");
+    c.push_back(10);
+    u32(c, 6);
+    // A future source tick and its flowing counterpart at the same cell: the
+    // two identities must both survive and stay distinct.
+    tick("minecraft:water", -8, -16, -8, 5, 0);
+    tick("minecraft:flowing_water", -8, -16, -8, 7, -2);
+    // An already-overdue entry (negative delay) in the same chunk.
+    tick("minecraft:flowing_lava", -7, -16, -8, -9, 0);
+    // Duplicate (pos, fluid) pairs are kept, exactly like scheduleUnchecked.
+    tick("minecraft:water", -6, -16, -8, 3, 0);
+    tick("minecraft:water", -6, -16, -8, 3, 0);
+    // An out-of-range priority must clamp, not fail the load.
+    tick("minecraft:lava", -5, -16, -8, 1, 9);
+  }
+  c.push_back(0); // closes the chunk compound
   auto data = compressed(c, 15);
   Bytes region(12288);
   int slot = 1023;
@@ -388,6 +421,21 @@ int main() {
   write(p / "region" / "r.-1.-1.mca", region);
   auto w = loadAnvilWorld(p, p / "region");
   assert(w.gameTime == 42);
+  // The disk reader must surface both tick lists with their exact types.
+  assert(w.ticks.size() == 7);
+  {
+    auto countFluid = 0;
+    for (const auto &tick : w.ticks)
+      if (tick.fluid)
+        ++countFluid;
+    assert(countFluid == 6);
+    assert(w.ticks[0].type == "minecraft:smooth_stone" && !w.ticks[0].fluid);
+    assert(w.ticks[1].type == "minecraft:water" && w.ticks[1].delay == 5);
+    assert(w.ticks[2].type == "minecraft:flowing_water" &&
+           w.ticks[2].priority == -2);
+    assert(w.ticks[3].type == "minecraft:flowing_lava" &&
+           w.ticks[3].delay == -9);
+  }
   assert(w.chunks.size() == 1 && w.chunks[0] == std::make_pair(-1, -1));
   assert(w.blocks.at({-16, -16, -16}).name() == "example:unknown");
   assert(w.blocks.at({-1, -1, -1}).properties().at("foo") == "bar");
@@ -395,6 +443,36 @@ int main() {
   assert(w.blocks.at({-4, 0, -16}).name() == "example:block_1");
   World world;
   importWorld(w, world);
+  // End-to-end: the same .mca bytes go through importWorld and land in the
+  // dispatch queues, so a regression in the disk reader is caught here rather
+  // than only in the in-memory restore path.
+  assert(world.scheduledTickCount() == 1);
+  assert(world.fluidTickCount() == 6);
+  assert(world.gameTime() == 42);
+  // Distinct exact identities at the same cell coexist.
+  assert(world.hasFluidTick({-8, -16, -8}, FluidRef(Fluids::water())));
+  assert(world.hasFluidTick({-8, -16, -8}, FluidRef(Fluids::flowingWater())));
+  // Overdue (negative delay) and future entries both survive the restore.
+  for (const auto &entry : world.fluidTicks()) {
+    if (entry.first.pos == Pos{-7, -16, -8})
+      assert(entry.first.trigger == 42 - 9);
+    if (entry.first.pos == Pos{-8, -16, -8} &&
+        entry.second.fluid() == &Fluids::water())
+      assert(entry.first.trigger == 42 + 5);
+    if (entry.first.pos == Pos{-5, -16, -8})
+      // TickPriority.byValue clamps 9 onto EXTREMELY_LOW.
+      assert(entry.first.priority == 3);
+  }
+  // Duplicate saved entries are kept, keyed apart only by their subTick.
+  {
+    auto duplicates = 0;
+    for (const auto &entry : world.fluidTicks())
+      if (entry.first.pos == Pos{-6, -16, -8}) {
+        ++duplicates;
+        assert(entry.first.trigger == 42 + 3);
+      }
+    assert(duplicates == 2);
+  }
   LoadedWorld saved;
   saved.gameTime = 100;
   saved.chunks = {{-1, 0}, {0, 0}, {1, 0}};
@@ -542,6 +620,33 @@ int main() {
     importWorld(empties, world3);
     assert(world3.fluidTickCount() == 1);
     assert(world3.hasFluidTick({5, 70, 5}, FluidRef(Fluids::empty())));
+  }
+  // SavedTick.unpack is Java wrapping arithmetic: an extreme delay must not be
+  // C++ signed-overflow UB, and TickPriority.byValue clamps instead of failing.
+  {
+    LoadedWorld extreme;
+    extreme.gameTime = std::numeric_limits<std::int64_t>::max() - 1;
+    extreme.chunks = {{0, 0}};
+    extreme.ticks = {
+        {{1, 70, 1}, "minecraft:water", 5, 0, true},
+        {{2, 70, 1}, "minecraft:flowing_water",
+         std::numeric_limits<int>::max(), 99, true},
+        {{3, 70, 1}, "minecraft:smooth_stone", 4, -99, false},
+    };
+    World wrapped;
+    importWorld(extreme, wrapped);
+    for (const auto &entry : wrapped.fluidTicks()) {
+      if (entry.first.pos == Pos{1, 70, 1})
+        assert(entry.first.priority == 0);
+      // max-1 + INT_MAX wraps past INT64_MAX into the negative half.
+      if (entry.first.pos == Pos{2, 70, 1}) {
+        assert(entry.first.trigger < 0);
+        assert(entry.first.priority == 3);
+      }
+    }
+    for (const auto &tick : wrapped.scheduledTicks())
+      if (tick.pos == Pos{3, 70, 1})
+        assert(tick.priority == -3);
   }
   // Unknown and empty fluid names are data errors, not silent drops.
   for (const char *bad : {"minecraft:not_a_fluid", ""}) {

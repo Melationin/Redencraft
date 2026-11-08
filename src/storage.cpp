@@ -507,6 +507,23 @@ LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
                 });
   return w;
 }
+namespace {
+// Java long addition wraps modulo 2^64 (SavedTick.java:49-51). Go through the
+// unsigned type so the C++ side is defined behaviour instead of UB.
+std::int64_t wrappingAdd(std::int64_t a, std::int64_t b) {
+  return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) +
+                                   static_cast<std::uint64_t>(b));
+}
+// TickPriority.byValue: values below -3 clamp to EXTREMELY_HIGH and values
+// above 3 clamp to EXTREMELY_LOW (TickPriority.java:21-29).
+int tickPriorityByValue(int value) {
+  if (value < -3)
+    return -3;
+  if (value > 3)
+    return 3;
+  return value;
+}
+} // namespace
 // TODO: non-piston block entities remain in LoadedWorld for reporting; their
 // simulation is not implemented.
 void importWorld(const LoadedWorld &input, World &world) {
@@ -545,6 +562,20 @@ void importWorld(const LoadedWorld &input, World &world) {
     const auto name = tick.type.find(':') == std::string::npos
                           ? "minecraft:" + tick.type
                           : tick.type;
+    // SavedTick.unpack is `currentTick + delay` in Java's wrapping long
+    // arithmetic (SavedTick.java:49-51), and 26.1 streams the delay as a
+    // 32-bit int, so an extreme NBT Time must wrap exactly like the JVM
+    // rather than trap on C++ signed overflow.
+    const std::int64_t trigger = wrappingAdd(input.gameTime, tick.delay);
+    // TickPriority.byValue clamps out-of-range values onto the nearest end
+    // (TickPriority.java:21-29) instead of rejecting them.
+    const int priority = tickPriorityByValue(tick.priority);
+    // A schematic that recorded subTickOrder keeps its own order; vanilla
+    // saves have none and use the per-family -N..-1 sequence instead.
+    const std::int64_t order = tick.subTick.has_value()
+                                   ? *tick.subTick
+                                   : (tick.fluid ? fluidNext[chunk]
+                                                 : blockNext[chunk])++;
     if (tick.fluid) {
       // ServerLevel.fluidTicks stores the Fluid identity itself, so an unknown
       // or empty name is a data error rather than a silent drop. The explicit
@@ -552,14 +583,12 @@ void importWorld(const LoadedWorld &input, World &world) {
       const auto fluid = FluidRef(name);
       if (fluid.empty())
         throw nbt::Error("unknown fluid in fluid_ticks: " + name);
-      world.restoreFluidTick({tick.pos, BlockRef{}, input.gameTime + tick.delay,
-                              tick.priority, fluidNext[chunk]++},
+      world.restoreFluidTick({tick.pos, BlockRef{}, trigger, priority, order},
                              fluid);
       continue;
     }
     // LevelChunkTicks.unpack: scheduleUnchecked keeps duplicate saved entries.
-    world.restoreScheduledTick({tick.pos, name, input.gameTime + tick.delay,
-                                tick.priority, blockNext[chunk]++});
+    world.restoreScheduledTick({tick.pos, name, trigger, priority, order});
   }
   for (auto &tag : input.blockEntities) {
     auto id = tag.get("id");

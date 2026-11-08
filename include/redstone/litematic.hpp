@@ -22,6 +22,10 @@ struct LitematicImport {
   std::size_t regeneratedEntityUuids{}, regionCount{};
   std::size_t skippedUnsupportedBlockEntities{};
   std::size_t skippedUnsupportedEntities{};
+  // Name -> number of pending ticks dropped, so a lenient import can never
+  // discard a scheduled tick silently.
+  std::map<std::string, std::size_t> skippedUnsupportedBlockTicks;
+  std::map<std::string, std::size_t> skippedUnsupportedFluidTicks;
   // Source block name -> number of cells placed as smooth_stone.
   std::map<std::string, std::size_t> substitutedBlocks;
   Pos min, maxExclusive;

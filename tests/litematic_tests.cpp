@@ -11,6 +11,12 @@ static Tag integer(int value) {
   t.number = value;
   return t;
 }
+static Tag longTag(int64_t value) {
+  Tag t;
+  t.type = 4;
+  t.number = value;
+  return t;
+}
 static Tag string(const std::string &value) {
   Tag t;
   t.type = 8;
@@ -82,9 +88,17 @@ static Tag fixture() {
         list({compound({{"x", integer(2)},
                         {"y", integer(0)},
                         {"z", integer(0)},
-                        {"Block", string("minecraft:flowing_water")},
+                        {"Fluid", string("minecraft:flowing_water")},
                         {"Time", integer(5)},
-                        {"Priority", integer(0)}})})}});
+                        {"Priority", integer(-2)},
+                        {"SubTick", longTag(7)}}),
+               compound({{"x", integer(3)},
+                         {"y", integer(0)},
+                         {"z", integer(0)},
+                         {"Fluid", string("minecraft:water")},
+                         {"Time", integer(-4)},
+                         {"Priority", integer(1)},
+                         {"SubTick", longTag(3)}})})}});
   return compound({{"Version", integer(6)},
                    {"SubVersion", integer(1)},
                    {"MinecraftDataVersion", integer(20060210)},
@@ -116,20 +130,40 @@ int main(int argc, char **argv) {
   assert(loaded.world.entities[0].get("UUID")->ints !=
          loaded.world.entities[1].get("UUID")->ints);
   assert(loaded.world.ticks[0].pos == (Pos{-19, 64, 0}));
-  // A-04: the fluid tick keeps the projection offset and its exact identity.
-  assert(loaded.world.ticks.size() == 2);
-  assert(loaded.world.ticks[1].fluid);
+  // A-04: the fluid ticks keep the projection offset, their exact identity and
+  // the schematic's own SubTick ordering key.
+  assert(loaded.world.ticks.size() == 3);
+  assert(loaded.world.ticks[1].fluid && loaded.world.ticks[2].fluid);
   assert(loaded.world.ticks[1].pos == (Pos{-18, 64, 0}));
   assert(loaded.world.ticks[1].type == "minecraft:flowing_water");
   assert(loaded.world.ticks[1].delay == 5 &&
-         loaded.world.ticks[1].priority == 0);
+         loaded.world.ticks[1].priority == -2);
+  assert(loaded.world.ticks[1].subTick == 7);
+  // Negative relative delay, positive priority and a second identity.
+  assert(loaded.world.ticks[2].pos == (Pos{-17, 64, 0}));
+  assert(loaded.world.ticks[2].type == "minecraft:water");
+  assert(loaded.world.ticks[2].delay == -4 &&
+         loaded.world.ticks[2].priority == 1);
+  assert(loaded.world.ticks[2].subTick == 3);
+  // The block tick has no SubTick in the fixture, so it uses the vanilla
+  // per-chunk -N..-1 sequence instead of a schematic key.
+  assert(!loaded.world.ticks[0].subTick.has_value());
   World world;
   importWorld(loaded.world, world);
   assert(world.entities.size() == 2 && world.scheduledTickCount() == 1);
-  assert(world.fluidTickCount() == 1);
+  assert(world.fluidTickCount() == 2);
   assert(world.hasFluidTick({-18, 64, 0}, FluidRef(Fluids::flowingWater())));
   // Exact identity again: the source entry must not match a flowing one.
   assert(!world.hasFluidTick({-18, 64, 0}, FluidRef(Fluids::water())));
+  assert(world.hasFluidTick({-17, 64, 0}, FluidRef(Fluids::water())));
+  // SubTick is the ordering key, distinct from the vanilla -N..-1 rule.
+  {
+    std::map<Pos, std::int64_t> orders;
+    for (const auto &entry : world.fluidTicks())
+      orders[entry.first.pos] = entry.first.order;
+    assert(orders.at({-18, 64, 0}) == 7);
+    assert(orders.at({-17, 64, 0}) == 3);
+  }
   // Snapshot import preserves unsupported/suspended physics until a saved tick
   // or a real world update reaches it; no onPlace callbacks are invented.
   assert(!world.hasScheduledTick({-17, 64, 0}, "minecraft:sand"));
@@ -166,20 +200,61 @@ int main(int argc, char **argv) {
   assert(many.regionCount == 4262 && many.world.blocks.size() == 4262);
   assert(many.world.blocks.at({61, 64, 42}).name() == "minecraft:smooth_stone");
   // A-04: an unknown fluid name in PendingFluidTicks is a data error by
-  // default and is only skipped when substitution is explicitly allowed.
+  // default and is only skipped when substitution is explicitly allowed --
+  // and then it is REPORTED, never dropped silently.
   {
     auto unknownFluid = doc;
     auto &ticks = unknownFluid.compound["Regions"]
                        .compound["one"]
                        .compound["PendingFluidTicks"]
                        .list;
-    ticks[0].compound["Block"].text = "minecraft:not_a_fluid";
+    ticks[0].compound["Fluid"].text = "minecraft:not_a_fluid";
     rejects([&] { loadLitematic(unknownFluid); });
     LitematicOptions lenient;
     lenient.substituteUnsupported = true;
     const auto skipped = loadLitematic(unknownFluid, lenient);
-    assert(skipped.world.ticks.size() == 1);
-    assert(!skipped.world.ticks[0].fluid);
+    // The known tick and the block tick survive; the unknown one is counted.
+    assert(skipped.world.ticks.size() == 2);
+    assert(skipped.skippedUnsupportedFluidTicks.size() == 1);
+    assert(skipped.skippedUnsupportedFluidTicks.at(
+               "minecraft:not_a_fluid") == 1);
+  }
+  // An empty fluid name is structurally invalid and is rejected even leniently.
+  {
+    auto emptyName = doc;
+    emptyName.compound["Regions"]
+        .compound["one"]
+        .compound["PendingFluidTicks"]
+        .list[0]
+        .compound["Fluid"].text = "";
+    rejects([&] { loadLitematic(emptyName); });
+    LitematicOptions lenient;
+    lenient.substituteUnsupported = true;
+    rejects([&] { loadLitematic(emptyName, lenient); });
+  }
+  // A explicit minecraft:empty is a real identity and imports as one.
+  {
+    auto explicitEmpty = doc;
+    explicitEmpty.compound["Regions"]
+        .compound["one"]
+        .compound["PendingFluidTicks"]
+        .list[0]
+        .compound["Fluid"].text = "minecraft:empty";
+    const auto imported = loadLitematic(explicitEmpty);
+    assert(imported.world.ticks[1].type == "minecraft:empty");
+    World emptyWorld;
+    importWorld(imported.world, emptyWorld);
+    assert(emptyWorld.hasFluidTick({-18, 64, 0}, FluidRef(Fluids::empty())));
+  }
+  // A record missing the "Fluid" key entirely is rejected, not defaulted.
+  {
+    auto missing = doc;
+    missing.compound["Regions"]
+        .compound["one"]
+        .compound["PendingFluidTicks"]
+        .list[0]
+        .compound.erase("Fluid");
+    rejects([&] { loadLitematic(missing); });
   }
   auto malformed = doc;
   malformed.compound["Regions"]

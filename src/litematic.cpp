@@ -269,33 +269,53 @@ LitematicImport loadLitematic(const nbt::Tag &root,
       if (!isSupportedBlock(type)) {
         if (!options.substituteUnsupported)
           throw nbt::Error("unsupported schematic tick");
+        ++result.skippedUnsupportedBlockTicks[type];
         continue;
       }
-      result.world.ticks.push_back(
-          {pos, type,
-           bounded(numeric(tick, "Time"), std::numeric_limits<int>::min(),
-                   std::numeric_limits<int>::max()),
-           bounded(numeric(tick, "Priority"), -3, 3), false});
+      SavedTickData entry{
+          pos, type,
+          bounded(numeric(tick, "Time"), std::numeric_limits<int>::min(),
+                  std::numeric_limits<int>::max()),
+          bounded(numeric(tick, "Priority"), -3, 3), false, std::nullopt};
+      // Litematica records subTickOrder on both families.
+      if (tick.get("SubTick"))
+        entry.subTick = numeric(tick, "SubTick");
+      result.world.ticks.push_back(std::move(entry));
     }
-    // PendingFluidTicks shares the PendingBlockTicks record shape (Block/Time/
-    // Priority) but the type names a Fluid, not a Block. The coordinate is
-    // transformed through the same projection offset, and the fluid identity is
-    // carried through to the world's own fluid tick queue on import.
+    // PendingFluidTicks is NOT the PendingBlockTicks record with a different
+    // value: Litematica writes the type under the key "Fluid" (it passes
+    // "Fluid" as the tag name to writePendingTicksToData) and also records the
+    // original ScheduledTick.subTickOrder as "SubTick"
+    // (LitematicaSchematic.java:1442,1496-1498,2834).
     for (const auto &tick : list(region, "PendingFluidTicks")) {
       const auto pos = add(lo, vector(tick), options);
-      const auto &type = required(tick, "Block", 8).text;
+      const auto &type = required(tick, "Fluid", 8).text;
       const auto canonical =
           type.find(':') == std::string::npos ? "minecraft:" + type : type;
       if (FluidRef(canonical).empty()) {
+        // Empty and unknown names stay distinguishable: an empty name is a
+        // structurally invalid record, an unknown one is a projection using a
+        // fluid this build does not implement.
+        if (canonical == "minecraft:" || type.empty())
+          throw nbt::Error("empty fluid name in PendingFluidTicks");
         if (!options.substituteUnsupported)
           throw nbt::Error("unsupported schematic fluid tick: " + canonical);
+        // Never a silent drop: the caller sees exactly which fluids were
+        // skipped, mirroring the entity and block-entity paths above.
+        ++result.skippedUnsupportedFluidTicks[canonical];
         continue;
       }
-      result.world.ticks.push_back(
-          {pos, canonical,
-           bounded(numeric(tick, "Time"), std::numeric_limits<int>::min(),
-                   std::numeric_limits<int>::max()),
-           bounded(numeric(tick, "Priority"), -3, 3), true});
+      SavedTickData entry{
+          pos, canonical,
+          bounded(numeric(tick, "Time"), std::numeric_limits<int>::min(),
+                  std::numeric_limits<int>::max()),
+          bounded(numeric(tick, "Priority"), -3, 3), true, std::nullopt};
+      // SubTick is optional in the format (it is read with a 0 default), but
+      // when present it is the schematic's own ordering key and must survive
+      // import rather than being replaced by the vanilla -N..-1 sequence.
+      if (auto sub = tick.get("SubTick"))
+        entry.subTick = numeric(tick, "SubTick");
+      result.world.ticks.push_back(std::move(entry));
     }
   }
   const auto minX = chunkCoord(result.min.x),

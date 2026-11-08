@@ -2,6 +2,7 @@
 #include "redstone/engine.hpp"
 #include "redstone/nbt.hpp"
 #include <filesystem>
+#include <optional>
 #include <vector>
 namespace redstone {
 struct SavedTickData {
@@ -9,6 +10,12 @@ struct SavedTickData {
   std::string type;
   int delay{}, priority{};
   bool fluid{};
+  // Litematica records the original ScheduledTick.subTickOrder as SubTick;
+  // vanilla's own chunk format does not, and rebuilds -N..-1 in saved-list
+  // order instead (LevelChunkTicks.unpack). Absent means "use the vanilla
+  // per-chunk sequence", present means "keep the schematic's own order", so
+  // the two rules never get mixed (LitematicaSchematic.java:1498,2834).
+  std::optional<std::int64_t> subTick;
 };
 struct LoadedWorld {
   std::int64_t gameTime{};
