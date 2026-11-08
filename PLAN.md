@@ -22,7 +22,7 @@
 - **F-2 流体计划刻队列**
   独立的 `LevelTicks` 容器，与方块刻分开收集/执行，共享 `Level.nextSubTickCount`；`ServerLevel.tick` 中位于方块刻之后、区块阶段之前；各自 65536 上限。
   依据 `ServerLevel.java`、`LevelTicks.java`、`LevelChunkTicks.java`、`ScheduledTickAccess.java`。执行 Q-01…Q-06，覆盖源与流动类型共存、陈旧刻按精确身份跳过、跨队列同刻收集、积压区块队首和各自上限。
-  依赖补充：先补 `FluidState::is(const Fluid&)`。`ServerLevel.tickFluid` 用 `fluidState.is(type)` 做精确身份匹配（`ServerLevel.java:797-803`，`TypedInstance.is`，`TypedInstance.java:22-24`）；F-1 只交付了要求「是源」的 `isSourceOfType`（`FluidState.java:41-43`），拿它当精确匹配会漏掉流动流体。
+  派发使用 `FluidState::is(const Fluid&)` 的精确身份匹配，依据 `ServerLevel.java:797-803` 和 `TypedInstance.java:22-24`。分别验证流水刻对流水执行、源水刻对流水跳过，以及同格水/岩浆条目不会串扰。
 
 - **F-3 `FlowingFluid` 传播**
   实现 `FlowingFluid.java` 的 `spread`、`spreadToSides`、`getNewLiquid`、`getSpread`、`getSlopeDistance`、`canPassThroughWall`、`SpreadContext`、`isWaterHole`、`getHeight` 和 `getFlow`。以预置方块和显式流体刻隔离算法。F-5 接通自然更新后用同一夹具复验。
@@ -40,11 +40,15 @@
 
 - **F-6 存档与投影的流体刻**
   依据 `SavedTick.java`、`LevelChunkTicks.java`、`SerializableChunkData.java` 和对应版本的 Litematica 格式实现。导入 `fluid_ticks` 的精确流体标识、相对延迟与优先级，按每个区块的独立流体列表恢复 `-n..-1`。投影 `PendingFluidTicks` 单独按格式夹具验证位置变换、字段与错误路径。
-  执行 A-01…A-04。Anvil 以同一存档副本的原版重启为基准。投影用经格式核对的夹具和原版运行快照作对照。验证 C++ 只读输入。
+  执行 A-01…A-04。Anvil 以同一存档副本的原版重启为基准。投影用经格式核对的夹具和原版运行快照作对照。验证 C++ 只读输入，并区别缺失/空名字、未知名字与显式 `minecraft:empty`。
 
 - **F-7 验收与差分**
   汇总 F-1…F-6 的聚焦用例，按 [流体测试规格](docs/fluid-testing.md) 补齐 P0 集成对照，包含 A-05 的稳定窗口、湿态与干态红石对比，以及已实现协议路径的 N-01/N-02/N-04。缺失依赖分别登记。
   区分源码对照、C++ CTest、原版 JAR 离线探针、真实 26.1 服务端差分四种证据。真实差分使用官方 JAR、隔离世界、同输入逐刻 trace 与原版生成的黄金文件；只在具备运行授权时执行。
+  协议回归使用固定 26.1 导出中的水、岩浆 32 条完整 `(协议 ID, 方块, 属性)`，在 `wire_tests` 核对 `Registry::stateId` 和 `stateById`。变异测试将两段整体移动并重排成连续 ID，仍应被拒绝。
+
+- **F-8 流体单例的所有权**
+  处理 `src/fluid.cpp` 中五处由静态裸指针持有的 `new`。按 `AGENTS.md` 的所有权约束选择值类型或智能指针，核对静态初始化和销毁次序。用回归验证同一流体的身份稳定，默认空状态在正常运行路径始终可查询。
 
 - **M0-2 交接与定位文档校正**
   在流体验收之后单独校正文档。`AGENTS.md` 的角色切换和验收统一以唯一的末行状态为准，时间目标对齐 26.1 World Clocks 与 `advance_time`。修复 `docs/compatibility.md` 的路线图链接及命令边界，`docs/handover.md` 区分历史段落与当前流体路线。
