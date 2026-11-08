@@ -88,6 +88,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 ### 提交
 
-（待填）
+- 主提交：`3c7e360` — Add a separate fluid tick queue and dispatch on exact fluid identity
+  （10 个文件，+557 / -299；含 `include/redstone/engine.hpp`、`src/engine.cpp`、`include/redstone/fluid.hpp`、`src/fluid.cpp`、`tests/fluid_tick_tests.cpp`、`CMakeLists.txt`、`docs/compatibility.md`，以及 reviewer 前一轮加入的 `PLAN.md` / `docs/fluid-testing.md` 性能回归要求）
 
 任务完成
