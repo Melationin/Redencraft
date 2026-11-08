@@ -246,33 +246,34 @@ void budgetsAreSeparate() {
   const auto posOf = [](int i) {
     return Pos{i & 255, 64 + ((i >> 8) & 255), i >> 16};
   };
+  // Both queues are filled *before* the first tick, so a single shared per-tick
+  // budget would be visible: blockTicks runs first and would starve fluidTicks.
+  // Draining one queue before filling the other could not distinguish that.
   for (int i = 0; i < kEntries; ++i) {
     const Pos pos = posOf(i);
     world.rawSetBlock(pos, waterLevel(0));
     require(world.scheduleFluidTick(pos, Fluids::water(), 0),
             "schedule fluid tick " + std::to_string(i));
+    require(world.scheduleTick(ScheduledTick{pos, BlockRef{Blocks::SMOOTH_STONE},
+                                             0, 0, 0}),
+            "schedule block tick " + std::to_string(i));
   }
   require(world.fluidTickCount() == static_cast<std::size_t>(kEntries),
           "all fluid ticks are queued");
-
-  world.tick();
-  require(world.fluidTickCount() == 1, "the first tick consumes 65536 and leaves 1");
-  world.tick();
-  require(world.fluidTickCount() == 0, "the second tick drains the last entry");
-
-  // The same cap applies to the block queue, independently.
-  for (int i = 0; i < kEntries; ++i)
-    require(world.scheduleTick(ScheduledTick{posOf(i),
-                                             BlockRef{Blocks::SMOOTH_STONE},
-                                             0, 0, 0}),
-            "schedule block tick " + std::to_string(i));
   require(world.scheduledTickCount() == static_cast<std::size_t>(kEntries),
           "all block ticks are queued");
+
+  // One tick: each queue spends its own 65536 and keeps exactly one entry, so
+  // neither budget could have been consumed by the other queue.
   world.tick();
-  require(world.scheduledTickCount() == 1, "the block queue also stops at 65536");
+  require(world.scheduledTickCount() == 1,
+          "the block queue consumes 65536 with the fluid backlog still present");
+  require(world.fluidTickCount() == 1,
+          "the fluid queue still consumes 65536 in that same tick");
+
   world.tick();
-  require(world.scheduledTickCount() == 0, "the block queue then drains");
-  require(world.fluidTickCount() == 0, "the fluid queue stayed empty");
+  require(world.scheduledTickCount() == 0, "the block queue drains its last entry");
+  require(world.fluidTickCount() == 0, "the fluid queue drains its last entry");
 }
 
 // Restored fluid ticks (LevelChunkTicks.scheduleUnchecked) keep duplicates, the
@@ -326,8 +327,9 @@ void nullFluidHandleIsRejected() {
   require(!world.scheduleFluidTick(pos, unknown, 1),
           "an unknown name cannot be scheduled");
 
-  // Fluids::empty() is a real identity and is allowed through the gate; the
-  // entry simply never dispatches because no block reports the empty fluid.
+  // Fluids::empty() is a real registered identity, so it passes the null-handle
+  // gate. This case only covers queuing and the snapshot; what a dispatch at an
+  // air position does is not asserted here.
   require(!FluidRef(Fluids::empty()).empty(),
           "the registered empty fluid is a valid identity");
   require(world.scheduleFluidTick(pos, FluidRef(Fluids::empty()), 1),
