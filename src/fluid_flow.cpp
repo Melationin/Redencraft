@@ -510,6 +510,11 @@ bool fluidCanPassThroughWall(World &world, Direction direction, Pos sourcePos,
   return !mergedFaceOccludes(*sourceShape, *targetShape, direction);
 }
 
+bool fluidShapesSealSharedFace(const VoxelShape &source,
+                               const VoxelShape &target, Direction direction) {
+  return mergedFaceOccludes(source, target, direction);
+}
+
 float fluidHeight(World &world, Pos pos, const FluidState &state) {
   // EmptyFluid.getHeight is the constant 0.0F, so an empty state never reports a
   // full block just because the block above is also empty.

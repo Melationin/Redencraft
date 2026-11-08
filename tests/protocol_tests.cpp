@@ -481,15 +481,23 @@ static void fluidTicksAndPistonSameTick(const ProtocolData &data) {
   world.rawSetBlock({7, 64, 0}, defaultState("smooth_stone"));
   world.rawSetBlock({6, 64, -1}, defaultState("redstone_block"));
   pistonNeighborChanged(world, {6, 64, 0}, world.getBlock({6, 64, 0}));
+  // Route every world-level block write to the session, exactly like the server
+  // does through Level.sendBlockUpdated. Without this the session never hears
+  // about the fluid at all, and a zero-packet run would pass.
+  world.blockUpdateObserver = [&](Pos pos, const BlockState &state, int) {
+    session.blockUpdate(pos, state);
+  };
   // Water needs 5 ticks per cell; run a short window so the front advances.
   for (int i = 0; i < 12; ++i)
     world.tick();
+  world.blockUpdateObserver = nullptr;
   // Whatever changed must be coalesced: at most one update per section per
   // broadcast, and the encoded state is the latest one.
   session.flushBlockUpdates();
   auto packets = session.takeOutput();
   std::set<std::int64_t> sections;
   int sectionUpdates = 0;
+  bool encodedWater = false;
   for (auto &bytes : packets) {
     auto body = popFrame(bytes);
     if (!body)
@@ -500,9 +508,20 @@ static void fluidTicksAndPistonSameTick(const ProtocolData &data) {
       continue;
     ++sectionUpdates;
     sections.insert(in.i64());
+    // Decode every encoded cell: the broadcast must carry the latest state.
+    const int count = in.varInt();
+    for (int i = 0; i < count; ++i) {
+      const auto packed = in.varLong();
+      const auto decoded =
+          data.registry.stateById(static_cast<int>(packed >> 12));
+      if (decoded.is(Blocks::WATER)) encodedWater = true;
+    }
   }
-  assert(sectionUpdates <= 2);
+  // A zero-packet run must not pass: the fluid wrote cells, so at least one
+  // section update is required, and each visited section appears exactly once.
+  assert(sectionUpdates >= 1);
   assert(sectionUpdates == static_cast<int>(sections.size()));
+  assert(encodedWater);
   // The fluid really moved: the water reached a downstream cell.
   bool reached = false;
   for (int x = 1; x <= 3; ++x)
@@ -572,6 +591,36 @@ static void slowSessionDoesNotStallFluid(const ProtocolData &data) {
   // does not drive. What N-04 requires of the core is that ticking continues.
   assert(!slow.closed());
 }
+// Minimal palette reader for the encoded section payload (mirrors the one in
+// wire_tests; the section framing is the part this test must not fake).
+static std::vector<int> readSectionPalette(Reader &r, int count, bool blocks) {
+  int bits = r.u8();
+  std::vector<int> palette;
+  if (!bits)
+    return std::vector<int>(count, r.varInt());
+  bool local = bits <= (blocks ? 8 : 3);
+  if (local) {
+    int n = r.varInt();
+    assert(n > 0 && n <= 256);
+    for (int i = 0; i < n; ++i)
+      palette.push_back(r.varInt());
+  }
+  int perLong = 64 / bits;
+  std::uint64_t mask = (std::uint64_t(1) << bits) - 1;
+  std::vector<int> values;
+  while (int(values.size()) < count) {
+    auto word = std::bit_cast<std::uint64_t>(r.i64());
+    for (int j = 0; j < perLong && int(values.size()) < count; ++j) {
+      int n = int((word >> (j * bits)) & mask);
+      if (local) {
+        assert(n < int(palette.size()));
+        n = palette[n];
+      }
+      values.push_back(n);
+    }
+  }
+  return values;
+}
 static void fluidSectionSnapshot(const ProtocolData &data) {
   World world;
   world.loadChunk(0, 0);
@@ -617,6 +666,55 @@ static void fluidSectionSnapshot(const ProtocolData &data) {
   // The live world lost the two fluids, so the states are genuinely distinct.
   assert(!world.getBlock({0, -64, 0}).is(Blocks::WATER));
   assert(!world.getBlock({1, -64, 0}).is(Blocks::LAVA));
+
+  // Encode the frozen snapshot into a real chunk packet and decode it back.
+  // Reading the internal palette alone would not prove the wire path carries
+  // the fluid states, their counts, or the section framing.
+  auto bytes = encodeChunk(snapshot, 0, 0, data.registry);
+  Reader r(bytes);
+  assert(r.i32() == 0 && r.i32() == 0);
+  // Heightmaps come first (3 packed arrays of 256 entries), then the section
+  // blob; encodeChunk writes them in that order (src/net/wire.cpp:546-554).
+  assert(r.varInt() == 3);
+  for (int type : {1, 4, 5}) {
+    assert(r.varInt() == type);
+    const int n = r.varInt();
+    for (int i = 0; i < n; ++i)
+      (void)r.i64();
+  }
+  Reader sections(r.raw(r.varInt()));
+  int decodedSections = 0;
+  for (int y = snapshot.minY; y < snapshot.maxY; y += 16) {
+    const int count = sections.i16();
+    const int fluidCount = sections.i16();
+    (void)fluidCount;
+    const auto states = readSectionPalette(sections, 4096, true);
+    (void)readSectionPalette(sections, 64, false);
+    if (count == 0)
+      continue;
+    ++decodedSections;
+    // Every cell must decode to the official id of the state the SNAPSHOT held.
+    // The section is the first of the chunk (y == minY), and the four fluid cells
+    // live at world y = minY, so the expected values come from the frozen
+    // snapshot, not from the (already mutated) live world.
+    std::map<int, BlockState> byId;
+    for (auto id : section.palette)
+      byId.emplace(id, BlockState::fromId(id));
+    const std::array<BlockState, 4> fluidCells{water, flowingLava, host, dry};
+    for (int i = 0; i < 4096; ++i) {
+      const int x = i & 15, z = (i >> 4) & 15, dy = (i >> 8) & 15;
+      const auto decoded = data.registry.stateById(states[i]);
+      if (y + dy != snapshot.minY || z != 0 || x > 3) {
+        assert(decoded.isAir());
+        continue;
+      }
+      assert(decoded == fluidCells[x]);
+    }
+    // The four fluid/host states must be reachable through the decoded palette.
+    std::set<int> ids(states.begin(), states.end());
+    for (int id : ids) (void)data.registry.stateById(id);
+  }
+  assert(decodedSections == 1);
 }
 void placementRules(const ProtocolData &data) {
   World world;

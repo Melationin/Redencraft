@@ -1,0 +1,587 @@
+[
+ {
+  "t": "T0",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T0",
+  "cell": 1,
+  "state": "air"
+ },
+ {
+  "t": "T0",
+  "cell": 2,
+  "state": "air"
+ },
+ {
+  "t": "T0",
+  "cell": 3,
+  "state": "air"
+ },
+ {
+  "t": "T0",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T0",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T0",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T0",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T0",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T1",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T1",
+  "cell": 1,
+  "state": "air"
+ },
+ {
+  "t": "T1",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T1",
+  "cell": 3,
+  "state": "air"
+ },
+ {
+  "t": "T1",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T1",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T1",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T1",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T1",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T2",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T2",
+  "cell": 1,
+  "state": "air"
+ },
+ {
+  "t": "T2",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T2",
+  "cell": 3,
+  "state": "air"
+ },
+ {
+  "t": "T2",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T2",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T2",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T2",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T2",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T3",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T3",
+  "cell": 1,
+  "state": "air"
+ },
+ {
+  "t": "T3",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T3",
+  "cell": 3,
+  "state": "air"
+ },
+ {
+  "t": "T3",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T3",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T3",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T3",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T3",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T4",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T4",
+  "cell": 1,
+  "state": "air"
+ },
+ {
+  "t": "T4",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T4",
+  "cell": 3,
+  "state": "air"
+ },
+ {
+  "t": "T4",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T4",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T4",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T4",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T4",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T5",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T5",
+  "cell": 1,
+  "state": "water1"
+ },
+ {
+  "t": "T5",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T5",
+  "cell": 3,
+  "state": "water1"
+ },
+ {
+  "t": "T5",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T5",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T5",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T5",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T5",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T6",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T6",
+  "cell": 1,
+  "state": "water1"
+ },
+ {
+  "t": "T6",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T6",
+  "cell": 3,
+  "state": "water1"
+ },
+ {
+  "t": "T6",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T6",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T6",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T6",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T6",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T7",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T7",
+  "cell": 1,
+  "state": "water1"
+ },
+ {
+  "t": "T7",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T7",
+  "cell": 3,
+  "state": "water1"
+ },
+ {
+  "t": "T7",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T7",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T7",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T7",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T7",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T8",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T8",
+  "cell": 1,
+  "state": "water1"
+ },
+ {
+  "t": "T8",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T8",
+  "cell": 3,
+  "state": "water1"
+ },
+ {
+  "t": "T8",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T8",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T8",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T8",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T8",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T9",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T9",
+  "cell": 1,
+  "state": "water1"
+ },
+ {
+  "t": "T9",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T9",
+  "cell": 3,
+  "state": "water1"
+ },
+ {
+  "t": "T9",
+  "cell": 4,
+  "state": "air"
+ },
+ {
+  "t": "T9",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T9",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T9",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T9",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T10",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T10",
+  "cell": 1,
+  "state": "water1"
+ },
+ {
+  "t": "T10",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T10",
+  "cell": 3,
+  "state": "water1"
+ },
+ {
+  "t": "T10",
+  "cell": 4,
+  "state": "water2"
+ },
+ {
+  "t": "T10",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T10",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T10",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T10",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T11",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T11",
+  "cell": 1,
+  "state": "water1"
+ },
+ {
+  "t": "T11",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T11",
+  "cell": 3,
+  "state": "water1"
+ },
+ {
+  "t": "T11",
+  "cell": 4,
+  "state": "water2"
+ },
+ {
+  "t": "T11",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T11",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T11",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T11",
+  "cell": 8,
+  "state": "stone"
+ },
+ {
+  "t": "T12",
+  "cell": 0,
+  "state": "stone"
+ },
+ {
+  "t": "T12",
+  "cell": 1,
+  "state": "water1"
+ },
+ {
+  "t": "T12",
+  "cell": 2,
+  "state": "water0"
+ },
+ {
+  "t": "T12",
+  "cell": 3,
+  "state": "water1"
+ },
+ {
+  "t": "T12",
+  "cell": 4,
+  "state": "water2"
+ },
+ {
+  "t": "T12",
+  "cell": 5,
+  "state": "air"
+ },
+ {
+  "t": "T12",
+  "cell": 6,
+  "state": "air"
+ },
+ {
+  "t": "T12",
+  "cell": 7,
+  "state": "air"
+ },
+ {
+  "t": "T12",
+  "cell": 8,
+  "state": "stone"
+ }
+]

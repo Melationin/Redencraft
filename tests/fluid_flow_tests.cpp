@@ -554,16 +554,15 @@ void complementarySharedFace() {
                                   world.getBlock(air)),
           "a single closed gate leaves the shared face partly open");
 
-  // 2. Two gates on the same axis: both contribute the SAME z=6..10 strip, so
-  //    the x edges stay open and fluid still passes. This is the control that
-  //    proves the test is not just 'two blocks are solid'.
-  const Pos right{2, 64, 0};
-  world.rawSetBlock(right, gateNorth);
+  // 2. Two gates across the SAME shared plane (left <-> air): both contribute
+  //    the same z=6..10 strip, so the x edges stay open and fluid still passes.
+  //    This is the control that rules out 'two partial blocks always seal'.
+  world.rawSetBlock(air, gateNorth);
   require(fluidCanPassThroughWall(world, Direction::East, left,
                                   world.getBlock(left), air,
                                   world.getBlock(air)),
           "two gates on the same axis still leave the face open");
-  world.rawSetBlock(right, Blocks::AIR.defaultState());
+  world.rawSetBlock(air, Blocks::AIR.defaultState());
 
   // 3. A gate meeting a wall post: the post occupies x/z 4..12, i.e. a
   //    different strip of the plane than the gate's z=6..10 band, and the union
@@ -574,7 +573,9 @@ void complementarySharedFace() {
               wallShape[0].x1 == 12 && wallShape[0].z0 == 4 &&
               wallShape[0].z1 == 12,
           "a bare wall post is the expected 4..12 column");
-  // The wall post alone also leaves part of the face open (its corners).
+  // The wall post sits on the OTHER side of the shared plane (left <-> air), so
+  // its 4..12 columns are what merges with the gate's strip. Alone it still
+  // leaves the corners open.
   world.rawSetBlock(air, wallPost);
   require(fluidCanPassThroughWall(world, Direction::East, left,
                                   world.getBlock(left), air,
@@ -644,22 +645,58 @@ void stableChannelSettles() {
                          Blocks::WATER.defaultState().with("level", "0")),
           "place the channel source");
 
-  for (int i = 0; i < 200; ++i)
+  world.traceUpdates = true;
+  // First assert it actually fills: the water must reach the far end, not just
+  // fail to change. Without this the 'no writes' window below is vacuous.
+  bool reachedEnd = false;
+  for (int i = 0; i < 200 && !reachedEnd; ++i) {
+    world.tick();
+    if (world.getBlock({5, 64, 0}).is(Blocks::WATER)) reachedEnd = true;
+  }
+  require(reachedEnd, "the channel really fills to the far end");
+  // Every channel cell is now water with a concrete level, and the source end
+  // is still a source: prove the levels, not just the block type.
+  require(fluidStateOf(world.getBlock({0, 64, 0})).isSource(),
+          "the source end is still a source");
+  for (int x = 1; x <= 5; ++x) {
+    const auto state = world.getBlock({x, 64, 0});
+    require(state.is(Blocks::WATER),
+            "the channel cell really holds water, got " +
+                std::string(state.shortName()));
+    require(!fluidStateOf(state).isSource(),
+            "a downstream cell is flowing, not a source");
+  }
+  // Drain the remaining work, then watch a window tick by tick: any fluid write,
+  // any new fluid tick or any block-tick growth is a failure. A snapshot of block
+  // names alone could not see 'written then reverted'.
+  for (int i = 0; i < 100 && world.fluidTickCount() > 0; ++i)
     world.tick();
   require(world.fluidTickCount() == 0,
           "a settled channel leaves no pending fluid ticks, got " +
               std::to_string(world.fluidTickCount()));
-  std::map<Pos, std::string> settled;
-  for (int x = -2; x <= 6; ++x)
-    settled[{x, 64, 0}] = std::string(world.getBlock({x, 64, 0}).shortName());
-  // A second window: still nothing may move.
-  for (int i = 0; i < 100; ++i)
+  std::map<Pos, BlockState> settled;
+  for (int x = -2; x <= 6; ++x) {
+    settled[{x, 64, 0}] = world.getBlock({x, 64, 0});
+    settled[{x, 65, 0}] = world.getBlock({x, 65, 0});
+    settled[{x, 64, 1}] = world.getBlock({x, 64, 1});
+  }
+  world.log.clear();
+  for (int i = 0; i < 100; ++i) {
     world.tick();
-  require(world.fluidTickCount() == 0,
-          "a settled channel does not start moving again");
-  for (const auto &[pos, name] : settled)
-    require(std::string(world.getBlock(pos).shortName()) == name,
-            "a settled channel keeps its cell states");
+    int writes = 0;
+    for (const auto &entry : world.log)
+      if (entry.kind == "fluid_tick") ++writes;
+    require(writes == 0,
+            "a settled channel dispatches no fluid ticks, tick " +
+                std::to_string(i));
+    require(world.fluidTickCount() == 0,
+            "a settled channel queues no new fluid ticks, tick " +
+                std::to_string(i));
+    world.log.clear();
+  }
+  for (const auto &[pos, state] : settled)
+    require(world.getBlock(pos) == state,
+            "a settled channel keeps every watched cell state");
 }
 
 // A-05's looping class: an intentionally self-retriggering input is NOT a steady
@@ -670,17 +707,42 @@ void selfRetriggeringLoopIsBounded() {
   for (int x = -1; x <= 1; ++x)
     for (int z = -1; z <= 1; ++z)
       loop.loadChunk(x, z);
+  // A genuinely self-retriggering input: an observer facing a redstone block.
+  // The neighbour change below starts the pulse train, and the observer's own
+  // pulse is what re-arms it, so the window must contain real events.
+  // The observer watches its facing side; a change there starts a pulse. Feeding
+  // the pulse back into the watched cell is what makes the train self-sustaining.
   loop.rawSetBlock({0, 64, 0},
                    Blocks::OBSERVER.defaultState().with("facing", "east"));
-  loop.rawSetBlock({1, 64, 0}, Blocks::REDSTONE_BLOCK.defaultState());
+  loop.rawSetBlock({1, 64, 0}, Blocks::SMOOTH_STONE.defaultState());
   loop.traceUpdates = true;
+  // Start the first pulse with the same call the engine uses for a real
+  // neighbour change at the watched cell.
+  loop.setBlock({1, 64, 0}, Blocks::GLASS.defaultState(), 2);
   std::vector<std::size_t> perTick;
+  std::vector<int> eventsPerTick;
   for (int i = 0; i < 60; ++i) {
     loop.log.clear();
     loop.tick();
     perTick.push_back(loop.scheduledTickCount());
+    int events = 0;
+    for (const auto &entry : loop.log)
+      if (entry.kind == "scheduled_tick" ||
+          entry.kind == "neighbor" || entry.kind == "shape")
+        ++events;
+    eventsPerTick.push_back(events);
   }
   require(!perTick.empty(), "the loop produced ticks to measure");
+  // The defining property of a LOOP: it really produces events, so a window of
+  // all-zero samples cannot satisfy this test.
+  int activeTicks = 0;
+  for (int events : eventsPerTick)
+    if (events > 0) ++activeTicks;
+  require(activeTicks >= 2,
+          "the loop must actually retrigger in at least two ticks, got " +
+              std::to_string(activeTicks));
+  // And it stays bounded: a looping input is allowed to keep queueing, but not
+  // to grow without bound across the window.
   const auto maxPending =
       *std::max_element(perTick.begin(), perTick.end());
   require(maxPending <= 8,
@@ -708,8 +770,12 @@ void wetAndDryRedstoneDiffer() {
       world.rawSetBlock({1, 63, 1},
                         Blocks::COBBLESTONE_WALL.defaultState().with(
                             "waterlogged", "true"));
-      world.rawSetBlock({0, 63, 1},
-                        Blocks::WATER.defaultState().with("level", "0"));
+      // Place through setBlock so onPlace queues the first fluid tick; this is
+      // what makes the wet case a real fluid-vs-piston interleaving rather
+      // than a static puddle beside a piston.
+      require(world.setBlock({0, 63, 1},
+                             Blocks::WATER.defaultState().with("level", "0")),
+              "place the wet fixture's water source");
     }
     world.traceUpdates = true;
     pistonNeighborChanged(world, {0, 64, 0}, world.getBlock({0, 64, 0}));
@@ -720,6 +786,12 @@ void wetAndDryRedstoneDiffer() {
   World wet;
   build(wet, true);
 
+  // The wet side must actually have a FLUID TICK due, otherwise the comparison
+  // is between one mechanism and one mechanism plus a static puddle.
+  require(wet.fluidTickCount() > 0,
+          "the wet fixture has a due fluid tick from the placed source");
+  require(dry.fluidTickCount() == 0, "the dry fixture has none");
+
   // Both extend: the piston mechanism itself is unaffected by the fluid.
   dry.tick();
   wet.tick();
@@ -727,12 +799,22 @@ void wetAndDryRedstoneDiffer() {
           "the dry piston starts extending");
   require(wet.getBlock({1, 64, 0}).is(Blocks::MOVING_PISTON),
           "the wet piston starts extending too");
-
-  // Run to completion and compare the resulting cell states cell by cell.
+  // The fluid tick is due at the water delay (5), so it must dispatch during the
+  // run and write cells, interleaving with the piston's own ticks.
+  bool wetFluid = false;
+  int wetCells = 0;
   for (int i = 0; i < 8; ++i) {
     dry.tick();
     wet.tick();
+    for (const auto &entry : wet.log)
+      if (entry.kind == "fluid_tick") ++wetCells;
+    wet.log.clear();
   }
+  require(wetCells > 0,
+          "the wet world dispatched fluid ticks during the run");
+  (void)wetFluid;
+
+  // Run to completion and compare the resulting cell states cell by cell.
   require(dry.getBlock({2, 64, 0}).is(Blocks::SMOOTH_STONE),
           "the dry piston pushed the block to the destination");
   require(wet.getBlock({2, 64, 0}).is(Blocks::SMOOTH_STONE),
@@ -748,6 +830,131 @@ void wetAndDryRedstoneDiffer() {
           "the wet fixture keeps its water source");
   require(!dry.getBlock({0, 63, 1}).is(Blocks::WATER),
           "the dry fixture has no water there");
+}
+
+// W-06's missing positive case, at the shape level. The registry has no pair of
+// blocks whose partial shapes complement each other, so the merge routine is
+// driven directly with the half-slab geometry the vanilla offline probe used:
+// a bottom slab (y 0..8) covers only the lower half of a vertical face and a top
+// slab (y 8..16) only the upper half, yet together they cover every 1/16 cell.
+void complementaryShapesSealTogether() {
+  const VoxelShape bottomSlab{{0, 0, 0, 16, 8, 16}};
+  const VoxelShape topSlab{{0, 8, 0, 16, 16, 16}};
+  const VoxelShape empty;
+
+  // Individually: neither seals an east/west face, because half of it is open.
+  require(!fluidShapesSealSharedFace(bottomSlab, empty, Direction::East),
+          "a bottom slab alone does not seal the shared face");
+  require(!fluidShapesSealSharedFace(topSlab, empty, Direction::East),
+          "a top slab alone does not seal the shared face");
+  // Two IDENTICAL bottom slabs also do not seal: they cover the same half.
+  require(!fluidShapesSealSharedFace(bottomSlab, bottomSlab, Direction::East),
+          "two identical slabs cover the same half and do not seal");
+  // The complementary pair does seal, in both directions of the query.
+  require(fluidShapesSealSharedFace(bottomSlab, topSlab, Direction::East),
+          "a bottom slab facing a top slab seals the shared face");
+  require(fluidShapesSealSharedFace(topSlab, bottomSlab, Direction::East),
+          "the reversed pair seals it just as well");
+  // And the same pair seals the west face, i.e. the result is not axis-fixed.
+  require(fluidShapesSealSharedFace(bottomSlab, topSlab, Direction::West),
+          "the complementary pair seals the west face too");
+  // A full cube seals on its own, which is the control for 'complete coverage'.
+  const VoxelShape cube{{0, 0, 0, 16, 16, 16}};
+  require(fluidShapesSealSharedFace(cube, empty, Direction::East),
+          "a full cube seals the face by itself");
+  // A shape that does not touch the plane contributes nothing.
+  const VoxelShape inset{{4, 4, 4, 12, 12, 12}};
+  require(!fluidShapesSealSharedFace(inset, inset, Direction::East),
+          "shapes that never reach the shared plane do not seal it");
+}
+
+// A-05's other two steady shapes. A junction pool (two feeds meeting) and a
+// waterfall cut off at the source must BOTH settle: no pending fluid ticks and
+// no further writes once the shape stops changing.
+void junctionAndCutWaterfallSettle() {
+  const auto watch = [](World &world, const char *what, int window) {
+    for (int i = 0; i < window; ++i)
+      world.tick();
+    require(world.fluidTickCount() == 0,
+            std::string(what) + ": no pending fluid ticks, got " +
+                std::to_string(world.fluidTickCount()));
+    world.log.clear();
+    for (int i = 0; i < 60; ++i) {
+      world.tick();
+      int fluidTicks = 0;
+      for (const auto &entry : world.log)
+        if (entry.kind == "fluid_tick") ++fluidTicks;
+      require(fluidTicks == 0,
+              std::string(what) + ": no dispatch in the settled window");
+      world.log.clear();
+    }
+  };
+
+  // A junction pool: two sources feeding the same sealed cell from opposite
+  // sides, so the middle turns into a source and everything stops.
+  {
+    World world;
+    for (int x = -1; x <= 1; ++x)
+      for (int z = -1; z <= 1; ++z)
+        world.loadChunk(x, z);
+    for (int x = -3; x <= 3; ++x) {
+      world.rawSetBlock({x, 63, 0}, Blocks::SMOOTH_STONE.defaultState());
+      world.rawSetBlock({x, 65, 0}, Blocks::SMOOTH_STONE.defaultState());
+      world.rawSetBlock({x, 64, -1}, Blocks::SMOOTH_STONE.defaultState());
+      world.rawSetBlock({x, 64, 1}, Blocks::SMOOTH_STONE.defaultState());
+    }
+    world.rawSetBlock({-3, 64, 0}, Blocks::SMOOTH_STONE.defaultState());
+    world.rawSetBlock({3, 64, 0}, Blocks::SMOOTH_STONE.defaultState());
+    world.traceUpdates = true;
+    // The two feeds must be ADJACENT to the junction cell: two-source
+    // conversion counts only horizontal neighbours that are sources, so a
+    // feed two cells away would leave the middle at a flowing level.
+    require(world.setBlock({-1, 64, 0},
+                           Blocks::WATER.defaultState().with("level", "0")),
+            "place the junction west feed");
+    require(world.setBlock({1, 64, 0},
+                           Blocks::WATER.defaultState().with("level", "0")),
+            "place the junction east feed");
+    // Let the two fronts meet and convert the middle into a source.
+    for (int i = 0; i < 200; ++i)
+      world.tick();
+    require(fluidStateOf(world.getBlock({0, 64, 0})).isSource(),
+            "the two feeds convert the middle cell into a source");
+    watch(world, "junction pool", 1);
+  }
+
+  // A waterfall whose source is removed must drain back to a settled empty
+  // column rather than oscillate.
+  {
+    World world;
+    for (int x = -1; x <= 1; ++x)
+      for (int z = -1; z <= 1; ++z)
+        world.loadChunk(x, z);
+    for (int x = -2; x <= 2; ++x)
+      for (int z = -2; z <= 2; ++z)
+        world.rawSetBlock({x, 60, z}, Blocks::SMOOTH_STONE.defaultState());
+    // A sealed vertical shaft with an open bottom cup.
+    for (int y = 61; y <= 66; ++y)
+      for (int x = -1; x <= 1; ++x)
+        for (int z = -1; z <= 1; ++z)
+          if (!(x == 0 && z == 0))
+            world.rawSetBlock({x, y, z}, Blocks::SMOOTH_STONE.defaultState());
+    world.traceUpdates = true;
+    require(world.setBlock({0, 66, 0},
+                           Blocks::WATER.defaultState().with("level", "0")),
+            "place the waterfall source");
+    // Let it fall and pool at the bottom.
+    for (int i = 0; i < 160; ++i)
+      world.tick();
+    require(world.getBlock({0, 61, 0}).is(Blocks::WATER),
+            "the waterfall reaches the bottom of the shaft");
+    // Cut the source: the column must drain and then stop moving.
+    require(world.setBlock({0, 66, 0}, Blocks::AIR.defaultState()),
+            "cut the waterfall source");
+    watch(world, "cut waterfall", 400);
+    require(world.getBlock({0, 66, 0}).isAir(),
+            "the cut waterfall leaves the source cell empty");
+  }
 }
 int main() {
   try {
@@ -765,9 +972,11 @@ int main() {
     soliditySemantics();
     wallFaceSides();
     complementarySharedFace();
+    complementaryShapesSealTogether();
     sharedFaceDependencyGap();
     stableChannelSettles();
     selfRetriggeringLoopIsBounded();
+    junctionAndCutWaterfallSettle();
     wetAndDryRedstoneDiffer();
     forceSolidGate();
     movingPistonShapeDependsOnProgress();

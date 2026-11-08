@@ -132,6 +132,9 @@ endif()
 if(BUILD_TESTING)
   add_executable(safesave_order_probe tests/safesave_order_probe.cpp)
   target_link_libraries(safesave_order_probe PRIVATE redstone_core redstone_allocator)
+  # F-7 differential: the C++ half of the same fixture the vanilla harness runs.
+  add_executable(fluid_differential_probe tests/fluid_differential_probe.cpp)
+  target_link_libraries(fluid_differential_probe PRIVATE redstone_core redstone_allocator)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
     if(REDSTONE_BUILD_VANILLA_SERVER)
@@ -148,6 +151,13 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/validation/safesave_order/compare.py"
       --native "$<TARGET_FILE:safesave_order_probe>"
       --output "${CMAKE_CURRENT_BINARY_DIR}/safesave-order-comparison.json")
+    # F-7 differential against the checked-in vanilla golden states. This is a
+    # regression pin: it re-runs the C++ side of the same fixture and compares
+    # to the recorded 26.1 output. It does NOT re-run the vanilla server.
+    add_test(NAME fluid_differential COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid_differential_test.py"
+      --probe "$<TARGET_FILE:fluid_differential_probe>"
+      --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid-vanilla-states.json")
   endif()
   foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")

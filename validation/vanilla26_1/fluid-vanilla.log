@@ -1,0 +1,240 @@
+Starting net.minecraft.server.Main
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.sun.jna.Native in an unnamed module (file:/F:/source/minecraft-merged-07da9a845a-26.1-sources/redstone-cpp/validation/vanilla26_1/libraries/net/java/dev/jna/jna/5.17.0/jna-5.17.0.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/F:/source/minecraft-merged-07da9a845a-26.1-sources/redstone-cpp/validation/vanilla26_1/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)
+WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+[23:32:20] [ServerMain/INFO]: Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]
+[23:32:21] [Worker-Main-19/INFO]: No existing world data, creating new world
+[23:32:22] [ServerMain/INFO]: Loaded 1515 recipes
+[23:32:22] [ServerMain/INFO]: Loaded 1617 advancements
+[23:32:22] [Server thread/INFO]: Starting minecraft server version 26.1
+[23:32:22] [Server thread/INFO]: Loading properties
+[23:32:22] [Server thread/INFO]: Default game type: SURVIVAL
+[23:32:22] [Server thread/INFO]: Generating keypair
+[23:32:22] [Server thread/INFO]: Starting Minecraft server on 127.0.0.1:25597
+[23:32:22] [Server thread/INFO]: Preparing level "fluid-validation-world"
+[23:32:22] [Server thread/INFO]: Selecting global world spawn...
+[23:32:24] [Server thread/INFO]: Loading 0 persistent chunks...
+[23:32:24] [Server thread/INFO]: Preparing spawn area: 100%
+[23:32:24] [Server thread/INFO]: Time elapsed: 1980 ms
+[23:32:24] [Server thread/INFO]: Done (2.235s)! For help, type "help"
+[23:32:24] [Server thread/INFO]: Saving chunks for level 'ServerLevel[fluid-validation-world]'/minecraft:overworld
+[23:32:25] [Server thread/INFO]: Saving chunks for level 'ServerLevel[fluid-validation-world]'/minecraft:the_nether
+[23:32:25] [Server thread/INFO]: Saving chunks for level 'ServerLevel[fluid-validation-world]'/minecraft:the_end
+[23:32:25] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[23:32:25] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[23:32:25] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[23:32:25] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
+[23:32:25] [Server thread/INFO]: The game is frozen
+[23:32:25] [Server thread/INFO]: Gamerule random_tick_speed is now set to: 0
+[23:32:25] [Server thread/INFO]: Gamerule spawn_mobs is now set to: false
+[23:32:25] [Server thread/INFO]: Gamerule advance_weather is now set to: false
+[23:32:25] [Server thread/INFO]: Gamerule water_source_conversion is now set to: true
+[23:32:25] [Server thread/INFO]: Gamerule lava_source_conversion is now set to: false
+[23:32:27] [Server thread/INFO]: Marked 4 chunks in minecraft:overworld from [-1, -1] to [0, 0] to be force loaded
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:27] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:28] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:28] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:28] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:28] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:28] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:28] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:29] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:29] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:29] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:29] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:29] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:30] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:30] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:30] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:30] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:30] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:30] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:31] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:31] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:31] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:31] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:31] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:31] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:32] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:32] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:32] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:32] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:32] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:33] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:33] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:33] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:33] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:33] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:33] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:34] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:34] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:34] [Server thread/INFO]: Successfully filled 1 block(s)
+[23:32:37] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 0 stone
+[23:32:37] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 1 air
+[23:32:41] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 2 air
+[23:32:44] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 3 air
+[23:32:47] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 4 air
+[23:32:50] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 5 air
+[23:32:54] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 6 air
+[23:32:57] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 7 air
+[23:33:03] [Server thread/INFO]: [Not Secure] [Server] SNAP T0 8 stone
+[23:33:03] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T0
+[23:33:04] [Server thread/INFO]: Changed the block at 0, 80, 0
+[23:33:04] [Server thread/INFO]: Stepping 1 tick(s)
+[23:33:08] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 0 stone
+[23:33:08] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 1 air
+[23:33:11] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 2 water0
+[23:33:14] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 3 air
+[23:33:17] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 4 air
+[23:33:21] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 5 air
+[23:33:24] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 6 air
+[23:33:27] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 7 air
+[23:33:34] [Server thread/INFO]: [Not Secure] [Server] SNAP T1 8 stone
+[23:33:34] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T1
+[23:33:34] [Server thread/INFO]: Stepping 1 tick(s)
+[23:33:38] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 0 stone
+[23:33:38] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 1 air
+[23:33:41] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 2 water0
+[23:33:44] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 3 air
+[23:33:48] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 4 air
+[23:33:51] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 5 air
+[23:33:54] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 6 air
+[23:33:57] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 7 air
+[23:34:04] [Server thread/INFO]: [Not Secure] [Server] SNAP T2 8 stone
+[23:34:04] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T2
+[23:34:04] [Server thread/INFO]: Stepping 1 tick(s)
+[23:34:08] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 0 stone
+[23:34:08] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 1 air
+[23:34:11] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 2 water0
+[23:34:14] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 3 air
+[23:34:18] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 4 air
+[23:34:21] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 5 air
+[23:34:24] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 6 air
+[23:34:27] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 7 air
+[23:34:34] [Server thread/INFO]: [Not Secure] [Server] SNAP T3 8 stone
+[23:34:34] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T3
+[23:34:34] [Server thread/INFO]: Stepping 1 tick(s)
+[23:34:38] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 0 stone
+[23:34:38] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 1 air
+[23:34:41] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 2 water0
+[23:34:45] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 3 air
+[23:34:48] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 4 air
+[23:34:51] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 5 air
+[23:34:54] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 6 air
+[23:34:58] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 7 air
+[23:35:04] [Server thread/INFO]: [Not Secure] [Server] SNAP T4 8 stone
+[23:35:04] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T4
+[23:35:04] [Server thread/INFO]: Stepping 1 tick(s)
+[23:35:08] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 0 stone
+[23:35:09] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 1 water1
+[23:35:12] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 2 water0
+[23:35:15] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 3 water1
+[23:35:18] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 4 air
+[23:35:21] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 5 air
+[23:35:24] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 6 air
+[23:35:28] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 7 air
+[23:35:34] [Server thread/INFO]: [Not Secure] [Server] SNAP T5 8 stone
+[23:35:34] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T5
+[23:35:34] [Server thread/INFO]: Stepping 1 tick(s)
+[23:35:38] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 0 stone
+[23:35:39] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 1 water1
+[23:35:42] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 2 water0
+[23:35:45] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 3 water1
+[23:35:48] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 4 air
+[23:35:51] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 5 air
+[23:35:55] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 6 air
+[23:35:58] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 7 air
+[23:36:04] [Server thread/INFO]: [Not Secure] [Server] SNAP T6 8 stone
+[23:36:04] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T6
+[23:36:05] [Server thread/INFO]: Stepping 1 tick(s)
+[23:36:08] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 0 stone
+[23:36:09] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 1 water1
+[23:36:12] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 2 water0
+[23:36:15] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 3 water1
+[23:36:18] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 4 air
+[23:36:21] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 5 air
+[23:36:25] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 6 air
+[23:36:28] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 7 air
+[23:36:34] [Server thread/INFO]: [Not Secure] [Server] SNAP T7 8 stone
+[23:36:34] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T7
+[23:36:35] [Server thread/INFO]: Stepping 1 tick(s)
+[23:36:38] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 0 stone
+[23:36:39] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 1 water1
+[23:36:42] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 2 water0
+[23:36:45] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 3 water1
+[23:36:48] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 4 air
+[23:36:52] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 5 air
+[23:36:55] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 6 air
+[23:36:58] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 7 air
+[23:37:04] [Server thread/INFO]: [Not Secure] [Server] SNAP T8 8 stone
+[23:37:05] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T8
+[23:37:05] [Server thread/INFO]: Stepping 1 tick(s)
+[23:37:08] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 0 stone
+[23:37:09] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 1 water1
+[23:37:12] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 2 water0
+[23:37:16] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 3 water1
+[23:37:18] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 4 air
+[23:37:22] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 5 air
+[23:37:25] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 6 air
+[23:37:28] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 7 air
+[23:37:34] [Server thread/INFO]: [Not Secure] [Server] SNAP T9 8 stone
+[23:37:35] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T9
+[23:37:35] [Server thread/INFO]: Stepping 1 tick(s)
+[23:37:39] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 0 stone
+[23:37:39] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 1 water1
+[23:37:42] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 2 water0
+[23:37:46] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 3 water1
+[23:37:49] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 4 water2
+[23:37:52] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 5 air
+[23:37:55] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 6 air
+[23:37:58] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 7 air
+[23:38:05] [Server thread/INFO]: [Not Secure] [Server] SNAP T10 8 stone
+[23:38:05] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T10
+[23:38:05] [Server thread/INFO]: Stepping 1 tick(s)
+[23:38:09] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 0 stone
+[23:38:09] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 1 water1
+[23:38:12] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 2 water0
+[23:38:16] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 3 water1
+[23:38:19] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 4 water2
+[23:38:22] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 5 air
+[23:38:25] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 6 air
+[23:38:28] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 7 air
+[23:38:35] [Server thread/INFO]: [Not Secure] [Server] SNAP T11 8 stone
+[23:38:35] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T11
+[23:38:35] [Server thread/INFO]: Stepping 1 tick(s)
+[23:38:39] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 0 stone
+[23:38:39] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 1 water1
+[23:38:42] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 2 water0
+[23:38:46] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 3 water1
+[23:38:49] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 4 water2
+[23:38:52] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 5 air
+[23:38:55] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 6 air
+[23:38:58] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 7 air
+[23:39:05] [Server thread/INFO]: [Not Secure] [Server] SNAP T12 8 stone
+[23:39:05] [Server thread/INFO]: [Not Secure] [Server] SNAP_END T12
+[23:39:05] [Server thread/INFO]: Stopping the server
+[23:39:05] [Server thread/INFO]: Stopping server
+[23:39:05] [Server thread/INFO]: Saving players
+[23:39:05] [Server thread/INFO]: Saving worlds
+[23:39:05] [Server thread/INFO]: Saving chunks for level 'ServerLevel[fluid-validation-world]'/minecraft:overworld
+[23:39:07] [Server thread/INFO]: Saving chunks for level 'ServerLevel[fluid-validation-world]'/minecraft:the_nether
+[23:39:07] [Server thread/INFO]: Saving chunks for level 'ServerLevel[fluid-validation-world]'/minecraft:the_end
+[23:39:08] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved
+[23:39:08] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[23:39:08] [Server thread/INFO]: ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[23:39:08] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved

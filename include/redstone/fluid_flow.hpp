@@ -66,6 +66,15 @@ int fluidSpreadDelay(World &world, Pos pos, const Fluid &self,
 // converts in place and returns false, telling the caller not to spread.
 bool liquidShouldSpreadLiquid(World &world, Pos pos, const BlockState &state);
 
+// Shapes.mergedFaceOccludes for a pair of already-resolved shapes. The registry
+// has no two blocks whose partial shapes complement each other (its only
+// partial shapes are the fence gate's bar band and the wall post's column, and
+// neither pair seals a face), so the merge path itself is exercised with
+// synthetic shapes -- exactly the half-slab pair the vanilla probe uses. This
+// is a read-only query: it never writes a block and never schedules a tick.
+bool fluidShapesSealSharedFace(const VoxelShape &source,
+                               const VoxelShape &target, Direction direction);
+
 // FlowingFluid.canPassThroughWall: whether fluid may cross from sourcePos to
 // targetPos through the face in `direction`.
 bool fluidCanPassThroughWall(World &world, Direction direction, Pos sourcePos,
