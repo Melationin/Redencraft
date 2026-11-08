@@ -150,6 +150,56 @@ void dueFluidTickRunsInTheSameTick() {
   require(dispatched, "a due fluid tick dispatches on the first tick");
 }
 
+
+// F-7: an explicit minecraft:empty tick is a REAL identity and the queue
+// accepts it, so it must be consumed observably. Fluid.java:61-62's empty
+// fluid tick does nothing: the entry drains, no block is written.
+void explicitEmptyTickIsInert() {
+  World world;
+  loadAround(world);
+  const Pos pos{0, 64, 0};
+  world.rawSetBlock(pos, waterLevel(0));
+  world.rawSetBlock({0, 65, 0}, Blocks::AIR.defaultState());
+  const auto before = world.getBlock(pos);
+  world.traceUpdates = true;
+  require(world.scheduleFluidTick(pos, Fluids::empty(), 1),
+          "the queue accepts an explicit empty identity");
+  world.tick();
+  require(world.fluidTickCount() == 0, "the empty tick was consumed");
+  // It is not re-scheduled and it did not run the flow algorithm.
+  bool ran = false;
+  for (const auto &entry : world.log)
+    if (entry.kind == "fluid_tick") ran = true;
+  require(!ran, "an empty fluid tick must not reach the flow logic");
+  require(world.getBlock(pos) == before,
+          "an empty fluid tick writes no block");
+}
+
+// F-7: a tick that was queued and then sees AIR at dispatch. The world still
+// holds a matching identity only if it decodes to it, so this covers the
+// 'read air' path: the entry drains and the cell is untouched.
+void staleTickReadingAirIsInert() {
+  World world;
+  loadAround(world);
+  const Pos pos{0, 64, 0};
+  world.rawSetBlock(pos, waterLevel(0));
+  world.traceUpdates = true;
+  require(world.scheduleFluidTick(pos, Fluids::water(), 1),
+          "schedule a water tick");
+  // Clear the cell before the tick runs: dispatch now reads air.
+  world.rawSetBlock(pos, Blocks::AIR.defaultState());
+  world.tick();
+  require(world.fluidTickCount() == 0, "the stale entry was drained");
+  bool dispatched = false, skipped = false;
+  for (const auto &entry : world.log) {
+    if (entry.kind == "fluid_tick" && entry.pos == pos) dispatched = true;
+    if (entry.kind == "fluid_tick_skipped" && entry.pos == pos) skipped = true;
+  }
+  require(!dispatched, "a tick that now reads air does not run the fluid logic");
+  require(skipped, "the skipped dispatch is traced, not silently dropped");
+  require(world.getBlock(pos).isAir(),
+          "a skipped tick writes no block (the cell stays air)");
+}
 // ServerLevel.tickFluid re-reads the position and skips a stale identity: a tick
 // recorded for water must not run when the block is now lava.
 void staleIdentityIsSkipped() {
@@ -374,6 +424,8 @@ int main() {
     phaseOrderWithinOneTick();
     dueFluidTickRunsInTheSameTick();
     staleIdentityIsSkipped();
+    explicitEmptyTickIsInert();
+    staleTickReadingAirIsInert();
     flowingVersusSource();
     unloadedChunkHoldsTicks();
     budgetsAreSeparate();

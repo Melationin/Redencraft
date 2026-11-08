@@ -97,6 +97,54 @@ static std::vector<int> readPalette(Reader &r, int count, bool blocks) {
   }
   return values;
 }
+
+// F-7: the fixed 26.1 export carries exactly 32 complete fluid states -- 16
+// water levels (protocol ids 86..101) and 16 lava levels (102..117). Pin both
+// directions of the mapping so a reordering of the palette cannot slip through.
+static void fluidStateTable(const std::filesystem::path &assets) {
+  Registry registry(assets);
+  std::vector<int> waterIds, lavaIds;
+  for (int level = 0; level < 16; ++level) {
+    const auto levelText = std::to_string(level);
+    const auto water =
+        defaultState("water").with("level", levelText);
+    const auto lava = defaultState("lava").with("level", levelText);
+    const int waterId = registry.stateId(water);
+    const int lavaId = registry.stateId(lava);
+    assert(registry.stateById(waterId) == water);
+    assert(registry.stateById(lavaId) == lava);
+    waterIds.push_back(waterId);
+    lavaIds.push_back(lavaId);
+  }
+  // Exact contiguous ranges from the official export.
+  for (int level = 0; level < 16; ++level) {
+    assert(waterIds[level] == 86 + level);
+    assert(lavaIds[level] == 102 + level);
+  }
+  // Water and lava never alias: the two 16-entry ranges are disjoint, and each
+  // level maps to exactly one id in each direction.
+  std::set<int> all;
+  for (int id : waterIds) assert(all.insert(id).second);
+  for (int id : lavaIds) assert(all.insert(id).second);
+  assert(all.size() == 32);
+  // An id outside the export must be rejected, not guessed. The lava range is
+  // NOT the top of the table (lava_cauldron and thousands of other states come
+  // after it), so the probe has to clear the highest id in the whole export.
+  int highest = 0;
+  for (int candidate = 0; candidate < 40000; ++candidate) {
+    try {
+      (void)registry.stateById(candidate);
+      highest = candidate;
+    } catch (const std::exception &) {
+      break;
+    }
+  }
+  assert(highest > 0);
+  rejects([&] { registry.stateById(highest + 1); });
+  rejects([&] { registry.stateById(-1); });
+  // Sanity: the water/lava ranges sit well below that ceiling.
+  assert(waterIds.back() < highest && lavaIds.back() < highest);
+}
 static void chunks(const std::filesystem::path &assets) {
   Registry registry(assets);
   assert(registry.stateById(registry.stateId(defaultState("air"))) ==
@@ -265,5 +313,6 @@ int main(int argc, char **argv) {
   const auto assets = argc > 1 ? std::filesystem::path(argv[1])
                                : std::filesystem::path("assets/protocol775");
   chunks(assets);
+  fluidStateTable(assets);
   std::cout << "wire tests passed\n";
 }

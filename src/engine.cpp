@@ -1659,8 +1659,17 @@ void World::tickFluidAt(Pos pos, const Fluid *expected) {
   // minecraft:empty -- which the queue accepts, since it is a real identity --
   // must be consumed without touching the block, otherwise the recompute would
   // see "no neighbours" and write air over whatever is there.
-  if (expected->isEmpty() || fluidState.isEmpty())
+  //
+  // Both inert cases are still traced: an entry that reached dispatch and did
+  // nothing must be distinguishable from an entry that never existed, and the
+  // trace is the only place that distinction survives.
+  if (expected->isEmpty() || fluidState.isEmpty()) {
+    if (traceUpdates)
+      log.push_back({fluidState.is(*expected) ? "fluid_tick"
+                                             : "fluid_tick_skipped",
+                     pos, expected->name()});
     return;
+  }
   // The queue dispatched an entry; only the identity check decides whether the
   // fluid's tick logic runs, so trace both outcomes distinctly.
   if (traceUpdates)

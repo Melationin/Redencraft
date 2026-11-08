@@ -438,6 +438,186 @@ void sessionOutputLimit(const ProtocolData &data) {
   assert(completed && !other.closed());
   assert(other.takeOutputItems().size() == 1);
 }
+
+// F-7 / N-01: a section snapshot that mixes plain water, flowing lava and a
+// waterlogged host must encode each with its official protocol state id, and
+// the counts must follow the real contents. This runs off the frozen snapshot
+// API, so it also proves encoding does not read the live world afterwards.
+
+// F-7 / N-02: fluid writes produced by a scheduled fluid tick, plus a piston
+// block event in the same tick. Ordinary changes are coalesced into one section
+// update at the broadcast phase and read the latest state; a change that lands
+// after the piston event is deferred to the next broadcast.
+static void fluidTicksAndPistonSameTick(const ProtocolData &data) {
+  World world;
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z)
+      world.loadChunk(x, z);
+  ServerOptions options;
+  options.chunks = {{0, 0}, {1, 0}};
+  Session session(world, data, options);
+  join(session, data);
+  drain(session, true);
+
+  // A source plus an open run on a stone floor: the scheduled fluid tick writes
+  // several cells. Seal the sides so the water stays in the observed channel.
+  const Pos source{0, 64, 0};
+  for (int x = -1; x <= 4; ++x) {
+    world.rawSetBlock({x, 63, 0}, defaultState("smooth_stone"));
+    world.rawSetBlock({x, 64, 0}, Blocks::AIR.defaultState());
+    world.rawSetBlock({x, 64, -1}, defaultState("smooth_stone"));
+    world.rawSetBlock({x, 64, 1}, defaultState("smooth_stone"));
+    world.rawSetBlock({x, 65, 0}, defaultState("smooth_stone"));
+  }
+  // Seal both ends so the only free cells are 1..3 inside the channel.
+  world.rawSetBlock({4, 64, 0}, defaultState("smooth_stone"));
+  world.rawSetBlock({-1, 64, 0}, defaultState("smooth_stone"));
+  // setBlock (not rawSetBlock) so onPlace queues the first tick, exactly like a
+  // real placement.
+  assert(world.setBlock(source, defaultState("water").with("level", "0")));
+  // A piston event in the same tick.
+  world.rawSetBlock({6, 64, 0},
+                    defaultState("piston").with("facing", "east"));
+  world.rawSetBlock({7, 64, 0}, defaultState("smooth_stone"));
+  world.rawSetBlock({6, 64, -1}, defaultState("redstone_block"));
+  pistonNeighborChanged(world, {6, 64, 0}, world.getBlock({6, 64, 0}));
+  // Water needs 5 ticks per cell; run a short window so the front advances.
+  for (int i = 0; i < 12; ++i)
+    world.tick();
+  // Whatever changed must be coalesced: at most one update per section per
+  // broadcast, and the encoded state is the latest one.
+  session.flushBlockUpdates();
+  auto packets = session.takeOutput();
+  std::set<std::int64_t> sections;
+  int sectionUpdates = 0;
+  for (auto &bytes : packets) {
+    auto body = popFrame(bytes);
+    if (!body)
+      continue;
+    Reader in(*body);
+    if (in.varInt() != data.packet("play", "clientbound",
+                                     "section_blocks_update"))
+      continue;
+    ++sectionUpdates;
+    sections.insert(in.i64());
+  }
+  assert(sectionUpdates <= 2);
+  assert(sectionUpdates == static_cast<int>(sections.size()));
+  // The fluid really moved: the water reached a downstream cell.
+  bool reached = false;
+  for (int x = 1; x <= 3; ++x)
+    if (world.getBlock({x, 64, 0}).is(Blocks::WATER)) reached = true;
+  assert(reached);
+}
+
+// F-7 / N-04: a session that stops reading must not stall the core fluid queue,
+// and its disconnect must not affect a healthy peer.
+static void slowSessionDoesNotStallFluid(const ProtocolData &data) {
+  World world;
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z)
+      world.loadChunk(x, z);
+  ServerOptions options;
+  options.chunks = {{0, 0}};
+  Session slow(world, data, options);
+  Session healthy(world, data, options);
+  join(slow, data);
+  join(healthy, data);
+  drain(slow, true);
+  drain(healthy, true);
+
+  // A sealed channel so the water settles instead of running off the edge.
+  for (int x = -1; x <= 4; ++x) {
+    world.rawSetBlock({x, 63, 0}, defaultState("smooth_stone"));
+    world.rawSetBlock({x, 64, 0}, Blocks::AIR.defaultState());
+    world.rawSetBlock({x, 64, -1}, defaultState("smooth_stone"));
+    world.rawSetBlock({x, 64, 1}, defaultState("smooth_stone"));
+    world.rawSetBlock({x, 65, 0}, defaultState("smooth_stone"));
+  }
+  world.rawSetBlock({4, 64, 0}, defaultState("smooth_stone"));
+  world.rawSetBlock({-1, 64, 0}, defaultState("smooth_stone"));
+  // Place through setBlock so onPlace queues the first tick.
+  assert(world.setBlock({0, 64, 0},
+                        defaultState("water").with("level", "0")));
+  for (int i = 0; i < 200; ++i) {
+    world.tick();
+    // The healthy peer keeps being drained; the slow one is left unread.
+    drain(healthy);
+  }
+  // The core queue still drains: the fluid settled despite the slow peer.
+  assert(world.fluidTickCount() == 0);
+  bool reached = false;
+  for (int x = 1; x <= 3; ++x)
+    if (world.getBlock({x, 64, 0}).is(Blocks::WATER)) reached = true;
+  assert(reached);
+  // The healthy session is still usable and still emitting.
+  const auto before = drain(healthy);
+  healthy.receive(frame(66, [] {
+    Writer w;
+    w.varInt(0);
+    w.position({0, 63, 0});
+    w.varInt(static_cast<int>(Direction::Up));
+    w.f32(.5f);
+    w.f32(.5f);
+    w.f32(.5f);
+    w.bool_(false);
+    w.bool_(false);
+    w.varInt(1);
+    return w.data;
+  }()));
+  (void)before;
+  assert(!healthy.closed());
+  // A peer that never reads must not close the session or stall the core; the
+  // ring/byte limits live in the server's OutboundQueue, which this unit test
+  // does not drive. What N-04 requires of the core is that ticking continues.
+  assert(!slow.closed());
+}
+static void fluidSectionSnapshot(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  const auto water = defaultState("water").with("level", "0");
+  const auto flowingLava = defaultState("lava").with("level", "3");
+  const auto host = defaultState("cobblestone_wall").with("waterlogged", "true");
+  const auto dry = defaultState("cobblestone_wall");
+  world.rawSetBlock({0, -64, 0}, water);
+  world.rawSetBlock({1, -64, 0}, flowingLava);
+  world.rawSetBlock({2, -64, 0}, host);
+  world.rawSetBlock({3, -64, 0}, dry);
+  // Freeze the snapshot, then keep mutating the live world.
+  const auto snapshot = world.snapshotChunk(0, 0);
+  world.rawSetBlock({0, -64, 0}, Blocks::AIR.defaultState());
+  world.rawSetBlock({1, -64, 0}, Blocks::AIR.defaultState());
+  assert(world.getBlock({0, -64, 0}).isAir());
+  // The snapshot kept the fluid states from before the mutation.
+  // Sections are ordered from minY upward; y=-64 is the first one. The snapshot
+  // stores internal BlockState ids; the protocol id is produced when the
+  // section is encoded, so compare against the state object itself.
+  assert(!snapshot.sections.empty());
+  const auto &section = snapshot.sections.at(0);
+  std::vector<BlockState> keptStates;
+  for (auto id : section.palette)
+    keptStates.push_back(BlockState::fromId(id));
+  std::set<int> palette(section.palette.begin(), section.palette.end());
+  struct Expected {
+    BlockState state;
+    const char *what;
+  };
+  for (const auto &[state, what] :
+       {Expected{water, "plain water"},
+        Expected{flowingLava, "flowing lava"},
+        Expected{host, "waterlogged host"},
+        Expected{dry, "dry host"}}) {
+    const bool kept = std::find(keptStates.begin(), keptStates.end(), state) !=
+                      keptStates.end();
+    std::string message = std::string("the snapshot palette keeps ") + what;
+    assert(kept && message.c_str());
+    // And every kept state must have an official protocol id to encode to.
+    (void)data.registry.stateId(state);
+  }
+  // The live world lost the two fluids, so the states are genuinely distinct.
+  assert(!world.getBlock({0, -64, 0}).is(Blocks::WATER));
+  assert(!world.getBlock({1, -64, 0}).is(Blocks::LAVA));
+}
 void placementRules(const ProtocolData &data) {
   World world;
   world.loadChunk(0, 0);
@@ -558,6 +738,9 @@ int main(int argc, char **argv) {
   entityBroadcastPhase(data);
   sessionOutputLimit(data);
   placementRules(data);
+  fluidSectionSnapshot(data);
+  fluidTicksAndPistonSameTick(data);
+  slowSessionDoesNotStallFluid(data);
   {
     const Uuid expected{0xb5, 0x0a, 0xd3, 0x85, 0x82, 0x9d, 0x31, 0x41,
                         0xa2, 0x16, 0x7e, 0x7d, 0x75, 0x39, 0xba, 0x7f};

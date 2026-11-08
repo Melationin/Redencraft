@@ -1,208 +1,118 @@
 # 任务交接
 
 流程与状态定义见 [AGENTS.md](../AGENTS.md) 第 3 节；任务顺序见 [PLAN.md](../PLAN.md)。
-本文件只记录**当前任务**。F-1…F-4 已验收，记录在 `53a5d20`…`8f67143`；
-F-5 已验收（`任务通过`），实现提交 `f4f1b2c` → `1e11490` → `eb32e7b`，审查记录见 `89dc371`。
+本文件只记录**当前任务**。F-1…F-5 已验收（`53a5d20`…`eb32e7b`）；
+F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `5770f2a`，审查记录见 `1edcf65`。
 
 > **状态词**：`任务进行中` → `任务已完成`（coder）→ `审查中` → `审查结束` / `任务通过`（reviewer）。
 
 ---
 
-## F-6 存档与投影的流体刻
+## F-7 验收与差分
 
 ### 目标
 
-把流体刻接入存档与投影：Anvil 的 `fluid_ticks` 按各区块独立列表恢复精确流体身份、相对延迟与优先级，
-`-n..-1` 的 subTick 基准按**各自列表**计算；投影的 `PendingFluidTicks` 按格式夹具导入而不是拒绝。
-缺失/空名字、未知名字与显式 `minecraft:empty` 分别处理，禁止静默丢弃。
+把 F-1…F-6 的聚焦用例汇总成 P0 集成对照，补齐仍缺的共享面与派发语义断言，
+并**明确区分**源码对照 / C++ CTest / 原版 JAR 离线探针 / 真实 26.1 服务端差分四种证据。
+未取得运行授权时，真实差分只登记不执行，且不得声称原版等价。
 
 ### 范围
 
-1. `importWorld` 恢复 `SavedTickData{fluid=true}` 条目到世界的流体刻队列（目前被 `tick.fluid` 直接跳过）。
-2. 方块刻与流体刻的 `-n..-1` subTick 基准**分别**计算（`LevelChunk.java:639-641` 调两个独立的 `LevelChunkTicks.unpack`）。
-3. 流体标识解析：显式 `minecraft:empty`、未知名字、空名字三种情况分开处理。
-4. Litematic `PendingFluidTicks`：坐标变换、`Time`/`Priority` 字段、精确流体身份。
+1. **A-05 稳定窗口**：封闭槽、交汇池、断源瀑布各跑足够长；额外造一个故意无限重复更新的红石输入。稳态类无新增非预期流体写入/队列积压；循环类按窗口比较，不把「队列非空」判为错误。
+2. **湿态与干态红石对比**：同一红石夹具在无流体与有流体下的行为对照。
+3. **W-06 互补共享面**：两块单独不封整面、合并后封整面；非实体满立方与部分形状分开；动态活塞在相同 state ID、不同 BE 进度下重算面。未注册形状按依赖缺口登记。
+4. **派发 trace 补回**：已消费的显式空流体刻、读到空气的陈旧刻，分别检查 `fluid_tick` / `fluid_tick_skipped`，**两者均不得写方块**。
+5. **协议 N-01/N-02/N-04**：快照区段混放水/流动岩浆/带水宿主；同刻反复改湿格 + 流体刻生成多格 + 活塞事件；慢会话与健康会话下的区块广播。
+6. **协议状态回归**：固定 26.1 导出中水、岩浆 32 条完整 `(协议 ID, 方块, 属性)`，在 `wire_tests` 核对 `Registry::stateId` 与 `stateById`；变异把两段重排成连续 ID 仍应被拒绝。
 
 ### 源码依据
 
-- `SavedTick.java:13,28-42,49-51`：`i`/`x`/`y`/`z`/`t`/`p` 六个字段，`unpack(currentTick, currentSubTick)` 返回 `trigger = currentTick + delay`。
-- `LevelChunkTicks.java:95-118`：`unpack` 用 `subTickBase = -pendingTicks.size()` 递增，`scheduleUnchecked` 保留重复条目。
-- `LevelChunk.java:639-641`：`blockTicks.unpack` 与 `fluidTicks.unpack` 是两个独立容器。
-- `SerializableChunkData` 的 `fluid_ticks` 键与 `block_ticks` 同构。
+- 稳定窗口与稳态判定：`docs/fluid-testing.md` 的 A-05。
+- 共享面：`Shapes.mergedFaceOccludes` 与 W-06。
+- 派发语义：`ServerLevel.tickFluid` 的 `fluidState.is(type)` 精确身份检查。
+- 协议：`assets/protocol775` 的官方导出。
 
 ### 验收判据
 
-1. `fluid_ticks` 恢复后 `hasFluidTick` / `fluidTicks()` 能按**精确流体**查到，`flowing_water` 与 `water` 不互相命中。
-2. 同一区块内方块刻与流体刻各自的 subTick 基准是 `-N..-1`，两族互不影响；重复条目被保留。
-3. 到期刻按 `gameTime + t` 展开；负延迟与已过期条目按原版 `unpack` 直接算出到期刻。
-4. 显式 `minecraft:empty` 可被恢复为一条真实身份条目；未知流体名与空名字给出明确错误，不是静默丢弃。
-5. Litematic `PendingFluidTicks` 导入后坐标按投影偏移变换，`Time`/`Priority` 与 `Block` 类型保留，未知流体按选项报错。
-6. 构建通过、CTest 全绿。
+1. 稳定窗口用例在定义窗口后无新增非预期流体写入，队列不增长；循环用例逐窗口比较事件序列。
+2. 湿/干红石夹具的行为差异被显式断言，而不是「两者都不崩」。
+3. W-06 的「单侧不封」「两侧合并封」各有断言；未注册的半砖/台阶按依赖缺口登记，不假装通过。
+4. 显式空流体刻与读空气陈旧刻都有派发 trace 断言，且都不写方块。
+5. 协议 N-01/N-02/N-04 的断言覆盖快照内容、同刻广播合并与慢会话行为。
+6. `wire_tests` 覆盖 32 条水/岩浆状态；变异测试被拒绝。
+7. 构建通过、CTest 全绿，且报告明确标注四种证据各自的覆盖范围。
 
 ### 计划改动
 
-- 修改：`src/storage.cpp`（`importWorld` 的流体刻恢复与名字校验）
-- 修改：`src/litematic.cpp`（`PendingFluidTicks` 导入）
-- 修改：`tests/storage_tests.cpp`、`tests/litematic_tests.cpp`
-- 修改：`docs/storage.md`、`docs/compatibility.md`
+- 新增/修改：`tests/` 下的集成与协议用例
+- 可能修改：`src/` 中为补齐断言而暴露的只读查询（不改行为）
+- 修改：`docs/` 的验收记录与证据分级说明
 
 ### 实际做了什么
 
-**Anvil `fluid_ticks` 恢复**（`src/storage.cpp` 的 `importWorld`）：
+按 F-7 的七条验收判据逐项补齐，证据分级见新增的 `docs/fluid-acceptance.md`。
 
-- 之前 `tick.fluid` 条目被直接 `continue` 跳过；现在按 `SavedTick.java:49-51` 的 `unpack` 语义恢复为一条流体刻，`trigger = gameTime + t`。
-- **两族 subTick 基准分开**：`block_ticks` 与 `fluid_ticks` 各自维护 `-N..-1` 计数器（`LevelChunk.java:639-641` 调两个独立的 `LevelChunkTicks.unpack`）。共用一个计数器会让流体刻的 order 接着方块刻继续递增。
-- 流体身份用 `FluidRef(name)` 解析：显式 `minecraft:empty` 是真身份、可恢复；未知名字与空名字抛 `nbt::Error`，不静默丢弃。
-- 去掉 `importWorld` 上已经过时的「流体刻不模拟」TODO。
+**1. W-06 互补共享面**（`tests/fluid_flow_tests.cpp`）
 
-**Litematic `PendingFluidTicks` 导入**（`src/litematic.cpp`）：
+此前只覆盖「单侧不封整面」。补前先**探测注册表真实碰撞盒**，没有凭猜测写断言：
 
-- 之前 `PendingFluidTicks` 非空直接抛 `schematic fluid ticks are excluded`；现在按与 `PendingBlockTicks` 相同的 `Block`/`Time`/`Priority` 记录形状导入，坐标走同一套投影偏移变换，以 `fluid=true` 标记进 `LoadedWorld.ticks`。
-- 未知流体名按 `substituteUnsupported` 选项决定「报错」还是「跳过」。
+| 方块 | 碰撞盒 | 单侧封 East |
+|---|---|---|
+| 关闭栅栏门 | `[0,0,6 - 16,24,10]` | 否 |
+| 墙柱 | `[4,0,4 - 12,24,12]` | 否 |
+| 羊毛地毯 | `[0,0,0 - 16,1,16]` | 向上封、向下不封 |
 
-### 测试
+新增 `complementarySharedFace`：单门不封；**同轴双门仍不封**（贡献同一条带，这是防止「两方块=封」的假阳性对照）；门 + 墙柱贡献不同条带；满立方封。另加 `sharedFaceDependencyGap`，断言半砖/台阶确实未注册，把 W-06 的砖块用例登记为依赖缺口而不是静默通过。
 
-`tests/storage_tests.cpp`：
+**2. 派发 trace —— 发现并修复一个真实缺陷**
 
-- 既有夹具里的 `{2,82,5} minecraft:water` 条目现在断言 `fluidTickCount()==1`、`hasFluidTick` 命中 `water` 且**不**命中 `flowingWater`、`trigger==102`、`order==-1`。
-- 新增混合夹具：同区块 2 条方块刻 + 2 条流体刻，断言 blockOrders 与 fluidOrders **各自**是 `{-2,-1}`，且 `water`/`flowingLava` 的精确身份与延迟（5/6）分别正确。
-- 新增显式 `minecraft:empty` 恢复用例。
-- 新增未知流体名与空名字两条拒绝用例。
+`World::tickFluidAt` 原本在 `expected->isEmpty() || fluidState.isEmpty()` 时**先 return 再 trace**，导致「派发到、但该格已变空气」的陈旧刻被静默吞掉，trace 里完全不可见。这违反「不得用静默成功冒充已完成」。已把 trace 移到提前返回之前，两种惰性情况都记录 `fluid_tick` / `fluid_tick_skipped`。新测试 `explicitEmptyTickIsInert` 与 `staleTickReadingAirIsInert` 断言两者都不写方块。
 
-`tests/litematic_tests.cpp`：
+**3. A-05 稳定窗口**
 
-- 夹具加入一条 `PendingFluidTicks`（`flowing_water`，`Time=5`，`Priority=0`）；断言投影偏移后的坐标、延迟、优先级与精确身份，并验证导入世界后 `hasFluidTick` 命中流水而**不**命中源水。
-- 新增未知流体名用例：默认拒收；`substituteUnsupported=true` 时跳过且只保留方块刻。
+`stableChannelSettles`：封闭 1 宽水槽跑 200 刻后 `fluidTickCount()==0`，再跑 100 刻无新刻且各格状态不变。`selfRetriggeringLoopIsBounded`：自我重触发观察者逐刻记录待处理刻数，断言窗口内上界有界——循环类不因「队列非空」判失败。
+
+**4. 湿态与干态红石对比**
+
+`wetAndDryRedstoneDiffer`：同一活塞夹具建干/湿两次，断言两者**都**正常伸出并推出方块，差异在于湿态保留水源与含水宿主、干态没有。差异是显式断言，不是「两者都不崩」。
+
+**5. 协议 N-01 / N-02 / N-04**（`tests/protocol_tests.cpp`）
+
+- N-01 `fluidSectionSnapshot`：快照区段混放纯水、流动岩浆、含水墙、干墙；快照冻结后再改活世界，断言调色板仍保留四者。**注意**：快照存内部 `BlockState::Id`，协议 ID 在编码时产生，测试按状态对象比较（我一开始按协议 ID 比较，是错的）。
+- N-02 `fluidTicksAndPistonSameTick`：同刻内流体刻生成多格 + 活塞事件，断言每区段至多一个 `section_blocks_update` 且水到达下游。
+- N-04 `slowSessionDoesNotStallFluid`：慢会话不读包时核心流体队列仍收敛，健康会话不受影响。**未覆盖**服务端 `OutboundQueue` 的环/字节上限与断连策略，已登记。
+
+**6. 协议状态回归**（`tests/wire_tests.cpp` 的 `fluidStateTable`）
+
+固定导出中水/岩浆共 32 条：`water` = 协议 ID 86…101、`lava` = 102…117，各 `level=0…15`。双向核对 `stateId` / `stateById`，断言两段连续且不相交；越界探测用**整表最大 ID + 1**（我最初写 103，那是合法岩浆状态，不报错——已改正）。
 
 ### 变异验证
 
 | 变异 | 结果 |
 |---|---|
-| `importWorld` 恢复流体刻处改回 `continue` | `restored.fluidTickCount() == 1` 失败 |
-| 两族共用一个 subTick 计数器 | `fluidTicks[0].first.order == -1` 失败 |
-| litematic 未知流体名静默 `continue` | `rejected` 断言失败 |
+| 移除 `tickFluidAt` 的惰性 trace | `the skipped dispatch is traced, not silently dropped` |
+| 共享面遮挡恒不通过 | `a 1/16 carpet does not block the fluid` |
+| 水/岩浆协议 ID 重排成 500/600 连续段 | `wire_tests` 失败 |
+| 水协议 ID 整体 +1 | `wire_tests` 失败 |
 
-第三条第一次**没被抓到**：当时只测了「合法流体名能导入」，没覆盖未知名分支。补了拒绝与放行两条用例后重跑变异才失败。每次变异后都从源码恢复并确认 `git diff` 只剩预期改动。
+每次变异后从备份还原，并确认 `git status` 只剩预期改动。
 
-**明确没有做的事**：存档**写回**（`fluid_ticks` 的保存侧）不在本任务范围；真实 26.1 服务端差分（F-7）；桶交互与实体推流（P1）。
+### 证据分级（新增 `docs/fluid-acceptance.md`）
+
+| 类别 | 状态 |
+|---|---|
+| A 源码对照 | 已做 |
+| B C++ CTest | 已做，20/20 |
+| C 原版 JAR 离线探针 | **本轮未执行** |
+| D 真实 26.1 服务端差分 | **未执行**（需运行授权） |
+
+### 明确没有做的事
+
+半砖/台阶未注册（W-06 砖块用例为依赖缺口）；`OutboundQueue` 背压未在单测覆盖；`fluid_ticks` 保存侧（写回）不在范围；**未跑真实 26.1 服务端差分，不声称原版等价**。
 
 ### 构建与测试
 
 - 构建：MSVC Release + jemalloc 通过。
 - CTest：**20/20 通过**。
-- 证据口径：**源码对照 + C++ 回归测试**，未跑真实 26.1 服务端差分，不声称原版等价。
 
-### 提交
-
-- 主提交：`1c629a2` — F-6: restore fluid ticks from Anvil saves and schematics（7 个文件，+222 / -191）
-- 返工提交：`7b862f2` — F-6 rework: read Litematica's real fluid tick record and cover the disk path（8 个文件，+335 / -33）
-
-### 审查记录（`1c629a2`）
-
-1. **阻塞｜真实 Litematica 的流体刻读不进来。** `src/litematic.cpp:280–298` 要求 `Block`，`tests/litematic_tests.cpp:80–88` 的手造夹具也使用了同样的字段。Litematica 的 26.1 分支写入和读取 `PendingFluidTicks` 时用 `Fluid`（见 [LitematicaSchematic.java](https://github.com/sakura-ryoko/litematica/blob/edf9ced2af2244d56fc20086883a014bf051b1b8/src/main/java/fi/dy/masa/litematica/schematic/LitematicaSchematic.java#L1472-L1480)），并记录 `SubTick`（`:1549–1557,3187–3192`）。请按实际格式修正并补带投影偏移、负延迟、非零优先级和精确身份的夹具；核对 `SubTick` 是否参与导入的同刻排序，写清策略并断言顺序，独立于 Anvil 的 `-N..-1` 规则。
-2. **阻塞｜没有验证 Anvil 读盘到派发的完整路径。** `tests/storage_tests.cpp:401–422,497–526` 直接构造 `LoadedWorld`，可以验证恢复函数，但即使 `src/storage.cpp:277–291` 的真实 `.mca` 读盘路径不再提取 `fluid_ticks`，这些用例也能通过。负延迟和重复流体刻也未在该入口验证。请复用现有磁盘夹具，让至少一个 `fluid_ticks` 列表走 `loadAnvilWorld` → `importWorld` → 派发，断言不同精确身份、逾期与未来到期刻、同区块顺序、重复条目、优先级和实际消费时刻。异常名至少检查一次真实磁盘入口的诊断。
-3. **应修｜宽松导入静默丢弃未知流体。** `src/litematic.cpp:289–292` 在 `substituteUnsupported=true` 时直接跳过，`LitematicImport` 也没有对应报告字段；已有宽松实体路径会累计跳过计数（`:209–212`）。建议记录被跳过的流体名字/数量并让调用者能看到，保留默认拒绝路径，覆盖缺失、空名字、未知名称与显式 `minecraft:empty` 的区别。
-4. **应修｜存档时间相加可能触发 C++ 有符号溢出。** `src/storage.cpp:555–562` 的 `int64_t gameTime + int delay` 可被 NBT `Time` 的极值触发，26.1 `SavedTick.java:49–51` 的 Java `long` 则按 64 位回绕。建议两族共用按位回绕的计算，增加一条极值用例，并按 `TickPriority.java:byValue` 核对 `p` 边界在读入后的排序。
-
-独立 MSVC Release 构建通过，CTest **20/20 通过**（8.32 s）。本轮依据为 26.1 Java 源码、Litematica 读写源码和 C++ 回归；未运行真实服务端差分或性能对跑。导入格式和磁盘路径覆盖修正后再验收。
-### 返工（针对 `1c629a2` 复审的 2 阻塞 + 2 应修）
-
-**阻塞 1 — 真实 Litematica 的流体刻字段是 `Fluid` + `SubTick`**
-
-已 clone 上游源码核对（`build-litematica-src`，sakura-ryoko/litematica）：
-
-- `LitematicaSchematic.java:1442` 写 `PendingFluidTicks` 时 tag 名是 `"Fluid"`（方块刻是 `"Block"`，`:1437`）。
-- `:1496-1498` 每条记录除 `x/y/z/Time/Priority` 外还写 `SubTick`（`entry.subTickOrder()`）。
-- `:2834` 读取是 `tag.getLongOrDefault("SubTick", 0L)`；`:1804` 只有 `version >= 5` 有该列表；`:2794` 要求 `Time` 为 int。
-
-改动：
-
-- `src/litematic.cpp:292` 改为 `required(tick, "Fluid", 8)`（之前错用 `Block`）。
-- `SavedTickData` 增加 `std::optional<std::int64_t> subTick`：**有** `SubTick` 就用它、**没有**才退回原版 `-N..-1`，两套规则不混用。
-- 方块刻同样读 `SubTick`（上游两族走同一个 `writePendingTicksToData`）。
-- 空名字（结构非法）与未知名字（本 build 不支持的流体）分开报错。
-
-**阻塞 2 — 没有验证 Anvil 读盘到派发的完整路径**
-
-- 真实 `.mca` 夹具补了 `block_ticks`（1 条）与 `fluid_ticks`（6 条）：未来源水、同格流水、已逾期（负延迟）、重复 `(pos, fluid)` 两条、越界优先级 `p=9`。
-- 先断言 `loadAnvilWorld` 读出两族（`w.ticks.size()==7`，流体 6 条且各字段正确），再断言 `importWorld` 后的派发队列：`scheduledTickCount()==1`、`fluidTickCount()==6`、同格 `water`/`flowing_water` 各自命中且互不命中、逾期条目 `trigger == 42-9`、重复条目保留 2 条、`p=9` 夹到 3。
-
-**应修 3 — 宽松导入静默丢弃未知流体**
-
-- `LitematicImport` 新增 `skippedUnsupportedBlockTicks` / `skippedUnsupportedFluidTicks`（`name -> count`），与既有实体/方块实体跳过计数同构。
-- 宽松路径累计计数而非 `continue` 了事；默认仍拒绝。
-- 测试覆盖四态：未知名字（默认拒绝 / 宽松跳过并计数）、空名字（两种模式都拒绝）、缺失 `Fluid` 键（拒绝）、显式 `minecraft:empty`（正常导入且 `hasFluidTick(empty)` 命中）。
-
-**应修 4 — 存档时间相加可能触发有符号溢出**
-
-- 新增 `wrappingAdd`：走 `uint64_t` 相加再转回，得到 Java `long` 的回绕语义（`SavedTick.java:49-51`），消除 C++ 有符号溢出 UB。
-- 新增 `tickPriorityByValue`：`p` 越界夹到 `[-3,3]`，对应 `TickPriority.java:21-29`。
-- 测试用 `gameTime = INT64_MAX-1` + `delay = INT_MAX` 断言结果回绕为负、`p=99` 夹到 3、`p=-99` 夹到 -3。
-
-**变异验证**
-
-| 变异 | 结果 |
-|---|---|
-| litematic 读回 `Block` 键 | 抓到 |
-| 磁盘读取不再提取 `fluid_ticks` | 抓到 |
-| 忽略 `SubTick`，一律用 `-N..-1` | 抓到 |
-| 宽松路径去掉跳过计数 | 抓到 |
-| `wrappingAdd` 换回 `gameTime + delay` | **未抓到** |
-
-第五条必须如实说明：MSVC/x64 上 `int64_t + int` 的运行时结果同样回绕，两种写法在 Release 下产生相同值，测试无法区分。`wrappingAdd` 的价值在于**消除未定义行为**（UB 允许编译器假定不回绕），这在 Release 构建里观察不到。保留它是正确的，但不能声称被变异测试覆盖。
-
-**明确没有做的事**：存档写回（`fluid_ticks` 保存侧）；`SubTick` 参与同刻派发顺序的端到端验证（目前只验证 `order` 字段被正确保留）；真实 26.1 服务端差分；桶交互与实体推流（P1）。
-
-### 构建与测试（返工后）
-
-- 构建：MSVC Release + jemalloc 通过。
-- CTest：**20/20 通过**。
-- 证据口径：**源码对照（含已 clone 的 Litematica 上游源码）+ C++ 回归测试**，未跑真实 26.1 服务端差分，不声称原版等价。
-
-### 返工复审（`7b862f2`）
-
-- **已解决｜投影字段、真实磁盘解析和整数边界。** `PendingFluidTicks` 已读实际的 `Fluid` 字段并保留 `SubTick`，Anvil 夹具已在真实 `.mca` 中包含两族队列、负延迟和重复项。两族的触发时间按 Java `long` 回绕，优先级按原版边界夹取。
-- **阻塞｜两条用例仍停在队列快照，未验证真实派发。** `tests/storage_tests.cpp:444–475` 在真实 `.mca` 读入后检查 `fluidTicks()` 就结束；因此恢复后的流体刻若在错误的刻被消费、逾期刻未推进，仍会通过。请从该读盘世界调用 `World::tick()`，断言逾期刻首个世界刻消费，未来刻在到期前保留、到期才消费，至少一个精确身份匹配的液体可观测到派发。`tests/litematic_tests.cpp:135–165` 的两个投影刻延迟和优先级都不同，只能检查字段保留。请补两条同延迟、同优先级、列表顺序与 `SubTick` 顺序相反的条目，断言实际派发次序，确保是 `SubTick` 决定的。
-- **应修｜宽松模式的跳过统计还没接到服务端输出。** `src/litematic.cpp:272,305` 已记名计数，实际 `--schematic` 导入路径 `src/net/server_main.cpp:535–543` 仍只输出替换方块及跳过实体的统计。请把两族被跳过的刻名和计数接入启动诊断，便于用户发现投影工作量发生变化。
-
-独立 MSVC Release 构建通过，CTest **20/20 通过**（8.36 s）。本轮未跑真实服务端差分或性能对跑。当前交回 coder 补齐实际派发断言和启动诊断。
-
-### Reviewer 授权修复（工作区未提交）
-
-- 本次按用户授权修复 coder 的未提交改动。`storage` 原失败是新派发用例推进了读盘世界，旧用例随后查找初始的移动活塞。活塞初态检查已移到第一次世界刻前。保留并收紧读盘派发用例，验证逾期 `flowing_lava` 在首刻按精确身份跳过、水源刻在第 47 刻实际派发、同格流水刻仍待第 49 刻。
-- 投影用例新增同延迟、同优先级的实际派发断言，验证 `SubTick` 逆转原列表顺序。协议服务端的宽松导入启动日志现输出被跳过的方块刻、流体刻名称与数量。
-- MSVC Release 构建通过，CTest **20/20 通过**（8.35 s）。用单刻本地服务端启动检查，确认宽松导入输出两族跳过计数。本轮未运行真实 26.1 服务端差分或性能对跑。
-- 按用户要求保留工作区改动，等待后续提交与交接。
-
-### 承接 reviewer 授权修复（提交记录）
-
-reviewer 在用户授权下直接修了工作区（未提交），交由 coder 走后续流程。本轮记录与验证如下。
-
-**reviewer 修的三处**
-
-1. `tests/storage_tests.cpp`：我原来的派发用例推进了读盘世界，导致**后面**那条既有的移动活塞初态断言（`world.pistonEntities.at(...)`）在活塞实体已被移除后抛异常——这正是我先前定位不到的 `0xC0000409`。reviewer 把活塞初态检查移到第一次世界刻之前，并收紧了派发用例：逾期 `flowing_lava` 在首刻按精确身份**跳过**（`fluid_tick_skipped`）、水源刻到第 47 刻才真正派发（`fluid_tick`）、同格流水刻仍待第 49 刻。
-2. `tests/litematic_tests.cpp`：新增同延迟、同优先级、列表顺序与 `SubTick` 顺序相反的两条刻，断言实际派发次序由 `SubTick` 决定。
-3. `src/net/server_main.cpp`：宽松导入的启动诊断补上两族被跳过的刻名与计数。
-
-**coder 本轮的验证**
-
-- MSVC Release + jemalloc 构建通过；CTest **20/20 通过**。
-- 变异独立确认新断言有效：把 `importWorld` 改成忽略 `subTick`、一律用 `-N..-1` 后，先被 `orders.at(...) == 7` 抓到；再临时关掉字段断言只留派发次序断言，仍被 `dispatched == {secondInFile, firstInFile}` 抓到，证明次序断言可独立成立。变异后均已恢复。
-- 真实投影启动冒烟：`--schematic` + `--allow-unsupported` + `--ticks 1` 跑 `无沟无车双倍速世吞…32x81x33.litematic`，退出码 0，输出 `SCHEMATIC regions=10 blocks=2873 …`、`SUBSTITUTED minecraft:repeating_command_block x1`、`SKIPPED unsupported_block_entities=1`。该投影的 `PendingFluidTicks` 为空，本次冒烟未触发新增的两行 tick 诊断；那两行的正确性由 `tests/litematic_tests.cpp` 的宽松导入用例与代码路径保证。
-
-**明确没有做的事**：未跑真实 26.1 服务端差分；`fluid_ticks` 保存侧（写回）仍不在范围。
-
-**结论**：reviewer 指出的 2 条阻塞 + 1 条应修均已解决并有回归断言。
-
-### 最终复审（`5770f2a`）
-
-- coder 已将授权修复提交。交接正文未单列哈希，reviewer 以 Git 核对本次已提交的版本 `5770f2a`，范围为 Anvil、投影派发用例和启动诊断。
-- **已解决｜实际派发断言。** `tests/storage_tests.cpp:483` 验证从 `.mca` 恢复的逾期刻首刻按身份跳过，未来水源刻第 47 刻实际派发，同格流水刻仍待第 49 刻。`tests/litematic_tests.cpp:168` 通过同延迟、同优先级的两个刻验证 `SubTick` 决定派发顺序。
-- **已解决｜启动诊断。** `src/net/server_main.cpp:538–543` 报告被跳过的方块刻和流体刻。本轮另以含未知刻的合成投影启动本地服务端 1 刻，核对输出分别为 1 条方块刻和 2 条流体刻，并确认正常退出。
-- 独立 MSVC Release 构建通过，CTest **20/20 通过**（8.43 s）。本轮未运行真实 26.1 服务端差分或性能对跑，按 F-7 的既定计划验收。
-
-### 结论
-
-F-6 验收为 `任务通过`。真实磁盘与投影的流体刻恢复、实际派发和诊断均已覆盖，交回 coder 领取 F-7。
-
-任务通过
+任务已完成
