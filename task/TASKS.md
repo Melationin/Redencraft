@@ -8,6 +8,64 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## F-8 流体单例的所有权（coder）
+
+**范围**：只处理 `src/fluid.cpp` 中 `Fluids` 五个函数局部单例的静态裸指针与 `new`，改成具有自动存储期所有权的稳定对象；不领取 M0-2/L-1，不改更新顺序、协议、客户端或 `PLAN.md`。F-7 最新复审结论及其 F-9a/F-9b、光照追踪引用保留。
+
+**源码依据**：26.1 `Fluids.java` 的五个进程级静态流体身份、`FluidState.getType()` 的 empty fallback、`BlockBehaviour.BlockStateBase` 对 `FluidState` 的缓存，以及本仓库 `include/redstone/fluid.hpp` 的非拥有 `FluidState::type_`/`FluidRef::fluid_` 契约。
+
+**验收判据**：`src/fluid.cpp` 不再有静态裸指针持有 `new`；五个对象各有唯一、稳定的进程内所有权和地址；重复查询及注册表解析返回同一身份，源/流动身份与虚函数结果不变；默认 `FluidState` 在正常路径和另一线程独立的 thread-local `fluidStateOf` 缓存中仍解析到同一个 `Fluids::empty()`；不存在依赖泄漏存活的对象。说明静态初始化和程序终止的实际析构路径，证明缓存与注册表析构不会被误当成所有者或在单例析构后解引用。最终 MSVC Release + jemalloc 完整构建，候选只跑一轮完整 CTest（工作区 `TMP/TEMP`，本机回环权限直接使用）。
+
+**计划文件**：`src/fluid.cpp`、`include/redstone/fluid.hpp`（仅注释契约如需要）、`tests/fluid_tests.cpp`、必要的所有权说明；提交为单一 F-8 实现与独立 TASKS 交接。现有 `PLAN.md`/`TASKS.md` 复审记录及其他未跟踪文件保持原样，除本轮领取与交接内容外不改。
+
+### 实际做了什么（实现提交 `4ee4ad6`）
+
+**所有权与生命周期**
+
+`src/fluid.cpp` 的五处 `static const ... *instance = new ...` 已删除。五个私有具体类型现在按固定声明顺序由同一个函数局部静态值对象
+`FluidInstances` 持有：`empty`、`flowingWater`、`water`、`flowingLava`、`lava`。
+
+- 首次调用任一 `Fluids` accessor 时，按 C++11 起的线程安全局部静态初始化一次构造全部五个对象；accessor 只返回该所有者成员的引用，地址此后稳定。
+- 静态对象没有后续替换或手动 `delete`；无需任何“故意泄漏”才能维持身份。
+- 程序终止时 `FluidInstances` 的隐式析构按成员声明逆序销毁五个具体流体：`lava`、`flowingLava`、`water`、`flowingWater`、`empty`。`Fluid` 的虚析构函数保证实际派生析构路径执行，成员析构只释放各自的名称与桶名字符串。
+- `thread_local std::vector<FluidStateCacheEntry>` 只缓存 `FluidState` 值；`FluidState` 的隐式析构不会调用 `getType()`。缓存条目里的 `type_` 是稳定对象地址，不拥有流体。
+- `FluidRef` 同样只保存非拥有 `const Fluid*`；其默认析构不 dereference。高层 `findFluidByName` 只做名称命中并返回稳定地址，不注册、不创建、不持有对象。仓库中没有以全局 `FluidState`/`FluidRef` 持有这些指针并在静态析构期回访的路径，因此不存在单例析构后由缓存或注册表调用虚函数的路径。
+
+**聚焦回归**
+
+`tests/fluid_tests.cpp` 新增 `singletonOwnershipAndLifetime`，并由 `fluid` 测试执行：
+
+- 五个流体名称与地址唯一，重复 accessor 调用地址不变。
+- 五个 `findFluidByName` 结果分别精确等于对应 accessor 的地址，未知名称仍返回空。
+- `FluidRef` 直接构造和名称解析都保留同一指针；默认 `FluidState().getType()` 指向 `Fluids::empty()`。
+- 另一线程填自己的 `fluidStateOf` 缓存后，仍解析到同一个 `flowing_water`，注册表和默认 empty fallback 也返回稳定地址。
+- 既有源/流动精确身份、`isSourceOfType`、family 虚函数、amount/height/legacy block、32 条协议状态和更新顺序测试全部保留并通过。
+
+聚焦命令：
+
+```powershell
+cmake --build build-f7-nmake --target fluid_tests
+.\build-f7-nmake\fluid_tests.exe .\assets\protocol775
+```
+
+输出：`fluid tests passed`。源码检查确认 `src/fluid.cpp`、`tests/`、`include/` 中不再有五个流体的静态裸指针 `new` 或对应手动 `delete`。
+
+**完整构建与 CTest**
+
+MSVC 19.51、NMake、Release、jemalloc 完整构建通过。按用户指示，最终候选只运行一轮完整 CTest：**23/23 通过，21.93 s**；新的 `fluid` 用例 0.03 s，其余 F-7 协议、socket、背压、真实黄金回归和全部聚焦测试继续通过。
+
+- `build-f7-nmake/build-f8-acceptance-final.log`，SHA-256 `fb8efd067e1b55b4425e16788c1c9ed86ece987a300180c3a0409fdaa3ca7508`。
+- `build-f7-nmake/ctest-f8-acceptance-final.log`，SHA-256 `9702f6938d8127affd60f8601cea2bae0522a05fb6d6c4bd7e9556b23beaf4e0`。
+- `TMP/TEMP` 指向工作区；本机回环测试按授权直接使用 `require_escalated`。reviewer 不重复 CTest，采用上述单轮结果。
+
+**没有修改的部分**
+
+没有改 `include/`、协议编码、方块更新阶段、流体派发顺序、源/流动身份或客户端；没有领取 M0-2、L-1，也没有改 `PLAN.md`。现有 `PLAN.md` 复审改动和 `build-f7-nmake-build3.log`、`build-f7-nmake-cleanbuild.log`、`scripts/wait-tasks.ps1`、`task/F7-FLUID-PERF-HANDOFF.md`、`validation/vanilla26_1/fluid-cpp-states.json` 均未纳入或修改。
+
+**返工提交**：`4ee4ad6`。TASKS 交接记录随后单独提交。
+
+---
+
 ## F-7 本轮验收收尾 · 原版逐刻差分（coder）
 
 **范围**：继续 F-7，只补可复验的真实 26.1 服务端差分证据。新增 **W-02 竖井下落**与 **M-03 魂土/蓝冰玄武岩（含不成立的负例）**夹具；两项均用同一输入、相对刻、逐格完整方块状态比较 C++ 与原版。再从 H-01/H-02 或 P-01/P-02 中选择一个本仓库已实现且能精确构造的切片，明确区分真实放置/容器/计划刻队列与 `setblock` 快照；无法证明原版的检查不冒充差分。最后逐条梳理仍缺的 F-7 验收，重点覆盖 N-04、agent 队列/进度、同存档重启、原版同阶段/世吞，并写明依赖与下一动作。不改光照，不领取 F-8，不改 `PLAN.md`。
@@ -553,5 +611,11 @@ MSVC 19.51 Release + jemalloc 构建通过；coder 的 CTest 在允许本机回�
 复核本机 CPU 拓扑：Windows 当前报告 24 个物理核、24 个逻辑 CPU，无可见 SMT 同核配对。A/B 的 affinity mask `0x4` 是组 0 的 CPU 2（性能级较高的一组）；线程探针验证该掩码能将自身临时固定在 CPU 2，随后恢复。进程亲和性不保留该核给基准进程。干态最终候选第 1 轮的主循环线程 CPU 时间为 3375 ms，刻内累计墙钟 3427 ms；测纯模拟时可继续固定整个基准进程，测整服可将模拟线程和网络/区块编码线程分配到不同核。
 
 **F-7 整体仍保持待审查返工。** 完整原版差分、同阶段同工作量的原版性能对跑及此前记录的协议待测项未纳入本轮；两项已有黄金回归通过，无新增真实 26.1 服务端差分。未释放 F-8。
+
+### F-7 验收收尾审查结论（`7a03592`）
+
+**已实现流体子集通过 F-7。** 生产源码未改；官方 JAR 和独立运行目录的黄金、日志及 manifest 哈希已核对。C++ 与真实 26.1 服务端比较 W-02 252 格、M-03 48 格、H-01 自然流入铁轨 99 格，共 399/399；H-01 证据仅覆盖容器正负例，M-03 覆盖同步放置转换与方向优先级。采用 coder 的 MSVC Release + jemalloc 构建和单轮 CTest **23/23**（22.34 s），不重复执行。结合此前 W-01、M-01、双观察者、协议 C++ 回归和交错湿/干性能证据，满足本轮核心验收。建议：`docs/fluid-acceptance.md` 的本轮原始日志 SHA-256 少了最后一位 `9`，在 M0-2 据实补齐。
+
+按 AGENTS §3.6 与用户要求的后续光照优先级，reviewer 在 `PLAN.md` 明确拆出 F-9a（完整原版探针、同存档重启与协议补证，含 N-04 同一湿态慢端）和 F-9b（原版同阶段、同工作量性能），安排在光照验收后；其余存在系统依赖的用例仍见矩阵。此项调整只分离验收范围，没有把未跑用例判为通过，也未改变兼容性结论。光照路线拆为 L-1、L-2a、L-2b、L-3、L-4，并明确世吞主线程开销 <10% 的 A/B 口径。按顺序释放 F-8，再到 M0-2 与 L-1。
 
 任务已完成
