@@ -96,6 +96,7 @@
 
 - 主提交：`f4f1b2c` — Wire the liquid block request paths and waterlogged hosts（12 个文件，+339 / -20）
 - 返工提交：`1e11490` — rework F-5: wire the waterlogged container into flow, drainage and placement（14 个文件，+547 / -41）
+- 返工二提交：`eb32e7b` — rework F-5 again: coral fans follow the water tag, rails drain via their own path（6 个文件，+202 / -18）
 
 
 ### 返工（针对 `f4f1b2c` 的四条阻塞）
