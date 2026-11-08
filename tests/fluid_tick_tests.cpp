@@ -68,24 +68,86 @@ void queuesAreIndependent() {
   require(world.fluidTickCount() == 2, "two fluid entries at one position");
 }
 
-// ServerLevel.tick ordering: block ticks, then fluid ticks, both before the
-// block-event stage. A fluid tick due on tick N runs on tick N.
-void runsInItsOwnPhase() {
+// ServerLevel.tick runs blockTicks, then fluidTicks, then the chunk stage, then
+// block events. This drives all four in one tick and asserts the observed order,
+// so moving the fluid phase before the block phase or after the events fails.
+// The trace log is the single timeline: the broadcast hook appends to it, and
+// traceUpdates already records the block tick, the fluid tick and the event.
+void phaseOrderWithinOneTick() {
+  World world;
+  loadAround(world);
+  const Pos blockPos{0, 64, 0};
+  const Pos fluidPos{1, 64, 0};
+  const Pos notePos{2, 64, 0};
+  world.rawSetBlock(blockPos, Blocks::SMOOTH_STONE.defaultState());
+  world.rawSetBlock(fluidPos, waterLevel(3));
+  world.rawSetBlock(notePos, Blocks::NOTE_BLOCK.defaultState());
+  world.traceUpdates = true;
+
+  // The chunk broadcast has no built-in trace entry, so record it in place.
+  world.blockUpdatesBroadcastObserver = [&world] {
+    world.log.push_back({"broadcast", {}, ""});
+  };
+  // A note block event, which runEvents accepts and traces as "block_event".
+  world.blockEvent(notePos, Blocks::NOTE_BLOCK, 0, 0);
+
+  // Both ticks are due on the very next tick: trigger 0 is already <= gameTime
+  // once World::tick advances it.
+  require(world.scheduleTick(ScheduledTick{blockPos, BlockRef{Blocks::SMOOTH_STONE},
+                                           0, 0, 0}),
+          "schedule block tick");
+  require(world.scheduleFluidTick(fluidPos, Fluids::flowingWater(), 0),
+          "schedule fluid tick");
+
+  world.tick();
+
+  auto order = std::vector<std::string>{};
+  for (const auto &entry : world.log) {
+    if (entry.kind == "scheduled_tick")
+      order.push_back("block_tick");
+    else if (entry.kind == "fluid_tick")
+      order.push_back("fluid_tick");
+    else if (entry.kind == "broadcast")
+      order.push_back("broadcast");
+    else if (entry.kind == "block_event")
+      order.push_back("block_event");
+  }
+  require(order.size() == 4,
+          "one block tick, one fluid tick, one broadcast and one block event");
+
+  const auto indexOf = [&order](const std::string &name) {
+    for (std::size_t i = 0; i < order.size(); ++i)
+      if (order[i] == name)
+        return i;
+    return order.size();
+  };
+  require(indexOf("block_tick") < indexOf("fluid_tick"),
+          "the block tick phase precedes the fluid tick phase");
+  require(indexOf("fluid_tick") < indexOf("broadcast"),
+          "the fluid tick phase precedes the chunk broadcast");
+  require(indexOf("broadcast") < indexOf("block_event"),
+          "the chunk broadcast precedes block events");
+
+  // Both queues were collected in this same tick; neither was deferred.
+  require(world.scheduledTickCount() == 0, "the block queue drained this tick");
+  require(world.fluidTickCount() == 0, "the fluid queue drained this tick");
+}
+
+// A fluid tick that is already due at the start of the tick is collected and run
+// in that same tick rather than waiting one more tick.
+void dueFluidTickRunsInTheSameTick() {
   World world;
   loadAround(world);
   const Pos pos{0, 64, 0};
-  world.rawSetBlock(pos, waterLevel(3));
+  world.rawSetBlock(pos, waterLevel(0));
   world.traceUpdates = true;
-
-  require(world.scheduleFluidTick(pos, Fluids::flowingWater(), 1),
-          "schedule fluid tick");
+  require(world.scheduleFluidTick(pos, Fluids::water(), 0), "schedule due tick");
   world.tick();
-  require(world.fluidTickCount() == 0, "the due fluid tick ran");
-  bool sawFluidTick = false;
+  bool dispatched = false;
   for (const auto &entry : world.log)
     if (entry.kind == "fluid_tick" && entry.pos == pos)
-      sawFluidTick = true;
-  require(sawFluidTick, "the fluid tick dispatched");
+      dispatched = true;
+  require(dispatched, "a due fluid tick dispatches on the first tick");
 }
 
 // ServerLevel.tickFluid re-reads the position and skips a stale identity: a tick
@@ -137,35 +199,80 @@ void flowingVersusSource() {
   require(dispatched, "the source tick fires for source water");
 }
 
-// The fluid queue keeps pending ticks while its chunk is not ticking and
-// resumes afterwards, exactly like the block queue.
+// LevelTicks keeps pending ticks for a chunk that is not ticking and resumes
+// when it ticks again. The chunk is genuinely unloaded here, and the entry must
+// dispatch exactly once after the reload.
 void unloadedChunkHoldsTicks() {
   World world;
   loadAround(world);
-  const Pos pos{0, 64, 0};
+  const Pos pos{3, 64, 3};
   world.rawSetBlock(pos, waterLevel(0));
-  require(world.scheduleFluidTick(pos, Fluids::water(), 3), "schedule far tick");
+  world.traceUpdates = true;
+  require(world.scheduleFluidTick(pos, Fluids::water(), 2), "schedule far tick");
   require(world.fluidTickCount() == 1, "tick is pending");
 
+  // Unload before it is due: the container stays registered and the entry must
+  // survive both the due tick and several further ticks.
+  world.unloadChunk(0, 0);
   for (int i = 0; i < 5; ++i)
     world.tick();
-  require(world.fluidTickCount() == 0, "the tick eventually ran");
+  require(world.fluidTickCount() == 1,
+          "a tick for an unloaded chunk is retained, not dropped or run");
+
+  // Reloading resumes it exactly once.
+  world.loadChunk(0, 0);
+  world.log.clear();
+  world.tick();
+  int dispatched = 0;
+  for (const auto &entry : world.log)
+    if (entry.kind == "fluid_tick" && entry.pos == pos)
+      ++dispatched;
+  require(dispatched == 1, "the retained tick dispatches exactly once");
+  require(world.fluidTickCount() == 0, "the queue is empty afterwards");
 }
 
-// Each queue has its own 65536 budget; a full block queue must not starve the
-// fluid queue. This uses a small scale check of the shared code path.
+// LevelTicks.tick(tick, 65536, ...): each queue enforces its own 65536 cap per
+// tick. Both queues are loaded beyond the cap so neither budget can cover the
+// other's backlog, and the second tick drains the remainder.
 void budgetsAreSeparate() {
   World world;
-  loadAround(world);
-  const Pos pos{0, 64, 0};
-  world.rawSetBlock(pos, waterLevel(0));
-  for (int i = 0; i < 8; ++i)
-    require(world.scheduleFluidTick({i, 64, 0}, Fluids::water(), 1),
-            "schedule a batch of fluid ticks");
-  require(world.fluidTickCount() == 8, "eight fluid entries");
+  // 256 blocks along x and 256 along y gives 65536 distinct positions per z
+  // layer; two z layers give more than the cap.
+  for (int cx = 0; cx < 16; ++cx)
+    for (int cz = 0; cz <= 1; ++cz)
+      world.loadChunk(cx, cz);
+
+  constexpr int kEntries = 65537;
+  const auto posOf = [](int i) {
+    return Pos{i & 255, 64 + ((i >> 8) & 255), i >> 16};
+  };
+  for (int i = 0; i < kEntries; ++i) {
+    const Pos pos = posOf(i);
+    world.rawSetBlock(pos, waterLevel(0));
+    require(world.scheduleFluidTick(pos, Fluids::water(), 0),
+            "schedule fluid tick " + std::to_string(i));
+  }
+  require(world.fluidTickCount() == static_cast<std::size_t>(kEntries),
+          "all fluid ticks are queued");
+
   world.tick();
-  require(world.fluidTickCount() == 0, "all eight drained in one tick");
-  require(world.scheduledTickCount() == 0, "the block queue stayed empty");
+  require(world.fluidTickCount() == 1, "the first tick consumes 65536 and leaves 1");
+  world.tick();
+  require(world.fluidTickCount() == 0, "the second tick drains the last entry");
+
+  // The same cap applies to the block queue, independently.
+  for (int i = 0; i < kEntries; ++i)
+    require(world.scheduleTick(ScheduledTick{posOf(i),
+                                             BlockRef{Blocks::SMOOTH_STONE},
+                                             0, 0, 0}),
+            "schedule block tick " + std::to_string(i));
+  require(world.scheduledTickCount() == static_cast<std::size_t>(kEntries),
+          "all block ticks are queued");
+  world.tick();
+  require(world.scheduledTickCount() == 1, "the block queue also stops at 65536");
+  world.tick();
+  require(world.scheduledTickCount() == 0, "the block queue then drains");
+  require(world.fluidTickCount() == 0, "the fluid queue stayed empty");
 }
 
 // Restored fluid ticks (LevelChunkTicks.scheduleUnchecked) keep duplicates, the
@@ -189,6 +296,47 @@ void scheduleIntoUnloadedChunkFails() {
   require(!world.scheduleFluidTick({128, 64, 0}, Fluids::water(), 1),
           "scheduling into an unloaded chunk is dropped");
   require(world.fluidTickCount() == 0, "nothing was queued");
+}
+
+// A default-constructed FluidRef carries no identity. Queueing it would leave a
+// null target for the snapshot to dereference, so every entry point must reject
+// it -- while Fluids::empty() stays a legitimate identity.
+void nullFluidHandleIsRejected() {
+  World world;
+  world.loadChunk(0, 0);
+  const Pos pos{0, 64, 0};
+  const FluidRef nullHandle;
+
+  require(nullHandle.empty(), "the default handle is empty");
+  require(!world.scheduleFluidTick(pos, nullHandle, 1),
+          "the delay overload rejects a null handle");
+  require(!world.scheduleFluidTick(ScheduledTick{pos, BlockRef{}, 1, 0, 0},
+                                   nullHandle),
+          "the explicit-tick overload rejects a null handle");
+  require(!world.restoreFluidTick(ScheduledTick{pos, BlockRef{}, 1, 0, -1},
+                                  nullHandle),
+          "restore rejects a null handle");
+  require(world.fluidTickCount() == 0, "nothing entered the queue");
+  require(world.fluidTicks().empty(), "the snapshot stays empty");
+  require(!world.hasFluidTick(pos, nullHandle), "no entry is reported");
+
+  // An unknown name also resolves to a null handle rather than registering.
+  const FluidRef unknown{"minecraft:not_a_fluid"};
+  require(unknown.empty(), "an unknown name yields an empty handle");
+  require(!world.scheduleFluidTick(pos, unknown, 1),
+          "an unknown name cannot be scheduled");
+
+  // Fluids::empty() is a real identity and is allowed through the gate; the
+  // entry simply never dispatches because no block reports the empty fluid.
+  require(!FluidRef(Fluids::empty()).empty(),
+          "the registered empty fluid is a valid identity");
+  require(world.scheduleFluidTick(pos, FluidRef(Fluids::empty()), 1),
+          "the empty fluid can be scheduled");
+  require(world.fluidTickCount() == 1, "the empty-fluid entry is queued");
+  const auto ticks = world.fluidTicks();
+  require(ticks.size() == 1 &&
+              ticks[0].second.str() == "minecraft:empty",
+          "the snapshot reports the empty fluid without dereferencing null");
 }
 
 // The snapshot reports the pending fluid ticks with their fluid identity and
@@ -215,13 +363,15 @@ void snapshotReportsFluidTicks() {
 int main() {
   try {
     queuesAreIndependent();
-    runsInItsOwnPhase();
+    phaseOrderWithinOneTick();
+    dueFluidTickRunsInTheSameTick();
     staleIdentityIsSkipped();
     flowingVersusSource();
     unloadedChunkHoldsTicks();
     budgetsAreSeparate();
     restoredTicksAreUnchecked();
     scheduleIntoUnloadedChunkFails();
+    nullFluidHandleIsRejected();
     snapshotReportsFluidTicks();
     std::cout << "fluid tick tests passed\n";
     return 0;

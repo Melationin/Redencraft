@@ -91,4 +91,68 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 - 主提交：`3c7e360` — Add a separate fluid tick queue and dispatch on exact fluid identity
   （10 个文件，+557 / -299；含 `include/redstone/engine.hpp`、`src/engine.cpp`、`include/redstone/fluid.hpp`、`src/fluid.cpp`、`tests/fluid_tick_tests.cpp`、`CMakeLists.txt`、`docs/compatibility.md`，以及 reviewer 前一轮加入的 `PLAN.md` / `docs/fluid-testing.md` 性能回归要求）
 
+### 返工（回应审查：2 阻塞）
+
+**阻塞 1 — 空句柄可入队，快照解引用空指针。** 属实：`scheduleFluidTick(Pos, …)` 在 1508 行有 `fluid.empty()` 检查，但 `ScheduledTick` 重载与 `restoreFluidTick` 都没有，`fluidTicks()` 的 `FluidRef(*entry.target)` 会解引用空指针。已修：
+
+- 两个入口都拒绝空句柄并返回 `false`，与延迟重载一致。
+- 明确区分「空句柄」与「有身份的 `Fluids::empty()`」：只拒绝 `fluid.empty()`（指针为空），`minecraft:empty` 仍是合法身份，可以入队、可以被快照正确报告。
+- 新增 `nullFluidHandleIsRejected`：默认句柄在三个入口都被拒绝、队列计数与快照保持为空、`hasFluidTick` 返回假；未知名字（`minecraft:not_a_fluid`）同样解析为空句柄并被拒绝；`FluidRef(Fluids::empty())` 可入队且快照能读出 `minecraft:empty` 而不解引用空指针。
+
+**阻塞 2 — 回归用例没有真正保护验收判据 3/6/7。** 三条都属实，已重写：
+
+1. **阶段顺序**：原用例只排流体刻。新增 `phaseOrderWithinOneTick` 在同一刻真实触发四件事——方块刻（`smooth_stone` 的到期刻）、流体刻（`flowing_water` 的到期刻）、区块广播（`blockUpdatesBroadcastObserver` 写入 trace）、方块事件（音符盒事件被 `runEvents` 接受并 trace）——并从**同一条 `world.log` 时间线**断言 `block_tick < fluid_tick < broadcast < block_event`。关键修正：不能把 observer 收集到独立 vector（那会在 tick 结束后才回填，顺序失真），必须让 observer 也写进 `world.log`。另加 `dueFluidTickRunsInTheSameTick` 断言当刻到期的流体刻在第一刻就派发，而不是延后一刻。
+2. **跨卸载保留**：原用例从未卸载。`unloadedChunkHoldsTicks` 现在先在到期前 `unloadChunk(0,0)`，再连跑 5 刻断言条目**仍在队列里**（既没被丢弃也没被执行），随后 `loadChunk` 重载并断言**恰好派发一次**、队列清空。
+3. **65536 上限**：原用例只有 8 个条目。`budgetsAreSeparate` 现在给两条队列**各排入 65537 个到期条目**（16×2 个区块，`x=i&255`、`y=64+((i>>8)&255)`、`z=i>>16` 保证位置唯一），断言第一刻各消费 65536 各留 1、第二刻各自清空，并交叉断言另一条队列不被影响。
+
+**变异验证（证明新断言真的能失败，不是又一批空用例）**：
+
+| 变异 | 结果 |
+|---|---|
+| 把流体阶段整体移到方块阶段之前 | `the block tick phase precedes the fluid tick phase` |
+| 删掉两个入口的 `fluid.empty()` 检查 | `the explicit-tick overload rejects a null handle` |
+| 把方块队列预算从 65536 改成 65535 | `the block queue also stops at 65536` |
+
+三次都被拒绝；变异后均已用备份恢复 `src/engine.cpp`，恢复后的 `git diff` 只含本次新增的空句柄检查。
+
+**返工后的构建与测试**：全量构建通过，**CTest 17/17 通过**（12.45 s）。`fluid_tick` 组单独运行 1.05 s。
+
+**没有做的事**：reviewer 在「独立验证」里提到的两点观察（现有基准不输出超过 50 ms 的刻数、本轮未覆盖湿态负载）属于基准工具与后续任务的范畴，本轮未处理，也未据此声称性能结论。
+
+### 审查记录
+
+1. **阻塞｜空流体句柄可入队，读取队列快照时解引用空指针。** `src/fluid.cpp:203` 将未知名称解析为空句柄。`src/engine.cpp:1514–1521` 的显式排刻和恢复入口都可以把空指针写入已注册的区块队列，`src/engine.cpp:1542–1543` 随后在快照中对它解引用。建议两个入口都按 `src/engine.cpp:1508` 拒绝空句柄，区分空句柄与有有效身份的 `Fluids::empty()`，并用已加载区块验证默认句柄和未知名称均被拒绝，队列计数与快照保持为空。
+2. **阻塞｜回归用例未触发验收判据 3、6、7 要保护的行为。** `tests/fluid_tick_tests.cpp:73–89` 只有流体刻，把流体阶段移到方块刻前或方块事件后仍可通过。建议同一刻实际触发方块刻、流体刻、区块广播和方块事件，并断言观察顺序；方块刻回调可顺带验证当刻排入的到期流体刻当刻执行。`tests/fluid_tick_tests.cpp:142–153` 从未卸载区块。建议在刻到期前卸载，断言到期后仍保留，再重载并验证恰好派发一次。`tests/fluid_tick_tests.cpp:157–169` 仅排入 8 个流体刻且方块队列为空。建议两个队列各排入 65537 个到期条目，断言第一刻各消费 65536 个、各留 1 个，下一刻清空。
+
+#### 独立验证
+
+- `cmake --build build-jemalloc --config Release -j 6` 通过。`ctest --test-dir build-jemalloc -C Release --output-on-failure -j 4` **17/17 通过**（8.33 s）。
+- 对照上一级 `net/minecraft/server/level/ServerLevel.java:380–382`、`:797–803` 和 `net/minecraft/world/ticks/LevelTicks.java`。主路径的两次队列调用和精确身份派发符合该源码。本轮为源码审查和 C++ 回归验证，未运行真实 26.1 服务端差分。
+- 世吞基准按本轮要求从 3000 改为 **1000 tick**。同一 800×83×800 干态投影、音符盒 `(2,101,3)` 触发，SHA-256 为 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。使用 MSVC x64 Release、jemalloc，关闭网络、分配计数和正式计时中的指纹。流体前基线 `c8e9eb1` 与待审 `3c7e360` 交替各跑 3 次，进程固定逻辑 CPU 2 并使用高优先级。下表取各指标三次结果的中位数。
+
+  | 指标 | `c8e9eb1` | `3c7e360` | 变化 |
+  |---|---:|---:|---:|
+  | 平均每 tick | 3.096 ms | 3.114 ms | +0.58% |
+  | 每 tick 中位数 | 2.248 ms | 2.269 ms | +0.93% |
+  | 每 tick P95 | 6.469 ms | 6.464 ms | −0.08% |
+  | 1000 tick 主线程 CPU | 2906.250 ms | 2953.125 ms | +1.61% |
+
+- 本轮干态 tick 未见明显性能回退，中位数和 P95 均未触及 5% 复测线。两版另跑的第 250、500、750、1000 刻指纹全部相同，导入与触发记录以及计时终态计数也一致。原始结果见本地 `build-review-f2/summary.json`。现有基准不输出超过 50 ms 的刻数，本轮也未覆盖湿态负载。
+
+#### 无车版世吞补测
+
+- 上表的 3.096 ms/tick 对应 800×83×800 音符盒投影的前 1000 刻。同一基线和投影另跑一次 3000 刻，平均 5.868 ms、P95 32.112 ms。两种时间窗口覆盖的负载不同。
+- 此前性能分析中的 87.989 ms 来自 2006×81×100 无车版在第 250 刻的单刻值，彼时有 8017 个移动活塞。该次带采样的 1000 刻均值为 30.89 ms，见本地 `build-profile-lto/no-cart-second-gate-1000-ticks.log`。
+- 补测使用同一无车版投影（SHA-256 `5b9f31fb5aa08eb6926a2c0df23e01307ea08d7dd12c14da2c6dc17956a603db`），用既有 `build-profile-lto/timing-no-cart.cpp` 触发第二处白桦栅栏门 `(4,87,93)`。两个提交各自链接相同配置的 MSVC x64 Release、jemalloc 核心，固定逻辑 CPU 2，高优先级，无网络、无采样，交替各跑 3 次，每次 1000 刻。
+
+  | 每 tick 耗时 | `c8e9eb1` | `3c7e360` | 变化 |
+  |---|---:|---:|---:|
+  | 平均 | 20.37 ms | 20.48 ms | +0.54% |
+  | 中位数 | 15.78 ms | 15.51 ms | −1.71% |
+  | P95 | 73.98 ms | 73.42 ms | −0.76% |
+
+- 表中取各指标三次结果的中位数。六次的终态方块及实体位置指纹、抽查的计划刻与移动活塞数、爆炸统计均一致，每次均有 26386 次爆炸。无车版干态负载也未见明显性能回退。完整数据见本地 `build-review-f2/heavy-summary.json`，该计时程序同样未输出超过 50 ms 的刻数。
+
+本轮退回修正两项阻塞，干态性能项通过。
+
 任务完成

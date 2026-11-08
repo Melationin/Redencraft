@@ -1512,10 +1512,17 @@ bool World::scheduleFluidTick(Pos p, const FluidRef &fluid, int delay,
                            fluid);
 }
 bool World::scheduleFluidTick(const ScheduledTick &tick, const FluidRef &fluid) {
+  // A default-constructed FluidRef has no identity; queueing it would leave a
+  // null target for the snapshot and the dispatch to dereference. Note that
+  // Fluids::empty() is a real identity, so only the null handle is rejected.
+  if (fluid.empty())
+    return false;
   const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
   return fluidTickQueue_->schedule(key, tick, fluid.fluid());
 }
 bool World::restoreFluidTick(const ScheduledTick &tick, const FluidRef &fluid) {
+  if (fluid.empty())
+    return false;
   const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
   return fluidTickQueue_->restore(key, tick, fluid.fluid());
 }
