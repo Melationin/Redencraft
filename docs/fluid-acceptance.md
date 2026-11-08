@@ -5,7 +5,7 @@
 | 证据类别 | 含义 | 本次状态 |
 |---|---|---|
 | **A. 源码对照** | 逐方法比对只读 26.1 Java 源码 | 已做 |
-| **B. C++ CTest** | 本仓库回归测试 | **22/22 通过**（18.39 s） |
+| **B. C++ CTest** | 本仓库回归测试 | **23/23 通过**（22.34 s） |
 | **C. 原版 JAR 离线探针** | 解包的原版 JAR 直接调用其类 | 共享面探针由 reviewer 完成；本仓库未新增离线 JAR 探针 |
 | **D. 真实 26.1 服务端差分** | 官方 dedicated server、隔离世界、逐刻 trace | **已执行**：W-01 水槽、M-01 混流、双观察者；另有整服计时 |
 
@@ -67,6 +67,40 @@
 
 实跑结果：候选 117 条观测与现有 `fluid-vanilla-states.json` **全部一致**（`candidate matches golden over 117 observations`），T0=121（含 100 刻预热），原始日志在当次运行目录。C++ 侧 `fluid_differential` 继续通过。
 
+### W-02 / M-03 / H-01 相对刻逐格差分（D）
+
+```powershell
+python validation/vanilla26_1/fluid_relative_validation.py --promote-golden
+python validation/vanilla26_1/fluid_fixture_differential_test.py `
+  --probe build-f7-nmake/fluid_fixture_probe.exe `
+  --golden validation/vanilla26_1/fluid-relative-golden.json
+```
+
+官方 `server.jar` 的 SHA-1 为 `3872a7f07a1a595e651aef8b058dfc2bb3772f46`。runner 在工作区
+`build-fluid-validation/relative-runs/20261109-033148-29988-b823b70a/` 创建独立世界，
+先预热 100 刻，再按精确 `gameTime` 步进；原始 `server.log`、候选 JSON 与 manifest 均留在该目录。
+三个夹具的 T0 分别为 101、121、122。
+
+| 夹具 | 采样 | 原版结果 | C++ 比较 |
+|---|---:|---|---|
+| W-02 竖井 | T0…T20 × 12 格 = 252 | T5/T10/T15 分别到 y=82/81/80 的 `water[level=8]`；T20 东侧出口为 `water[level=1]` | 252/252 一致 |
+| M-03 玄武岩 | T0/T1 × 24 格 = 48 | 魂土+西侧蓝冰生成 `basalt[axis=y]`；缺魂土、缺蓝冰、蓝冰在下均保持 `lava[level=0]`；西蓝冰/东水生成玄武岩，交换后生成黑曜石 | 48/48 一致 |
+| H-01 容器切片 | T0…T10 × 9 格 = 99 | 两水源之间的干铁轨在 T5 前保持干态、T5 起 `waterlogged=true`；单水源旁的铁轨始终 `waterlogged=false` | 99/99 一致 |
+
+总计 **399/399 格一致**。黄金与候选 JSON 的 SHA-256 均为
+`61793b281a9d86163c33b435dc514dd55cc2adf94f09e496c566a7fb89cc25e6`；原始日志 SHA-256 为
+`7aa4802431711b678cd40d0a8b777cb9ab0bc42729fc45e4ec23a108e54bf7d`。
+
+W-02 的 T0 是在放水前记录，之后每刻比较；M-03 的夹具通过冻结世界的 `setblock` 放置岩浆，
+比较的是 `LiquidBlock.onPlace` 的同步转换结果和下一稳定刻，不是桶或随机刻路径。
+
+H-01 的边界需要明确：夹具用冻结世界的 `setblock` 建造石壳、干铁轨和水源；观察到的含水化来自
+水源自己的 T5 流体刻，经 `FlowingFluid.spread` 计算目标格为 exact water source，再走
+`SimpleWaterloggedBlock.placeLiquid`。没有命令直接写 `rail[waterlogged=true]`。单水源的目标格
+只得到 `flowing_water`，容器拒绝它。因此状态变化确实经过真实的流体派发与容器判定，而不是
+含水铁轨快照。runner 只观察方块状态；它没有用 agent 直接记录 `LevelTicks` 的入队、优先级或
+`placeLiquid` 后新增水刻，也没有覆盖玩家物品放置、桶或 `H-02` 的破坏/掉落。
+
 ## 2. P0 覆盖矩阵
 
 标记：A=源码对照，B=C++ CTest，C=原版 JAR 离线探针，D=真实 26.1 服务端差分。
@@ -74,9 +108,9 @@
 | 用例 | A | B | C | D | 说明与下一步 |
 |---|---|---|---|---|---|
 | F-01/F-02 状态映射 | 有 | 有 | 部分（共享面） | 未跑 | 需要原版 runtime 全状态导出；现有 32 条水/岩浆 ID 已在 `wire_tests` 钉住。 |
-| Q-01…Q-06 队列 | 有 | 有 | 无 | **阻塞** | 控制台无法注入任意 ScheduledTick/BlockTick；需要扩展现有 `ExactAgent`，下一步是 queue hook。 |
+| Q-01…Q-06 队列 | 有 | 有 | 无 | **阻塞** | 控制台无法注入任意 due/priority/subTick；需要扩展现有 agent，记录 `LevelTicks.schedule` 与 `tickFluid`。 |
 | W-01 水平水槽 | 有 | 有 | 无 | **有** | 117 格观测全一致。 |
-| W-02 竖井下落 | 有 | 有 | 无 | 未跑 | C++ `waterfall` 覆盖；原版夹具可用同一 console 路线补。 |
+| W-02 竖井下落 | 有 | 有 | 无 | **有** | 21 个相对刻 × 12 格共 252 格一致；下落、落地与东侧 `level=1` 均已钉住。 |
 | W-03/L-02 源转换 | 有 | 有 | 无 | 未跑 | 需先补半砖/台阶注册和支撑形状。 |
 | W-04 向下/侧流计数 | 有 | 有 | 无 | 未跑 | C++ 聚焦用例覆盖，原版需队列 trace。 |
 | W-05 坡度 | 有 | 有 | 无 | 未跑 | 同上。 |
@@ -86,14 +120,14 @@
 | L-04 FAST_LAVA | 有 | 无（维度属性未接） | 无 | 未跑 | 维度环境依赖。 |
 | M-01 水岩浆接触 | 有 | 有 | 无 | **有** | 源岩浆→黑曜石、流动岩浆→圆石，T0/T1/T2/T10 × 7 格共 56 格一致（`fluid_mixing_differential`）。 |
 | M-02 向下成石 | 有 | 有 | 无 | 未跑 | 需要原版容器/带水宿主分支。 |
-| M-03 玄武岩 | 有 | 有 | 无 | 未跑 | 方向优先顺序的独立原版夹具未做。 |
-| H-01/H-02 含水宿主 | 有 | 有 | 无 | 未跑 | C++ 铁轨/墙/珊瑚扇覆盖；原版放置/破坏夹具未跑。 |
-| P-01/P-02 活塞 | 有 | 有 | 无 | 未跑 | C++ 有移动含水铁轨共享格；原版逐刻 `movedState`/进度需 agent。 |
+| M-03 玄武岩 | 有 | 有 | 无 | **有** | T0/T1 共 48 格一致；三组负例与方向交换的黑曜石分支均实际执行。 |
+| H-01/H-02 含水宿主 | 有 | 有 | 无 | **部分（H-01）** | 两水源真实流入干铁轨、单水源拒绝，11 个相对刻共 99 格一致；H-02 破坏/掉落与直接玩家放置未跑。 |
+| P-01/P-02 活塞 | 有 | 有 | 无 | 未跑 | C++ 有移动含水铁轨共享格；原版 `progress/progressO/movedState` 与事件写序仍需 agent。 |
 | P-03/P-04 红石/相位 | 有 | 有 | 无 | 未跑 | 与 A-05 湿干对照部分重叠。 |
-| A-01/A-02 存档恢复 | 有 | 有 | 无 | 未跑 | C++ `storage_tests` 覆盖导入/队列；原版“保存—重启—同副本”未跑。 |
+| A-01/A-02 存档恢复 | 有 | 有 | 无 | 未跑 | C++ `storage_tests` 覆盖导入/队列；原版“保存—停服—同一副本重启”及后续派发未跑。 |
 | A-03/A-04 边界/投影 | 有 | 有 | 无 | 未跑 | 原版加载票/实体就绪夹具未接。 |
 | A-05 稳定/循环/湿干 | 有 | 有 | 无 | **部分** | 稳定/交汇/断源 + 重复输入 + 湿干共享格为 B；双观察者为 D。 |
-| N-01/N-02/N-04 协议 | 有 | 有 | 无 | 未跑 | C++ 解码/真实 socket；未与原版录包逐帧比较。 |
+| N-01/N-02/N-04 协议 | 有 | 有 | 无 | 未跑 | N-01/N-02 C++ 编码和解帧已测；N-04 仅有跨 section 湿态帧、健康端和另一条 ping 连接触发的断连。同一湿态慢端触发阈值及原版录包仍缺。 |
 | N-03/N-05 桶/混合 | 未实现 | 无 | 无 | 未跑 | 桶、玩家状态与 level event 未接。 |
 
 ## 3. 真实原版夹具的原始证据与命令
@@ -184,14 +218,18 @@ build-*/redstone_fluid_perf_benchmark.exe 1000
 
 ## 5. 已知依赖与未跑项（逐项）
 
-1. **Q-01…Q-06**：需要 Java agent 在 `LevelTicks.schedule` / `tickFluid` 注入并记录，纯 console 无法构造任意 due/priority/subTick；现有 `validation/safesave_order/vanilla/ExactAgent` 可扩展，但本轮未改 agent。
-2. **W-02/W-03/W-04/W-05/W-07、L-03/L-04、M-02/M-03、H-01/H-02、P-01/P-02/P-03/P-04、A-01/A-02/A-03/A-04**：需要各自的隔离世界与逐刻 trace；本轮只对 W-01、M-01 和双观察者做了真实运行。未跑的项不以 C++ 结果冒充 D。
-3. **N-01/N-02/N-04 原版协议帧**：没有启动原版客户端/录包；C++ 解码和 socket 证据只证明本仓库路径。需要原版连接或代理录包才能逐帧对照。
-4. **W-06 方块级半砖/台阶**：C++ 未注册；纯形状合并路径已覆盖，方块级仍是依赖缺口。
-5. **性能同阶段**：C++ 没有原版光照、随机刻、保存和网络 event loop；原版也没有 C++ `World::tick` 的裸调用。没有匹配边界前不写倍率、不按 10% 判定。
-6. **干态世吞整服对跑**：需要原版可加载同一投影的等价世界、相同区块资格与工作量；当前 C++ 投影输入和原版世界不可直接互认，按 blocker 保留 C++ 历史基准。
-7. **协议桶/玩家状态/level event**：N-03/N-05 未实现。
-8. **`fluid_ticks` 写回**：仍不在范围；本文件只验收读入/运行时队列。
+1. **N-04 湿态本身触发断连**：现有 C++ socket 证据已让不读包会话积累跨 section 流体帧，并由另一条 ping 灌包连接越过 `OutboundQueue` 阈值；reviewer 要求的“同一个湿态慢端自行触发断连、健康端在其后继续”仍未取得。下一步要放大同一湿态会话的 section/批次负载，分别记录该连接的首帧、队列高水位、`backpressure_disconnects` 与断开 tick，再确认健康端 FIFO 和核心 tick 延续。
+2. **N-01/N-02/N-04 原版协议帧**：C++ 的编码、完整解帧和真实 socket 已测；没有启动原版客户端或代理录包，因此原版同输入帧序、包边界和慢端行为仍为 D 缺口。下一步需在隔离环境录同一夹具的 775 包流并逐帧比较，不能以 C++ 解码代替。
+3. **Q-01…Q-06 队列与 P-01/P-02 活塞进度**：console 不能直接注入任意 due/priority/subTick，也不能读取 `PistonMovingBlockEntity` 的 `progress/progressO/movedState`。现有 `OrderAgent.java`/`ExactAgent.java` 只记录事件与部分完成路径。下一步扩展 agent，只读记录 `LevelTicks.schedule`/`tickFluid`、`ServerLevel.doBlockEvent` 和移动 BE tick 前后字段，再跑队列、提前撤回和正常完成三组夹具。
+4. **A-01/A-02 同存档重启**：`storage_tests` 只证明 C++ 读入和自身队列，尚无“原版保存含未来 `fluid_ticks` 的副本 → 停服 → 同一副本重启 → 对照后续派发”的 D 证据。下一步创建独立存档，记录保存前后 SHA-256、`fluid_ticks` 原始标签、重启 gameTime 和前几个到期刻；C++ 只读加载同一副本。
+5. **A-03/A-04 边界与投影**：负 delay、HIGH/NORMAL 同位置竞争和跨区块边界已有聚焦 B，但缺少原版加载票/实体就绪后的重启 trace；仍直接依赖 agent 队列记录。
+6. **世界生成/加载相关 P0**：W-03/W-04/W-05/W-07、L-03/L-04、M-02 和 A-05 的部分分支仍需要原版自然更新或维度属性；本轮没有把这些 C++ 用例升级成 D。
+7. **H-02 与玩家路径**：本轮只跑 H-01 的真实流体容器切片。墙/珊瑚扇的 EXACT break、移除支撑、drop 和显式 set air 尚未做原版逐刻对照；玩家物品放置、桶、实体推流仍未接。
+8. **W-06 方块级半砖/台阶**：C++ 未注册；纯形状合并路径和 reviewer 的官方 JAR 离线探针已覆盖，方块级 D 仍是依赖缺口。
+9. **同阶段性能**：C++ 目前计 `World::tick`，原版计整服 tick，包含光照、随机刻、保存与网络循环；当前 W-01 1000 刻只有初始 12 次派发/6 次写入，不能代表持续流动。下一步在两端接入相同阶段时间戳与派发/写入计数，使用持续动态水槽和静水负荷，各自至少三次交替，再判断 10% 线。
+10. **干态世吞对跑**：C++ 使用固定 litematic，尚无原版可加载的同布局、同区块资格、同 tick/随机设置世界。当前只有 C++ 历史基线，不能把该输入直接当作原版性能对照。下一步先建立可由两端重放的共同导出/等价世界，核对实体、计划刻、移动活塞和逐刻指纹，再跑 1000 tick。
+11. **协议桶/玩家状态/level event**：N-03/N-05 未实现。
+12. **`fluid_ticks` 写回**：仍不在范围；本文件只验收读入、运行时队列与 H-01 的自然派发效果。
 
 ## 6. 行为差异表与可能的高于原版热路径
 
@@ -201,8 +239,8 @@ build-*/redstone_fluid_perf_benchmark.exe 1000
 | 普通方块变化在广播时读当前位置、事件即时发送 | `ChunkHolder.broadcastChanges`；`src/net/session.cpp:665-725` | 同语义；单格/区段两形式，同格去重 | B（N-02） |
 | 区块包 local 位序 | `SectionPos.sectionRelativePos`；`src/net/session.cpp:64-67` | `x<<8｜z<<4｜y`；N-02 解码按此 | B |
 | 移动活塞完成清 `waterlogged` | `PistonMovingBlockEntity.tick`；`src/piston.cpp:624-642` | 同；A-05 共享格夹具 | B |
-| 水/岩浆接触 | `LiquidBlock.shouldSpreadLiquid`、`LavaFluid.spreadTo`；`src/fluid_flow.cpp:391-632` | 源→黑曜石、流动→圆石 | D（M-01 56 格） |
-| 含水宿主子集 | `SimpleWaterloggedBlock`；墙/铁轨/珊瑚扇 | 部分宿主；桶/玩家/容器未接 | A+B，D 未跑 |
+| 水/岩浆接触 | `LiquidBlock.shouldSpreadLiquid`、`LavaFluid.spreadTo`；`src/fluid_flow.cpp:391-632` | 源→黑曜石、流动→圆石；魂土+蓝冰→玄武岩 | D（M-01 56 格，M-03 48 格） |
+| 含水宿主子集 | `SimpleWaterloggedBlock`；墙/铁轨/珊瑚扇 | 部分宿主；自然来源水可流入干铁轨，单侧流水被拒；桶/玩家路径未接 | A+B；D（H-01 99 格，H-02 未跑） |
 | 观察者行为 | `ObserverBlock.tick/updateShape` | 正常放置持续振荡 | D（20 刻）+B |
 | 光源/保存/网络 event loop | 原版整服 | C++ 无光照、无写回、网络只在本仓库 | 推断：C++ dedicated tick 不能与整服直接比 |
 
@@ -229,4 +267,11 @@ cmake --build build-f7-nmake
 ctest --test-dir build-f7-nmake -C Release --output-on-failure
 ```
 
-结果：**22/22 通过**，22.13 s（干净重建后；增量轮曾为 18.39 s）；包含 `fluid_differential`、`fluid_mixing_differential`、`protocol`、`protocol_socket`、`protocol_backpressure`、`storage`。`storage_tests` 在本沙箱下需要把 `TMP/TEMP` 指到工作区内（默认 `dsh-*` 临时目录对新建进程不可写），这是环境约束，不是测试失败。
+最终候选的完整构建日志为 `build-f7-nmake/build-f7-acceptance-final.log`（SHA-256
+`308f17980540b3dac7064ee05eb32a7f2d94ac2cf24b05760264c72fd696daa8`）；只运行一轮完整
+CTest，日志为 `build-f7-nmake/ctest-f7-acceptance-final.log`（SHA-256
+`03cb9bd6f1c5fd55a34fde18c5a6779731d3e955645a8b8cb79ce6a10589f32a`）。结果：
+**23/23 通过**，22.34 s；包含新增的 `fluid_fixture_differential`，以及原有的
+`fluid_differential`、`fluid_mixing_differential`、`protocol`、`protocol_socket`、
+`protocol_backpressure`、`storage`。`storage_tests` 在本沙箱下需要把 `TMP/TEMP` 指到工作区内；
+协议 socket 测试需要 localhost 权限。这是运行环境约束，不是测试失败。

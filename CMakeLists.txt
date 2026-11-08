@@ -137,6 +137,8 @@ if(BUILD_TESTING)
   # F-7 differential: the C++ half of the same fixture the vanilla harness runs.
   add_executable(fluid_differential_probe tests/fluid_differential_probe.cpp)
   target_link_libraries(fluid_differential_probe PRIVATE redstone_core redstone_allocator)
+  add_executable(fluid_fixture_probe tests/fluid_fixture_probe.cpp)
+  target_link_libraries(fluid_fixture_probe PRIVATE redstone_core redstone_allocator)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
     if(REDSTONE_BUILD_VANILLA_SERVER)
@@ -166,6 +168,13 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid_mixing_differential_test.py"
       --probe "$<TARGET_FILE:fluid_differential_probe>"
       --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid-vanilla-mixing.json")
+    # W-02, M-03 and the H-01 real-container slice. The checked-in golden is
+    # produced by fluid_relative_validation.py against official 26.1; this test
+    # only reruns the C++ half and checks every recorded cell at every tick.
+    add_test(NAME fluid_fixture_differential COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid_fixture_differential_test.py"
+      --probe "$<TARGET_FILE:fluid_fixture_probe>"
+      --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid-relative-golden.json")
   endif()
   foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
