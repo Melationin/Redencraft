@@ -24,8 +24,13 @@ public:
   FluidState(const Fluid &type, std::uint8_t amount, bool falling)
       : type_(&type), amount_(amount), falling_(falling) {}
   const Fluid &getType() const;
+  // FluidState.is(Fluid): exact identity, not the family test. ServerLevel
+  // .tickFluid dispatches on this, so a flowing state must not match its source.
+  // Defined after Fluid so the inline body can call Fluid::is.
+  bool is(const Fluid &type) const;
   // FluidState.isSource: the Source variant, independent of amount.
   bool isSource() const;
+  // FluidState.isSourceOfType: exact identity AND that identity is a source.
   bool isSourceOfType(const Fluid &type) const;
   bool isEmpty() const;
   // FluidState.getAmount dispatches to the owning fluid: a Source answers 8 and
@@ -63,8 +68,12 @@ public:
   bool is(const Fluid &other) const { return this == &other; }
   // Fluid.isEmpty: only minecraft:empty.
   bool isEmpty() const { return empty_; }
-  // Fluid.isSource: Source variants answer true, Flowing variants false.
+  // Fluid.isSource(FluidState): vanilla takes the state as the argument. A
+  // Source variant always answers true; a Flowing variant always answers false,
+  // so the constant is equivalent for the five registered fluids, but the pair
+  // overload keeps the vanilla call shape for FluidState:
   bool isSource() const { return source_; }
+  bool isSource(const FluidState &) const { return source_; }
   // Fluid.isSame: the family test used by flowing logic and mixing.
   virtual bool isSame(const Fluid &other) const { return this == &other; }
   // Fluid.getAmount: 8 for a Source, the flowing level otherwise.
@@ -127,5 +136,10 @@ const Fluid *findFluidByName(std::string_view name);
 // their `level` property. Non-fluid blocks return minecraft:empty.
 // TODO: waterlogged hosts report their host fluid state; that is task F-5.
 FluidState fluidStateOf(const BlockState &state);
+
+// Inline accessors that need the complete Fluid type.
+inline bool FluidState::is(const Fluid &type) const {
+  return getType().is(type);
+}
 
 } // namespace redstone

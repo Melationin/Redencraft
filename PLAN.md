@@ -22,14 +22,17 @@
 - **F-2 流体计划刻队列**
   独立的 `LevelTicks` 容器，与方块刻分开收集/执行，共享 `Level.nextSubTickCount`；`ServerLevel.tick` 中位于方块刻之后、区块阶段之前；各自 65536 上限。
   依据 `ServerLevel.java`、`LevelTicks.java`、`LevelChunkTicks.java`、`ScheduledTickAccess.java`。执行 Q-01…Q-06，覆盖源与流动类型共存、陈旧刻按精确身份跳过、跨队列同刻收集、积压区块队首和各自上限。
+  依赖补充：先补 `FluidState::is(const Fluid&)`。`ServerLevel.tickFluid` 用 `fluidState.is(type)` 做精确身份匹配（`ServerLevel.java:797-803`，`TypedInstance.is`，`TypedInstance.java:22-24`）；F-1 只交付了要求「是源」的 `isSourceOfType`（`FluidState.java:41-43`），拿它当精确匹配会漏掉流动流体。
 
 - **F-3 `FlowingFluid` 传播**
   实现 `FlowingFluid.java` 的 `spread`、`spreadToSides`、`getNewLiquid`、`getSpread`、`getSlopeDistance`、`canPassThroughWall`、`SpreadContext`、`isWaterHole`、`getHeight` 和 `getFlow`。以预置方块和显式流体刻隔离算法。F-5 接通自然更新后用同一夹具复验。
   执行 W-01…W-07，验证水平扩散、退流、瀑布、源转换、坡度同距写序、共享面和动态形状。若引入原版 200 项遮挡缓存，另证实冷/热缓存结果相同且动态形状不复用静态缓存。
+  依赖补充：F-3 同时补 `FluidState::getHeight`（`FlowingFluid.getHeight`，`FlowingFluid.java:472-475`：正上方同族时 `1.0F`，否则 `getOwnHeight()`），F-1 只交付了固有高度 `getOwnHeight`；`getFlow` 的向量部分仍按本节原口径在 F-3 实现。
 
 - **F-4 水与岩浆参数差异**
   依据 `WaterFluid.java`、`LavaFluid.java`、`LiquidBlock.java`。主世界水 delay/dropOff/slope 为 5/1/4，岩浆为 30/2/2。水源转换规则默认开、岩浆默认关，分别验证规则开关。岩浆液面抬升的随机延迟、水接触方向、下落成石及魂土/蓝冰成玄武岩都有独立用例。
   执行 L-01…L-03 和 M-01…M-03。L-04 的 `FAST_LAVA` 使用原版扩展对照，项目支持随维度环境属性接入。
+  依赖补充：本节需要 `FluidTags.WATER` / `FluidTags.LAVA`（`FluidTags.java:8-9`）作为独立于 `Fluid.isSame` 的判定面，`WaterFluid.canBeReplacedWith` 用 `!other.is(FluidTags.WATER)`、`LavaFluid.canBeReplacedWith` 用 `other.is(FluidTags.WATER)`、`LiquidBlock.shouldSpreadLiquid` 用 `is(FluidTags.WATER)`，`isSame` 不能替代。
 
 - **F-5 方块侧接线与排水**
   依据 `LiquidBlock.java`、`SimpleWaterloggedBlock.java`、`BaseRailBlock.java` 和各宿主源码。分别接通放置、`neighborChanged`、`updateShape` 的流体刻请求，以及铁轨、墙、珊瑚扇等原版支持宿主的含水与排水。栅栏门用于开闭时的流体阻挡对照。

@@ -1,9 +1,13 @@
 #include "redstone/fluid.hpp"
 #include "redstone/engine.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace redstone;
 
@@ -24,6 +28,52 @@ std::string describe(const BlockState &state) {
 BlockState levelState(const Block &block, int level) {
   return block.defaultState().with(PropertyKind::Level,
                                    static_cast<std::uint8_t>(level));
+}
+
+// FluidState.is(Fluid) is the exact-identity test ServerLevel.tickFluid uses to
+// decide which fluid's tick logic runs. A flowing state must not match its
+// source, and isSourceOfType must additionally reject the flowing variant.
+void identityTests() {
+  const FluidState waterSource = fluidStateOf(levelState(Blocks::WATER, 0));
+  const FluidState waterFlow = fluidStateOf(levelState(Blocks::WATER, 1));
+  require(waterSource.is(Fluids::water()), "source water is water");
+  require(!waterSource.is(Fluids::flowingWater()),
+          "source water is not flowing_water");
+  require(waterFlow.is(Fluids::flowingWater()),
+          "flowing water is flowing_water");
+  require(!waterFlow.is(Fluids::water()),
+          "flowing water is not the water source");
+  require(!waterFlow.is(Fluids::lava()), "flowing water is not lava");
+  require(!FluidState().is(Fluids::water()), "empty is not water");
+
+  require(waterSource.isSourceOfType(Fluids::water()),
+          "source water is a source of water");
+  require(!waterFlow.isSourceOfType(Fluids::flowingWater()),
+          "flowing water is not a source of flowing_water");
+  require(!waterFlow.isSourceOfType(Fluids::water()),
+          "flowing water is not a source of water");
+  require(!waterSource.isSourceOfType(Fluids::lava()),
+          "source water is not a source of lava");
+
+  // Fluid.isSource(FluidState) keeps the vanilla call shape.
+  require(Fluids::water().isSource(waterSource), "water.isSource(state)");
+  require(!Fluids::flowingWater().isSource(waterFlow),
+          "flowing_water.isSource(state)");
+
+  // A source's amount is the fluid constant, not the stored field, so a state
+  // built with a wrong amount still reports 8. This pins the getAmount()
+  // dispatch and would hang instead of failing if the Flowing path recursed.
+  const FluidState forcedSource(Fluids::water(), 3, false);
+  require(forcedSource.getAmount() == 8,
+          "a source reports 8 regardless of the stored amount");
+  require(forcedSource.isFull(), "a source is full");
+  const FluidState forcedFlow(Fluids::flowingWater(), 3, false);
+  require(forcedFlow.getAmount() == 3,
+          "a flowing fluid reports its stored amount");
+  require(forcedFlow.rawAmount() == 3, "rawAmount is the stored amount");
+  require(!forcedFlow.isFull(), "a partially flowing fluid is not full");
+  require(forcedFlow.getOwnHeight() == 3.0f / 9.0f,
+          "flowing own height is amount/9");
 }
 
 // Every (fluid, level) pair from LiquidBlock.stateCache: level 0 is the source,
@@ -174,11 +224,30 @@ void levels() {
   }
 }
 
+// fluidStateOf takes a BlockState and has no World, so it cannot write a block
+// by construction. What can actually regress is the state table itself: a
+// lookup that interned a new state would mint ids and shift the protocol map.
+// The world half uses a sand block, whose onPlace schedules a real tick, so the
+// baseline is genuinely non-zero instead of trivially 0.
 void queriesAreSideEffectFree() {
+  const auto waterCount = Blocks::WATER.stateCount();
+  const auto lavaCount = Blocks::LAVA.stateCount();
+  const auto registeredBefore = registeredStateCount();
+  auto waterIds = std::vector<BlockState::Id>{};
+  auto lavaIds = std::vector<BlockState::Id>{};
+  for (int level = 0; level <= 15; ++level) {
+    waterIds.push_back(levelState(Blocks::WATER, level).id());
+    lavaIds.push_back(levelState(Blocks::LAVA, level).id());
+  }
+
   World world;
   world.loadChunk(0, 0);
-  const BlockState water = levelState(Blocks::WATER, 3);
-  world.rawSetBlock({0, 64, 0}, water);
+  // setBlock on sand runs FallingBlock.onPlace and schedules a tick at delay 2.
+  require(world.setBlock({0, 100, 0}, Blocks::SAND.defaultState()),
+          "sand placement succeeds");
+  require(world.scheduledTickCount() == 1,
+          "sand placement gives a non-zero scheduled-tick baseline");
+  world.rawSetBlock({0, 64, 0}, levelState(Blocks::WATER, 3));
   world.rawSetBlock({1, 64, 0}, levelState(Blocks::LAVA, 0));
 
   const auto ticksBefore = world.scheduledTickCount();
@@ -191,6 +260,7 @@ void queriesAreSideEffectFree() {
     (void)fluidStateOf(world.getBlock({2, 64, 0}));
   }
 
+  require(ticksBefore != 0, "the scheduled-tick baseline is not trivially zero");
   require(world.scheduledTickCount() == ticksBefore,
           "fluid queries schedule no ticks");
   require(world.getBlock({0, 64, 0}) == waterBefore,
@@ -199,36 +269,99 @@ void queriesAreSideEffectFree() {
           "fluid queries do not rewrite the lava block");
   require(world.getBlock({2, 64, 0}).is(Blocks::AIR),
           "fluid queries do not create blocks");
+
+  // No new state was interned and no id moved.
+  require(Blocks::WATER.stateCount() == waterCount, "water state count is stable");
+  require(Blocks::LAVA.stateCount() == lavaCount, "lava state count is stable");
+  require(registeredStateCount() == registeredBefore,
+          "fluid queries intern no new block state");
+  for (int level = 0; level <= 15; ++level) {
+    require(levelState(Blocks::WATER, level).id() == waterIds[level],
+            "water level " + std::to_string(level) + " keeps its state id");
+    require(levelState(Blocks::LAVA, level).id() == lavaIds[level],
+            "lava level " + std::to_string(level) + " keeps its state id");
+  }
 }
 
-// The 32 water/lava states must stay inside the 26.1 exported protocol table.
-void protocolStateTable() {
-  require(Blocks::WATER.stateCount() == 16, "water keeps 16 level states");
-  require(Blocks::LAVA.stateCount() == 16, "lava keeps 16 level states");
-  require(Blocks::WATER.defaultState().get("level") == "0",
-          "water default level is 0");
-  require(Blocks::LAVA.defaultState().get("level") == "0",
-          "lava default level is 0");
-  for (const Block *block : {&Blocks::WATER, &Blocks::LAVA}) {
-    require(!block->defaultState().hasProperty("falling"),
-            std::string(block->shortName()) + " has no falling block property");
+// The 32 water/lava states must match the 26.1 exported protocol table: the
+// JSON-derived TSV lists every block state in registry-id order, so the rows at
+// the water/lava block states pin both the ids and the property values.
+void protocolStateTable(const std::filesystem::path &assets) {
+  const auto path = assets / "block_states.tsv";
+  std::ifstream in(path, std::ios::binary);
+  require(in.good(), "open " + path.string());
+
+  // Parse "id<TAB>block<TAB>[key=value,...]".
+  auto rowsByBlock = std::map<std::string, std::map<int, int>>{};
+  auto idToRow = std::map<int, std::string>{};
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    if (line.empty())
+      continue;
+    const auto firstTab = line.find('\t');
+    require(firstTab != std::string::npos, "TSV row has an id field: " + line);
+    const int id = std::stoi(line.substr(0, firstTab));
+    const auto secondTab = line.find('\t', firstTab + 1);
+    const std::string block =
+        line.substr(firstTab + 1, secondTab == std::string::npos
+                                      ? std::string::npos
+                                      : secondTab - firstTab - 1);
+    const std::string properties =
+        secondTab == std::string::npos ? std::string{} : line.substr(secondTab + 1);
+    idToRow[id] = block;
+    if (block != "minecraft:water" && block != "minecraft:lava")
+      continue;
+    const auto key = properties.find("level=");
+    require(key != std::string::npos,
+            block + " row has a level property: " + line);
+    const int level = std::stoi(properties.substr(key + 6));
+    rowsByBlock[block][level] = id;
+  }
+
+  for (const auto &[blockName, levels] :
+       {std::pair<std::string, const Block *>{"minecraft:water", &Blocks::WATER},
+        std::pair<std::string, const Block *>{"minecraft:lava", &Blocks::LAVA}}) {
+    require(levels->stateCount() == 16,
+            blockName + " keeps 16 level states");
+    require(rowsByBlock[blockName].size() == 16,
+            blockName + " has 16 rows in the protocol table");
+    // Registry ids are contiguous per block, and the first row is level 0.
+    const int firstId = rowsByBlock[blockName].at(0);
     for (int level = 0; level <= 15; ++level) {
-      const BlockState state = levelState(*block, level);
+      const int protocolId = rowsByBlock[blockName].at(level);
+      require(protocolId == firstId + level,
+              blockName + " level " + std::to_string(level) +
+                  " has a contiguous protocol id");
+      const int localId = static_cast<int>(levels->firstState()) + level;
+      require(idToRow.count(localId) == 1,
+              "local state id " + std::to_string(localId) + " exists in the table");
+      // The block's own dense variant order must line up with the TSV order.
+      const BlockState state = levelState(*levels, level);
       require(state.isSchemaState(),
-              std::string(block->shortName()) + " level " + std::to_string(level) +
+              blockName + " level " + std::to_string(level) +
                   " stays inside the StateDefinition");
+      require(!state.hasProperty("falling"),
+              blockName + " has no falling block property");
     }
+    require(levels->defaultState().get("level") == "0",
+            blockName + " default level is 0");
   }
 }
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
   try {
+    require(argc > 1, "fluid_tests needs the assets/protocol775 directory");
+    const std::filesystem::path assets = argv[1];
+
     fluidRegistry();
+    identityTests();
     emptyFluidState();
     levels();
     queriesAreSideEffectFree();
-    protocolStateTable();
+    protocolStateTable(assets);
     std::cout << "fluid tests passed\n";
     return 0;
   } catch (const std::exception &error) {

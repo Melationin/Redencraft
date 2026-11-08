@@ -149,7 +149,7 @@ if(BUILD_TESTING)
       --native "$<TARGET_FILE:safesave_order_probe>"
       --output "${CMAKE_CURRENT_BINARY_DIR}/safesave-order-comparison.json")
   endif()
-  foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid)
+  foreach(name engine entity piston storage litematic allocator shapes client_inventory command)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_core redstone_allocator)
@@ -162,6 +162,21 @@ if(BUILD_TESTING)
       add_test(NAME ${name} COMMAND ${name}_tests)
     endif()
   endforeach()
+  # fluid_tests reads the exported 26.1 block-state table to pin the water/lava
+  # protocol ids, so it takes the assets directory as its argument. The timeout
+  # turns the FluidState::getAmount() dispatch recursion into a failure instead
+  # of a hung run, and /W4 keeps it as strict as the core library.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/fluid_tests.cpp")
+    add_executable(fluid_tests tests/fluid_tests.cpp)
+    target_link_libraries(fluid_tests PRIVATE redstone_core redstone_allocator)
+    if(MSVC)
+      target_compile_options(fluid_tests PRIVATE /UNDEBUG /W4 /utf-8)
+    else()
+      target_compile_options(fluid_tests PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME fluid COMMAND fluid_tests "${CMAKE_CURRENT_SOURCE_DIR}/assets/protocol775")
+    set_tests_properties(fluid PROPERTIES TIMEOUT 60)
+  endif()
   # The clientbound command tree is encoded by the protocol library, so the
   # command tests exercise it only when the optional server is part of the build.
   if(TARGET redstone_protocol AND TARGET command_tests)
