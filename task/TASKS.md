@@ -95,6 +95,7 @@ F-5 已验收（`任务通过`），实现提交 `f4f1b2c` → `1e11490` → `eb
 ### 提交
 
 - 主提交：`1c629a2` — F-6: restore fluid ticks from Anvil saves and schematics（7 个文件，+222 / -191）
+- 返工提交：`7b862f2` — F-6 rework: read Litematica's real fluid tick record and cover the disk path（8 个文件，+335 / -33）
 
 ### 审查记录（`1c629a2`）
 
