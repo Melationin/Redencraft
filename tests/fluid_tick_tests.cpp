@@ -228,7 +228,11 @@ void unloadedChunkHoldsTicks() {
     if (entry.kind == "fluid_tick" && entry.pos == pos)
       ++dispatched;
   require(dispatched == 1, "the retained tick dispatches exactly once");
-  require(world.fluidTickCount() == 0, "the queue is empty afterwards");
+  // The retained entry itself is gone; a new continuation tick at the same
+  // position is expected now that F-5 wires setBlock and the spread re-schedules.
+  for (const auto &entry : world.fluidTicks())
+    require(!(entry.first.pos == pos && entry.first.trigger == 5),
+            "the retained entry (trigger 5) was consumed");
 }
 
 // LevelTicks.tick(tick, 65536, ...): each queue enforces its own 65536 cap per
@@ -249,10 +253,12 @@ void budgetsAreSeparate() {
   // Both queues are filled *before* the first tick, so a single shared per-tick
   // budget would be visible: blockTicks runs first and would starve fluidTicks.
   // Draining one queue before filling the other could not distinguish that.
+  // This case is about the queue budget, not fluid behaviour, so it queues the
+  // inert empty fluid: its dispatch returns before any spread, which keeps the
+  // counts exact now that F-5 lets a real fluid tick write blocks and queue more.
   for (int i = 0; i < kEntries; ++i) {
     const Pos pos = posOf(i);
-    world.rawSetBlock(pos, waterLevel(0));
-    require(world.scheduleFluidTick(pos, Fluids::water(), 0),
+    require(world.scheduleFluidTick(pos, FluidRef(Fluids::empty()), 0),
             "schedule fluid tick " + std::to_string(i));
     require(world.scheduleTick(ScheduledTick{pos, BlockRef{Blocks::SMOOTH_STONE},
                                              0, 0, 0}),

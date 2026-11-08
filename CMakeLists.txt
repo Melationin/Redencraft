@@ -149,7 +149,7 @@ if(BUILD_TESTING)
       --native "$<TARGET_FILE:safesave_order_probe>"
       --output "${CMAKE_CURRENT_BINARY_DIR}/safesave-order-comparison.json")
   endif()
-  foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params)
+  foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_core redstone_allocator)

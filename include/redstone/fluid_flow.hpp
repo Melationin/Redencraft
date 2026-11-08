@@ -29,6 +29,20 @@ void fluidSpread(World &world, Pos pos, const BlockState &blockState,
 FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
                           const Fluid &self);
 
+// LiquidBlock.onPlace / neighborChanged: run shouldSpreadLiquid and, if the
+// liquid survived, request a fluid tick. The two are separate entry points
+// because vanilla calls them from different places.
+void liquidOnPlace(World &world, Pos pos, const BlockState &state);
+void liquidNeighborChanged(World &world, Pos pos, const BlockState &state);
+
+// LiquidBlock.updateShape: request a fluid tick only when this block or the
+// changed neighbour is a source.
+void liquidUpdateShape(World &world, Pos pos, const BlockState &state,
+                       const BlockState &neighbor);
+
+// SimpleWaterloggedBlock: a waterlogged host reports a water source.
+bool isWaterloggedHost(const BlockState &state);
+
 // FlowingFluid.getSpreadDelay: the tick delay to re-schedule with, including
 // LavaFluid's x4 when the surface rises without falling.
 int fluidSpreadDelay(World &world, Pos pos, const Fluid &self,

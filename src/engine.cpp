@@ -1079,6 +1079,9 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
   if (!getBlock(p).sameBlock(state))
     return false;
   if (!(flags & 512)) {
+    // LiquidBlock.onPlace: a type change into a liquid requests its first tick.
+    if (isLiquidBlock(state) && !old.sameBlock(state))
+      liquidOnPlace(*this, p, state);
     // FallingBlock.onPlace is a type-change callback, including piston moves.
     if (state.is(Blocks::SAND) && !old.sameBlock(state))
       scheduleTick(p, state.block(), 2);
@@ -1136,6 +1139,9 @@ BlockState World::updateShapeState(Pos p, const BlockState &state,
   // currently has support. Scheduled-tick deduplication preserves the first due time.
   if (state.is(Blocks::SAND))
     scheduleTick(p, state.block(), 2);
+  // LiquidBlock.updateShape: only a source on either side requests a fluid tick.
+  if (isLiquidBlock(state))
+    liquidUpdateShape(*this, p, state, neighbor);
   if (isWoolCarpet(state)) {
     auto below = getBlock(p.relative(Direction::Down));
     if (below.isAir())
@@ -1383,6 +1389,9 @@ void World::executeNeighbor(Pos p, const BlockState &state,
       neighborChanged(basePos, source.str());
   } else if (state.is(Blocks::TNT) && hasNeighborSignal(p) && tntExplodes) {
     primeTntBlock(p);
+  } else if (isLiquidBlock(state)) {
+    // LiquidBlock.neighborChanged: a separate path from onPlace and updateShape.
+    liquidNeighborChanged(*this, p, state);
   } else if (isRailBlock(state)) {
     railNeighborChanged(*this, p, state, source, movedByPiston);
   } else if (state.is(Blocks::REDSTONE_LAMP)) {

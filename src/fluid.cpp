@@ -179,8 +179,13 @@ bool FluidState::operator==(const FluidState &other) const {
 // (Math.min(level, 8)), so levels 8..15 all read the falling full state while
 // the block state keeps its own property value.
 FluidState fluidStateOf(const BlockState &state) {
-  if (!isLiquidBlock(state))
+  if (!isLiquidBlock(state)) {
+    // SimpleWaterloggedBlock.getFluidState: a waterlogged host reports a water
+    // source even though its own block is not a liquid (F-5).
+    if (waterloggedOf(state))
+      return FluidState(Fluids::water(), 8, false);
     return FluidState();
+  }
   const int level = static_cast<int>(propertyValue(state, PropertyKind::Level));
   const int clamped = std::min(level, 8);
   const bool water = state.is(Blocks::WATER);

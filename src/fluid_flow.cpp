@@ -701,3 +701,54 @@ int fluidSpreadDelay(World &world, Pos pos, const Fluid &self,
   return computeSpreadDelay(world, pos, self, oldState, newState);
 }
 } // namespace redstone
+
+namespace redstone {
+// ---------------------------------------------------------------------------
+// LiquidBlock's three request paths (F-5). They are kept separate on purpose:
+// vanilla reaches them from onPlace, neighborChanged and updateShape, and each
+// has its own trigger condition.
+// ---------------------------------------------------------------------------
+namespace {
+void requestFluidTick(World &world, Pos pos) {
+  const FluidState fluid = fluidStateOf(world.getBlock(pos));
+  if (fluid.isEmpty())
+    return;
+  world.scheduleFluidTick(pos, FluidRef(fluid.getType()),
+                          fluid.getType().tickDelay());
+}
+} // namespace
+
+bool isWaterloggedHost(const BlockState &state) {
+  // SimpleWaterloggedBlock declares the WATERLOGGED property; that declaration
+  // is what makes the block a LiquidBlockContainer here.
+  return state.hasProperty("waterlogged");
+}
+
+void liquidOnPlace(World &world, Pos pos, const BlockState &state) {
+  if (!isLiquidBlock(state))
+    return;
+  // LiquidBlock.onPlace: shouldSpreadLiquid may convert lava to stone or
+  // obsidian in place, in which case no tick is requested.
+  if (!liquidShouldSpreadLiquid(world, pos, state))
+    return;
+  requestFluidTick(world, pos);
+}
+
+void liquidNeighborChanged(World &world, Pos pos, const BlockState &state) {
+  if (!isLiquidBlock(state))
+    return;
+  if (!liquidShouldSpreadLiquid(world, pos, state))
+    return;
+  requestFluidTick(world, pos);
+}
+
+void liquidUpdateShape(World &world, Pos pos, const BlockState &state,
+                       const BlockState &neighbor) {
+  if (!isLiquidBlock(state))
+    return;
+  // LiquidBlock.updateShape schedules only when one side is a source.
+  if (!fluidStateOf(state).isSource() && !fluidStateOf(neighbor).isSource())
+    return;
+  requestFluidTick(world, pos);
+}
+} // namespace redstone

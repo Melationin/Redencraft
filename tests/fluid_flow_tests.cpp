@@ -510,12 +510,16 @@ void tickReschedulesNonSource() {
   again.rawSetBlock(p, waterLevel(6));
   again.rawSetBlock({1, 64, 0}, waterLevel(0)); // a source raises the level
   const BlockState b2 = again.getBlock(p);
-  const auto t2 = again.fluidTickCount();
   fluidTick(again, p, b2, fluidStateOf(b2));
   require(!again.getBlock(p).is(Blocks::AIR),
           "a replenished fluid keeps its block");
-  require(again.fluidTickCount() == t2 + 1,
-          "a level change schedules the next fluid tick");
+  // The level change re-schedules this position. The spread also queues ticks for
+  // the neighbours it wrote now that F-5 wires setBlock, so count per position.
+  auto atPos = 0;
+  for (const auto &entry : again.fluidTicks())
+    if (entry.first.pos == p)
+      ++atPos;
+  require(atPos >= 1, "a level change schedules the next fluid tick");
 }
 } // namespace
 

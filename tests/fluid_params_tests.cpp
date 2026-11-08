@@ -375,10 +375,12 @@ void spreadDelayThroughTick() {
     (void)world.random.nextInt(16);
     fluidTick(world, pos, world.getBlock(pos),
               fluidStateOf(world.getBlock(pos)));
-    const auto ticks = world.fluidTicks();
-    require(!ticks.empty(), "the tick re-scheduled itself");
-    const int delay =
-        static_cast<int>(ticks.front().first.trigger - world.gameTime());
+    // Only the entry at this position is the re-scheduled one; the spread may
+    // also have queued ticks for the neighbours it wrote (F-5 wiring).
+    auto delay = -1;
+    for (const auto &entry : world.fluidTicks())
+      if (entry.first.pos == pos)
+        delay = static_cast<int>(entry.first.trigger - world.gameTime());
     require(delay == 30 || delay == 120,
             "the tick schedules 30 or 120, got " + std::to_string(delay));
     if (delay == 30)
