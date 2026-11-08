@@ -23,11 +23,13 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 `--chunk` 可重复；未指定则选择存档中已读取的全部区块。指定的区块必须存在，当前阶段不会因玩家移动或放置自动加载/生成区块（目标形态是加载票驱动，见 [PLAN.md](../PLAN.md) 阶段 4）。`--view-distance 3` 控制网络视野半径（2–10），独立于模拟强加载；客户端移动时发送新的中心和区块、卸载旧视野。大世界每批最多 2 区块，小场景最多 9 区块，等待 `chunk_batch_received` 再继续。当前视野为方形边界，原版圆角边界和客户端距离协商仍为 TODO。协议维度目前固定原版 overworld 高度 [-64,320)，存档仍要求 DataVersion 4786；当前阶段没有保存（目标形态见 [PLAN.md](../PLAN.md) 阶段 3）。`--port 0` 自动分配本地端口，`--ticks N` 用于有限时长自动测试，`--assets` 可选择导出资产目录。Ctrl+C 正常结束；不执行自动客户端启动。
 
+协议里的时间字段只反映当前内存 `gameTime`。26.1 World Clocks、`world_clocks`、`advance_time`、睡眠跳转和 `/time` 的时钟语义尚未实现；`/tick freeze/step/sprint` 只是测试控制入口。两者都不写回 `level.dat`。
+
 ## 连接与同步
 
 - 实现 handshake/status ping、离线 UUID v3 登录、login acknowledgement、空 known-packs 协商、完整 registry/tags 配置及 finish acknowledgement。
 - Play 发送创造玩家登录、玩家信息、能力、出生点、区块中心、chunk batch、时间、初始九格、传送确认和 keepalive。
-- 区块采用 26.1 的 section 双计数（non-empty、fluid）、palette 固定 long 存储、原版状态标志计算的高度图及移动活塞 NBT（ByteTag facing、progressO）。块/物品/实体等 ID 使用完整原版导出表，而非 C++ 子集的注册顺序。
+- 区块采用 26.1 的 section 双计数（non-empty、fluid）、palette 固定 long 存储、原版状态标志计算的高度图及移动活塞 NBT（ByteTag facing、progressO）。流体状态、流体刻传播和自然方块状态更新已经参与核心模拟和区块/单格广播；协议光照段仍由占位值填充。块/物品/实体等 ID 使用完整原版导出表，而非 C++ 子集的注册顺序。
 - 创造放置与破坏经过距离、范围、已加载区块、物品、支撑及当前玩家/简单实体碰撞检查；处理珊瑚地面/挂墙候选、活塞和侦测器方向、铁轨方向、草/墙/音符盒初始属性、音符盒右键调音、创造破坏活塞头关联基座、矿车坡道放置。侦测器放置不得调用会调度计划刻的通用 updateShape 查询。
 - 输入预测 sequence 在修改世界之前校验，修正包和 block_changed_ack 回传；负序列不会先编辑再断开。创造丢弃限制堆叠/频率，不向未加载区块生成暂停实体。
 - 物品、TNT、下落方块、矿车生成时用包组发送实体和非默认元数据。跟踪采用原版 `VecDeltaCodec` 的 1/4096 位移及 `Mth.packDegrees` 的 1/256 圈旋转。位移超出 short、着地变化或超过重同步阈值时发送 `entity_position_sync`。同一轮更新先发变化的速度，再发位置或旋转，最后发变化的 TNT 元数据。TNT 引信每刻变化，因此也会每刻进入跟踪更新。实体受推力时可以提前进入更新。矿车轨迹插值、物品后续元数据更新与原版受击专用速度同步仍待实现。
@@ -46,13 +48,13 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 ## 验证与剩余工作
 
-MSVC Release + jemalloc 的 CTest **14/14 通过**。除既有行为用例外，新增队列 FIFO/容量/并发、冻结快照后台编码期间注册扩容、实体广播阶段/注册/落地移除顺序、块变化去重后读取最新状态、Session 积压隔离，以及 1 秒滑动窗口平均值和报告节流断言。socket 测试实际启动有限时长的本地 C++ 服务端；慢连接压测触发 1 次输出积压断开，健康连接仍通过 ping、放置、破坏并收到递增 tick 报告，服务端完成 160 tick。投影 TCP 冒烟通过 50 个区块、视野切换与右键激活。详细结果见 [发包验证记录](../validation/performance/2026-11-07-network-sync.json)。
+该协议批在 MSVC Release + jemalloc 下的 CTest 为 **14/14**（2026-11-07 记录）。除既有行为用例外，新增队列 FIFO/容量/并发、冻结快照后台编码期间注册扩容、实体广播阶段/注册/落地移除顺序、块变化去重后读取最新状态、Session 积压隔离，以及 1 秒滑动窗口平均值和报告节流断言。socket 测试实际启动有限时长的本地 C++ 服务端；慢连接压测触发 1 次输出积压断开，健康连接仍通过 ping、放置、破坏并收到递增 tick 报告，服务端完成 160 tick。投影 TCP 冒烟通过 50 个区块、视野切换与右键激活。详细结果见 [发包验证记录](../validation/performance/2026-11-07-network-sync.json)。当前全量基线见[交接文档](handover.md#当前状态2026-11-09)。
 
 `validation/protocol775/export.ps1` 从官方 jar 重建资产并检查版本与哈希。其 `-VerifyPlayPackets` 使用官方 GameProtocols codec 解码 C++ 测试生成的所有记录，区块继续用真实 LevelChunkSection.read 解码 24 个子区块，检查无剩余字节。来源、格式和结果见 `validation/protocol775/README.md`、`verification-result.json`。这验证编码和源码约定，不能代替真实客户端实际连接、资源加载和动画验证。
 
 本轮将 wire/protocol 测试产生的记录合并，使用同一官方 codec 验证 **294 包通过**；导出写入构建目录，未覆盖固定协议资产。没有启动真实 Minecraft 客户端，也没有运行本轮真实 26.1 服务端逐 tick 差分，不能声称原版等价。
 
-仍有明确 TODO：真实 ServerPlayer 服务端物理与推挤、其他玩家模型/放置碰撞、动态区块跟踪、玩家拾取/容器与生存、任意物品组件/工具与完整 BlockPlaceContext、聊天与配方、原版光照引擎、其他生物群系、音效粒子和完整元数据优化。当前 sky light 统一全亮、biome 统一 plains，仅用于查看；水/流体刻当前阶段不参与模拟，流体刻是 [路线图](../PLAN.md) 阶段 1。网络支持是创造编辑入口，不代表完整原版多人服务端等价。
+仍有明确 TODO：真实 ServerPlayer 服务端物理与推挤、其他玩家模型/放置碰撞、动态区块跟踪、玩家拾取/容器与生存、任意物品组件/工具与完整 BlockPlaceContext、聊天与配方、原版光照引擎、其他生物群系、音效粒子和完整元数据优化。当前 sky light 统一全亮、`biome` 统一为 plains，仅用于查看；流体状态和流体刻已经运行并完成 F-7 当前核心验收，剩余差分与性能补证见 [F-9a/F-9b](../PLAN.md#阶段-25--流体补充验收)及[流体验收证据](fluid-acceptance.md)。网络支持是创造编辑入口，不代表完整原版多人服务端等价。
 
 ## 命令系统与 `/tick`
 

@@ -46,17 +46,17 @@ C++ 侧按 `LevelTicks`/`LevelChunkTicks` 实现：每个已加载区块一个�
 
 1. 编译与 CTest：存储边界、脉冲延迟、更新模式、事件时序、活塞推动/拉回/限制。
 2. 固定实际存档回放：导入状态、计划刻和移动中的活塞，逐刻导出比较结果（本版不写回 Minecraft 存档）。
-3. 26.1 服务端差分：先用原版服务端命令控制冻结/单步并检查状态与物品；更细的逐回调轨迹需要 Fabric 测试夹具。完整覆盖目标包括准连接、短脉冲丢块、粘液蜂蜜分离、12 方块上限、跨区块与负坐标、侦测器移除/放置、更新抑制。
+3. 26.1 服务端差分：先用原版服务端命令控制冻结/单步并检查状态与物品；更细的逐回调轨迹使用 Java agent 探针。完整覆盖目标包括准连接、短脉冲丢块、粘液蜂蜜分离、12 方块上限、跨区块与负坐标、侦测器移除/放置、更新抑制。
 
-尚未做第 3 项时，不能宣称已验证“几乎全部原版特性”。具体当前限制在实现完成后追加。
+第 3 项按夹具逐项推进：W-01、M-01、W-02、M-03、H-01 和双观察者已有真实 26.1 差分；其余未跑项及依赖见[流体验收证据](fluid-acceptance.md#5-已知依赖与未跑项逐项)。未列出的分支不能宣称已验证“几乎全部原版特性”。
 
-2026-11-06 已完成用户截图中的地毯复制结构的实际原版 26.1 服务端比较；原版与 C++ 均保留移动后的地毯并产生一个额外地毯物品。现在 C++ 产生的是真实 `ItemEntity`，并由 `piston` CTest 断言。证据见 `validation/vanilla26_1`。其他结构仍主要依赖源码审查与回归测试；更新顺序审查记录见 `docs/update-order-audit.md`。
+2026-11-06 已完成用户截图中的地毯复制结构的实际原版 26.1 服务端比较；原版与 C++ 均保留移动后的地毯并产生一个额外地毯物品。现在 C++ 产生的是真实 `ItemEntity`，并由 `piston` CTest 断言。证据见 `validation/vanilla26_1`。其他结构仍主要依赖源码审查与回归测试；更新顺序审查记录见[更新顺序审查](update-order-audit.md)。
 
 ## 当前实现与剩余差异
 
 后续新增独立可选原生协议 775 服务端，支持创造编辑和简单实体同步，详见 [原版连接说明](protocol775.md)。网络只观察核心，在原版区块广播阶段合并脏位置，成功方块事件立即发送；没有真实客户端验收。下述未实现的玩家指服务端物理、玩家实体和完整交互系统。
 
-本批（当前阶段）排除水/流体刻，保留水和岩浆的存档状态、空碰撞和实体接触判定；不模拟流动、液面重算和流体推挤。流体刻不是被永久排除，它是 [路线图](../PLAN.md) 阶段 1，测试规格见 [水与岩浆对照测试设计](fluid-testing.md)。
+流体阶段 F-1…F-8 已通过当前核心验收：状态、独立计划刻、传播、参数/反应、方块宿主接线、存档读入、差分验证和单例所有权均已实现；测试规格见[水与岩浆对照测试设计](fluid-testing.md)，证据边界与后续 F-9a/F-9b 见[流体验收证据](fluid-acceptance.md)和[路线图](../PLAN.md#阶段-25--流体补充验收)。桶、玩家物品路径、实体推流和 `fluid_ticks` 写回仍未实现。
 
 流体**状态模型与计划刻队列已经实现**（F-1、F-2）：`include/redstone/fluid.hpp` / `src/fluid.cpp` 提供 `Fluid` / `FluidState` / `Fluids` 五个单例，以及 `fluidStateOf(BlockState)` 的 `level=0..15` 解码（`level=0` 源、`1..7` 流动 amount `8-level`、`8..15` 归一到 falling 满态，索引按原版 `Math.min(level,8)` 截断而方块属性保留原值）。`World` 现在有第二条独立的 `LevelTicks`（`fluidTicks`），容器、去重集与 65536 预算都与方块刻分开，在 `World::tick` 中紧随方块刻、早于区块阶段；派发按 `fluidState.is(type)` 精确身份匹配，陈旧刻不触发。查询与排刻不写方块。水与岩浆的**参数差异与反应规则已实现**（F-4）：`FluidTags.WATER`/`LAVA` 作为独立于 `isSame` 的判定面，`canBeReplacedWith` 改用标签；源转换改由世界的 `waterSourceConversion`/`lavaSourceConversion` 开关控制（默认开/关）；`fluidSpreadDelay` 实现岩浆液面抬升时 `nextInt(4) != 0` 的 4 倍延迟；`liquidShouldSpreadLiquid` 实现岩浆遇水成黑曜石（源）/圆石（流动）、下方灵魂土邻接蓝冰成玄武岩。新增 `cobblestone`/`basalt`/`soul_soil`/`blue_ice` 四个方块支撑上述反应。方块侧接线已实现（F-5）：`LiquidBlock` 的放置、`neighborChanged`、`updateShape` 三条路径分别请求流体刻（不合并成统一邻居刷新），三条入口都按**回调传入的 state** 定刻身份而非重读世界；`LevelChunk.setBlockState` 的语义也已对齐——除 flags 512 外每次状态写入都调 `onPlace`（同种液体改 `level` 也算），去重交给 `LevelChunkTicks` 的 (位置, 精确流体) 键。含水宿主按 `LiquidBlockContainer` 接通：`canHoldAnyFluid` 对宿主恒真，`canHoldSpecificFluid` 走 `canPlaceLiquid`（只接受精确 `minecraft:water` 源，流动态与岩浆拒绝），`spreadTo` 对宿主调 `placeLiquid`（写 `waterlogged=true`、flags 3、排自己的水刻）而不是替换方块；`getSpread` 用**目标格算出的流体**判定接受，因此单源侧流（`flowing_water`）不会注入宿主，只有双源转源得到的精确水源会。宿主各自的 `updateShape`（铁轨、墙、地面/墙面枯珊瑚扇）在含水时排水刻；`Level.removeBlock`/`destroyBlock` 写回原流体的 legacy 方块，因此宿主失去支撑或玩家破坏时**保水**而不是变空气。玩家放置宿主按目标格原有流体初始化 `waterlogged`：铁轨与墙要求**精确水源**（`BaseRailBlock.java:139-147`、`WallBlock.java:112-131`），珊瑚扇用的是 **`FluidTags.WATER` + `isFull()`**（`BaseCoralPlantTypeBlock.java:57-62`，`BaseCoralWallFanBlock` 继承），因此 falling `water[level=8]`（流动身份但 amount 8）会浸湿珊瑚扇却不会浸湿铁轨和墙；非满态流水两者都不浸湿。墙与五种枯珊瑚扇补上 `forceSolidOn`。存档与投影的**流体刻已恢复**（F-6）：`fluid_ticks` 按精确流体身份进入独立的流体 `LevelTicks`，`block_ticks` 与 `fluid_ticks` 各自计算 `-N..-1` 的 subTick 基准（`LevelChunk.java:639-641`），显式 `minecraft:empty` 作为真实身份恢复、未知或空名字报错而不静默丢弃；Litematic `PendingFluidTicks` 同样导入并做坐标变换。仍未实现：桶交互与实体推流（测试规格 P1）。
 
@@ -71,7 +71,8 @@ C++ 侧按 `LevelTicks`/`LevelChunkTicks` 实现：每个已加载区块一个�
 以下仍须明确区分：
 
 - 区块与子区块按原版 `LevelChunk`/`LevelChunkSection` 分层，子区块内部是 palette + 索引的压缩存储（单值 0 位、8 位、16 位三档切换，`hasOnlyAir` 快速路径），区块表是哈希表。每个方块类型是进程级单例 `Block`（对应原版 `Blocks` 的静态字段），构造时按 `StateDefinition` 注册自身与全部状态；`BlockState` 持有 `Block*` 与 32 位注册 ID，拷贝是两个机器字，`state.is(Blocks.SAND)` 就是原版 `getBlock() == Blocks.SAND` 的指针比较，`with` 是 `StateHolder.setValue` 的变体索引转移，属性读取按属性名二分查找。详见下文“方块状态与区块存储”。
-- 未实现随机刻、光照、高度图、天气、睡眠、世界边界动画、袭击和完整命令系统。已有 `/tick` 命令骨架（`src/command.cpp:310`、`docs/protocol775.md`），不含原版命令树、权限、选择器与其余命令。草方块随机蔓延/退化不在当前循环中。
+- 尚未实现随机刻、光照、高度图、天气、睡眠、世界边界动画、袭击和完整命令系统。已有 `/tick` 命令骨架（`src/command.cpp:310`、[原版连接说明](protocol775.md)），不含原版命令树、权限、选择器与其余命令。草方块随机蔓延/退化不在当前循环中。
+- 时间目前只从 `level.dat` 的 `Time` 恢复 `gameTime` 并在内存中递增；26.1 World Clocks 生命周期、`world_clocks`、`advance_time`、睡眠跳转、`/time` 语义和时钟持久化仍未实现。光照传播与协议光照段也仍未实现，协议里的光照仍是占位。这两项分别属于[路线图](../PLAN.md#阶段-3--时间与世界保存)的 W-1 和[阶段 2](../PLAN.md#阶段-2--光照)。
 - 注册表覆盖本批方块、物品与实体类型，不包含全游戏内容。未支持的方块保留状态，碰撞形状保守按整方块处理；其回调和硬度/推动反应不保证原版一致。因此不能用含其他机制方块的存档推断本批逻辑错误或正确。
 - 墙及活塞的盒形状实现覆盖本批方块；与未实现方块标签、特殊面的互动仍待扩充。简单实体的 AABB/方块碰撞、粘液块落地反弹、移动活塞/粘液块的实体推挤与蜂蜜粘性位移已实现；实体间碰撞与载具乘客仍为 TODO。
 - 音效、粒子、客户端通知、游戏事件、完整掉落表（精准采集/时运/工具条件/经验）和其他方块实体尚未实现。音符盒只保证本批范围内的更新路径；不模拟头颅自定义声音。
@@ -81,7 +82,7 @@ C++ 侧按 `LevelTicks`/`LevelChunkTicks` 实现：每个已加载区块一个�
 - 计划刻按 `LevelTicks`/`LevelChunkTicks` 的区块容器结构实现，收集与执行阶段分开；`scheduledTicks()` 只是按区块和 `DRAIN_ORDER` 排序的只读快照，不再参与模拟。与仍存在的差异：原版区块卸载会丢弃该区块的待执行刻，本项目的 `unloadChunk` 只停止 tick 并保留容器（沿用"卸载数据保留在内存"的既有边界）；原版 `tickCheck` 用区块的 ticking 等级，本项目用"区块已加载"。存档导入不含原版 DataFixer；只接受 26.1 DataVersion 4786、完整生成的区块。
 - 存档中的 gamerules、持久化强加载列表与自定义维度元数据未自动导入；API/CLI 显式设置高度与加载区块，TNT 游戏规则默认开启。实体从同维度独立 `entities` 区域及遗留地形列表读取，未支持类型保留原始标签；种子读取 26.1 独立 world_gen_settings saved data。默认主世界路径优先 `dimensions/minecraft/overworld/region`，兼容旧根 region。详见 [读取说明](storage.md)。
 
-后续验收优先补真实服务端逐刻差分。状态驻留、`Block` 单例身份、palette 存储、碰撞形状缓存、计划刻区块容器和方块事件插入序哈希集合均已落地；流体刻、随机刻仍未实现。不得用性能优化改变更新语义。
+后续验收继续补真实服务端逐刻差分。状态驻留、`Block` 单例身份、palette 存储、碰撞形状缓存、计划刻区块容器、方块事件插入序哈希集合以及流体刻均已落地；随机刻和光照仍未实现。不得用性能优化改变更新语义。
 
 ## 计划刻与方块事件队列（2026-11-06，按原版结构）
 
@@ -129,7 +130,7 @@ C++ 侧按 `LevelTicks`/`LevelChunkTicks` 实现：每个已加载区块一个�
 
 方块的类型判定（活塞/活塞头/侦测器/铁轨/液体/地毯/墙/珊瑚扇等）是 `Block` 上的标志位或 `is(Blocks::X)` 指针比较，热路径上不再有方块名比较；`BlockMetadata` 现在按方块保存一份，读取返回 `const BlockMetadata&`，仅扩展活塞基座的导体判定由 `isRedstoneConductor` 按状态补充。导入的存档/投影若含未注册方块，会按名字惰性创建一个未支持 `Block` 单例，并按（名字，属性集合）注册扩展状态且可序列化；这类方块保持“状态原样保留、回调和硬度不保证原版一致”的既有边界。属性值不在已注册 StateDefinition 内的组合同样注册为扩展状态，不会静默合并到默认值对应的状态。
 
-验证状态：`ctest -C Release` 12/12 通过（engine/entity/piston/storage/litematic/shapes/wire/protocol/socket 等）。本轮**没有**运行 26.1 服务端逐刻差分，因此只能声称“C++ 回归测试保持通过”，不能声称与原版等价。
+验证状态：该 2026-11-06 性能批的 `ctest -C Release` 为 12/12；当前代码基线由 F-8 记录为 MSVC Release + jemalloc **23/23**（21.93 s）。那些整体 CTest 不等于完整原版差分；本批结论仍只能声称“C++ 回归测试保持通过”，不能声称与原版等价。
 
 2026-11-07 后续减少纯服务端临时分配：活塞 12 格推动列表与移动状态快照改为栈内存，销毁列表仍动态存储；属性读取/转换使用字符串视图；普通支撑面借用缓存形状，形状缓存用 `deque` 保证引用稳定；实体移动复用碰撞盒缓冲，死亡实体按原注册顺序稳定压缩。保留实体刻与移动活塞刻的快照、更新阶段和通知顺序。源码对照与新增 C++ 行为断言见 [性能记录第 10 节](performance.md#10-纯服务端减少分配与临时构造2026-11-07)。本轮未新增真实 26.1 服务端差分验证。
 

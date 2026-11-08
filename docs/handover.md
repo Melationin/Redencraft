@@ -1,33 +1,45 @@
-# 交接文档（2026-11-06）
+# 交接索引与历史记录
 
-本文件记录当前工作区未提交状态、已完成实现、验证边界、已知问题和下一步建议。若要继续开发，先读本文件和 `docs/entities.md`，再读 `docs/compatibility.md`。
+## 当前状态（2026-11-09）
 
-> **2026-11-08 方向变更**：项目定位已从「单维度只读红石模拟器」改为「对齐 Minecraft Java 26.1 的 C++ 服务端」（多维度、加载票、世界生成、世界保存、时间、光照）。本文下面所有「单维度 / 不保存 / 无流体刻 / 无加载票」的表述一律按**当时的实现状态**理解，不是项目定义。目标形态见 [AGENTS.md](../AGENTS.md) 第 1 节，分期见 [PLAN.md](../PLAN.md)。
+本项目目标是实现对齐 Minecraft Java Edition 26.1 的 C++ 服务端，不是把历史阶段中「单维度 / 只读 / 无生成 / 无光照」等描述当作项目定义。目标范围见 [AGENTS.md](../AGENTS.md) 第 1 节，唯一任务顺序与验收口径见 [PLAN.md](../PLAN.md)，角色切换和状态唯一写入 [task/TASKS.md](../task/TASKS.md) 的末行。
 
-## 0. 后续接手更新（2026-11-06，本节优先于下面的历史记录）
+F-1…F-8 已按当前任务定义验收。最近可复验代码基线是实现提交 `4ee4ad6`（F-8 流体单例所有权）及其交接记录 `dcfbe6e`：MSVC Release + jemalloc 构建通过，CTest **23/23**（21.93 s）。M0-2 完成本次文档校正后，路线中的下一代码任务是 L-1 光照数据与线程交接；仍须按 `TASKS.md` 的实际末行决定动作。
 
-最新追加：用户要求加载无沟 V3.1 世吞投影并启动，已实现沙子、石砖墙、红石灯，告示牌跳过。新增 `litematic.hpp/cpp` 快照导入、跨 long/负尺寸/实体坐标验证、铁砧替换黑曜石、全部投影实体独立 UUID；实际导入 70,111 方块、133 矿车，强加载 2,916 区块（含两区块边缘）。协议改为玩家周围视野分批发送，大世界每批最多 2 区块并等待 ACK；不再有全世界 64 区块上限。每 tick 结束以 `system_chat overlay=false` 向聊天栏发本 tick 耗时。下落方块成功落地包立即发送给跟踪该实体的玩家，并且先于实体移除。MSVC Release/jemalloc CTest **12/12**，实际投影读取测试和两次完整投影 TCP 100 tick 测试通过；其中一次右键前端音符盒后，100 tick 时有 401 个计划刻及 266 个移动活塞，未做原版整机差分。更新后的协议测试 **255 个包**已由官方 Java codec 严格回读。详见 `docs/litematic.md` 和 `validation/litematic/server[-active]-smoke-result.json`。用户最新要求直接启动后，已启动常驻服务器 127.0.0.1:25565，出生点 (2.5,102,-1.5)，前端音符盒 (2,101,3)；没有启动客户端。所有改动仍未提交。
+- 当前流体：状态、计划刻、传播、参数、宿主、存档读入和单例所有权已实现；W-01、W-02、M-01、M-03、H-01 与双观察者已有对应真实差分。未跑分支及同阶段性能补证归 [F-9a/F-9b](../PLAN.md#阶段-25--流体补充验收)，见[流体验收证据](fluid-acceptance.md)与[测试规格](fluid-testing.md)。
+- 当前光照：没有天空光/方块光传播，协议区块光照段仍是占位。任务与性能边界见 [PLAN.md](../PLAN.md#阶段-2--光照)。
+- 当前时间与保存：`gameTime` 只从 `level.dat` 的 `Time` 恢复并在内存递增；26.1 World Clocks、`world_clocks`、`advance_time`、睡眠跳转、`/time` 语义和时钟持久化尚未实现。Anvil 仍只读，不写回 `level.dat`、`.mca`、方块刻/流体刻或实体。目标见 [PLAN.md](../PLAN.md#阶段-3--时间与世界保存)。
+- 当前加载与世界：区块仍由显式选择/加载强加载控制，没有原版加载票和 ticking 等级；没有世界生成、缺失区块自动生成或完整多维度。原生协议 775 服务端是可选的创造编辑入口，不是完整原版多人服务端，详见[原版连接说明](protocol775.md)。
+- 当前能力边界以[兼容性边界](compatibility.md)为准；本文件从“历史交接追加”起的未提交状态、测试数字和 TODO 都是带日期的历史快照，不再代表当前工作区。
+
+## 历史交接追加（2026-11-06，归档）
+
+> **2026-11-08 方向变更**：项目定位已从「单维度只读红石模拟器」改为「对齐 Minecraft Java 26.1 的 C++ 服务端」（多维度、加载票、世界生成、世界保存、时间、光照）。下面所有「单维度 / 不保存 / 无流体刻 / 无加载票」的表述一律按**当时的实现状态**理解，不是项目定义。目标形态见 [AGENTS.md](../AGENTS.md) 第 1 节，分期见 [PLAN.md](../PLAN.md)。
+
+### 当时追加（2026-11-06）
+
+当时追加：用户要求加载无沟 V3.1 世吞投影并启动，已实现沙子、石砖墙、红石灯，告示牌跳过。新增 `litematic.hpp/cpp` 快照导入、跨 long/负尺寸/实体坐标验证、铁砧替换黑曜石、全部投影实体独立 UUID；实际导入 70,111 方块、133 矿车，强加载 2,916 区块（含两区块边缘）。协议改为玩家周围视野分批发送，大世界每批最多 2 区块并等待 ACK；不再有全世界 64 区块上限。每 tick 结束以 `system_chat overlay=false` 向聊天栏发本 tick 耗时。下落方块成功落地包立即发送给跟踪该实体的玩家，并且先于实体移除。MSVC Release/jemalloc CTest **12/12**，实际投影读取测试和两次完整投影 TCP 100 tick 测试通过；其中一次右键前端音符盒后，100 tick 时有 401 个计划刻及 266 个移动活塞，未做原版整机差分。更新后的协议测试 **255 个包**已由官方 Java codec 严格回读。详见[litematic.md](litematic.md)和 `validation/litematic/server[-active]-smoke-result.json`。当时服务端曾启动于 127.0.0.1:25565，出生点 (2.5,102,-1.5)，前端音符盒 (2,101,3)；没有启动客户端。该快照的所有改动在当时尚未提交。
 
 用户已确认路线为**原生 C++ 协议服务端，而且需要放置/破坏方块**。无需再次询问原生/桥接或只读/交互路线。用户要求本轮不启动客户端或接管操作，已遵守；没有实际客户端连接/动画验收。
 
-- 审查原未提交实体/铁轨/活塞实现并修复多项：跨格碰撞盒、地毯下摩擦/速度因子、空形状脱困出口、铁轨 RIGID 支撑、T 路口电源切向、非标准活塞进度先扫掠再截断、物品分数伤害取整、建造高度边界冻结/虚空移除与下落方块超时边界；保留 TNT 独立虚空行为。详见 `docs/update-order-audit.md`，关键路径有实际行为测试。
-- 存储审查修正 26.1 主世界 `dimensions/minecraft/overworld/region` 默认路径、同维度独立实体区域和规范 `data/minecraft/world_gen_settings.dat` 种子；遗留列表/UUID去重/数值边界都有回归。实际已有原版存档单区块副本由 CLI 只读导入成功，读取 43,594 个方块、4 个简单实体和 2 个未模拟实体，不启动服务端/客户端；证据见 `docs/storage.md`。
-- 新增独立可选 `REDSTONE_BUILD_VANILLA_SERVER`（默认 OFF）和 `redstone_vanilla_server`；本机 build-jemalloc 已设 ON。文件在 `include/redstone/net/`、`src/net/`；默认监听 127.0.0.1:25565，离线协议 775，固定已加载区域、创造物品选择/编辑、活塞事件和简单实体同步。使用方法、验证边界与具体 TODO 见 `docs/protocol775.md`。
+- 审查原未提交实体/铁轨/活塞实现并修复多项：跨格碰撞盒、地毯下摩擦/速度因子、空形状脱困出口、铁轨 RIGID 支撑、T 路口电源切向、非标准活塞进度先扫掠再截断、物品分数伤害取整、建造高度边界冻结/虚空移除与下落方块超时边界；保留 TNT 独立虚空行为。详见[更新顺序审查](update-order-audit.md)，关键路径有实际行为测试。
+- 存储审查修正 26.1 主世界 `dimensions/minecraft/overworld/region` 默认路径、同维度独立实体区域和规范 `data/minecraft/world_gen_settings.dat` 种子；遗留列表/UUID去重/数值边界都有回归。当时已有原版存档单区块副本由 CLI 只读导入成功，读取 43,594 个方块、4 个简单实体和 2 个未模拟实体，不启动服务端/客户端；证据见[存档说明](storage.md)。
+- 新增独立可选 `REDSTONE_BUILD_VANILLA_SERVER`（默认 OFF）和 `redstone_vanilla_server`；当时本机 build-jemalloc 设为 ON。文件在 `include/redstone/net/`、`src/net/`；默认监听 127.0.0.1:25565，离线协议 775，固定已加载区域、创造物品选择/编辑、活塞事件和简单实体同步。使用方法、验证边界与具体 TODO 见[原版连接说明](protocol775.md)。
 - `assets/protocol775/` 来自官方 26.1 jar：完整状态/物品/实体/serializer ID、28 动态注册表和 tags、section 样例、状态标志、manifest 来源哈希。重建脚本 `validation/protocol775/export.ps1` 不启动真实服务端或客户端。
 - 网络普通方块变化只记脏位置，在计划刻后、方块事件前的区块广播入口读取当前状态并合并发送；事件阶段生成的普通变化留至下一刻广播。成功方块事件立即发出。**不能把源位置 air 提前发到活塞事件前**。预测修正独立立即发。
 - 放置侦测器不能用 `updateFromNeighbourShapes` 预查询，否则凭空调度脉冲。已改为按方块放置规则处理，仅墙/草/音符盒初始化其邻居属性。支撑、碰撞、珊瑚候选、矿车坡道、负预测序列等已有检查。
 - 连接输出有上限；压缩已发送前缀；映射错误/积压只关闭对应连接，不能中断核心更新链。核心无网络开启时这些观察钩子均为空。
 - 默认 jemalloc / MSVC Release 构建成功；启用网络后 CTest **11/11 通过**（原 8 组 + wire/protocol/protocol_socket）。TCP 测试实际运行本地 C++ 服务端，测试完成已退出；无客户端进程。
 - 原版 Java GameProtocols codec 已严格回读 C++ 最新 **182** 个 play 数据包（无剩余字节），包括 4 份区块各 24 个 section；另 30 个配置包也已回读。证据见 `validation/protocol775/verification-result.json`。这是编码验证，不是真实客户端或机制差分。
-- 所有改动仍未提交；没有替用户提交或丢弃原改动。Java 临时 classes 和项目根 logs 已忽略。
+- 当时所有改动仍未提交；没有替用户提交或丢弃原改动。Java 临时 classes 和项目根 logs 已忽略。
 
-下一步：完整玩家/容器与库存点击处理、更多 BlockPlaceContext/物品组件、真实光照/biome、动态客户端区块跟踪，以及在用户允许后由用户进行实际客户端连接验证。当前是可测试的创造编辑协议入口，不是完整原版多人服务端。下面第 1–11 节保留本轮之前的交接历史，若与本节冲突，以本节和 `docs/protocol775.md` 为准。（原文「水/流体刻仍不做」是**历史结论**；2026-11-08 起流体刻是 [路线图](../PLAN.md) 阶段 1 的当前任务。）
+当时下一步：完整玩家/容器与库存点击处理、更多 BlockPlaceContext/物品组件、真实光照/biome、动态客户端区块跟踪，以及在用户允许后由用户进行实际客户端连接验证。下面第 1–11 节保留该轮之前的交接历史；若与当前状态冲突，以本文件开头和[原版连接说明](protocol775.md)为准。（原文「水/流体刻仍不做」是**历史结论**；流体现在已经实现并通过 F-7 当前核心验收。）
 
-## 1. 仓库状态
+## 1. 历史快照：仓库状态（2026-11-06）
 
 - 工作目录：`F:\source\minecraft-merged-07da9a845a-26.1-sources\redstone-cpp`
 - 基线提交：`6b543a3 Initial C++20 redstone simulator and vanilla order validation`
-- 当前**没有任何新提交**；本批所有改动都在工作区，处于“可构建、可测试、未提交”状态。
+- 当时**没有任何新提交**；本批所有改动都在工作区，处于“可构建、可测试、未提交”状态。
 - 上一级 `F:\source\minecraft-merged-07da9a845a-26.1-sources` 是只读的 26.1 Java 行为依据，不要修改。
 - 构建目录 `build-jemalloc/` 等已被 `.gitignore` 忽略；`assets/` 下新增的铁轨纹理和 `validation/vanilla26_1/` 下的物品轨迹探针/日志是未跟踪文件。
 
@@ -147,7 +159,7 @@ cmake --build build-jemalloc --config Release -j 6
 ctest --test-dir build-jemalloc -C Release --output-on-failure
 ```
 
-最近结果：**CTest 8/8 通过**（safesave_order_parity、engine、entity、piston、storage、allocator、shapes、client_inventory）。Release 下断言仍启用。
+当时最近结果：**CTest 8/8 通过**（safesave_order_parity、engine、entity、piston、storage、allocator、shapes、client_inventory）。Release 下断言仍启用。
 
 GCC 15.2 的 system Debug 构建目录存在，但本机 `g++` 当前连空程序也返回 1（环境问题），本批未能在 GCC 下验证。
 
@@ -171,11 +183,11 @@ GCC 15.2 的 system Debug 构建目录存在，但本机 `g++` 当前连空程�
 
 实际预览/背包截图已检查：铁轨纹理出现在创造列表底行；简单实体没有出现在默认 demo 场景，因为 demo 没有生成实体。
 
-## 7. 已知限制 / TODO
+## 7. 历史限制 / TODO（2026-11-06）
 
 按优先级：
 
-1. **原版客户端直连**：尚未实现，见第 8 节。
+1. **原版客户端直连**：当时尚未实现，见第 8 节；后续已实现可选原生协议入口。
 2. 实体间碰撞、实体挤压、活塞推动玩家/生物、载具乘客、`ServerLevel.tickPassenger` 递归。
 3. 玩家拾取、物品栏、漏斗、容器、生存模式、掉落经验。
 4. 完整战利品表（精准采集、时运、工具条件）、方块实体掉落数据。
@@ -188,9 +200,11 @@ GCC 15.2 的 system Debug 构建目录存在，但本机 `g++` 当前连空程�
 11. 存档实体 UUID/Owner/Thrower/Passengers/自定义组件、其他实体类型。
 12. 尚未对实体/铁轨/爆炸做完整 26.1 服务端逐刻差分，不能宣称原版等价。
 
-## 8. 原版客户端直连调研（下一步候选）
+## 8. 历史调研：原版客户端直连（后续已实现协议入口）
 
-用户已询问“像原版服务端那样让原版客户端连进去”。目前**未实现**，只做了协议源码调研。结论：技术上可行，但这是一个独立的大子系统，不能直接塞进现有 `World::tick`。
+> 本节记录当时的可行性调研与分阶段建议；原生协议服务端后续已实现，当前边界见[原版连接说明](protocol775.md)。
+
+用户当时已询问“像原版服务端那样让原版客户端连进去”。当时**未实现**，只做了协议源码调研。结论是技术上可行，但这是一个独立的大子系统，不能直接塞进现有 `World::tick`；后续实现见[原版连接说明](protocol775.md)。
 
 ### 8.1 已确认事实
 
@@ -243,7 +257,7 @@ GCC 15.2 的 system Debug 构建目录存在，但本机 `g++` 当前连空程�
 
 对于 registry/chunk 数据，建议先用真实 26.1 服务端 + 代理抓取合法配置包，保存为静态模板；不要手写完整 registry codec。要记录协议版本、客户端版本和抓包来源。
 
-另一条更快的路线是“真实 vanilla 服务端 + 桥接”：客户端连真实服务端，C++ 通过 RCON/Fabric/命令把方块和实体镜像过去。它能让原版客户端连入，但不是“直接连 C++ 模拟核心”，且真实服务端自身仍在 tick，需要冻结/接管；与本项目“单维度、无生成、只读”的定位冲突，需要用户明确选择。
+另一条更快的路线是“真实 vanilla 服务端 + 桥接”：客户端连真实服务端，C++ 通过 RCON/Fabric/命令把方块和实体镜像过去。它能让原版客户端连入，但不是直接连 C++ 模拟核心，且真实服务端自身仍在 tick，需要冻结/接管；这只与当时“单维度、无生成、只读”的实现快照冲突。后续用户已确认采用原生 C++ 协议服务端，不再需要重新选择该路线。
 
 ### 8.5 接手建议
 
@@ -264,20 +278,27 @@ GCC 15.2 的 system Debug 构建目录存在，但本机 `g++` 当前连空程�
 | Anvil 导入/实体 NBT | `include/redstone/storage.hpp`、`src/storage.cpp` |
 | CLI/JSON 快照 | `src/main.cpp` |
 | 调试客户端 | `src/client_win32.cpp`、`src/client_inventory.hpp`、`src/client_textures.hpp` |
+| 流体状态、计划刻、传播与所有权 | `include/redstone/fluid.hpp`、`include/redstone/fluid_flow.hpp`、`src/fluid.cpp`、`src/fluid_flow.cpp` |
+| 流体验收与测试规格 |[流体证据](fluid-acceptance.md)、[测试规格](fluid-testing.md) |
+| 原生协议入口 | `include/redstone/net/`、`src/net/`、[协议说明](protocol775.md) |
 | 实体测试 | `tests/entity_tests.cpp` |
 | 活塞/粘液块测试 | `tests/piston_tests.cpp` |
-| 简单实体说明 | `docs/entities.md` |
-| 兼容性/剩余差异 | `docs/compatibility.md` |
-| 更新顺序审查 | `docs/update-order-audit.md` |
+| 简单实体说明 |[entities.md](entities.md) |
+| 兼容性/剩余差异 |[compatibility.md](compatibility.md) |
+| 更新顺序审查 |[update-order-audit.md](update-order-audit.md) |
 | 原版物品轨迹探针 | `validation/vanilla26_1/item_motion_validation.py`、`item-motion-validation.log` |
 
-## 10. 恢复工作时的第一条命令
+## 10. 当前恢复命令
 
 ```powershell
-cd F:\source\minecraft-merged-07da9a845a-26.1-sources\redstone-cpp
-cmake --build build-jemalloc --config Release -j 6
+cmake -S . -B build-jemalloc -G "Visual Studio 18 2026" -A x64 `
+  -DCMAKE_PREFIX_PATH="$PWD/third_party/vcpkg-installed/x64-windows-static" `
+  -DREDSTONE_ALLOCATOR=jemalloc -DREDSTONE_BUILD_VANILLA_SERVER=ON
+cmake --build build-jemalloc --config Release
 ctest --test-dir build-jemalloc -C Release --output-on-failure
 ```
+
+命令只构建当前工作区；真实 26.1 服务端差分与性能对跑有独立 runner/证据目录，不能把这里的 CTest 结果当作原版等价或同阶段性能。
 
 如果继续协议方向，先读：
 
@@ -291,11 +312,11 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 - `net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java`
 - `net/minecraft/world/level/chunk/storage/SerializableChunkData.java`
 
-## 11. 未提交改动提示
+## 11. 历史未提交快照（2026-11-06）
 
-`git status` 会看到：
+当时的 `git status` 包含：
 
 - 已修改：注册/引擎/活塞/形状/存储/客户端/CMake/文档/测试等。
-- 新增未跟踪：`entity.hpp`、`entity.cpp`、`rail.hpp`、`rail.cpp`、`tests/entity_tests.cpp`、`docs/entities.md`、8 张铁轨纹理、`validation/vanilla26_1/item_motion_validation.py` 和 `item-motion-validation.log`。
+- 新增未跟踪：`entity.hpp`、`entity.cpp`、`rail.hpp`、`rail.cpp`、`tests/entity_tests.cpp`、`entities.md`、8 张铁轨纹理、`validation/vanilla26_1/item_motion_validation.py` 和 `item-motion-validation.log`。
 
-没有任何提交。接手者若需要提交，请先完整跑一遍构建/CTest，并决定是否把验证产物与纹理一并纳入提交。
+这是历史快照，不代表当前工作区。当前提交与任务状态只以 Git 和 `task/TASKS.md` 末行为准。
