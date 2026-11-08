@@ -8,6 +8,64 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## F-7 本轮返工 · 纯服务端流体性能（coder）
+
+**基线**：`main` 的 `96fcafd`。**范围**：只处理 `fluidNewLiquid` 的方块状态复用与调用点重读、`SpreadContext`/四方向结果分配、静态共享面的有向状态对缓存、按方块状态 ID 复用 `fluidStateOf`；不改协议与发包，不领取下一任务。
+
+**源码依据**：上一级只读 26.1 `FlowingFluid.getNewLiquid` / `getSpread` / `getSlopeDistance` / `canPassThroughWall`、`BlockBehaviour.BlockStateBase` 的流体状态初始化，以及 `Shapes.mergedFaceOccludes` 的共享面规则。保持既有方向顺序、同距分支、下落口、替换条件和动态形状的现场计算。
+
+**验收判据**：聚焦回归覆盖最大坡度半径、负坐标、等距、互补共享面与方向、动态形状、静态初始化及后注册/扩展状态；完整 CTest；湿态重复侧向搜索核对每组派发数、写入数与终态一致；干态指定投影 1000 tick 在相同 MSVC Release + jemalloc 配置下记录终态及均值、中位数、P95，并保存命令、原始输出、hash；兼容性结论只陈述本次实际证据。
+
+**计划改动**：`src/fluid_flow.cpp`、`src/fluid.cpp`、必要头文件及聚焦测试、现有基准驱动；工作区内日志和临时基准产物。
+
+---
+
+### 本轮实际（实现提交 `abd5236`）
+
+**1. `fluidNewLiquid` 复用调用方状态**
+
+`src/fluid_flow.cpp:630-665` 不再忽略参数并从 `World` 重读 `pos`；水平传播和上方判断都把调用方已读的 `blockState` 传给 `fluidCanPassThroughWall`，与 `FlowingFluid.java:166-199` 一致。`getSpread` 传入已在目标格读取的 `testState`。新测试 `newLiquidUsesPassedState` 用一个与实际空气格不同的满立方参数证明该状态确实参与墙面判定。
+
+**2. 坡度上下文和方向结果去堆分配**
+
+`SpreadContext` 改为栈上有界缓存：当前最大坡度半径 4，加一格的洞口探测半径，使用 11×11 状态/洞口表；负坐标直接用相对偏移定位，不经过 short 打包。四方向结果由 `EnumMap` 对应的四个内联槽替代树节点，保持 `NORTH, SOUTH, WEST, EAST` 的访问、同距保留和写入顺序。`maximumSlopeAtNegativeCoordinates` 覆盖负坐标下半径五的洞口、半径外一格的反例；既有 `equalDistanceWriteOrder` 继续断言四方向顺序。
+
+**3. 静态共享面缓存**
+
+`src/fluid_flow.cpp:195-225,570-610` 先查询并短路整块目标，再按 `(源 state id, 目标 state id, 有向面)` 查询 256 项线程局部直接映射缓存。只有 `moving_piston` 是动态形状，任一侧为它时完全绕过缓存并现场读取进度；其余状态形状不可变。既有互补形状、单侧/双向和轴测试继续通过，并增加重复 `Up`/`Down`/`East` 查询及双门同轴查询；`movingPistonShapeDependsOnProgress` 现在同时覆盖动态目标与动态源。
+
+**4. 按 state id 缓存流体状态**
+
+`src/fluid.cpp:176-251` 用线程局部的 state-id 索引表缓存 `fluidStateOf`；该表存储值类型 `FluidState`，不改变 `BlockState` 的 16 字节布局。缓存耗尽时只为新 id 扩容，常规重复查询不再解析属性。扩展状态仍从导入属性中的 `level`/`waterlogged` 解码，覆盖源水、流水、下落、岩浆和含水宿主；后注册块首次查询后也进入同一缓存。
+
+**基准驱动与证据**
+
+新增 `benchmarks/fluid_perf_benchmark.cpp`，同一源码分别链接基线和候选 core。湿态每刻显式派发开阔石底平台上的源水，持续触发完整侧向搜索。命令、原始输出索引和 SHA-256 位于工作区 `build-f7-perf-coder/COMMANDS.txt`、`SUMMARY.txt`、`HASHES.sha256`（清单自身 SHA-256 `c3dc0fcf8e5e6469a4a3a1c621cdcae45385a0f8775296cd100133bcded26748`）；投影 SHA-256 为 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。构建为 MSVC 19.51、NMake、Release、jemalloc，计时进程 CPU affinity=4、High，基线与候选交替三次。
+
+| 组 | mean_ms（三次） | median_ms（三次） | P95_ms（三次） |
+|---|---:|---:|---:|
+| 湿态基线 | 0.0614 / 0.0503 / 0.0508 | 0.0494 / 0.0399 / 0.0405 | 0.0545 / 0.0447 / 0.0450 |
+| 湿态候选 | 0.0261 / 0.0295 / 0.0281 | 0.0215 / 0.0242 / 0.0233 | 0.0240 / 0.0254 / 0.0242 |
+| 干态基线 | 3.841 / 3.851 / 3.913 | 2.783 / 2.901 / 2.964 | 8.111 / 8.167 / 8.380 |
+| 干态候选 | 3.848 / 3.860 / 3.779 | 3.054 / 3.064 / 2.728 | 8.121 / 8.074 / 7.922 |
+
+湿态两版每组均为 `dispatches=1192`、`writes=112`、`pending=0`、终态指纹 `d0d9a2212b8f161d`。干态两版终态均为 `entities=1197 scheduled=1197 moving_pistons=2003 events=0`，1000 刻 blocks/scheduled/entities/pistons/events 指纹逐项一致；三次交替均值中位数同为 3.85 ms，P95 中位数 8.17→8.07 ms，不能把差异归因成优化或回归。
+
+**构建与测试**
+
+- MSVC Release + jemalloc 完整构建通过。
+- 最终完整 CTest：**22/22 通过，18.38 s**；包含 `fluid_differential`、`fluid_mixing_differential`、`fluid_flow`、`fluid`、`protocol`、`protocol_socket`、`protocol_backpressure`。原始输出为 `build-f7-perf-coder/ctest-final-escalated.log`。
+- 最后仅增加基准源文件的标准头，随后单独重建 `redstone_fluid_perf_benchmark` 通过；没有改变测试目标或核心行为。
+- 未提交 `build-f7-nmake-build3.log`、`build-f7-nmake-cleanbuild.log`、`scripts/wait-tasks.ps1`、`task/F7-FLUID-PERF-HANDOFF.md`、`validation/vanilla26_1/fluid-cpp-states.json` 等已有无关文件，也未提交工作区基准产物。
+
+**明确没有做**
+
+本轮没有修改协议或发包，没有重跑真实 26.1 服务端差分，也没有完成与原版同阶段、同工作量的性能对跑。因此上述数据只支持 C++ 基线与候选的固定工作量对照、现有黄金回归和 CTest；不声明原版等价或原版性能结论。
+
+- 返工提交：`abd5236`
+
+---
+
 ## F-7 返工（针对 `dc1b3ea` 复审）
 
 **领取人**：DSH coder（本轮唯一 coder）。**基线**：`dc1b3ea`，交接记录 `90d9134`。
@@ -342,5 +400,28 @@ MSVC 19.51 Release + jemalloc（独立 NMake 构建目录 `build-f7-nmake`）：
 
 - 返工提交：`ecd6d6a`
 - 独立验证：MSVC Release + jemalloc 重新构建，开放本机回环后 CTest **22/22 通过**（16.41 s，`build-review-f2/ctest-f7-handoff.log`）。
+
+### 主对话复审（`ecd6d6a`）
+
+独立 MSVC Release + jemalloc 构建通过。默认沙箱拒绝 127.0.0.1，复跑时为 CTest 单次开放本机回环，**22/22 通过**（16.41 s）。本次 reviewer 复跑 C++ 和已记录黄金。官方实跑证据来自此次返工的 W-01 水槽、M-01 水岩浆和双观察者记录。官方 JAR 离线的 W-06 互补面只覆盖形状操作。
+
+- **通过｜N-01/N-02 C++ 回归。** 负区块与跨 section 冻结快照计数、状态和协议 ID 有实断言。N-02 同刻断言两类流体更新帧、同格去重、成功活塞事件帧、下一刻的活塞更新，阶段互换变异触发预期失败。A-05 的持续振荡和湿/干共享格已有 C++ 行为断言。协议层还没有原版包流差分。
+- **应修｜N-04 湿态积压场景。** `validation/protocol775/backpressure_test.py:283–327` 证明一条慢连接积累了两个区段的流体更新，健康连接继续收包和交互。另一条 ping 灌包连接触发生产 outbox 的积压断连。要验收“流体更新本身可让同一慢端触及断连阈值”，需由同一个湿态慢端积累更新，并核对该连接的断连及健康端在断连后的连续进展。
+- **阻塞｜原版差分与同阶段性能缺口。** `PLAN.md:48–52` 和 `docs/fluid-acceptance.md:72–96,155–172`。W-01 117 个观测和 M-01 56 个观测匹配。含水宿主、活塞进度与队列/存档恢复等仍缺原版逐刻证据；下轮优先补 H-01/H-02、P-01/P-02、A-01/A-02，缺依赖的用例保留登记。水槽性能一端计 `World::tick`、另一端计原版整服，且 1000 刻只覆盖初始 12 次流体派发、6 次写入，无法据此判断持续流动或原版 10% 线。先做持续动态输入及静水的匹配工作量、同阶段计时，再扩到原版同输入世吞。
+- **应修｜干态 C++ 尾延迟复测。** 使用 SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52` 投影，历史 `c8e9eb1` 与 `ecd6d6a` 的 MSVC Release + jemalloc，CPU affinity=4、High，交替 3 组 × 1000 tick。导入规模及终点 1197 实体、1197 计划刻、2003 移动活塞一致。以三次的中间值统计，均值 3.310 → 3.443 ms，中位 2.425 → 2.470 ms，P95 6.959 → 7.480 ms（+7.5%）。P95 区间分别为 6.818–7.715 与 7.168–7.493 ms，第三对方向相反，当前无法将差距归因到流体。基线和候选的 CMake 生成器不同，复测应统一并增加逐刻分布、>50 ms 计数和关键状态指纹。日志 `build-review-f2/f7-final-*-1000.log`。
+- **建议｜先定位可避免的开销。** `src/fluid_flow.cpp:249–293,442–484` 的节点树用于短键坡度缓存和最多四方向输出，原版用原生短键开放寻址及 `EnumMap`。 `src/fluid_flow.cpp:106–185,487–510` 的非整块共享面走 16×16 栅格重算，原版对静态形状按状态对和方向缓存结果。 `src/fluid.cpp:181–201` 反复由方块状态解析流体，原版 `BlockBehaviour.BlockStateBase` 初始化时缓存。 `src/net/session.cpp:659–710` 在广播为每个会话排序脏位置，原版 `ChunkHolder.blockChanged` 按区段维护去重集合。 `src/engine.cpp:1079–1083,1655–1690` 的基准计数常驻热路径，可测量关闭计数后的差值。上述为源码定位，尚无逐项采样占比。
+
+F-7 保持待返工。本轮按用户指示暂停 DSH，完成本地实现和交接提交，复审意见写回工作区。下轮由新 coder 子智能体接手此交接。
+
+### 本轮返工范围 · 纯服务端流体性能
+
+用户要求先处理纯服务端热点。本轮保留 F-7 的原版差分、协议和同阶段性能验收缺项，集中优化以下四处：
+
+- `fluidNewLiquid` 复用调用方已读的方块状态，按 `FlowingFluid.getNewLiquid` 核对传播条件。可一并移除调用方无意义的重读。
+- 去掉 `SpreadContext` 与四方向结果中的堆和树节点分配。利用当前流体最大搜索半径做有界缓存，保持原版方向顺序、同距分支和替换条件。验证最远半径与负坐标。
+- 静态共享面按有向状态对缓存。整块目标先行短路，位置或进度相关的形状继续现场计算。验证互补面、反向或其他轴、动态活塞，以及扩展状态安全性。
+- 用状态 ID 复用流体状态。处理初始化、后注册的状态和导入的未知或扩展状态，保证源、流水、下落与含水属性的原语义。查找不得使常见干块路径明显回退。
+
+参考 `FlowingFluid.java` 的液面重算、坡度搜索和共享面缓存，以及 `BlockBehaviour.BlockStateBase` 的流体状态初始化。协议和发包不属于本轮。用 Release + jemalloc 构建并跑 CTest，检查已有原版黄金及必要的聚焦回归。优化前后以相同构建配置和工作量对照，至少涵盖有持续侧向搜索的湿态输入及干态 1000 tick。报告测试口径及结果，原版性能结论继续要求同阶段、同工作量。
 
 任务已完成
