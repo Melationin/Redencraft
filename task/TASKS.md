@@ -8,6 +8,25 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## F-7 返工（针对 `dc1b3ea` 复审）
+
+**领取人**：DSH coder（本轮唯一 coder）。**基线**：`dc1b3ea`，交接记录 `90d9134`。
+
+**目标与验收判据**
+
+1. **N-02 真实阶段与完整解帧**：测试经真实 `World::tick` 阶段，方块事件经生产 `Session::blockEvent` 进入会话；按发送顺序完整解帧，断言当刻流体脏块帧（单格 + 区段）在活塞事件帧之前、事件写入只出现在下一次广播；具体坐标、完整状态、同格去重均精确断言；local 位序按 `src/net/session.cpp` 生产编码修正；两类包都必须真实出现。做一次阶段顺序变异并确认测试失败，恢复后复跑。
+2. **N-01**：补负区块 X/Z、跨 y 区段与完整 non-empty/fluid 计数证据。
+3. **N-04**：在现有 `validation/protocol775/backpressure_test.py` socket 驱动上扩展真实湿态夹具：跨区段流体更新、慢端真实入队并越过积压阈值、健康端 FIFO/解码/进展且流体继续推进。
+4. **A-05**：保留已有效的重复输入压力；新增「流体到期格确实与活塞共享」的湿/干夹具，验证原版来源与逐刻行为；双观察者按原版与 C++ 分别核实，不把重复外部输入叫自激。
+5. **原版 runner**：唯一临时目录、端口碰撞检查、精确 `gameTime` 边界、默认只写运行产物、显式黄金晋升；实跑官方服务器验证，保留可重复命令、原始证据与明确 T0；现有水槽黄金继续通过。
+6. **P0 差分**：尽量把 `docs/fluid-testing.md` §4 明列 P0 补为真实原版差分，优先混流、含水宿主/活塞、调度和恢复；逐用例报告 A/B/C/D 四级证据；不能跑的逐项给出依赖与下一步。
+7. **性能**：真实 26.1 与 C++ 对照，优先静水与动态水槽；固定计时边界，记录活跃刻、流体派发/写入/工作量、均值/中位/P95/>50ms 与重复范围；不可比则保留实测与 blocker，不伪造指标。干态世吞仅在输入/加载/工作量可核对时纳入，可比也只跑 1000 tick。
+8. **构建与文档**：MSVC Release + jemalloc、CTest；给 reviewer 的行为差异表与热路径（测量/推断、文件行号、工作量依据）；更新 `docs/fluid-acceptance.md` 与 `task/TASKS.md`；实现单独提交，交接记录单独提交并写 `- 返工提交：<实际 hash>`，末行 `任务已完成`；不 push。
+
+**计划改动**：`tests/protocol_tests.cpp`、`tests/fluid_flow_tests.cpp`、`validation/vanilla26_1/*`、`validation/protocol775/backpressure_test.py`、`docs/fluid-acceptance.md`、必要的只读测试入口；不改变已对照的更新顺序。
+
+---
+
 ## F-7 验收与差分
 
 ### 目标
@@ -244,5 +263,84 @@ reviewer 要求扩展 `validation/protocol775/backpressure_test.py`，走真实 
 
 - 构建：MSVC Release + jemalloc 通过。
 - CTest：**21/21 通过**。
+
+### 返工复审（`dc1b3ea`）
+
+已核实实现提交 `dc1b3ea` 与交接记录提交 `90d9134`。独立复跑 Release + jemalloc 构建及 CTest，21/21 通过（8.36 s）。
+
+- **阻塞｜N-02 尚未验证客户端包序。** `tests/protocol_tests.cpp:490–542` 的事件回调只存 tick，没有调用生产路径中的 `Session::blockEvent`（`src/net/server_main.cpp:619–622`）。流体写入发生在创建当刻广播记录之前，`fluidWrites` 却只记广播记录创建之后的写入，活塞写入即可让该断言通过。解码 `section_blocks_update` 时 X/Y 的位序也与 `src/net/session.cpp:63–86` 相反，断言允许只验证恰好解码正确的单格包。建议按 tick 与发送顺序完整解帧，断言具体坐标、同格去重、两类脏块包、活塞事件帧以及下一刻的活塞脏块，并对阶段互换做一次变异验证。
+- **阻塞｜N-04 与原版差分、性能对照仍缺失。** N-04 需要实际 socket、跨区段湿态变更、慢端积压和健康端 FIFO。原版待补清单及同工作量计时边界见上次复审与 `PLAN.md:48–52`。现有水槽黄金证据继续有效。受当前功能边界制约的原版输入应逐项给出源码依据、缺少的前置条件及后续验收方案。
+- **应修｜A-05 循环压力与湿态交互应分开表述。** 两个窗口中的重复输入已有可观测工作量和上界断言。湿、干活塞测试仍在 T1 启动活塞，水刻按 T5 到期；其断言是分离的逐刻工作量相等，适合保留为并行负载回归。另加一个确实影响活塞相关格的湿态夹具，或明确其依赖与目前的未覆盖范围。双观察者是否自激应单独用原版与 C++ 核实，不能从当前 C++ 行为推断原版。
+- **应修｜采样并发和 N-01 坐标。** `validation/vanilla26_1/fluid_validation.py:60–73,180–193` 的秒级目录及端口会在同秒重跑时碰撞，黄金文件仍默认覆盖。建议使用唯一临时目录、独立端口和显式黄金更新选项，原版实跑验证新同步路径。N-01 已断言精确计数，跨区段和负区块坐标仍待覆盖（`tests/protocol_tests.cpp:775–804`）。
+
+按用户本轮安排，返工由 DSH coder 领取。Reviewer 仅写此交接。
+
+### 返工实际（针对 `dc1b3ea` 复审）
+
+**1. N-02 真实阶段与完整解帧（已解决）**
+
+`tests/protocol_tests.cpp` 重写为生产观察器链：写→`Session::blockUpdate`；广播→`flushBlockUpdates`；成功活塞事件→`Session::blockEvent`。第 5 刻同时有：5×5 池源水的 4 格写入（区段包）、独立竖井的 1 格下落（单格包）、活塞事件。逐帧解码并断言：
+
+- 第 5 刻广播帧全部早于事件帧；事件帧坐标/type/data/block id 完整且无尾字节；
+- 第 5 刻广播包含两类包，具体坐标与广播时活状态一致；
+- 同格湿宿主 tick 5 前连续写三次只出现一次；
+- 活塞事件写的 base `extended=true` 只在下一次（tick 6）广播出现；
+- local 位序按生产 `x<<8 | z<<4 | y` 修正；
+- 阶段互换变异：把广播移到 `runEvents` 后，测试失败于 `firstBroadcast < firstEvent`；恢复 `engine.cpp` 后通过。
+
+**2. N-01（已解决）**
+
+`fluidSectionSnapshot` 改为 chunk `(-1,-1)`，y=-64 与 y=-48 两个 section：精确计数 4/3 和 3/2，其余 0/0；全 24 section 解码、负坐标、完整状态与官方协议 ID。
+
+**3. N-04（已解决）**
+
+`validation/protocol775/backpressure_test.py` 增加 `--fluid-basin` 湿态夹具：9 个跨 y section 的竖井 + 9 个源水小池。一个不读包会话收到 186 帧、207 个水格（section 3+4）；另一个灌包会话触发 `backpressure_disconnects=1`；健康端严格解码、FIFO tick 单调、放置/破坏与 320 tick 完成。
+
+**4. A-05（已解决/部分 D）**
+
+- 保留外部重复输入压力，改名并注明不是自激；
+- 双观察者：C++ 正常放置 20 刻各 ≥4 边沿；真实 26.1 服务端同一夹具 20 刻 A=7、B=8 边沿，确认会振荡，删除此前“锁存”错误结论；
+- 新增湿/干共享格：含水铁轨位于活塞移动格，T1 活塞移动、T5 到期水刻读到移动活塞/活塞头并 `fluid_tick_skipped`，干态无任何流体刻；两侧活塞逐刻 trace 相同，完成时水logged 被清除。
+
+**5. 原版 runner（已解决）**
+
+`fluid_validation.py` 改为唯一目录、`pick_port()` 绑定检查、精确 `gameTime`、T0 前 100 刻区块可刻预热、默认只写运行目录、`--promote-golden`/`--force-golden`、JAR SHA-1 复核。实跑候选 **117/117 与黄金一致**。日志/candidate/manifest 在 `build-fluid-validation/fluid-runs/<unique>/`。
+
+**6. P0 差分（新增 M-01 D 类）**
+
+`fluid_mixing_validation.py` 在官方 26.1 上跑源岩浆/流动岩浆与相邻水：T1 起分别为黑曜石/圆石，T10 稳定。`fluid-vanilla-mixing.json` 记录 T0/T1/T2/T10 × 7 格，`fluid_mixing_differential` 在 CTest 中逐格比较 **56 格全部一致**。其余 P0 的 A/B/C/D 状态与依赖见 `docs/fluid-acceptance.md` §2、§5。
+
+**7. 性能实测（不按 10% 线结论）**
+
+- C++ W-01 `World::tick` 1000 tick 三次：mean 0.0053/0.0052/0.0108 ms，median 0.0001，P95 0.0002，max≈0.10，>50ms=0；12 次流体派发、6 次流体 tick 写入；
+- 原版 W-01 整服 `tick sprint 1000` 三次：11559/14065/14835 tick/s，0.09/0.07/0.07 ms/tick，P95 0.1，P99 0.2–0.4；
+- C++ dedicated `--fluid-basin` 1000 tick：mean≈0、max 0.3 ms；
+- 干态 3000 tick 三次：mean 12.176/13.051/12.230，median 6.807/9.299/7.551，P95 60.286/65.448/63.323。
+- 两侧计时边界不同（C++ `World::tick` vs 原版整服），不写性能倍率、不按 10% 线判定；干态世吞原版同输入仍为 blocker。详见 `docs/fluid-acceptance.md` §4–§6。
+
+**8. 构建与 CTest**
+
+MSVC 19.51 Release + jemalloc（独立 NMake 构建目录 `build-f7-nmake`）：干净重建后 **22/22 通过，22.13 s**。新增 `fluid_mixing_differential`；`protocol_backpressure` 超时调整为 60 s。沙箱下 `TMP/TEMP` 需指向工作区内，否则 `storage_tests` 默认 `dsh-*` 临时目录不可写；这是环境约束。
+
+**9. 明确没有做到的事**
+
+- N-01/N-02/N-04 未与原版录包逐帧比较；
+- Q-01…Q-06、W-02/W-03/W-04/W-05/W-07、L-03/L-04、M-02/M-03、H-01/H-02、P-01/P-02/P-03/P-04、A-01/A-02/A-03/A-04 未跑真实 26.1 服务端；
+- 性能边界未匹配，未按 10% 线结论；干态世吞原版同输入未达成；
+- 半砖/台阶、桶、玩家物理、level event、`fluid_ticks` 写回仍不在范围。
+
+**10. Git 提交状态（环境阻塞）**
+
+实现与验证已完成，但当前 DSH sandbox 对 `.git` 的写入全部拒绝（`index.lock`、`refs` 均 Permission denied），`danger-full-access` 升级没有审批通道；因此无法按 AGENTS §3.2 生成本地实现提交和交接提交。不得把本状态写成 `任务已完成`。待获得 `.git` 写权限后，应：
+
+1. 提交本轮实现（文件清单：`CMakeLists.txt`、`include/redstone/engine.hpp`、`src/engine.cpp`、`src/net/server_main.cpp`、`tests/{protocol,fluid_flow,fluid_differential_probe}.cpp`、`validation/protocol775/backpressure_test.py`、`validation/vanilla26_1/{fluid_validation,fluid_differential_test,fluid_mixing_validation,fluid_mixing_differential_test,observer_validation,fluid_sprint_validation}.py`、`validation/vanilla26_1/fluid-vanilla-mixing.json`、`docs/{fluid-acceptance,fluid-testing}.md`）；
+2. 以小交接记录提交写入 `- 返工提交：<实际 hash>` 并把末行改为 `任务已完成`。
+
+### 主对话接管提交
+
+应用户本轮指示，已暂停 DSH 并关闭其完成回调。主对话按上列清单提交了实现，未将运行日志、等待脚本或旧的生成数据纳入提交。
+
+- 返工提交：`ecd6d6a`
+- 独立验证：MSVC Release + jemalloc 重新构建，开放本机回环后 CTest **22/22 通过**（16.41 s，`build-review-f2/ctest-f7-handoff.log`）。
 
 任务已完成
