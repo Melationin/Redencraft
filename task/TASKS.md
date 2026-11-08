@@ -96,4 +96,17 @@
 
 - 主提交：`f4f1b2c` — Wire the liquid block request paths and waterlogged hosts（12 个文件，+339 / -20）
 
-任务已完成
+### 审查记录（`f4f1b2c`）
+
+1. **阻塞｜含水容器仍未接到实际流体传播。** `src/fluid_flow.cpp:70–81,368–390` 仍按普通方块判断能否容纳并直接替换目标；新增的 `isWaterloggedHost` 未用于这两处。原版 `FlowingFluid.java:410–435,271–279` 先识别容器、调用 `canPlaceLiquid` 和 `placeLiquid`。`SimpleWaterloggedBlock.java:18–35` 允许精确的源水身份，实际注水成功时保留宿主、置 `waterlogged=true` 并排水刻。当前流动水可能直接冲掉干铁轨，墙和枯珊瑚扇也无法通过容器接收源水。按 H-01/H-03 增加实际传播的源水成功、流水与岩浆拒绝、重复注水不重写和去重断言。
+2. **阻塞｜含水宿主的形状排刻和正常移除保水缺失。** `src/engine.cpp:1142–1156,1223–1240` 只给液体方块接 `updateShape`，珊瑚支撑失效后的销毁写空气；`src/rail.cpp:572–579` 的断支撑移除和 `src/net/session.cpp:849–865` 的创造破坏也写空气。26.1 的湿铁轨、墙和珊瑚分别在 `BaseRailBlock.java:283–298`、`WallBlock.java:134–151`、`BaseCoralPlantTypeBlock.java:69–86`、`BaseCoralWallFanBlock.java:57–75` 排水刻；`Level.java:277–299` 的移除和销毁写回原流体的 legacy 状态。建议保留各宿主的更新入口，普通销毁与移除保水，直接置空气仍遵从调用方；按 H-02 验证支撑破坏、掉落、保水和排刻，至少加一组含水宿主的 P-01/P-02 活塞联动回归。桶交互继续留在 P1。
+3. **阻塞｜玩家放置宿主时强制清除含水初态。** `src/net/session.cpp:984–985` 对带属性的所有宿主写 `waterlogged=false`，而 `BaseRailBlock.java:139–146` 与 `WallBlock.java:112–131` 根据目标格精确水源决定初态，`BaseCoralPlantTypeBlock.java:57–62` 用水标签和满态判定。建议在真实放置入口读取被替换格的流体，按宿主规则初始化，并补 H-01 的空气、源水、流水对照。
+4. **阻塞｜同种液体的水位变化漏掉 `onPlace`，排刻身份也偏离回调传参。** `src/engine.cpp:1081–1084` 以换方块类型为条件，26.1 `LevelChunk.java:318–341` 对未被 flags 512 跳过的状态写入调用 `onPlace`，`LiquidBlock.java:148–151` 无同类型早退。`src/fluid_flow.cpp:712–752` 又重读世界位置来决定刻身份，原版三条路径分别使用回调状态（`LiquidBlock.java:148–151,167–179,194–198`）。建议保留三条入口，按传入状态请求，并验证同种液体改 level、flags 512 及捕获状态。补测岩浆在 `setBlock` 回调中请求基础延迟与随后显式请求竞争时的接受顺序，两端 RNG 序列独立。
+
+#### 独立验证
+
+- MSVC Release 构建通过，CTest **20/20 通过**（8.60 s）。
+- `c8e9eb1` 与 `f4f1b2c` 用同一 800×83×800 干态音符盒投影交替各跑 3 次，每次 1000 tick，Release + jemalloc，固定逻辑 CPU 2，高优先级。平均 **3.084 → 3.130 ms**（+1.49%），单刻中位数 **2.263 → 2.316 ms**（+2.34%），P95 **6.461 → 6.581 ms**（+1.86%），均低于历史 C++ 回归复测线。另跑的四个检查点指纹一致。完整结果见本地 `build-review-f2/f5-summary.json`。
+- 原版依据是本地 26.1 源码，本轮未运行真实服务端差分或原版性能对跑。湿态行为仍有上述缺口，待同一夹具的工作量核对后再做对比。
+
+任务进行中
