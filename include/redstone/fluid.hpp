@@ -153,6 +153,14 @@ const LavaFluid &flowingLava();
 const LavaFluid &lava();
 } // namespace Fluids
 
+// FluidTags.java:8-9. A tag is a judgement independent of Fluid.isSame: `isSame`
+// answers "same fluid family", a tag answers "belongs to this behaviour group".
+// WaterFluid.canBeReplacedWith tests !other.is(FluidTags.WATER) and
+// LavaFluid.canBeReplacedWith tests other.is(FluidTags.WATER), so the two must
+// not be conflated.
+enum class FluidTag : std::uint8_t { Water, Lava };
+bool fluidHasTag(const Fluid &fluid, FluidTag tag);
+
 const Fluid *findFluidByName(std::string_view name);
 
 // BlockBehaviour.getFluidState for this registry subset: liquid blocks decode

@@ -207,3 +207,17 @@ const std::string &FluidRef::str() const {
 }
 
 } // namespace redstone
+
+namespace redstone {
+// FluidTags.WATER / FluidTags.LAVA. Only the four flowing/source entries carry a
+// tag; minecraft:empty belongs to none.
+bool fluidHasTag(const Fluid &fluid, FluidTag tag) {
+  switch (tag) {
+  case FluidTag::Water:
+    return fluid.is(Fluids::water()) || fluid.is(Fluids::flowingWater());
+  case FluidTag::Lava:
+    return fluid.is(Fluids::lava()) || fluid.is(Fluids::flowingLava());
+  }
+  return false;
+}
+} // namespace redstone

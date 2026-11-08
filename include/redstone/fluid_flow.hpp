@@ -29,6 +29,15 @@ void fluidSpread(World &world, Pos pos, const BlockState &blockState,
 FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
                           const Fluid &self);
 
+// FlowingFluid.getSpreadDelay: the tick delay to re-schedule with, including
+// LavaFluid's x4 when the surface rises without falling.
+int fluidSpreadDelay(World &world, Pos pos, const Fluid &self,
+                     const FluidState &oldState, const FluidState &newState);
+
+// LiquidBlock.shouldSpreadLiquid: lava meeting water (or soul soil + blue ice)
+// converts in place and returns false, telling the caller not to spread.
+bool liquidShouldSpreadLiquid(World &world, Pos pos, const BlockState &state);
+
 // FlowingFluid.canPassThroughWall: whether fluid may cross from sourcePos to
 // targetPos through the face in `direction`.
 bool fluidCanPassThroughWall(World &world, Direction direction, Pos sourcePos,

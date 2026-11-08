@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -377,6 +377,10 @@ public:
   // Optional instrumentation hook, invoked after a moving entity is removed.
   std::function<void(World &, Pos)> pistonCompletionObserver;
   bool tntExplodes = true;
+  // GameRules.WATER_SOURCE_CONVERSION / LAVA_SOURCE_CONVERSION. 26.1 defaults to
+  // water on and lava off; FlowingFluid.canConvertToSource reads them.
+  bool waterSourceConversion = true;
+  bool lavaSourceConversion = false;
   bool traceUpdates = false;
 
 private:

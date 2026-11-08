@@ -190,5 +190,15 @@ const Block MOSS_BLOCK{"minecraft:moss_block",
                        BlockMetadata{0.1f, true, "destroy", true, 0.6f, 1.0f, 0.1f}};
 const Block STONE_BRICKS{"minecraft:stone_bricks",
                          BlockMetadata{1.5f, true, "normal", true, 0.6f, 1.0f, 6.0f}};
+// F-4: blocks the water/lava reaction rules produce or depend on.
+const Block COBBLESTONE{
+    "minecraft:cobblestone",
+    BlockMetadata{2.0f, true, "normal", true, 0.6f, 1.0f, 6.0f}};
+const Block BASALT{"minecraft:basalt",
+                   BlockMetadata{1.25f, true, "normal", true, 0.6f, 1.0f, 4.2f}};
+const Block SOUL_SOIL{"minecraft:soul_soil",
+                      BlockMetadata{0.5f, true, "normal", true, 0.6f, 1.0f, 0.5f}};
+const Block BLUE_ICE{"minecraft:blue_ice",
+                     BlockMetadata{2.8f, true, "normal", true, 0.6f, 1.0f, 2.8f}};
 } // namespace Blocks
 } // namespace redstone

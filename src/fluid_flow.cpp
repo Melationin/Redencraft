@@ -187,12 +187,43 @@ bool canBeReplacedWith(const FluidState &state, World &world, Pos pos,
   const Fluid &self = state.getType();
   if (self.isEmpty())
     return true;
+  // Both branches test the WATER *tag*, not the family: WaterFluid wants
+  // !other.is(FluidTags.WATER), LavaFluid wants other.is(FluidTags.WATER).
   if (self.isSame(Fluids::water()))
     return direction == Direction::Down &&
-           !other.isSame(Fluids::water());
+           !fluidHasTag(other, FluidTag::Water);
   if (self.isSame(Fluids::lava()))
     return fluidHeight(world, pos, state) >= 0.44444445f &&
-           other.isSame(Fluids::water());
+           fluidHasTag(other, FluidTag::Water);
+  return false;
+}
+
+// FlowingFluid.getSpreadDelay (base) overridden by LavaFluid: the delay is
+// multiplied by 4 when the surface rises without falling, unless the level's
+// random source rolls 0 (LavaFluid.java:179-191).
+int computeSpreadDelay(World &world, Pos pos, const Fluid &self,
+                       const FluidState &oldState, const FluidState &newState) {
+  int result = tickDelay(self);
+  if (!self.isSame(Fluids::lava()))
+    return result;
+  if (oldState.isEmpty() || newState.isEmpty())
+    return result;
+  if (oldState.isFalling() || newState.isFalling())
+    return result;
+  if (fluidHeight(world, pos, newState) <= fluidHeight(world, pos, oldState))
+    return result;
+  if (world.random.nextInt(4) != 0)
+    result *= 4;
+  return result;
+}
+
+// Level.getGameRuleBooleanValue(WATER_SOURCE_CONVERSION / LAVA_SOURCE_CONVERSION).
+// The world owns the switches because vanilla reads them from the gamerules.
+bool fluidCanConvertToSource(World &world, const Fluid &self) {
+  if (self.isSame(Fluids::water()))
+    return world.waterSourceConversion;
+  if (self.isSame(Fluids::lava()))
+    return world.lavaSourceConversion;
   return false;
 }
 
@@ -474,7 +505,7 @@ FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
       ++neighbourSources;
     highestNeighbor = std::max<int>(highestNeighbor, fluidState.getAmount());
   }
-  if (neighbourSources >= 2 && self.canConvertToSource()) {
+  if (neighbourSources >= 2 && fluidCanConvertToSource(world, self)) {
     const BlockState belowState = world.getBlock(pos.relative(Direction::Down));
     const FluidState belowFluid = fluidStateOf(belowState);
     if (isSolid(belowState) || isSourceBlockOfThisType(belowFluid, self))
@@ -519,6 +550,38 @@ void fluidSpread(World &world, Pos pos, const BlockState &blockState,
     spreadToSides(world, pos, state, blockState, self);
 }
 
+// LiquidBlock.shouldSpreadLiquid (LiquidBlock.java:213-235). Lava meeting water
+// turns into obsidian when it is a source and cobblestone otherwise; lava over
+// soul soil next to blue ice turns into basalt. Returns false when the lava was
+// replaced, which is the caller's signal to stop spreading. The block-side
+// callers (onPlace / neighborChanged) arrive with F-5; this is the rule itself.
+bool liquidShouldSpreadLiquid(World &world, Pos pos, const BlockState &state) {
+  const FluidState fluid = fluidStateOf(state);
+  if (!fluidHasTag(fluid.getType(), FluidTag::Lava))
+    return true;
+  const bool overSoulSoil = world.getBlock(pos.relative(Direction::Down))
+                                .is(Blocks::SOUL_SOIL);
+  for (Direction direction : {Direction::Down, Direction::North, Direction::South,
+                              Direction::West, Direction::East}) {
+    const Pos neighborPos = pos.relative(opposite(direction));
+    if (fluidHasTag(fluidStateOf(world.getBlock(neighborPos)).getType(),
+                    FluidTag::Water)) {
+      const BlockState convertTo = fluid.isSource() ? Blocks::OBSIDIAN.defaultState()
+                                                    : Blocks::COBBLESTONE.defaultState();
+      world.setBlock(pos, convertTo, 3);
+      // TODO: fizz (levelEvent 1501) needs the event/sound layer.
+      return false;
+    }
+    if (overSoulSoil &&
+        world.getBlock(neighborPos).is(Blocks::BLUE_ICE)) {
+      world.setBlock(pos, Blocks::BASALT.defaultState(), 3);
+      // TODO: fizz (levelEvent 1501) needs the event/sound layer.
+      return false;
+    }
+  }
+  return true;
+}
+
 void fluidTick(World &world, Pos pos, const BlockState &blockState,
                const FluidState &state) {
   FluidState current = state;
@@ -534,8 +597,10 @@ void fluidTick(World &world, Pos pos, const BlockState &blockState,
       current = newFluidState;
       currentBlock = newFluidState.getType().createLegacyBlock(current);
       world.setBlock(pos, currentBlock, 3);
-      world.scheduleFluidTick(pos, FluidRef(current.getType()),
-                              tickDelay(current.getType()));
+      world.scheduleFluidTick(
+          pos, FluidRef(current.getType()),
+          computeSpreadDelay(world, pos, current.getType(), state,
+                             newFluidState));
     }
   }
   fluidSpread(world, pos, currentBlock, current);
@@ -604,4 +669,13 @@ Vec3 fluidFlow(World &world, Pos pos, const FluidState &state) {
   return flow.normalize();
 }
 
+} // namespace redstone
+
+namespace redstone {
+// Public wrapper: the anonymous-namespace helper above plus the same rule the
+// lava tick uses, so tests and F-5 callers share one implementation.
+int fluidSpreadDelay(World &world, Pos pos, const Fluid &self,
+                     const FluidState &oldState, const FluidState &newState) {
+  return computeSpreadDelay(world, pos, self, oldState, newState);
+}
 } // namespace redstone

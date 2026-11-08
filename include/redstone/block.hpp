@@ -485,6 +485,11 @@ extern const Block POWDER_SNOW;
 extern const Block CRYING_OBSIDIAN;
 extern const Block RESPAWN_ANCHOR;
 extern const Block REINFORCED_DEEPSLATE;
+// Added by F-4 for the water/lava reaction rules.
+extern const Block COBBLESTONE;
+extern const Block BASALT;
+extern const Block SOUL_SOIL;
+extern const Block BLUE_ICE;
 } // namespace Blocks
 
 // Name lookup: findBlockByName never registers, blockByName registers an
