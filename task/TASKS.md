@@ -164,4 +164,4 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 独立 MSVC Release 构建和 CTest **18/18 通过**（8.29 s）。以上差异来自本地 26.1 源码对照，未运行真实服务端差分。当前先退回纠正行为及覆盖缺口；本轮未重跑世吞性能基准。
 
-任务完成
+任务已完成
