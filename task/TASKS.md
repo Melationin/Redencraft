@@ -161,4 +161,45 @@
 - `c8e9eb1` 与 `f4f1b2c` 用同一 800×83×800 干态音符盒投影交替各跑 3 次，每次 1000 tick，Release + jemalloc，固定逻辑 CPU 2，高优先级。平均 **3.084 → 3.130 ms**（+1.49%），单刻中位数 **2.263 → 2.316 ms**（+2.34%），P95 **6.461 → 6.581 ms**（+1.86%），均低于历史 C++ 回归复测线。另跑的四个检查点指纹一致。完整结果见本地 `build-review-f2/f5-summary.json`。
 - 原版依据是本地 26.1 源码，本轮未运行真实服务端差分或原版性能对跑。湿态行为仍有上述缺口，待同一夹具的工作量核对后再做对比。
 
+
+### 返工二（针对 `1e11490` 复审的 1 阻塞 + 1 应修）
+
+**阻塞 — 满态流水中放置枯珊瑚扇变成干宿主**
+
+- 事实确认：`BaseCoralPlantTypeBlock.java:57-62` 用 `FluidTags.WATER` + `isFull()`，与 `BaseRailBlock.java:139-147` / `WallBlock.java:112-131` 的**精确水源**判定不同。`FluidState.java:57-58` 的 `isFull` 只看 `amount == 8`，所以 falling `water[level=8]`（精确身份是 `flowing_water`）满足珊瑚规则却不满足铁轨/墙规则。
+- `src/engine.cpp` 的 `coralPlacementState`：改为 `fluidHasTag(type, FluidTag::Water) && isFull()`。
+- `src/net/session.cpp` 的放置入口：珊瑚分支改用同一 tag+满态判定，铁轨/墙分支保持 `is(Fluids::water())`，两族规则不再混用。两条注释同步更正。
+- 测试：`tests/fluid_block_tests.cpp` 新增 `coralPlacementWaterloggedStates`，覆盖 H-01 要求的四态——普通源水（湿）、falling water[level=8]（湿）、非满态流水 level 4（干）、空气（干），并断言 `level 8` 确实解码成 `flowing_water` 且 `isFull()`；`coralAndRailRulesDivergeOnFallingWater` 固定住两族规则分歧所依赖的流体事实。
+- **真实放置入口**由 `tests/protocol_tests.cpp` 的 `placementRules` 覆盖：驱动 `Session::useItemOn` 从 falling water、浅流水、源水三种格子分别放珊瑚扇，断言 `waterlogged` 为 true/false/true。
+
+**应修 — 断支撑铁轨测试未走断支撑入口**
+
+- `tests/fluid_block_tests.cpp` 的 `railDrainKeepsWater` 改为真实移除下方支撑：`setBlock(support, air)` → `BaseRailBlock.shouldBeRemoved` → `rail.cpp` 的 `world.removeBlock(pos, movedByPiston)`；断言铁轨消失、位置留下**水源**、且仍有对应水刻。
+- 保留独立对照：显式 `setBlock(rail, air)` 仍然写空气，因为该调用方要的就是空气而不是移除。
+
+**变异验证（三条新变异，全部被抓到）**
+
+| 变异 | 结果 |
+|---|---|
+| `rail.cpp` 断支撑改回直接写空气 | `the rail's water stays behind instead of air` |
+| `coralPlacementState` 改回精确源水 | `falling water[level=8] waterlogs the placed fan` |
+| `session.cpp` 珊瑚分支塌成精确源水 | `protocol_tests`：`waterlogged == "true"` 断言失败 |
+
+第三条一开始**没有被抓到**：当时 `fluid_block` 里那条用例是把 `session.cpp` 的分支抄进测试的，属于自证。已删除该写法，改由 `protocol_tests` 驱动真实放置入口，重跑变异后确认失败。
+
+**明确没有做的事**：桶交互（P1）、实体推流（P1）、活珊瑚死亡逻辑、真实 26.1 服务端差分。
+
+### 构建与测试（返工二后）
+
+- 构建：MSVC Release + jemalloc 通过，无新增警告。
+- CTest：**20/20 通过**。
+- 证据口径：**源码对照 + C++ 回归测试**，未跑真实 26.1 服务端差分，因此不声称原版等价。
+### 返工复审（`1e11490`）
+
+- **已解决｜含水容器、普通移除保水与液体回调。** 传播已通过容器接收精确水源，拒绝流水及岩浆并保留宿主；支撑损失和创造破坏走保水写回，湿宿主有形状排刻。同种液体改水位进入 `onPlace`，flags 512 可以跳过，排刻读取回调状态。岩浆的基础延迟与后续显式请求竞争按原版队列规则去重。已有活塞正常完成时清除含水的回归。
+- **阻塞｜满态流水中放置枯珊瑚扇仍会变成干宿主。** `src/engine.cpp:1135–1138` 和 `src/net/session.cpp:996–1001` 都要求精确源水身份。26.1 `BaseCoralPlantTypeBlock.java:57–62` 用 `FluidTags.WATER` 加 `isFull()`，墙扇通过 `BaseCoralWallFanBlock.java:85–87` 继承该判定；`FluidState.java:57–58` 只检查 amount 为 8。因此 falling `water[level=8]` 是精确流水身份但仍可含水。建议 `coralPlacementState` 用水标签与满态，`Session` 保留这个已算好的珊瑚含水值，铁轨和墙仍用精确源水。按 H-01 覆盖普通源水、满态流水、非满态流水和空气，并至少验证一次真实放置入口没有覆盖珊瑚判定。
+- **应修｜断支撑铁轨测试未走断支撑入口。** `tests/fluid_block_tests.cpp:319–330` 直接调用 `removeBlock(rail)`，因此 `src/rail.cpp:572–579` 若改回写空气仍能通过。请实际移除下方支撑，断言铁轨消失、留下水源并有对应水刻；保留直接 `setBlock(air)` 的独立对照。
+
+独立 MSVC Release 构建通过，CTest **20/20 通过**（8.32 s）。同一 800×83×800 干态投影，`c8e9eb1` 与 `1e11490` 交替各跑 3 次 1000 tick，Release + jemalloc。平均 **2.746 → 2.794 ms**（+1.75%），中位数 **1.988 → 2.040 ms**（+2.62%），P95 **5.708 → 5.867 ms**（+2.79%），四个检查点指纹一致，未达 5% 复测线。完整结果见本地 `build-review-f2/f5-rework-summary.json`。本轮行为依据为 26.1 源码，未跑官方服务端差分或性能对跑。
+
 任务已完成

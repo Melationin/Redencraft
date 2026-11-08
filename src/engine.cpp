@@ -1129,11 +1129,15 @@ std::optional<BlockState> World::coralPlacementState(Pos pos,
     auto floor = name.find("_coral_fan");
     name.replace(floor, 10, "_coral_wall_fan");
   }
-  // BaseCoralPlantTypeBlock.getStateForPlacement (which both fan shapes inherit)
-  // reads the fluid of the cell being filled and waterlogs the fan only for a
-  // full water source: BaseCoralPlantTypeBlock.java:57-62.
+  // BaseCoralPlantTypeBlock.getStateForPlacement (which BaseCoralWallFanBlock
+  // inherits) reads the fluid of the cell being filled and waterlogs the fan for
+  // FluidTags.WATER && isFull() -- BaseCoralPlantTypeBlock.java:57-62. That is a
+  // TAG test, not the exact-source test the rails and the walls use: falling
+  // water[level=8] decodes to the flowing identity with amount 8 and still
+  // satisfies both halves (FluidState.java:57-58 only checks amount == 8).
   const FluidState replacedFluid = fluidStateOf(getBlock(pos));
-  const bool wet = replacedFluid.is(Fluids::water()) && replacedFluid.isFull();
+  const bool wet =
+      fluidHasTag(replacedFluid.getType(), FluidTag::Water) && replacedFluid.isFull();
   auto state =
       defaultState(name).with("waterlogged", wet ? "true" : "false");
   if (clickedFace != Direction::Up)

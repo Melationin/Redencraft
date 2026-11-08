@@ -983,21 +983,23 @@ void Session::useItemOn(Reader &in) {
                                ? "east_west"
                                : "north_south");
       }
-      // H-01: getStateForPlacement reads the fluid of the cell being replaced.
-      // BaseRailBlock.java:139-147 and WallBlock.java:112-131 keep a host dry
-      // only when that fluid is not the exact WATER source;
-      // BaseCoralPlantTypeBlock.java:57-62 (which the coral fans inherit) also
-      // wants it full. A water source therefore lands already waterlogged.
+      // H-01: getStateForPlacement reads the fluid of the cell being replaced,
+      // and the two host families ask different questions. BaseRailBlock
+      // .java:139-147 and WallBlock.java:112-131 test the exact WATER source;
+      // BaseCoralPlantTypeBlock.java:57-62 (inherited by BaseCoralWallFanBlock)
+      // tests FluidTags.WATER plus isFull(), so a falling water[level=8] still
+      // waterlogs the fan. A full water source lands waterlogged either way.
       if (state.hasProperty("waterlogged")) {
         // BlockPlaceContext.getClickedPos() is the CELL BEING REPLACED, which
         // is `target`, not the face that was clicked on (BlockPlaceContext
         // .java:48-51). Water is replaceable, so the two coincide exactly for
         // the water case this rule cares about.
         const auto replacedFluid = fluidStateOf(world_.getBlock(target));
-        const bool waterSource = replacedFluid.is(Fluids::water());
-        const bool wet = isDeadCoralFan(state)
-                             ? waterSource && replacedFluid.isFull()
-                             : waterSource;
+        const bool wet =
+            isDeadCoralFan(state)
+                ? (fluidHasTag(replacedFluid.getType(), FluidTag::Water) &&
+                   replacedFluid.isFull())
+                : replacedFluid.is(Fluids::water());
         state = state.with("waterlogged", wet ? "true" : "false");
       }
       if (isWoolCarpet(state))

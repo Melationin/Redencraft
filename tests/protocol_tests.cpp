@@ -472,6 +472,35 @@ void placementRules(const ProtocolData &data) {
   world.setBlock({6, 65, 7}, defaultState("glass"));
   assert(world.hasScheduledTick({6, 65, 6}, "minecraft:observer"));
   drain(session, true);
+  // H-01: coral fans waterlog on FluidTags.WATER + isFull(), so a falling
+  // water[level=8] cell still yields a wet fan, while a shallow flowing cell
+  // does not. This drives the real placement entry, not a copy of its rule.
+  {
+    const Pos floorCell{13, 65, 8};
+    world.rawSetBlock({13, 64, 8}, defaultState("smooth_stone"));
+    creative(session, data, 0, "dead_tube_coral_fan");
+    select(session, 0);
+    // Falling water: level 8, the flowing identity, amount 8.
+    world.rawSetBlock(floorCell,
+                      defaultState("water").with("level", "8"));
+    use(session, {13, 64, 8}, Direction::Up);
+    assert(world.getBlock(floorCell).is(Blocks::DEAD_TUBE_CORAL_FAN));
+    assert(world.getBlock(floorCell).get("waterlogged") == "true");
+    world.rawSetBlock(floorCell, airState());
+    // Shallow flowing water (level 4, amount 4): water tag but not full.
+    world.rawSetBlock(floorCell,
+                      defaultState("water").with("level", "4"));
+    use(session, {13, 64, 8}, Direction::Up);
+    assert(world.getBlock(floorCell).is(Blocks::DEAD_TUBE_CORAL_FAN));
+    assert(world.getBlock(floorCell).get("waterlogged") == "false");
+    world.rawSetBlock(floorCell, airState());
+    // A plain source waterlogs it too.
+    world.rawSetBlock(floorCell, defaultState("water"));
+    use(session, {13, 64, 8}, Direction::Up);
+    assert(world.getBlock(floorCell).get("waterlogged") == "true");
+    world.rawSetBlock(floorCell, airState());
+    drain(session, true);
+  }
   // Unsupported rails/carpet fail before mutation, producing no free drops.
   world.rawSetBlock({7, 66, 8}, defaultState("smooth_stone"));
   for (const auto *name : {"rail", "powered_rail", "white_carpet"}) {

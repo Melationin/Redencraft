@@ -317,16 +317,47 @@ void hostDrainOnSupportLoss() {
 }
 
 // H-02: a waterlogged rail that loses its support drains through
-// Level.removeBlock rather than leaving air behind.
+// BaseRailBlock.neighborChanged -> Level.removeBlock rather than leaving air.
+// The support is REALLY removed, so a regression in rail.cpp that writes air
+// directly is observable here.
 void railDrainKeepsWater() {
   World world;
   flatFloor(world);
+  // flatFloor already laid a smooth-stone floor at y=63, so that IS the
+  // support; removing it is what drives BaseRailBlock.shouldBeRemoved.
+  const Pos support{0, 63, 0};
   const Pos rail{0, 64, 0};
-  world.rawSetBlock(rail, Blocks::RAIL.defaultState().with("waterlogged", "true"));
+  require(world.getBlock(support).is(Blocks::SMOOTH_STONE),
+          "the floor under the rail is the support");
+  require(world.setBlock(rail,
+                         Blocks::RAIL.defaultState().with("waterlogged",
+                                                          "true")),
+          "place the waterlogged rail");
   require(waterloggedOf(world.getBlock(rail)), "the rail starts waterlogged");
-  require(world.removeBlock(rail), "removeBlock writes the fluid state");
+  // Placement itself does not shape-update the new block, so no water tick is
+  // queued yet; hostUpdateShapeSchedulesWater covers the updateShape path.
+
+  // Removing the support runs BaseRailBlock.shouldBeRemoved (rail.cpp
+  // shouldBeRemoved) and then level.removeBlock(pos, movedByPiston).
+  require(world.setBlock(support, airState()), "remove the support");
+  require(!isRailBlock(world.getBlock(rail)),
+          "the unsupported rail is gone");
   require(world.getBlock(rail).is(Blocks::WATER),
-          "the rail's water stays behind");
+          "the rail's water stays behind instead of air");
+  require(fluidStateOf(world.getBlock(rail)).isSource(),
+          "the kept fluid is a water source");
+  require(hasWaterTick(world, rail),
+          "the drained water still has its fluid tick queued");
+
+  // Independent control: an explicit setBlock(air) still writes air, because
+  // that caller asked for air and not for a removal.
+  World explicitWorld;
+  flatFloor(explicitWorld);
+  explicitWorld.rawSetBlock(
+      rail, Blocks::RAIL.defaultState().with("waterlogged", "true"));
+  require(explicitWorld.setBlock(rail, airState()), "explicit air write");
+  require(explicitWorld.getBlock(rail).isAir(),
+          "an explicit setBlock(air) keeps writing air");
 }
 
 // UpdateShape on a waterlogged host schedules its own water tick, one per
@@ -450,6 +481,81 @@ void pistonMovesWaterloggedHost() {
   require(!waterloggedOf(moved),
           "the moving piston clears waterlogged when it completes");
 }
+
+// H-01: the coral fans waterlog on FluidTags.WATER + isFull(), which is a
+// TAG test, unlike the exact-source test the rails and the walls use. Falling
+// water (level 8) decodes to flowing_water with amount 8 and therefore still
+// waterlogs a fan (BaseCoralPlantTypeBlock.java:57-62, FluidState.java:57-58).
+void coralPlacementWaterloggedStates() {
+  const auto place = [](const BlockState &fluid, const char *what) {
+    World world;
+    flatFloor(world);
+    const Pos pos{0, 64, 0};
+    world.rawSetBlock({0, 63, 0}, Blocks::SMOOTH_STONE.defaultState());
+    world.rawSetBlock(pos, fluid);
+    auto placed = world.coralPlacementState(
+        pos, Blocks::DEAD_TUBE_CORAL_FAN.defaultState(), Direction::Up);
+    require(placed.has_value(), std::string("the fan is placeable over ") + what);
+    require(placed->is(Blocks::DEAD_TUBE_CORAL_FAN),
+            std::string("placement picks the floor fan over ") + what);
+    return waterloggedOf(*placed);
+  };
+
+  // 1. A plain water source: waterlogged.
+  require(place(waterLevel(0), "a water source"),
+          "a water source waterlogs the placed fan");
+
+  // 2. Falling water: level 8 is flowing_water with amount 8, still full and
+  //    still in the WATER tag, so the fan is waterlogged.
+  const auto falling = waterLevel(8);
+  require(fluidStateOf(falling).is(Fluids::flowingWater()),
+          "level 8 decodes to the flowing identity");
+  require(fluidStateOf(falling).isFull(), "level 8 is still full");
+  require(place(falling, "falling water"),
+          "falling water[level=8] waterlogs the placed fan");
+
+  // 3. Non-full flowing water: water tag, but not full, so the fan stays dry.
+  const auto shallow = waterLevel(4); // amount 4
+  require(fluidStateOf(shallow).isFull() == false, "level 4 is not full");
+  require(!place(shallow, "shallow flowing water"),
+          "non-full flowing water leaves the placed fan dry");
+
+  // 4. Air: dry.
+  require(!place(airState(), "air"), "air leaves the placed fan dry");
+
+  // The rails and the walls keep the exact-source rule: falling water does NOT
+  // waterlog them (BaseRailBlock.java:139-147, WallBlock.java:112-131).
+  World railWorld;
+  flatFloor(railWorld);
+  railWorld.rawSetBlock({0, 64, 0}, falling);
+  railWorld.rawSetBlock({1, 64, 0}, Blocks::COBBLESTONE_WALL.defaultState());
+  // A wall placed into falling water stays dry: the rule reads the exact
+  // source identity, which flowing_water is not.
+  const auto wallState = railWorld.getBlock({1, 64, 0});
+  const auto replaced = fluidStateOf(railWorld.getBlock({0, 64, 0}));
+  require(!replaced.is(Fluids::water()),
+          "falling water is not the exact water source");
+  require(replaced.isFull() &&
+              fluidHasTag(replaced.getType(), FluidTag::Water),
+          "...but it is still full and in the WATER tag, which is why the "
+          "two host families disagree");
+  (void)wallState;
+}
+
+// H-01 for the two host families: the same fluid decodes differently for each
+// rule. The REAL placement entry is covered by protocol_tests' placementRules
+// (it drives Session::useItemOn); this case only pins the fluid facts the two
+// rules disagree about, so a decode change cannot silently align them.
+void coralAndRailRulesDivergeOnFallingWater() {
+  const auto falling = fluidStateOf(waterLevel(8));
+  require(falling.is(Fluids::flowingWater()),
+          "falling water decodes to the flowing identity");
+  require(falling.isFull(), "...with a full amount");
+  require(fluidHasTag(falling.getType(), FluidTag::Water),
+          "...inside the WATER tag, which the coral rule tests");
+  require(!falling.is(Fluids::water()),
+          "...but not the exact source, which the rail and wall rules test");
+}
 } // namespace
 
 int main() {
@@ -466,6 +572,8 @@ int main() {
     hostDrainOnSupportLoss();
     railDrainKeepsWater();
     hostUpdateShapeSchedulesWater();
+    coralPlacementWaterloggedStates();
+    coralAndRailRulesDivergeOnFallingWater();
     callbackStateDecidesIdentity();
     sameFluidLevelChangeRunsOnPlace();
     pistonMovesWaterloggedHost();
