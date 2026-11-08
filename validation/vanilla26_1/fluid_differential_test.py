@@ -35,11 +35,19 @@ def main():
     vanilla = json.loads(pathlib.Path(args.golden).read_text(encoding='utf-8'))
 
     key = lambda r: (r['t'], r['cell'])
+    # Reject duplicate keys before collapsing into dicts: a silent overwrite
+    # would hide a broken sampler or probe that emitted a cell twice.
+    for name, rows in (('cpp', cpp), ('vanilla', vanilla)):
+        keys = [key(r) for r in rows]
+        if len(keys) != len(set(keys)):
+            raise SystemExit('%s has duplicate observations' % name)
     a = {key(r): r['state'] for r in cpp}
     b = {key(r): r['state'] for r in vanilla}
-    if set(a) != set(b):
-        raise SystemExit('observation sets differ: cpp=%d vanilla=%d'
-                         % (len(a), len(b)))
+    missing = set(b) - set(a)
+    extra = set(a) - set(b)
+    if missing or extra:
+        raise SystemExit('observation sets differ: missing=%d extra=%d'
+                         % (len(missing), len(extra)))
     diffs = [k for k in sorted(a) if a[k] != b[k]]
     if diffs:
         for k in diffs[:20]:

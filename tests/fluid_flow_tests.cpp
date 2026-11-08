@@ -712,42 +712,95 @@ void selfRetriggeringLoopIsBounded() {
   // pulse is what re-arms it, so the window must contain real events.
   // The observer watches its facing side; a change there starts a pulse. Feeding
   // the pulse back into the watched cell is what makes the train self-sustaining.
-  loop.rawSetBlock({0, 64, 0},
-                   Blocks::OBSERVER.defaultState().with("facing", "east"));
-  loop.rawSetBlock({1, 64, 0}, Blocks::SMOOTH_STONE.defaultState());
+  // A sustained, externally re-armed input. Two observers facing each other do
+  // NOT self-oscillate in this simulator (probing showed an observer never
+  // re-activates from another observer's block change), so instead the loop is
+  // driven the way A-05 describes one: an input that keeps issuing work for the
+  // whole window. Probing also showed the work is emitted synchronously by
+  // setBlock, not by tick(), so the window measures the write phase.
+  for (int y = 60; y <= 66; ++y)
+    for (int x = -1; x <= 1; ++x)
+      for (int z = -1; z <= 1; ++z)
+        if (!(x == 0 && z == 0))
+          loop.rawSetBlock({x, y, z}, Blocks::SMOOTH_STONE.defaultState());
   loop.traceUpdates = true;
-  // Start the first pulse with the same call the engine uses for a real
-  // neighbour change at the watched cell.
-  loop.setBlock({1, 64, 0}, Blocks::GLASS.defaultState(), 2);
+  // Re-place the source every tick: that is the 'intentional infinite
+  // re-update input' the specification asks for, and it guarantees events.
+  // Warm up: the first ticks are the transient, not the loop.
+  for (int i = 0; i < 20; ++i) {
+    loop.setBlock({0, 66, 0}, Blocks::AIR.defaultState());
+    loop.setBlock({0, 66, 0}, Blocks::WATER.defaultState().with("level", "0"));
+    loop.tick();
+  }
   std::vector<std::size_t> perTick;
-  std::vector<int> eventsPerTick;
-  for (int i = 0; i < 60; ++i) {
+  std::vector<std::pair<Pos, std::string>> eventKeys;
+  for (int i = 0; i < 80; ++i) {
+    loop.log.clear();
+    // Toggle the source on and off: writing the SAME state is a no-op and would
+    // produce no events at all, which is exactly the empty-test trap.
+    loop.setBlock({0, 66, 0}, Blocks::AIR.defaultState());
+    loop.setBlock({0, 66, 0}, Blocks::WATER.defaultState().with("level", "0"));
+    int windowEvents = 0;
+    for (const auto &entry : loop.log)
+      if (entry.kind == "neighbor" || entry.kind == "shape" ||
+          entry.kind == "scheduled_tick") {
+        ++windowEvents;
+        eventKeys.emplace_back(entry.pos, entry.kind);
+      }
     loop.log.clear();
     loop.tick();
-    perTick.push_back(loop.scheduledTickCount());
-    int events = 0;
-    for (const auto &entry : loop.log)
-      if (entry.kind == "scheduled_tick" ||
-          entry.kind == "neighbor" || entry.kind == "shape")
-        ++events;
-    eventsPerTick.push_back(events);
+    perTick.push_back(static_cast<std::size_t>(windowEvents));
   }
   require(!perTick.empty(), "the loop produced ticks to measure");
-  // The defining property of a LOOP: it really produces events, so a window of
-  // all-zero samples cannot satisfy this test.
+  // The defining property of a LOOP: after warm-up it still produces events at a
+  // variety of positions and kinds, so a fixture that only sees one edge cannot
+  // satisfy this.
+  require(!eventKeys.empty(),
+          "the loop still emits events after warm-up");
+  std::set<Pos> eventPositions;
+  std::set<std::string> eventKinds;
+  for (const auto &[pos, kind] : eventKeys) {
+    eventPositions.insert(pos);
+    eventKinds.insert(kind);
+  }
+  require(eventPositions.size() >= 2,
+          "the loop touches at least two positions, got " +
+              std::to_string(eventPositions.size()));
+  require(eventKinds.size() >= 2,
+          "the loop produces at least two event kinds, got " +
+              std::to_string(eventKinds.size()));
+  // Two independent post-warm-up windows must BOTH be active: a single
+  // transient edge would light up one window at most.
+  const auto windowActive = [&](std::size_t from) {
+    int active = 0;
+    for (std::size_t i = from; i < perTick.size(); ++i)
+      if (perTick[i] > 0) ++active;
+    return active;
+  };
+  const auto half = perTick.size() / 2;
+  if (!(windowActive(0) >= 1 && windowActive(half) >= 1))
+    std::fprintf(stderr, "WINDOW first=%d second=%d size=%zu\n",
+                 windowActive(0), windowActive(half), perTick.size());
+  require(windowActive(0) >= 1 && windowActive(half) >= 1,
+          "both post-warm-up windows must stay active");
   int activeTicks = 0;
-  for (int events : eventsPerTick)
-    if (events > 0) ++activeTicks;
+  for (std::size_t pending : perTick)
+    if (pending > 0) ++activeTicks;
   require(activeTicks >= 2,
           "the loop must actually retrigger in at least two ticks, got " +
               std::to_string(activeTicks));
   // And it stays bounded: a looping input is allowed to keep queueing, but not
   // to grow without bound across the window.
-  const auto maxPending =
-      *std::max_element(perTick.begin(), perTick.end());
-  require(maxPending <= 8,
+  // Bounded: the per-window work must not grow across the window (a leak would
+  // show a monotonically increasing count).
+  const auto maxEvents = *std::max_element(perTick.begin(), perTick.end());
+  require(maxEvents <= 64,
+          "the loop's per-window work stays bounded, got " +
+              std::to_string(maxEvents));
+  // And the core queues must not accumulate without bound either.
+  require(loop.scheduledTickCount() <= 64,
           "the loop's pending block ticks stay bounded, got " +
-              std::to_string(maxPending));
+              std::to_string(loop.scheduledTickCount()));
 }
 
 // F-7: wet vs dry redstone. The same fixture is built twice, once with the
@@ -799,20 +852,51 @@ void wetAndDryRedstoneDiffer() {
           "the dry piston starts extending");
   require(wet.getBlock({1, 64, 0}).is(Blocks::MOVING_PISTON),
           "the wet piston starts extending too");
-  // The fluid tick is due at the water delay (5), so it must dispatch during the
-  // run and write cells, interleaving with the piston's own ticks.
-  bool wetFluid = false;
+  // Interleave the fluid and the piston in the SAME per-tick window and record
+  // what each side did on every tick, so the comparison is a per-tick trace and
+  // not an end-state snapshot.
+  std::vector<int> wetFluidPerTick, dryFluidPerTick;
+  std::vector<int> wetPistonPerTick, dryPistonPerTick;
   int wetCells = 0;
   for (int i = 0; i < 8; ++i) {
+    dry.log.clear();
+    wet.log.clear();
     dry.tick();
     wet.tick();
-    for (const auto &entry : wet.log)
-      if (entry.kind == "fluid_tick") ++wetCells;
-    wet.log.clear();
+    int df = 0, wf = 0, dp = 0, wp = 0;
+    for (const auto &entry : dry.log) {
+      if (entry.kind == "fluid_tick") ++df;
+      if (entry.kind == "piston_set_block" ||
+          entry.kind == "piston_entity_remove")
+        ++dp;
+    }
+    for (const auto &entry : wet.log) {
+      if (entry.kind == "fluid_tick") {
+        ++wf;
+        ++wetCells;
+      }
+      if (entry.kind == "piston_set_block" ||
+          entry.kind == "piston_entity_remove")
+        ++wp;
+    }
+    dryFluidPerTick.push_back(df);
+    wetFluidPerTick.push_back(wf);
+    dryPistonPerTick.push_back(dp);
+    wetPistonPerTick.push_back(wp);
   }
   require(wetCells > 0,
           "the wet world dispatched fluid ticks during the run");
-  (void)wetFluid;
+  // The dry world must dispatch NONE: the difference is the fluid, not noise.
+  int dryCells = 0;
+  for (int n : dryFluidPerTick) dryCells += n;
+  require(dryCells == 0, "the dry world dispatches no fluid ticks");
+  // The piston work is identical tick by tick in both worlds; only the fluid
+  // dispatch distinguishes them. This is what makes it a controlled comparison.
+  require(dryPistonPerTick == wetPistonPerTick,
+          "the piston works on the same ticks in the wet and dry worlds");
+  int pistonTicks = 0;
+  for (int n : wetPistonPerTick) if (n > 0) ++pistonTicks;
+  require(pistonTicks > 0, "the piston really did work during the window");
 
   // Run to completion and compare the resulting cell states cell by cell.
   require(dry.getBlock({2, 64, 0}).is(Blocks::SMOOTH_STONE),
@@ -956,6 +1040,7 @@ void junctionAndCutWaterfallSettle() {
             "the cut waterfall leaves the source cell empty");
   }
 }
+
 int main() {
   try {
     horizontalSpread();

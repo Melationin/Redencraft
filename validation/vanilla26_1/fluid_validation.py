@@ -11,7 +11,7 @@ independence cannot perturb the compared values.
 import json, os, pathlib, queue, re, subprocess, sys, threading, time
 
 root = pathlib.Path(__file__).resolve().parent
-TICKS = int(os.environ.get('FLUID_TICKS', '30'))
+TICKS = int(os.environ.get('FLUID_TICKS', '12'))  # must match the CTest value
 PORT = 25597
 
 
@@ -56,15 +56,21 @@ def snapshot_commands(tag):
 
 def run_vanilla(ticks):
     java = os.environ.get('JAVA_26', r'C:\Program Files\Zulu\zulu-26\bin\java.exe')
-    (root / 'server.properties').write_text(
+    # Each run gets its OWN directory and port so it cannot inherit state from a
+    # previous run, and so two runs can never share a world or a socket.
+    run_dir = root / 'fluid-runs' / time.strftime('%Y%m%d-%H%M%S')
+    run_dir.mkdir(parents=True, exist_ok=True)
+    port = PORT + (int(time.time()) % 200)
+    (run_dir / 'eula.txt').write_text('eula=true\n', encoding='ascii')
+    (run_dir / 'server.properties').write_text(
         'server-ip=127.0.0.1\nserver-port=%d\nonline-mode=true\n'
         'spawn-protection=0\nview-distance=3\nsimulation-distance=3\n'
         'max-players=1\nlevel-name=fluid-validation-world\n'
-        'pause-when-empty-seconds=-1\n' % PORT,
+        'pause-when-empty-seconds=-1\n' % port,
         encoding='ascii')
     p = subprocess.Popen(
-        [java, '-Xms512M', '-Xmx2G', '-jar', 'server.jar', 'nogui'],
-        cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        [java, '-Xms512M', '-Xmx2G', '-jar', str(root / 'server.jar'), 'nogui'],
+        cwd=run_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, bufsize=1, encoding='utf-8',
         errors='replace')
     lines = queue.Queue()
@@ -97,6 +103,29 @@ def run_vanilla(ticks):
         p.stdin.flush()
         time.sleep(0.18)
 
+    def game_time():
+        # The server echoes gameTime for `time query gametime`; parse the number
+        # so sampling is pinned to a tick boundary instead of a sleep.
+        command('time query gametime')
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            try:
+                line = lines.get(timeout=1)
+            except queue.Empty:
+                continue
+            m = re.search(r'time is (\d+)', line) or re.search(r'(\d+)\s*$', line)
+            if 'gametime' in line.lower() or 'time is' in line.lower():
+                if m:
+                    return int(m.group(1))
+        raise RuntimeError('could not read gameTime')
+
+    def wait_game_time(target):
+        end = time.monotonic() + 60
+        while time.monotonic() < end:
+            if game_time() >= target:
+                return
+        raise RuntimeError('gameTime did not reach %d' % target)
+
     def capture(tag):
         for cmd in snapshot_commands(tag):
             command(cmd)
@@ -128,8 +157,11 @@ def run_vanilla(ticks):
         capture('T0')
         command('setblock %d %d %d minecraft:water[level=0]' % (0, Y, Z))
         for t in range(1, ticks + 1):
+            # Synchronize on gameTime rather than sleeping: the golden must be
+            # tied to an actual tick boundary, not to wall-clock guesswork.
+            before = game_time()
             command('tick step 1')
-            time.sleep(0.5)
+            wait_game_time(before + 1)
             capture('T%d' % t)
     finally:
         if p.poll() is None:
@@ -146,6 +178,17 @@ if __name__ == '__main__':
     if not eula_ok():
         raise SystemExit('Accept the Minecraft EULA in this directory first.')
     data = run_vanilla(TICKS)
+    # Only write the golden once the run proved complete and unique.
+    expected = (TICKS + 1) * len(CELLS)
+    if len(data) != expected:
+        raise SystemExit('incomplete sampling: %d of %d observations'
+                         % (len(data), expected))
+    keys = [(r['t'], r['cell']) for r in data]
+    if len(keys) != len(set(keys)):
+        raise SystemExit('duplicate observations; refusing to update the golden')
+    ticks = sorted({r['t'] for r in data}, key=lambda s: int(s[1:]))
+    if len(ticks) != TICKS + 1:
+        raise SystemExit('expected %d ticks, got %d' % (TICKS + 1, len(ticks)))
     out = root / 'fluid-vanilla-states.json'
     out.write_text(json.dumps(data, indent=1), encoding='utf-8')
     print('recorded', len(data), 'cell observations ->', out)
