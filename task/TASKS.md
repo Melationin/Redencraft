@@ -8,6 +8,42 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## M0-2 交接与定位文档校正（coder）
+
+**范围**：只校正文档。更新 `docs/compatibility.md` 的当前实现边界、路线链接和命令口径；重构 `docs/handover.md` 的当前状态与历史快照分区；修正 `docs/protocol775.md` 中流体现已运行、光照仍占位的状态；按 F-7 复审把 `docs/fluid-acceptance.md` 的原始日志 SHA-256 尾位补为 `9`，保留未验证项并链接 F-9a/F-9b。复核 `AGENTS.md` 的唯一末行状态与交接位置，已对齐则不改。现状 `PLAN.md` 的 F-9a/F-9b、光照拆分是 reviewer 已审核内容，本轮将其纳入文档对齐提交；除纠正断链外不改验收口径。不写代码、不领取 L-1。
+
+**依据与验收**：`AGENTS.md` 第 1、3 节，`PLAN.md` 阶段 2.5/3 与 F-7 后续安排，F-7/F-8 最近复审。文档必须明确 26.1 World Clocks、`advance_time` 尚未实现，世界保存仍为只读；流体已实现并完成当前核心验收，而协议光照段仍是占位。所有本地 Markdown 链接、标题锚点和路线术语要逐项核对，F-7 未跑差分不得写成通过。只运行 `git diff --check`、链接/术语检查；代码基线沿用刚通过的 F-8 MSVC Release + jemalloc **23/23**，不重复构建或 CTest。
+
+**计划文件**：`docs/compatibility.md`、`docs/handover.md`、`docs/protocol775.md`、`docs/fluid-acceptance.md`、`PLAN.md`、`task/TASKS.md`。`AGENTS.md` 只在核对后发现不一致时修改。
+
+### 实际做了什么（实现提交 `b95e7f8`）
+
+**当前边界与历史归档**
+
+- `docs/handover.md` 改为“当前状态 + 历史记录”结构。当前页明确记录：F-1…F-8 已通过；下一代码任务是 L-1，仍以 TASKS 末行为准；流体已运行，光照仍无传播且协议段为占位；Anvil 只读；没有加载票、世界生成或完整多维度。
+- 历史部分明确标注 2026-11-06 的未提交快照、旧 CTest 数字、旧 TODO 和当时原生客户端直连调研，不再把这些历史状态呈现为当前工作区。原“单维度、无生成、只读”的表述已限定为当时实现快照；已确认的原生 C++ 协议路线保留。
+- `docs/compatibility.md` 删除了“整批排除流体刻”和“流体刻仍未实现”的当前表述，改为 F-1…F-8 已通过当前核心验收，并保留桶、玩家路径、实体推流和 `fluid_ticks` 写回缺口。新增当前时间/光照边界：只有内存 `gameTime`；26.1 World Clocks、`world_clocks`、`advance_time`、睡眠跳转、`/time` 和持久化尚未实现；协议光照仍占位。该文档的全部 CTest 数字改为带日期或明确指向 F-8 当前基线。
+- `docs/protocol775.md` 明确区块/单格广播可携带已运行的流体变化，但光照段仍为占位；时间字段只是内存 `gameTime`，不能把 `/tick` 测试控制入口当作 World Clocks 或 `/time`。旧的 14/14 协议批结果标为 2026-11-07 历史记录。
+- `docs/fluid-acceptance.md` 把 W-02/M-03/H-01 原始 `server.log` 的 SHA-256 尾位补为 `9`，现在为 `7aa4802431711b678cd40d0a8b777cb9ab0bc42729fc45e4ec23a108e54bf7d9`；第 5 节保留全部未跑项，并链接 [F-9a/F-9b](../PLAN.md#阶段-25--流体补充验收)。
+- 当前 `PLAN.md` 中 reviewer 已审核的 F-9a/F-9b、L-1/L-2a/L-2b/L-3/L-4 和光照性能口径随本次文档对齐一并提交；本轮没有改写这些任务的验收内容。所有相对链接和标题锚点均已核对。
+
+**AGENTS 与命令边界**
+
+`AGENTS.md` 已满足唯一末行状态、正文状态词内联/反引号、README 至 TASKS 的领取位置和 review 写回位置要求，未修改。`docs/handover.md` 的恢复命令改为完整 CMake 配置、Release 构建和 CTest；`docs/compatibility.md` 区分 C++ CTest、固定存档回放、真实服务端差分，并说明 Java agent 只用于更细轨迹。真实差分和性能 runner 不计入普通 CTest。
+
+**验证**
+
+- `git diff --check`：通过。
+- Markdown 检查：扫描 `AGENTS.md`、`PLAN.md`、`task/TASKS.md` 和 `docs/*.md` 共 15 份文档；本地路径/标题锚点断链 **0**。
+- 术语检查：旧日志哈希、`整批排除流体刻`、`流体刻仍未实现，流体刻`、`水/流体刻当前阶段不参与模拟` 均无命中；World Clocks、`world_clocks`、`advance_time`、光照占位和 F-9a/F-9b 均有当前边界记录。
+- 按用户指示不重复代码验证；采用刚通过的 F-8 基线：MSVC Release + jemalloc **23/23（21.93 s）**，构建日志 SHA-256 `fb8efd067e1b55b4425e16788c1c9ed86ece987a300180c3a0409fdaa3ca7508`，CTest 日志 SHA-256 `9702f6938d8127affd60f8601cea2bae0522a05fb6d6c4bd7e9556b23beaf4e0`。
+
+**明确没有做**：没有修改代码、协议、CMake、客户端或 `AGENTS.md`；没有领取 L-1，没有新增原版差分或性能数据，也没有声称未跑用例通过。`build-f7-nmake-build3.log`、`build-f7-nmake-cleanbuild.log`、`scripts/wait-tasks.ps1`、`task/F7-FLUID-PERF-HANDOFF.md`、`validation/vanilla26_1/fluid-cpp-states.json` 等既有未跟踪文件未纳入或修改。
+
+**实现提交**：`b95e7f8`。TASKS 交接记录随后单独提交。
+
+---
+
 ## F-8 流体单例的所有权（coder）
 
 **范围**：只处理 `src/fluid.cpp` 中 `Fluids` 五个函数局部单例的静态裸指针与 `new`，改成具有自动存储期所有权的稳定对象；不领取 M0-2/L-1，不改更新顺序、协议、客户端或 `PLAN.md`。F-7 最新复审结论及其 F-9a/F-9b、光照追踪引用保留。
@@ -617,5 +653,9 @@ MSVC 19.51 Release + jemalloc 构建通过；coder 的 CTest 在允许本机回�
 **已实现流体子集通过 F-7。** 生产源码未改；官方 JAR 和独立运行目录的黄金、日志及 manifest 哈希已核对。C++ 与真实 26.1 服务端比较 W-02 252 格、M-03 48 格、H-01 自然流入铁轨 99 格，共 399/399；H-01 证据仅覆盖容器正负例，M-03 覆盖同步放置转换与方向优先级。采用 coder 的 MSVC Release + jemalloc 构建和单轮 CTest **23/23**（22.34 s），不重复执行。结合此前 W-01、M-01、双观察者、协议 C++ 回归和交错湿/干性能证据，满足本轮核心验收。建议：`docs/fluid-acceptance.md` 的本轮原始日志 SHA-256 少了最后一位 `9`，在 M0-2 据实补齐。
 
 按 AGENTS §3.6 与用户要求的后续光照优先级，reviewer 在 `PLAN.md` 明确拆出 F-9a（完整原版探针、同存档重启与协议补证，含 N-04 同一湿态慢端）和 F-9b（原版同阶段、同工作量性能），安排在光照验收后；其余存在系统依赖的用例仍见矩阵。此项调整只分离验收范围，没有把未跑用例判为通过，也未改变兼容性结论。光照路线拆为 L-1、L-2a、L-2b、L-3、L-4，并明确世吞主线程开销 <10% 的 A/B 口径。按顺序释放 F-8，再到 M0-2 与 L-1。
+
+### F-8 审查结论（`4ee4ad6`）
+
+**通过。** `src/fluid.cpp:118–149` 由内部函数局部静态值拥有五种流体；初始化无相互调用，访问仍返回具体成员地址，缓存和 `FluidRef` 析构不解引用。 `tests/fluid_tests.cpp:215` 断言不同身份、名称映射、默认空回退及线程局部缓存使用相同单例。变更没有触及更新链和协议。采用 coder 的 MSVC Release + jemalloc 构建和 **23/23 CTest**（21.93 s），没有重复运行。这里的证据是源码和 C++ 回归，没有新增真实原版差分。流体功能阶段已收尾；补证沿用 F-9a/F-9b。释放 M0-2。
 
 任务已完成
