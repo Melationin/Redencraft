@@ -108,6 +108,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 ### 提交
 
-（待填）
+- 主提交：`f2201fc` — Implement FlowingFluid spread, level recomputation and flow vectors
+  （8 个文件，+991 / -10；新增 `include/redstone/fluid_flow.hpp`、`src/fluid_flow.cpp`、`tests/fluid_flow_tests.cpp`，修改 `include/redstone/fluid.hpp`、`src/engine.cpp`、`CMakeLists.txt`、`docs/compatibility.md`）
 
 任务完成
