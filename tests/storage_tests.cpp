@@ -1,6 +1,7 @@
 #include "redstone/piston.hpp"
 #include "redstone/entity.hpp"
 #include "redstone/storage.hpp"
+#include <algorithm>
 #include <cassert>
 #include <bit>
 #include <cmath>
@@ -443,6 +444,12 @@ int main() {
   assert(w.blocks.at({-4, 0, -16}).name() == "example:block_1");
   World world;
   importWorld(w, world);
+  {
+    const auto &moving = world.pistonEntities.at({-16, 0, -16});
+    assert(moving->movedState.name() == "minecraft:stone" &&
+           moving->direction == Direction::East && moving->progress == 0.5f &&
+           moving->extending);
+  }
   // End-to-end: the same .mca bytes go through importWorld and land in the
   // dispatch queues, so a regression in the disk reader is caught here rather
   // than only in the in-memory restore path.
@@ -472,6 +479,48 @@ int main() {
         assert(entry.first.trigger == 42 + 3);
       }
     assert(duplicates == 2);
+  }
+  // Keep the saved ticks and isolate the two target cells from propagation.
+  {
+    const Pos overdue{-7, -16, -8};
+    const Pos future{-8, -16, -8};
+    const auto water = Blocks::WATER.defaultState();
+    world.rawSetBlock(overdue, water);
+    world.rawSetBlock(future, water);
+    for (auto direction : {Direction::Down, Direction::North, Direction::South,
+                           Direction::West})
+      world.rawSetBlock(future.relative(direction), Blocks::STONE.defaultState());
+
+    const auto survives = [&](Pos pos, std::int64_t trigger) {
+      return std::ranges::any_of(world.fluidTicks(), [&](const auto &entry) {
+        return entry.first.pos == pos && entry.first.trigger == trigger;
+      });
+    };
+    world.traceUpdates = true;
+    world.tick();
+    assert(world.gameTime() == 43);
+    assert(!survives(overdue, 33));
+    assert(std::ranges::any_of(world.log, [&](const auto &entry) {
+      return entry.pos == overdue && entry.kind == "fluid_tick_skipped" &&
+             entry.detail == "minecraft:flowing_lava";
+    }));
+    assert(world.getBlock(overdue) == water);
+    assert(survives(future, 47));
+    for (int tick = 44; tick <= 46; ++tick) {
+      world.tick();
+      assert(world.gameTime() == tick);
+      assert(survives(future, 47));
+    }
+
+    world.log.clear();
+    world.tick();
+    assert(world.gameTime() == 47);
+    assert(!survives(future, 47));
+    assert(survives(future, 49));
+    assert(std::ranges::any_of(world.log, [&](const auto &entry) {
+      return entry.pos == future && entry.kind == "fluid_tick" &&
+             entry.detail == "minecraft:water";
+    }));
   }
   LoadedWorld saved;
   saved.gameTime = 100;
@@ -526,10 +575,6 @@ int main() {
   assert((restoredOrder[0] == Pos{0, 82, 5}));
   assert((restoredOrder[1] == Pos{1, 82, 5}));
   assert((restoredOrder[5] == Pos{17, 82, 5}));
-  auto moving = world.pistonEntities.at({-16, 0, -16});
-  assert(moving->movedState.name() == "minecraft:stone" &&
-         moving->direction == Direction::East && moving->progress == 0.5f &&
-         moving->extending);
   for (bool raw : {false, true}) {
     auto l = lz4(c, raw);
     assert(l.size() < 4091);

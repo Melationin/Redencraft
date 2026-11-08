@@ -535,6 +535,12 @@ int runServer(int argc, char **argv) {
       for (const auto &[name, count] : imported.substitutedBlocks)
         std::cout << "SUBSTITUTED " << name << " x" << count
                   << " -> minecraft:smooth_stone" << std::endl;
+      for (const auto &[name, count] : imported.skippedUnsupportedBlockTicks)
+        std::cout << "SKIPPED unsupported_block_tick=" << name
+                  << " count=" << count << std::endl;
+      for (const auto &[name, count] : imported.skippedUnsupportedFluidTicks)
+        std::cout << "SKIPPED unsupported_fluid_tick=" << name
+                  << " count=" << count << std::endl;
       if (imported.skippedUnsupportedBlockEntities ||
           imported.skippedUnsupportedEntities)
         std::cout << "SKIPPED unsupported_block_entities="

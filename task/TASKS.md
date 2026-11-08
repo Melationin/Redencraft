@@ -159,4 +159,39 @@ F-5 已验收（`任务通过`），实现提交 `f4f1b2c` → `1e11490` → `eb
 - CTest：**20/20 通过**。
 - 证据口径：**源码对照（含已 clone 的 Litematica 上游源码）+ C++ 回归测试**，未跑真实 26.1 服务端差分，不声称原版等价。
 
+### 返工复审（`7b862f2`）
+
+- **已解决｜投影字段、真实磁盘解析和整数边界。** `PendingFluidTicks` 已读实际的 `Fluid` 字段并保留 `SubTick`，Anvil 夹具已在真实 `.mca` 中包含两族队列、负延迟和重复项。两族的触发时间按 Java `long` 回绕，优先级按原版边界夹取。
+- **阻塞｜两条用例仍停在队列快照，未验证真实派发。** `tests/storage_tests.cpp:444–475` 在真实 `.mca` 读入后检查 `fluidTicks()` 就结束；因此恢复后的流体刻若在错误的刻被消费、逾期刻未推进，仍会通过。请从该读盘世界调用 `World::tick()`，断言逾期刻首个世界刻消费，未来刻在到期前保留、到期才消费，至少一个精确身份匹配的液体可观测到派发。`tests/litematic_tests.cpp:135–165` 的两个投影刻延迟和优先级都不同，只能检查字段保留。请补两条同延迟、同优先级、列表顺序与 `SubTick` 顺序相反的条目，断言实际派发次序，确保是 `SubTick` 决定的。
+- **应修｜宽松模式的跳过统计还没接到服务端输出。** `src/litematic.cpp:272,305` 已记名计数，实际 `--schematic` 导入路径 `src/net/server_main.cpp:535–543` 仍只输出替换方块及跳过实体的统计。请把两族被跳过的刻名和计数接入启动诊断，便于用户发现投影工作量发生变化。
+
+独立 MSVC Release 构建通过，CTest **20/20 通过**（8.36 s）。本轮未跑真实服务端差分或性能对跑。当前交回 coder 补齐实际派发断言和启动诊断。
+
+### Reviewer 授权修复（工作区未提交）
+
+- 本次按用户授权修复 coder 的未提交改动。`storage` 原失败是新派发用例推进了读盘世界，旧用例随后查找初始的移动活塞。活塞初态检查已移到第一次世界刻前。保留并收紧读盘派发用例，验证逾期 `flowing_lava` 在首刻按精确身份跳过、水源刻在第 47 刻实际派发、同格流水刻仍待第 49 刻。
+- 投影用例新增同延迟、同优先级的实际派发断言，验证 `SubTick` 逆转原列表顺序。协议服务端的宽松导入启动日志现输出被跳过的方块刻、流体刻名称与数量。
+- MSVC Release 构建通过，CTest **20/20 通过**（8.35 s）。用单刻本地服务端启动检查，确认宽松导入输出两族跳过计数。本轮未运行真实 26.1 服务端差分或性能对跑。
+- 按用户要求保留工作区改动，等待后续提交与交接。
+
+### 承接 reviewer 授权修复（提交记录）
+
+reviewer 在用户授权下直接修了工作区（未提交），交由 coder 走后续流程。本轮记录与验证如下。
+
+**reviewer 修的三处**
+
+1. `tests/storage_tests.cpp`：我原来的派发用例推进了读盘世界，导致**后面**那条既有的移动活塞初态断言（`world.pistonEntities.at(...)`）在活塞实体已被移除后抛异常——这正是我先前定位不到的 `0xC0000409`。reviewer 把活塞初态检查移到第一次世界刻之前，并收紧了派发用例：逾期 `flowing_lava` 在首刻按精确身份**跳过**（`fluid_tick_skipped`）、水源刻到第 47 刻才真正派发（`fluid_tick`）、同格流水刻仍待第 49 刻。
+2. `tests/litematic_tests.cpp`：新增同延迟、同优先级、列表顺序与 `SubTick` 顺序相反的两条刻，断言实际派发次序由 `SubTick` 决定。
+3. `src/net/server_main.cpp`：宽松导入的启动诊断补上两族被跳过的刻名与计数。
+
+**coder 本轮的验证**
+
+- MSVC Release + jemalloc 构建通过；CTest **20/20 通过**。
+- 变异独立确认新断言有效：把 `importWorld` 改成忽略 `subTick`、一律用 `-N..-1` 后，先被 `orders.at(...) == 7` 抓到；再临时关掉字段断言只留派发次序断言，仍被 `dispatched == {secondInFile, firstInFile}` 抓到，证明次序断言可独立成立。变异后均已恢复。
+- 真实投影启动冒烟：`--schematic` + `--allow-unsupported` + `--ticks 1` 跑 `无沟无车双倍速世吞…32x81x33.litematic`，退出码 0，输出 `SCHEMATIC regions=10 blocks=2873 …`、`SUBSTITUTED minecraft:repeating_command_block x1`、`SKIPPED unsupported_block_entities=1`。该投影的 `PendingFluidTicks` 为空，本次冒烟未触发新增的两行 tick 诊断；那两行的正确性由 `tests/litematic_tests.cpp` 的宽松导入用例与代码路径保证。
+
+**明确没有做的事**：未跑真实 26.1 服务端差分；`fluid_ticks` 保存侧（写回）仍不在范围。
+
+**结论**：reviewer 指出的 2 条阻塞 + 1 条应修均已解决并有回归断言。
+
 任务已完成

@@ -83,7 +83,7 @@ static Tag fixture() {
                         {"Block", string("minecraft:sand")},
                         {"Time", integer(2)},
                         {"Priority", integer(-1)}})})},
-       // PendingFluidTicks shares the record shape, but Block names a Fluid.
+       // PendingFluidTicks stores the registry ID under Fluid, not Block.
        {"PendingFluidTicks",
         list({compound({{"x", integer(2)},
                         {"y", integer(0)},
@@ -163,6 +163,38 @@ int main(int argc, char **argv) {
       orders[entry.first.pos] = entry.first.order;
     assert(orders.at({-18, 64, 0}) == 7);
     assert(orders.at({-17, 64, 0}) == 3);
+  }
+  {
+    // Hold delay and priority equal so only SubTick can reverse list order.
+    auto tied = doc;
+    auto &ticks = tied.compound.at("Regions").compound.at("one")
+                      .compound.at("PendingFluidTicks").list;
+    for (auto &tick : ticks) {
+      tick.compound.at("Fluid") = string("minecraft:water");
+      tick.compound.at("Time") = integer(1);
+      tick.compound.at("Priority") = integer(0);
+    }
+    World ordered;
+    importWorld(loadLitematic(tied).world, ordered);
+    const Pos firstInFile{-18, 64, 0};
+    const Pos secondInFile{-17, 64, 0};
+    for (const auto pos : {firstInFile, secondInFile}) {
+      ordered.rawSetBlock(pos, Blocks::WATER.defaultState());
+      for (auto direction : {Direction::Down, Direction::North, Direction::South,
+                             Direction::West, Direction::East}) {
+        const auto neighbor = pos.relative(direction);
+        if (neighbor != firstInFile && neighbor != secondInFile)
+          ordered.rawSetBlock(neighbor, Blocks::STONE.defaultState());
+      }
+    }
+    ordered.traceUpdates = true;
+    ordered.tick();
+    std::vector<Pos> dispatched;
+    for (const auto &entry : ordered.log)
+      if (entry.kind == "fluid_tick")
+        dispatched.push_back(entry.pos);
+    assert((dispatched == std::vector<Pos>{secondInFile, firstInFile}));
+    assert(ordered.fluidTickCount() == 0);
   }
   // Snapshot import preserves unsupported/suspended physics until a saved tick
   // or a real world update reaches it; no onPlace callbacks are invented.
