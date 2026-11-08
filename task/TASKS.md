@@ -100,7 +100,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 独立 MSVC Release 构建通过，CTest **19/19 通过**（8.70 s）。未运行真实 26.1 服务端差分。本轮先退回修正 F-4 的行为与覆盖缺口，未重跑世吞基准。
 
-审查结束
+交接纠错（AGENTS.md §3.5）。本处旧 `审查结束` 转为正文，以最后一个有效状态为准。
 
 ### 返工（回应复审：3 阻塞 + 1 应修）
 
@@ -125,5 +125,40 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 **一处如实记录未覆盖**：把 `computeSpreadDelay` 挪回 `setBlock` **之后**在当前注册表下**行为等价**——没有任何方块的 `setBlock` 回调会消费世界 RNG，所以顺序差异不可观测。我是按源码顺序实现的，但不声称该顺序有回归保护；等有回调消费 RNG 的方块（或 F-7 的真实差分）才可能暴露。
 
 **返工后的构建与测试**：全量构建通过，**CTest 19/19 通过**（12.90 s）。
+
+### 返工复审（`454a5b8`）
+
+- **已解决｜反应写入与时序。** `src/fluid_flow.cpp:368–379,573–595,610–625` 已接通向下遇水成石，按上、北、南、西、东顺序检查接触，以当前岩浆态选产物，并在写入前算延迟。玄武岩声明三种轴、默认 `y`，回归验证了实际产物。
+- **阻塞｜M-02 的反向高度阈值与验收判据 4 仍未测试。** `tests/fluid_params_tests.cpp:116–129` 的 `replacementRules` 仅调用 `fluidSpreadDelay`，即使替换判定失效也会通过。`tests/fluid_params_tests.cpp:293–318` 覆盖岩浆落到源水/流水及空气，未覆盖水落到浅/深岩浆。建议通过实际 `fluidSpread` 或显式计划刻断言：水向下接触 `lava[level=5]`（高度 3/9）保留岩浆，接触 `lava[level=4]`（4/9）可替换；再断言侧向岩浆无法替换水。按 `LavaFluid.java:168–170`、`WaterFluid.java` 的替换规则验收。
+- **验收口径。** 随机行为对照 26.1 的触发条件、合法延迟、分布和可观察时序，两端使用各自的 RNG 序列。原版性能对照与 C++ 历史回归分开，记录在 `docs/fluid-testing.md` §7.2；需在共同夹具的行为和工作量核对后计时。
+
+独立 Release 构建通过，CTest **19/19 通过**（8.32 s）。本次未跑可比的原版服务端性能或行为差分，余下的替换边界用例交回 coder 补齐。
+
+任务进行中
+
+### 返工二（回应复审：1 阻塞）
+
+**阻塞 — canBeReplacedWith 零覆盖，验收判据 4 判了等于没判。** 属实且是我自己的问题：`replacementRules` 的注释写着「uses the water *tag* on both sides」，函数体却只断言 `fluidSpreadDelay == 5`，全文件根本没调用过 `canBeReplacedWith`。注释声称的和实际测的不是一回事，这正是本项目反复强调要避免的。
+
+已重写 `replacementRules`，全部走实际 `fluidSpread`：
+
+- 水在 `lava[level=5]`（amount 3，高度 3/9）上方 → 目标仍是岩浆；
+- 水在 `lava[level=4]`（amount 4，高度 4/9 = `0.44444445f` 的最近浮点）上方 → 目标被替换成水；
+- 岩浆向东侧的水扩散 → 水保留（水自身的规则要求 `direction == DOWN`）；
+- 岩浆向下落到水 → 变石头（同时覆盖水标签判定的正方向）。
+
+**变异验证**：
+
+| 变异 | 结果 |
+|---|---|
+| 岩浆阈值改成 `>= 1.0f` | `water above lava[4] replaces it with water, got lava` |
+| 水规则去掉 `direction == DOWN` | `lava cannot replace water sideways, got lava` |
+| 水规则方向无关且极性写反 | `a downward water-tagged target is replaceable (turns to stone)` |
+
+三条都被拒绝。恢复后 `git diff src/` 为空。
+
+**关于「验收口径」**：本轮证据仍只到**源码对照 + C++ 回归**。原版差分与性能对照按 `docs/fluid-testing.md` §7.2（reviewer 本轮新增，原版 10% 复测线、C++ 历史基线 5%）留待 F-7，本轮不声称原版等价。
+
+**返工二之后的构建与测试**：全量构建通过，**CTest 19/19 通过**（12.07 s）。生产代码本轮未改动。
 
 任务已完成

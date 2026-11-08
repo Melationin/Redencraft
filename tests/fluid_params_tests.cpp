@@ -112,20 +112,60 @@ void sourceConversionSwitch() {
           "lava converts once the rule is enabled");
 }
 
-// L-03: canBeReplacedWith uses the water *tag* on both sides.
+// L-03: LavaFluid.canBeReplacedWith only yields to a WATER-tagged fluid once its
+// surface is at least 4/9 high, and WaterFluid only yields downward. These go
+// through fluidSpread so the whole replace-or-not path runs, not just the helper.
 void replacementRules() {
-  World world;
-  flatFloor(world);
-  const Pos pos{0, 64, 0};
-  world.rawSetBlock(pos, waterLevel(0));
+  const auto waterAbove = [](int lavaLevelValue) {
+    World world;
+    flatFloor(world);
+    const Pos above{0, 65, 0};
+    const Pos target{0, 64, 0};
+    world.rawSetBlock(above, waterLevel(0));
+    world.rawSetBlock(target, lavaLevel(lavaLevelValue));
+    fluidSpread(world, above, world.getBlock(above),
+                fluidStateOf(world.getBlock(above)));
+    return world.getBlock(target);
+  };
 
-  const FluidState water = fluidStateOf(world.getBlock(pos));
-  // Water yields downward to anything outside the water tag...
-  require(fluidSpreadDelay(world, pos, Fluids::water(), water, water) == 5,
-          "water re-schedules after 5 ticks");
-  // ...but not to another water fluid.
-  require(fluidSpreadDelay(world, pos, Fluids::flowingWater(), water, water) == 5,
-          "flowing water keeps the base delay");
+  // lava[level=5] decodes to amount 3, so its height is 3/9 < 0.44444445.
+  const BlockState low = waterAbove(5);
+  require(low.is(Blocks::LAVA),
+          "water above lava[5] leaves the lava alone, got " +
+              std::string(low.shortName()));
+  // lava[level=4] decodes to amount 4, so its height is 4/9 >= 0.44444445.
+  const BlockState high = waterAbove(4);
+  require(high.is(Blocks::WATER),
+          "water above lava[4] replaces it with water, got " +
+              std::string(high.shortName()));
+
+  // Sideways is water's rule, which only allows replacement downward, so lava
+  // spreading east into water must leave the water alone.
+  World side;
+  flatFloor(side);
+  const Pos lavaPos{0, 64, 0};
+  const Pos waterPos{1, 64, 0};
+  side.rawSetBlock(lavaPos, lavaLevel(0));
+  side.rawSetBlock(waterPos, waterLevel(0));
+  fluidSpread(side, lavaPos, side.getBlock(lavaPos),
+              fluidStateOf(side.getBlock(lavaPos)));
+  require(side.getBlock(waterPos).is(Blocks::WATER),
+          "lava cannot replace water sideways, got " +
+              std::string(side.getBlock(waterPos).shortName()));
+
+  // Downward lava still replaces water: that is LavaFluid.spreadTo's stone rule,
+  // covered by lavaFallsOntoWater. Directly assert the predicate's water-tag
+  // half: a downward target holding water is replaceable.
+  World down;
+  flatFloor(down);
+  const Pos above{0, 65, 0};
+  const Pos target{0, 64, 0};
+  down.rawSetBlock(above, lavaLevel(0));
+  down.rawSetBlock(target, waterLevel(0));
+  fluidSpread(down, above, down.getBlock(above),
+              fluidStateOf(down.getBlock(above)));
+  require(down.getBlock(target).is(Blocks::STONE),
+          "a downward water-tagged target is replaceable (turns to stone)");
 }
 
 // M-01: lava's spread delay is multiplied by 4 when the surface rises without
