@@ -8,6 +8,88 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## L-1 光照数据与线程交接（coder）
+
+**范围**：只实现真实光照底座：天空光/方块光双 `DataLayer` 表示、26.1 方块光学元数据、主线程提交与每世界单写者后台执行器的所有权/代际/读写快照交接、现有区块加载与方块变更的 opt-in 挂钩。实现 16³ 光层、光 section 数=`block sections+2`、不可变发布与批处理。实际增减光传播、形状合面、协议光照、Anvil 光照读写和性能门槛分别留到后续任务；生产默认仍不使用占位亮度冒充已照明。
+
+**追加范围**：按用户追加要求同时实现 26.1 `Heightmap`/`Heightmap.Types` 基础，包括六种类型 id/key/usage、final chunk 的四张 live map、SimpleBitStorage 位宽/打包、`primeHeightmaps`、逐列 `update`、World 的 `setBlock` 更新和导入后重算；不改协议高度图编码。
+
+**Java 依据**：上一级只读 `DataLayer.java`、`LayerLightSectionStorage.java`、`LevelLightEngine.java:161–173`、`LightEngine.java:42–69`、`LevelChunk.java:284–315`、`ThreadedLevelLightEngine.java:26–65,185–216`，以及 `BlockBehaviour.BlockStateBase` 的 emission/dampening/useShape/canOcclude 初始化。高度图依据 `Heightmap.java`、`ChunkStatus.FINAL_HEIGHTMAPS`、`ChunkAccess.getHeight/setHeightmap/primeHeightmaps` 和 `LevelChunk.java:299–302`。主线程只提交区段状态、方块状态和区块生命周期；后台每个世界单写者按批次执行 PRE_UPDATE→传播→POST_UPDATE；正常 tick 不等待任务，不在主线程扫描区段或逐格调度。
+
+**验收判据**：
+
+1. 光层可区分缺席、均匀、非均匀；天空/方块光类型分开；nibble 索引严格 `y<<8|z<<4|x`，2048 bytes；min light section=min block section−1，总数=block sections+2。覆盖负坐标、上下边界、0/15 满层、混合层和不可变快照。
+2. 光学元数据含 emission、dampening、canOcclude、useShapeForLightOcclusion；未知状态必须显式 unsupported，不根据名称猜。优先从官方 26.1 JAR/已解包 libraries 生成独立资产/清单，至少覆盖当前注册状态且不覆盖 `assets/protocol775`。热路径只读预构建元数据，不做字符串/形状扫描。
+3. `hasDifferentLightProperties`：同状态 false；emission 或 dampening 不同必须重算；useShape 任一侧为 true 时重算；canOcclude 差异单独判定。空 section 状态转换拥有独立任务/代际语义。
+4. 单写者后台线程只接收独立拥有或不可变的初始快照、变更、索引和光学注册表；绝不借用活 `World`/palette/mutable registry。主线程提交不等待、不为每格建任务；合批/容量/积压/关闭/失效需有可观察结果，不静默丢弃。区块 load/unload/reload 用代际拒绝过期结果。发布回调只暴露完整不可变快照。
+5. 挂钩保持现有 tick/callback/packet 顺序；本轮不接协议或实际传播。opt-in 路径有真实线程测试；默认生产光照标 TODO。文档明确“未传播/未接协议/未写回存档”。
+6. 最终候选 MSVC Release+jemalloc 完整构建、唯一一轮完整 CTest；本机回环协议测试用 `require_escalated` 和工作区 `TMP/TEMP`。保存基线 HEAD、工作负载哈希、原始 bench/core 与最终日志/hash；不以 L-1 声明传播正确或 <10% 性能门槛通过。
+
+**基线**：HEAD `00c15ea`；`build-l1-baseline/` 保存 Release+jemalloc 配置、workload SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`、原始 benchmark/core 和三次 1000 tick 输出。
+
+**计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`tests/light_tests.cpp`、`include/redstone/heightmap.hpp`、`src/heightmap.cpp`、`tests/heightmap_tests.cpp`、`src/engine.cpp`/`include/redstone/engine.hpp` 的必要 opt-in 挂钩、CMake、`docs/light-engine.md`、必要的兼容性边界文档、光学生成/校验工具与资产、`task/TASKS.md`。不改 `PLAN.md`。
+
+### 实际做了什么（实现提交 `cde93ce`）
+
+**光照数据层**
+
+- 新增 `include/redstone/light.hpp` / `src/light.cpp`。`LightLayerSnapshot` 精确区分 `Missing`、`Uniform`、`Mixed`；mixed 每层恰为 2048 bytes，索引为 `y << 8 | z << 4 | x`，偶数为低 nibble、奇数为高 nibble。天空光与方块光由独立 `LightLayer::Block`/`LightLayer::Sky` 访问。
+- `LightChunkInput` 校验光 section 从 `minBlockSectionY - 1` 开始、数量为 `blockSectionCount + 2` 且连续。测试覆盖负 section、上下边界、全 0/全 15、混合层、packed round-trip 和不可变读者；世界默认高度 384 时两层各自保持单独的完整数据。
+- 光学比较与 `LightEngine.hasDifferentLightProperties` 对齐：同状态 false；emission/dampening 差异或任一 `useShapeForLightOcclusion` true 时 true；`canOcclude` 保持独立；section 空/非空转换由独立函数判定。未知元数据按保守重查处理，不当成无变化。
+
+**官方 26.1 光学元数据**
+
+新增独立资产 `assets/light26_1/`、离线探针 `validation/vanilla26_1/LightMetadataProbe.java`、生成脚本和 CTest 校验器，未改写 `assets/protocol775`。探针从未修改官方 `server.jar` 导出当前注册名单的 68 个方块、2366 个官方状态。
+
+- 官方 JAR SHA-1：`3872a7f07a1a595e651aef8b058dfc2bb3772f46`。
+- 已解包 classes JAR SHA-256：`a7fed6f7d88379349e35ae0c6e9881d4484605132f6f620376a3868eea6cce52`。
+- `block_names.txt` SHA-256：`b0ceda3e4553f115550f3d09f525139ad95256afdf77a2f62712ff2e36b5c950`。
+- `block_light.tsv` SHA-256：`d2e60ad07a59b1ec0a1f2550c3127ee5f937a2f3b85183f9db145522bb8fac49`。
+- `manifest.json` SHA-256：`74a020c934a1d2755473783754a3989c2598113d3ffcee8c2a97c5627b6f7b32`。
+- 生成表 `src/light_metadata.inc` SHA-256：`fa52b4a99dd50ffa8f7bbaa0bf6b74b5e9ca05f537aed9db5049d8f844ec35c8`。
+
+`Block` 注册时按完整状态键安装预构建 `BlockLightProperties`，热路径只按 state variant 读取，不查名称或扫描形状。官方导出中没有的 extension/后注册状态显式 `supported=false`，不按名称猜值。方向 face mask 字段已保留，但 L-1 不派生 shape 面，留给 L-2a。
+
+**单写者后台交接**
+
+- `LightService` 为每个启用世界创建真实 worker；主线程只提交独立拥有的 chunk 快照、section 空态和合批方块变化，不把活 `World`、palette 或 mutable registry 交给 worker。
+- load/unload/reload 使用每区块单调代际。旧代结果在 `drainPublished()` 丢弃并计入 `stalePublications`；发布 callback 在主线程执行，只收到 `shared_ptr<const LightChunkSnapshot>`。
+- 默认队列 4096、每批量 1000 命令、每批最多 4096 个 block change；连续变更按区块合并。拒绝返回 false/0 并计入 `Stats::rejected`，关闭排空队列后 join，worker 错误可观察，不提供静默成功路径。
+- `World::enableLighting()`/`disableLighting()` 和 load/unload/setBlock 挂钩均为 opt-in；生产默认不创建 worker。`World::~World` 先关闭光照服务再销毁 chunk 存储。主 tick 不等待 worker。
+- `light` 测试使用真实线程覆盖主线程提交与发布、旧代失效、队列/积压、合批、关闭排空、不悬垂回调，以及 `World` 的启用/方块变化/卸载/重载接线。
+
+**26.1 高度图**
+
+新增 `include/redstone/heightmap.hpp` / `src/heightmap.cpp` 和 `heightmap_tests.cpp`：
+
+- 六种 `Heightmap.Types` 的 id、序列化键和 Usage 精确分开；final chunk 创建 `WORLD_SURFACE`、`OCEAN_FLOOR`、`MOTION_BLOCKING`、`MOTION_BLOCKING_NO_LEAVES`。Java `EnumSet` 按枚举序迭代，因此容器初始化顺序与 `ChunkStatus.FINAL_HEIGHTMAPS` 的实际迭代顺序一致。
+- 每列 `ceil(log2(height + 1))` 位；384 高世界为 9 bits、256 列、37 个 `uint64_t`，按 `SimpleBitStorage` 的 little-endian 字段打包。测试覆盖 raw round-trip、长度不匹配重算、负坐标和上下边界。
+- `prime` 从最高非空 section 顶向 minY 扫描；`update` 保留 Java 的 `localY <= firstAvailable - 2` 短路、抬升和删除顶块后的向下重扫。`LevelChunk.setBlockState` 的四表调用顺序保持 `MOTION_BLOCKING`、`MOTION_BLOCKING_NO_LEAVES`、`OCEAN_FLOOR`、`WORLD_SURFACE`。
+- 正常 `World::setBlock` 在方块写入后实时更新，`rawSetBlock` 不更新；`importWorld` 完成 raw block 导入后统一 prime。协议仍使用既有区块编码时计算的高度图，没有切到 live map。
+- 当前注册表没有 `LeavesBlock`。no-leaves 谓词对现有已注册状态与 motion-blocking 相同；未支持导入状态不按名称猜成叶子，保持 `TODO(tree-blocks)`。
+
+**构建、测试与证据**
+
+最终候选使用 MSVC 19.51、NMake、Release、jemalloc 完整构建通过；`TMP/TEMP` 指向工作区 `.tmp/`。最终候选只运行一轮完整 CTest：**26/26 通过，24.37 s**，包含新增 `light_metadata_asset`、`heightmap`、`light`，以及本机 localhost 的 `protocol_socket`、`protocol_backpressure` 和全部既有黄金/聚焦测试。
+
+- 构建日志 `build-f7-nmake/build-l1-acceptance-final-4.log`，SHA-256 `fbd0e3d5659e22badc40eccefae86e7ad132d8706a862cf30e73d7e7d196ae32`。
+- CTest 日志 `build-f7-nmake/ctest-l1-acceptance-final-4.log`，SHA-256 `c5da748769df3db7b9c35dc606d6b96b7211862a2fc42e34db7a61f2f4a5e96d`。
+- 复验命令在同一候选上为：`cmake --build build-f7-nmake --config Release`，然后 `ctest --test-dir build-f7-nmake -C Release --output-on-failure`；VC 环境用 `VsDevCmd.bat -arch=x64 -host_arch=x64` 初始化。reviewer 不重复 CTest，采用上述单轮结果。
+
+**基线与性能边界**
+
+基线 HEAD 为 `00c15ea0fa7ea275248ec240d1314e64159f6e8c`；工作区 `build-l1-baseline/` 保存配置、原始 baseline core/benchmark、workload 和六份运行日志。`SUMMARY.txt` SHA-256 `bf21771ee746f3bc1d026df04f13ba25414d54503db715b5a5ba41b182efa4b8`，其清单 `HASHES.sha256` SHA-256 `0cff3f69e6ff424369e4371c3730bd477a1d0e784c284724c48f83c20582abef`。workload SHA-256 为 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。
+
+同一投影的 1000 tick 诊断中，L-1 前三次 mean 为 `3.061/3.452/4.323 ms`、p95 为 `6.586/7.668/11.068 ms`；候选三次 mean 为 `4.783/4.959/4.895 ms`、p95 为 `14.406/16.422/14.080 ms`，终态计数相同。这些只是未启用传播的固定场景诊断，**不是 L-1 或原版性能验收，也不能证明主线程额外 CPU/平均刻墙钟 <10%**。L-4 才在真实传播与发布接入后按相同阶段边界复测。
+
+**明确没有做**
+
+没有实现天空光/方块光增量和减量传播、`LightEngine` 保留队列、区段/邻居约束或精确 face occlusion（L-2a/L-2b）；没有把光照接入协议或发送真实亮度（L-3）；没有读写 Anvil `SkyLight`/`BlockLight`/`isLightOn`；没有把 live heightmap 切换进协议；没有实现 26.1 世界生成或 `_WG` 高度图流程。snapshot 持续标记 `propagationComplete=false`、`protocolReady=false`，生产默认光照路径仍未启用。没有修改 `PLAN.md`、客户端或流体更新顺序，也没有领取 L-2a。
+
+`task/TASKS.md` 的实现交接记录随后单独提交；本轮没有纳入 `.tmp/`、`build-f7-nmake-build3.log`、`build-f7-nmake-cleanbuild.log`、`build-l1-configure.log`、`scripts/wait-tasks.ps1`、`task/F7-FLUID-PERF-HANDOFF.md`、`validation/vanilla26_1/fluid-cpp-states.json` 等既有无关文件。
+
+---
+
 ## M0-2 交接与定位文档校正（coder）
 
 **范围**：只校正文档。更新 `docs/compatibility.md` 的当前实现边界、路线链接和命令口径；重构 `docs/handover.md` 的当前状态与历史快照分区；修正 `docs/protocol775.md` 中流体现已运行、光照仍占位的状态；按 F-7 复审把 `docs/fluid-acceptance.md` 的原始日志 SHA-256 尾位补为 `9`，保留未验证项并链接 F-9a/F-9b。复核 `AGENTS.md` 的唯一末行状态与交接位置，已对齐则不改。现状 `PLAN.md` 的 F-9a/F-9b、光照拆分是 reviewer 已审核内容，本轮将其纳入文档对齐提交；除纠正断链外不改验收口径。不写代码、不领取 L-1。
@@ -657,5 +739,9 @@ MSVC 19.51 Release + jemalloc 构建通过；coder 的 CTest 在允许本机回�
 ### F-8 审查结论（`4ee4ad6`）
 
 **通过。** `src/fluid.cpp:118–149` 由内部函数局部静态值拥有五种流体；初始化无相互调用，访问仍返回具体成员地址，缓存和 `FluidRef` 析构不解引用。 `tests/fluid_tests.cpp:215` 断言不同身份、名称映射、默认空回退及线程局部缓存使用相同单例。变更没有触及更新链和协议。采用 coder 的 MSVC Release + jemalloc 构建和 **23/23 CTest**（21.93 s），没有重复运行。这里的证据是源码和 C++ 回归，没有新增真实原版差分。流体功能阶段已收尾；补证沿用 F-9a/F-9b。释放 M0-2。
+
+### M0-2 审查结论（`b95e7f8`）
+
+**通过。** 提交只含路线图与文档；`docs/handover.md` 区分历史段和当前边界，`docs/compatibility.md` 明确 26.1 World Clocks、`advance_time` 和持久化待做，`docs/protocol775.md` 同时反映流体已运行和光照仍占位。F-7 原始日志 SHA-256 与实测一致，后续证据归 F-9a/F-9b。光照拆分及 <10% 世吞验收口径已纳入 `PLAN.md`。文档路径/锚点检查通过，无生产改动，沿用 F-8 的 23/23 CTest。释放 L-1。
 
 任务已完成
