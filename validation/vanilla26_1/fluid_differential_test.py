@@ -16,7 +16,7 @@ def read_probe(text):
     records = []
     for line in text.splitlines():
         line = line.strip()
-        if line:
+        if line.startswith("{"):
             records.append(ast.literal_eval(line))
     return records
 

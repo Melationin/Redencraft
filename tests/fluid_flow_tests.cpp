@@ -5,6 +5,7 @@
 #include "redstone/fluid.hpp"
 #include "redstone/fluid_flow.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -699,25 +700,20 @@ void stableChannelSettles() {
             "a settled channel keeps every watched cell state");
 }
 
-// A-05's looping class: an intentionally self-retriggering input is NOT a steady
-// state, so it is compared over a defined window instead of being called broken
-// because the queue stays busy.
-void selfRetriggeringLoopIsBounded() {
+// A-05's looping class: an intentionally repeated external input is NOT a
+// steady state, so it is compared over a defined window instead of being called
+// broken because the queue stays busy. It is NOT self-oscillation: the test
+// itself re-arms the source every tick.
+void externallyRearmedInputIsBounded() {
   World loop;
   for (int x = -1; x <= 1; ++x)
     for (int z = -1; z <= 1; ++z)
       loop.loadChunk(x, z);
-  // A genuinely self-retriggering input: an observer facing a redstone block.
-  // The neighbour change below starts the pulse train, and the observer's own
-  // pulse is what re-arms it, so the window must contain real events.
-  // The observer watches its facing side; a change there starts a pulse. Feeding
-  // the pulse back into the watched cell is what makes the train self-sustaining.
-  // A sustained, externally re-armed input. Two observers facing each other do
-  // NOT self-oscillate in this simulator (probing showed an observer never
-  // re-activates from another observer's block change), so instead the loop is
-  // driven the way A-05 describes one: an input that keeps issuing work for the
-  // whole window. Probing also showed the work is emitted synchronously by
-  // setBlock, not by tick(), so the window measures the write phase.
+  // A sustained, externally re-armed input: every window toggles the source
+  // between air and water. A genuine two-observer oscillator is a separate
+  // fixture below; this one measures repeated external pressure, as A-05 asks.
+  // Probing also showed the work is emitted synchronously by setBlock, not by
+  // tick(), so the window measures the write phase.
   for (int y = 60; y <= 66; ++y)
     for (int x = -1; x <= 1; ++x)
       for (int z = -1; z <= 1; ++z)
@@ -751,12 +747,12 @@ void selfRetriggeringLoopIsBounded() {
     loop.tick();
     perTick.push_back(static_cast<std::size_t>(windowEvents));
   }
-  require(!perTick.empty(), "the loop produced ticks to measure");
-  // The defining property of a LOOP: after warm-up it still produces events at a
-  // variety of positions and kinds, so a fixture that only sees one edge cannot
-  // satisfy this.
+  require(!perTick.empty(), "the repeated input produced ticks to measure");
+  // The defining property of this pressure fixture: after warm-up it still
+  // produces events at a variety of positions and kinds, so a fixture that only
+  // sees one edge cannot satisfy this.
   require(!eventKeys.empty(),
-          "the loop still emits events after warm-up");
+          "the repeated input still emits events after warm-up");
   std::set<Pos> eventPositions;
   std::set<std::string> eventKinds;
   for (const auto &[pos, kind] : eventKeys) {
@@ -764,10 +760,10 @@ void selfRetriggeringLoopIsBounded() {
     eventKinds.insert(kind);
   }
   require(eventPositions.size() >= 2,
-          "the loop touches at least two positions, got " +
+          "the repeated input touches at least two positions, got " +
               std::to_string(eventPositions.size()));
   require(eventKinds.size() >= 2,
-          "the loop produces at least two event kinds, got " +
+          "the repeated input produces at least two event kinds, got " +
               std::to_string(eventKinds.size()));
   // Two independent post-warm-up windows must BOTH be active: a single
   // transient edge would light up one window at most.
@@ -801,6 +797,54 @@ void selfRetriggeringLoopIsBounded() {
   require(loop.scheduledTickCount() <= 64,
           "the loop's pending block ticks stay bounded, got " +
               std::to_string(loop.scheduledTickCount()));
+}
+
+// Two observers facing each other, placed through the same normal state writes
+// the vanilla fixture uses. The real 26.1 server (validation/vanilla26_1/
+// observer_validation.py) shows this fixture oscillating for the whole window:
+// placement itself schedules the initial shape updates, so the pair does not
+// settle after one pulse. This is a separate fixture from the externally
+// re-armed pressure case above; both are bounded-window comparisons.
+void facingObserversOscillate() {
+  World world;
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z)
+      world.loadChunk(x, z);
+  const auto observerEast =
+      Blocks::OBSERVER.defaultState().with("facing", "east").with(
+          "powered", "false");
+  const auto observerWest =
+      Blocks::OBSERVER.defaultState().with("facing", "west").with(
+          "powered", "false");
+  // Normal placement (not rawSetBlock): the shape updates caused by placing one
+  // observer next to the other are part of the vanilla fixture.
+  require(world.setBlock({0, 64, 0}, observerEast), "place the east observer");
+  require(world.setBlock({1, 64, 0}, observerWest), "place the west observer");
+  world.traceUpdates = true;
+  std::vector<bool> aOn, bOn;
+  for (int i = 0; i < 20; ++i) {
+    world.tick();
+    aOn.push_back(world.getBlock({0, 64, 0}).get("powered", "false") == "true");
+    bOn.push_back(world.getBlock({1, 64, 0}).get("powered", "false") == "true");
+    require(world.scheduledTickCount() <= 8,
+            "the observer pair's pending block ticks stay bounded");
+  }
+  const auto transitions = [](const std::vector<bool> &values) {
+    int count = 0;
+    bool previous = false;
+    for (bool on : values) {
+      if (on != previous) ++count;
+      previous = on;
+    }
+    return count;
+  };
+  const int aEdges = transitions(aOn), bEdges = transitions(bOn);
+  // The vanilla window has both observers changing repeatedly. A one-pulse
+  // latch would fail here, as would a run that only moved one of the two.
+  require(aEdges >= 4 && bEdges >= 4,
+          "both observers keep changing, got A=" + std::to_string(aEdges) +
+              " B=" + std::to_string(bEdges) + " edges");
+  require(aOn != bOn, "the observers do not latch into the same value");
 }
 
 // F-7: wet vs dry redstone. The same fixture is built twice, once with the
@@ -914,6 +958,105 @@ void wetAndDryRedstoneDiffer() {
           "the wet fixture keeps its water source");
   require(!dry.getBlock({0, 63, 1}).is(Blocks::WATER),
           "the dry fixture has no water there");
+}
+
+// F-7 / A-05: a wet fixture whose due fluid cell is the piston's own moved
+// block. The waterlogged rail is placed at (1,64,0), a real support change makes
+// BaseRailBlock.updateShape schedule its water tick (due on tick 5), and the
+// piston moves that exact cell on tick 1. The dry side repeats every input with
+// waterlogged=false. The due tick therefore shares both the cell and the time
+// window with the piston instead of running beside it.
+void wetAndDryPistonSharedCell() {
+  struct Trace {
+    std::vector<std::vector<std::pair<std::string, Pos>>> perTick;
+    std::vector<std::pair<std::string, Pos>> fluid;
+    bool startsWet = false;
+  };
+  const auto build = [](World &world, bool wet) {
+    for (int x = -1; x <= 1; ++x)
+      for (int z = -1; z <= 1; ++z)
+        world.loadChunk(x, z);
+    for (int x = -2; x <= 3; ++x)
+      world.rawSetBlock({x, 63, 0}, Blocks::SMOOTH_STONE.defaultState());
+    world.rawSetBlock({0, 64, 0},
+                      Blocks::PISTON.defaultState().with("facing", "east"));
+    const auto rail =
+        Blocks::RAIL.defaultState().with("waterlogged", wet ? "true" : "false");
+    world.rawSetBlock({1, 64, 0}, rail);
+    world.rawSetBlock({0, 64, -1}, Blocks::REDSTONE_BLOCK.defaultState());
+    world.traceUpdates = true;
+    // BaseRailBlock.updateShape: a waterlogged rail schedules its water tick
+    // whenever it receives a shape update. Changing the support from stone to
+    // glass is a real neighbour change and leaves the rail supported.
+    require(world.setBlock({1, 63, 0}, Blocks::GLASS.defaultState()),
+            "change the rail support");
+    // Arm the piston for the next tick, after the water tick was queued.
+    pistonNeighborChanged(world, {0, 64, 0}, world.getBlock({0, 64, 0}));
+  };
+
+  World dry;
+  World wet;
+  build(dry, false);
+  build(wet, true);
+  require(wet.fluidTickCount() > 0,
+          "the wet moved cell has a real due fluid tick");
+  require(dry.fluidTickCount() == 0, "the dry moved cell has no fluid tick");
+
+  const auto run = [](World &world) {
+    Trace trace;
+    trace.startsWet = waterloggedOf(world.getBlock({1, 64, 0}));
+    for (int tick = 1; tick <= 8; ++tick) {
+      world.log.clear();
+      world.tick();
+      std::vector<std::pair<std::string, Pos>> piston;
+      for (const auto &entry : world.log) {
+        if (entry.kind == "fluid_tick" || entry.kind == "fluid_tick_skipped")
+          trace.fluid.emplace_back(entry.kind, entry.pos);
+        if (entry.kind == "piston_set_block" ||
+            entry.kind == "piston_entity_remove" ||
+            entry.kind == "piston_self_notify")
+          piston.emplace_back(entry.kind, entry.pos);
+      }
+      trace.perTick.push_back(std::move(piston));
+    }
+    return trace;
+  };
+  const Trace dryTrace = run(dry);
+  const Trace wetTrace = run(wet);
+  require(wetTrace.startsWet && !dryTrace.startsWet,
+          "the wet fixture really starts with water in the moved cell");
+  // The piston work is identical tick by tick; the fluid due tick is the only
+  // added work, and it arrives on the tick its rail asked for.
+  require(dryTrace.perTick == wetTrace.perTick,
+          "the piston trace is identical in the wet and dry worlds");
+  int pistonWork = 0;
+  for (const auto &tick : wetTrace.perTick)
+    pistonWork += static_cast<int>(tick.size());
+  require(pistonWork > 0, "the piston really worked on the shared cell");
+  // The wet side's due tick is on the moved cell, after the piston moved it.
+  bool wetDueOnMovedCell = false;
+  for (const auto &[kind, pos] : wetTrace.fluid) {
+    if (pos != Pos{1, 64, 0}) continue;
+    wetDueOnMovedCell = true;
+    require(kind == "fluid_tick_skipped",
+            "the due tick reads the moved cell and does not run fluid logic");
+  }
+  require(wetDueOnMovedCell,
+          "the wet due tick is on the cell the piston moved");
+  require(dryTrace.fluid.empty(),
+          "the dry side dispatches no fluid tick at all");
+  // The rail was moved to (2,64,0), and the normal completion path clears its
+  // waterlogged bit; the source cell now holds the piston head.
+  require(wet.getBlock({1, 64, 0}).is(Blocks::PISTON_HEAD),
+          "the shared source cell is the extended piston head");
+  require(wet.getBlock({2, 64, 0}).is(Blocks::RAIL),
+          "the wet moved host reached the destination");
+  require(dry.getBlock({2, 64, 0}).is(Blocks::RAIL),
+          "the dry moved host reached the destination too");
+  require(!waterloggedOf(wet.getBlock({2, 64, 0})),
+          "normal piston completion clears the moved host's water");
+  require(!waterloggedOf(dry.getBlock({2, 64, 0})),
+          "the dry host is dry at the destination");
 }
 
 // W-06's missing positive case, at the shape level. The registry has no pair of
@@ -1060,9 +1203,11 @@ int main() {
     complementaryShapesSealTogether();
     sharedFaceDependencyGap();
     stableChannelSettles();
-    selfRetriggeringLoopIsBounded();
+    externallyRearmedInputIsBounded();
+    facingObserversOscillate();
     junctionAndCutWaterfallSettle();
     wetAndDryRedstoneDiffer();
+    wetAndDryPistonSharedCell();
     forceSolidGate();
     movingPistonShapeDependsOnProgress();
     tickReschedulesNonSource();

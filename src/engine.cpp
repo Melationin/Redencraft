@@ -1078,6 +1078,8 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
   }
   if (!getBlock(p).sameBlock(state))
     return false;
+  if (insideFluidTick_)
+    ++fluidWrites_;
   if (!(flags & 512)) {
     // LevelChunk.java:339-341: every write that survives the type check runs
     // onPlace, whatever the old block was. LiquidBlock.onPlace has no
@@ -1651,6 +1653,7 @@ void World::tickBlockAt(Pos pos, const Block *expected) {
 // versa. Flow behaviour itself is task F-3; until then a due tick only records
 // itself so the queue can be exercised.
 void World::tickFluidAt(Pos pos, const Fluid *expected) {
+  ++fluidDispatches_;
   if (!expected)
     return;
   const auto state = getBlock(pos);
@@ -1678,7 +1681,14 @@ void World::tickFluidAt(Pos pos, const Fluid *expected) {
   if (!fluidState.is(*expected))
     return;
   // FlowingFluid.tick: recompute a non-source level, then spread.
-  fluidTick(*this, pos, state, fluidState);
+  insideFluidTick_ = true;
+  try {
+    fluidTick(*this, pos, state, fluidState);
+  } catch (...) {
+    insideFluidTick_ = false;
+    throw;
+  }
+  insideFluidTick_ = false;
 }
 // TODO: note particles, sound, game events, skull sounds and event broadcasts.
 void World::runEvents() {

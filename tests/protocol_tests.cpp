@@ -444,13 +444,14 @@ void sessionOutputLimit(const ProtocolData &data) {
 // the counts must follow the real contents. This runs off the frozen snapshot
 // API, so it also proves encoding does not read the live world afterwards.
 
-// F-7 / N-02: fluid writes produced by a scheduled fluid tick, plus a piston
-// block event in the same tick. Ordinary changes are coalesced into one section
-// update at the broadcast phase and read the latest state; a change that lands
-// after the piston event is deferred to the next broadcast.
+// F-7 / N-02: a real World::tick run with the production observer wiring:
+// scheduled fluid writes are collected before the broadcast phase, the piston's
+// successful block event is sent through Session::blockEvent in the event phase,
+// and the event's own writes are dirty for the NEXT broadcast. Every emitted
+// frame is decoded in send order, so a phase swap cannot pass.
 static void fluidTicksAndPistonSameTick(const ProtocolData &data) {
   World world;
-  for (int x = -1; x <= 1; ++x)
+  for (int x = -1; x <= 2; ++x)
     for (int z = -1; z <= 1; ++z)
       world.loadChunk(x, z);
   ServerOptions options;
@@ -459,162 +460,293 @@ static void fluidTicksAndPistonSameTick(const ProtocolData &data) {
   join(session, data);
   drain(session, true);
 
-  // A source plus an open run on a stone floor: the scheduled fluid tick writes
-  // several cells. Seal the sides so the water stays in the observed channel.
-  const Pos source{0, 64, 0};
-  for (int x = -1; x <= 4; ++x) {
+  // The main fixture is a sealed 5x5 basin around (2,64,2). Its first source
+  // tick writes the four open neighbours, so the broadcast must use
+  // section_blocks_update. Keep every observed cell in chunk (0,0) so the
+  // session really owns it.
+  for (int x = 0; x <= 4; ++x)
+    for (int z = 0; z <= 4; ++z)
+      world.rawSetBlock({x, 63, z}, defaultState("smooth_stone"));
+  for (int x = 0; x <= 4; ++x)
+    for (int z = 0; z <= 4; ++z)
+      if (x == 0 || x == 4 || z == 0 || z == 4) {
+        world.rawSetBlock({x, 64, z}, defaultState("smooth_stone"));
+        world.rawSetBlock({x, 65, z}, defaultState("smooth_stone"));
+      }
+  // A separate one-cell falling write: the source is horizontally sealed and
+  // drops into the section below, which must be a plain block_update.
+  for (int x = 11; x <= 13; ++x)
+    for (int z = -1; z <= 1; ++z) {
+      world.rawSetBlock({x, 63, z}, defaultState("smooth_stone"));
+      world.rawSetBlock({x, 64, z}, defaultState("smooth_stone"));
+      world.rawSetBlock({x, 65, z}, defaultState("smooth_stone"));
+    }
+  world.rawSetBlock({12, 62, 0}, defaultState("smooth_stone"));
+  world.rawSetBlock({12, 63, 0}, Blocks::AIR.defaultState());
+  world.rawSetBlock({12, 64, 0}, Blocks::AIR.defaultState());
+  // Piston: base (6,64,0) facing east, pushable block (7,64,0), destination
+  // (8,64,0). Raw placement avoids firing on placement; it is armed below.
+  for (int x = 5; x <= 8; ++x)
     world.rawSetBlock({x, 63, 0}, defaultState("smooth_stone"));
-    world.rawSetBlock({x, 64, 0}, Blocks::AIR.defaultState());
-    world.rawSetBlock({x, 64, -1}, defaultState("smooth_stone"));
-    world.rawSetBlock({x, 64, 1}, defaultState("smooth_stone"));
-    world.rawSetBlock({x, 65, 0}, defaultState("smooth_stone"));
-  }
-  // Seal both ends so the only free cells are 1..3 inside the channel.
-  world.rawSetBlock({4, 64, 0}, defaultState("smooth_stone"));
-  world.rawSetBlock({-1, 64, 0}, defaultState("smooth_stone"));
-  // setBlock (not rawSetBlock) so onPlace queues the first tick, exactly like a
-  // real placement.
-  assert(world.setBlock(source, defaultState("water").with("level", "0")));
-  // A piston, placed so its block event lands on the SAME tick the first fluid
-  // tick is due. The source's onPlace scheduled tick 5, so the piston is armed
-  // four ticks from now to fire on tick 5 as well.
   world.rawSetBlock({6, 64, 0},
                     defaultState("piston").with("facing", "east"));
   world.rawSetBlock({7, 64, 0}, defaultState("smooth_stone"));
-  world.rawSetBlock({6, 64, -1}, defaultState("redstone_block"));
-  // Wire the SAME observers the production loop installs, so the test drives
-  // the real broadcast phases rather than merging by hand at the end.
-  //   write -> blockUpdate ; fluid ticks -> broadcast -> block events
-  // (src/engine.cpp:1725-1740, src/net/server_main.cpp:614-632).
-  struct BroadcastRecord {
+  world.rawSetBlock({5, 64, 0}, defaultState("redstone_block"));
+
+  // Place both water sources through setBlock so onPlace queues the first tick.
+  assert(world.setBlock({2, 64, 2},
+                        defaultState("water").with("level", "0")));
+  assert(world.setBlock({12, 64, 0},
+                        defaultState("water").with("level", "0")));
+
+  // Production wiring (src/net/server_main.cpp:663-681): every write feeds the
+  // session's dirty map, the broadcast phase flushes it, and a successful event
+  // is sent immediately inside runEvents.
+  const std::array<Pos, 13> watched{{
+      {2, 64, 2}, {3, 64, 2}, {1, 64, 2}, {2, 64, 3}, {2, 64, 1},
+      {14, 64, 0}, {12, 63, 0}, {6, 64, 0}, {7, 64, 0}, {8, 64, 0},
+      {6, 63, 0}, {7, 63, 0}, {8, 63, 0}}};
+  struct PacketRecord {
     int tick = 0;
-    std::int64_t gameTime = 0;
-    std::vector<Pos> fluidWrites;
+    std::string phase;
+    Bytes body;
   };
-  std::vector<BroadcastRecord> broadcasts;
-  std::vector<Pos> eventWrites;
+  std::vector<PacketRecord> packets;
+  std::map<int, std::map<Pos, BlockState>> liveAtBroadcast;
   std::vector<int> eventTicks;
   int tickIndex = 0;
+  const auto take = [&](int tick, std::string_view phase) {
+    for (auto &bytes : session.takeOutput()) {
+      auto body = popFrame(bytes);
+      assert(body && bytes.empty());
+      packets.push_back({tick, std::string(phase), std::move(*body)});
+    }
+  };
   world.blockUpdateObserver = [&](Pos pos, const BlockState &state, int) {
     session.blockUpdate(pos, state);
-    if (!broadcasts.empty() && broadcasts.back().tick == tickIndex)
-      broadcasts.back().fluidWrites.push_back(pos);
   };
-  world.blockEventObserver = [&](const BlockEvent &) {
+  world.blockEventObserver = [&](const BlockEvent &event) {
     eventTicks.push_back(tickIndex);
-    // A successful piston event reports its writes through the same observer,
-    // so anything after this point belongs to the NEXT broadcast phase.
+    // Exactly the production order: send the successful event, then let the
+    // event's own writes reach blockUpdateObserver for the next broadcast.
+    session.blockEvent(event);
+    take(tickIndex, "event");
   };
-  std::vector<Bytes> allPackets;
   world.blockUpdatesBroadcastObserver = [&] {
-    broadcasts.push_back({tickIndex, world.gameTime(), {}});
     session.flushBlockUpdates();
-    for (auto &bytes : session.takeOutput())
-      allPackets.push_back(std::move(bytes));
+    liveAtBroadcast[tickIndex].clear();
+    for (Pos p : watched)
+      liveAtBroadcast[tickIndex][p] = world.getBlock(p);
+    take(tickIndex, "broadcast");
   };
-  // Arm the piston to fire on the fluid tick's due tick (5).
+  // Warm-up ticks 1..4: the source tick is due on tick 5.
   for (int i = 0; i < 4; ++i) {
     tickIndex = i + 1;
     world.tick();
   }
+  // Same-tick repeated update of ONE wet host in the basin's section. The last
+  // write is the live state; the dirty map may contain the cell only once.
+  const auto wetHost = defaultState("cobblestone_wall").with("waterlogged", "true");
+  const auto dryHost = defaultState("cobblestone_wall");
+  world.rawSetBlock({14, 64, 0}, wetHost);
+  session.blockUpdate({14, 64, 0}, wetHost);
+  world.rawSetBlock({14, 64, 0}, dryHost);
+  session.blockUpdate({14, 64, 0}, dryHost);
+  world.rawSetBlock({14, 64, 0}, wetHost);
+  session.blockUpdate({14, 64, 0}, wetHost);
+  // Arm the piston to fire on the fluid tick's due tick (5).
   pistonNeighborChanged(world, {6, 64, 0}, world.getBlock({6, 64, 0}));
-  // Tick 5: the fluid tick is due and the piston event fires in the same tick.
   tickIndex = 5;
   world.tick();
-  for (int i = 5; i < 12; ++i) {
-    tickIndex = i + 1;
-    world.tick();
-  }
+  tickIndex = 6;
+  world.tick();
+  // One last production broadcast for anything the last tick left dirty.
+  session.flushBlockUpdates();
+  take(6, "final");
   world.blockUpdateObserver = nullptr;
   world.blockEventObserver = nullptr;
   world.blockUpdatesBroadcastObserver = nullptr;
-  // The piston event really fired, and on the fluid tick's due tick.
-  assert(!eventTicks.empty());
-  assert(eventTicks.front() == 5);
-  // Tick 5 must have broadcast fluid writes BEFORE the event, because the
-  // broadcast phase precedes runEvents (engine.cpp:1734-1740).
-  bool sawFluidBroadcastAt5 = false;
-  for (const auto &record : broadcasts)
-    if (record.tick == 5 && !record.fluidWrites.empty())
-      sawFluidBroadcastAt5 = true;
-  assert(sawFluidBroadcastAt5);
-  // One final broadcast for anything the last tick left dirty, using the same
-  // path the production loop takes.
-  session.flushBlockUpdates();
-  for (auto &bytes : session.takeOutput())
-    allPackets.push_back(std::move(bytes));
-  auto &packets = allPackets;
-  std::set<std::int64_t> sections;
-  int sectionUpdates = 0;
-  bool encodedWater = false;
-  int singleUpdates = 0;
-  int sectionY = 0;
-  std::map<Pos, BlockState> lastEncoded;
-  for (auto &bytes : packets) {
-    auto body = popFrame(bytes);
-    if (!body)
-      continue;
-    Reader in(*body);
-    const int packetId = in.varInt();
-    if (packetId == data.packet("play", "clientbound", "block_update")) {
-      // A section with a single change is sent as a plain block_update.
-      const Pos pos = in.position();
-      const auto decoded = data.registry.stateById(in.varInt());
-      lastEncoded[pos] = decoded;
-      if (decoded.is(Blocks::WATER)) encodedWater = true;
-      ++singleUpdates;
-      continue;
+
+  assert(!eventTicks.empty() && eventTicks.front() == 5);
+  const auto blockUpdateId =
+      data.packet("play", "clientbound", "block_update");
+  const auto sectionUpdateId =
+      data.packet("play", "clientbound", "section_blocks_update");
+  const auto blockEventId = data.packet("play", "clientbound", "block_event");
+
+  struct DecodedCell {
+    Pos pos;
+    BlockState state;
+  };
+  struct DecodedPacket {
+    int tick;
+    std::string phase;
+    int id;
+    std::vector<DecodedCell> cells; // block_update / section_blocks_update
+    bool isEvent = false;
+    Pos eventPos{};
+    int eventType = 0, eventData = 0, eventBlock = 0;
+  };
+  std::vector<DecodedPacket> decoded;
+  int sectionPacketsAt5 = 0, blockPacketsAt5 = 0;
+  std::size_t broadcastAt5 = 0, eventAt5 = 0;
+  for (auto &record : packets) {
+    Reader in(record.body);
+    DecodedPacket out{record.tick, record.phase, in.varInt()};
+    if (out.id == blockUpdateId) {
+      DecodedCell cell;
+      cell.pos = in.position();
+      cell.state = data.registry.stateById(in.varInt());
+      out.cells.push_back(cell);
+      assert(in.empty());
+      if (record.tick == 5 && record.phase == "broadcast") ++blockPacketsAt5;
+    } else if (out.id == sectionUpdateId) {
+      assert(in.remaining() >= 8);
+      const auto sectionPos = in.i64();
+      const auto signExtend = [](std::uint64_t value, int bits) {
+        const std::uint64_t mask = (std::uint64_t{1} << bits) - 1;
+        value &= mask;
+        return static_cast<std::int64_t>(
+            value & (std::uint64_t{1} << (bits - 1)) ? value | ~mask : value);
+      };
+      const auto s = static_cast<std::uint64_t>(sectionPos);
+      const int sectionX = static_cast<int>(signExtend(s >> 42, 22));
+      const int sectionY = static_cast<int>(signExtend(s, 20));
+      const int sectionZ = static_cast<int>(signExtend(s >> 20, 22));
+      const int count = in.varInt();
+      assert(count > 0);
+      for (int i = 0; i < count; ++i) {
+        const auto packed = in.varLong();
+        const int local = static_cast<int>(packed & 0xfff);
+        const int stateId = static_cast<int>(packed >> 12);
+        // Production packSectionLocal: x << 8 | z << 4 | y.
+        const int x = (local >> 8) & 15, z = (local >> 4) & 15, y = local & 15;
+        out.cells.push_back({{sectionX * 16 + x, sectionY * 16 + y,
+                              sectionZ * 16 + z},
+                             data.registry.stateById(stateId)});
+      }
+      assert(in.empty());
+      if (record.tick == 5 && record.phase == "broadcast") ++sectionPacketsAt5;
+    } else if (out.id == blockEventId) {
+      out.isEvent = true;
+      out.eventPos = in.position();
+      out.eventType = in.u8();
+      out.eventData = in.u8();
+      out.eventBlock = in.varInt();
+      assert(in.empty());
+    } else {
+      assert(in.empty());
     }
-    if (packetId != data.packet("play", "clientbound",
-                                "section_blocks_update"))
-      continue;
-    ++sectionUpdates;
-    const auto sectionPos = in.i64();
-    sections.insert(sectionPos);
-    // SectionPos.asLong is x << 42 | z << 20 | y (src/net/session.cpp:69), so
-    // the section Y is the low 20 bits, sign-extended.
-    sectionY = static_cast<int>(sectionPos & 0xfffff);
-    if (sectionY >= 0x80000)
-      sectionY -= 0x100000;
-    // Decode every encoded cell, keeping its coordinates: the packet must carry
-    // the state at the position it names, and the last value per cell wins.
-    const int count = in.varInt();
-    for (int i = 0; i < count; ++i) {
-      const auto packed = in.varLong();
-      const int local = static_cast<int>(packed & 0xfff);
-      const int stateId = static_cast<int>(packed >> 12);
-      const auto decoded = data.registry.stateById(stateId);
-      const int x = local & 15, z = (local >> 4) & 15, y = (local >> 8) & 15;
-      lastEncoded[{x, sectionY * 16 + y, z}] = decoded;
-      if (decoded.is(Blocks::WATER)) encodedWater = true;
+    decoded.push_back(std::move(out));
+  }
+
+  // Both packet forms must really occur in the same-tick broadcast. A test that
+  // only saw one of them would not pin the local position packing.
+  assert(sectionPacketsAt5 >= 1 && blockPacketsAt5 >= 1);
+  for (const auto &packet : decoded)
+    if (packet.tick == 5 && packet.phase == "broadcast")
+      ++broadcastAt5;
+  for (const auto &packet : decoded)
+    if (packet.tick == 5 && packet.phase == "event") {
+      assert(packet.id == blockEventId);
+      ++eventAt5;
+    }
+  assert(broadcastAt5 > 0 && eventAt5 == 1);
+  // The successful piston event frame is completely decoded: position, both
+  // payload bytes and the block registry id, with no trailing bytes.
+  const auto eventIt = std::find_if(decoded.begin(), decoded.end(),
+                                    [](const auto &p) {
+                                      return p.tick == 5 && p.phase == "event";
+                                    });
+  assert(eventIt != decoded.end());
+  assert(eventIt->isEvent && (eventIt->eventPos == Pos{6, 64, 0}));
+  assert(eventIt->eventType == 0 && eventIt->eventData == int(Direction::East));
+  assert(eventIt->eventBlock == data.blockIds.at("minecraft:piston"));
+  // In send order, every tick-5 broadcast frame precedes the event frame.
+  const auto firstBroadcast = std::find_if(decoded.begin(), decoded.end(),
+                                           [](const auto &p) {
+                                             return p.tick == 5 &&
+                                                    p.phase == "broadcast";
+                                           });
+  const auto firstEvent = std::find_if(decoded.begin(), decoded.end(),
+                                       [](const auto &p) {
+                                         return p.tick == 5 &&
+                                                p.phase == "event";
+                                       });
+  assert(firstBroadcast < firstEvent);
+
+  // Tick 5 carries the live fluid states, the repeatedly updated wet host once,
+  // and NO piston cell: those writes only exist after runEvents.
+  std::map<Pos, int> occurrencesAt5;
+  for (const auto &packet : decoded)
+    if (packet.tick == 5 && packet.phase == "broadcast")
+      for (const auto &cell : packet.cells) {
+        ++occurrencesAt5[cell.pos];
+        const auto live = liveAtBroadcast.at(5).find(cell.pos);
+        if (live != liveAtBroadcast.at(5).end())
+          assert(cell.state == live->second);
+      }
+  for (Pos p : {Pos{3, 64, 2}, Pos{1, 64, 2}, Pos{2, 64, 3},
+                Pos{2, 64, 1}})
+    assert(occurrencesAt5.count(p) == 1);
+  assert((occurrencesAt5[Pos{12, 63, 0}] == 1));
+  assert((occurrencesAt5[Pos{14, 64, 0}] == 1));
+  assert(liveAtBroadcast.at(5).at({14, 64, 0}) == wetHost);
+  for (Pos p : {Pos{6, 64, 0}, Pos{7, 64, 0}, Pos{8, 64, 0}})
+    assert(occurrencesAt5.count(p) == 0);
+
+  // The falling cell is a plain block_update at the exact position and state;
+  // the basin neighbours come through section_blocks_update at their positions.
+  bool sawSingle = false, sawSection = false;
+  for (const auto &packet : decoded) {
+    if (packet.tick != 5 || packet.phase != "broadcast") continue;
+    if (packet.id == blockUpdateId) {
+      assert(packet.cells.size() == 1);
+      assert((packet.cells[0].pos == Pos{12, 63, 0}));
+      assert(packet.cells[0].state ==
+             liveAtBroadcast.at(5).at({12, 63, 0}));
+      sawSingle = true;
+    } else if (packet.id == sectionUpdateId) {
+      std::set<std::uint16_t> locals;
+      for (const auto &cell : packet.cells) {
+        const std::uint16_t local = static_cast<std::uint16_t>(
+            ((cell.pos.x & 15) << 8) | ((cell.pos.z & 15) << 4) |
+            (cell.pos.y & 15));
+        assert(locals.insert(local).second); // no duplicate cell in a packet
+      }
+      sawSection = true;
     }
   }
-  // A zero-packet run must not pass: the fluid wrote cells, so at least one
-  // section update is required, and each visited section appears exactly once.
-  assert(sectionUpdates + singleUpdates >= 1);
-  assert(sectionUpdates == static_cast<int>(sections.size()));
-  (void)singleUpdates;
-  assert(encodedWater);
-  // The LAST packet naming a cell must carry that cell's current state: earlier
-  // packets may legitimately carry an intermediate value, which is exactly why
-  // the broadcast reads the live section instead of replaying write history.
-  // The channel cells are the ones this test owns end to end: their last
-  // encoded value must equal the live state. (The piston head lives in a
-  // different section and is retracted by its own event schedule, so it is
-  // covered by the ordering assertions above, not by this identity check.)
-  std::size_t checkedCells = 0;
-  for (const auto &[pos, encoded] : lastEncoded) {
-    if (pos.y != 64 || pos.z != 0 || pos.x < 0 || pos.x > 4)
-      continue;
-    assert(encoded == world.getBlock(pos));
-    ++checkedCells;
+  assert(sawSingle && sawSection);
+
+  // The event's writes reach the NEXT broadcast, with the exact live states at
+  // that broadcast: base extended, arm and destination moving pistons.
+  // The base is the event write the production update flags (67) mark for the
+  // client. The arm/destination moving_piston writes use flags 324, which do not
+  // set UPDATE_CLIENTS, so they are deliberately absent from this broadcast;
+  // their live states are still moving pistons, which is asserted below.
+  bool sawBaseAfterEvent = false;
+  for (const auto &packet : decoded) {
+    if (packet.tick != 6 || packet.phase != "broadcast") continue;
+    for (const auto &cell : packet.cells) {
+      const auto live = liveAtBroadcast.at(6).find(cell.pos);
+      if (live != liveAtBroadcast.at(6).end())
+        assert(cell.state == live->second);
+      if (cell.pos == Pos{6, 64, 0}) {
+        assert(cell.state.is(Blocks::PISTON));
+        assert(cell.state.get("extended", "false") == "true");
+        sawBaseAfterEvent = true;
+      }
+      assert((cell.pos != Pos{7, 64, 0}));
+      assert((cell.pos != Pos{8, 64, 0}));
+    }
   }
-  assert(checkedCells > 0);
-  // The fluid really moved: the water reached a downstream cell.
-  bool reached = false;
-  for (int x = 1; x <= 3; ++x)
-    if (world.getBlock({x, 64, 0}).is(Blocks::WATER)) reached = true;
-  assert(reached);
+  assert(sawBaseAfterEvent);
+  assert(world.getBlock({7, 64, 0}).is(Blocks::MOVING_PISTON));
+  assert(world.getBlock({8, 64, 0}).is(Blocks::MOVING_PISTON));
+  // The fluid really moved: four basin neighbours hold water after tick 5.
+  for (Pos p : {Pos{3, 64, 2}, Pos{1, 64, 2}, Pos{2, 64, 3}, Pos{2, 64, 1}})
+    assert(world.getBlock(p).is(Blocks::WATER));
 }
 
 // F-7 / N-04: a session that stops reading must not stall the core fluid queue,
@@ -711,56 +843,72 @@ static std::vector<int> readSectionPalette(Reader &r, int count, bool blocks) {
 }
 static void fluidSectionSnapshot(const ProtocolData &data) {
   World world;
-  world.loadChunk(0, 0);
+  // Negative chunk X/Z: both the chunk coordinate and every section coordinate
+  // are signed on the wire, so a positive-only fixture cannot catch a missing
+  // sign extension.
+  constexpr int chunkX = -1, chunkZ = -1;
+  constexpr int baseX = chunkX * 16, baseZ = chunkZ * 16;
+  world.loadChunk(chunkX, chunkZ);
   const auto water = defaultState("water").with("level", "0");
   const auto flowingLava = defaultState("lava").with("level", "3");
   const auto host = defaultState("cobblestone_wall").with("waterlogged", "true");
   const auto dry = defaultState("cobblestone_wall");
-  world.rawSetBlock({0, -64, 0}, water);
-  world.rawSetBlock({1, -64, 0}, flowingLava);
-  world.rawSetBlock({2, -64, 0}, host);
-  world.rawSetBlock({3, -64, 0}, dry);
+  // Section -4 (y=-64): four non-empty cells, three with fluid.
+  world.rawSetBlock({baseX, -64, baseZ}, water);
+  world.rawSetBlock({baseX + 1, -64, baseZ}, flowingLava);
+  world.rawSetBlock({baseX + 2, -64, baseZ}, host);
+  world.rawSetBlock({baseX + 3, -64, baseZ}, dry);
+  // Section -3 (y=-48): three non-empty cells, two with fluid. This section is
+  // 16 blocks above the first, so it must be encoded and counted separately.
+  world.rawSetBlock({baseX, -48, baseZ}, water);
+  world.rawSetBlock({baseX + 1, -48, baseZ}, host);
+  world.rawSetBlock({baseX + 2, -48, baseZ}, dry);
   // Freeze the snapshot, then keep mutating the live world.
-  const auto snapshot = world.snapshotChunk(0, 0);
-  world.rawSetBlock({0, -64, 0}, Blocks::AIR.defaultState());
-  world.rawSetBlock({1, -64, 0}, Blocks::AIR.defaultState());
-  assert(world.getBlock({0, -64, 0}).isAir());
+  const auto snapshot = world.snapshotChunk(chunkX, chunkZ);
+  world.rawSetBlock({baseX, -64, baseZ}, Blocks::AIR.defaultState());
+  world.rawSetBlock({baseX + 1, -64, baseZ}, Blocks::AIR.defaultState());
+  world.rawSetBlock({baseX, -48, baseZ}, Blocks::AIR.defaultState());
+  assert(world.getBlock({baseX, -64, baseZ}).isAir());
   // The snapshot kept the fluid states from before the mutation.
-  // Sections are ordered from minY upward; y=-64 is the first one. The snapshot
-  // stores internal BlockState ids; the protocol id is produced when the
-  // section is encoded, so compare against the state object itself.
-  assert(!snapshot.sections.empty());
-  const auto &section = snapshot.sections.at(0);
-  std::vector<BlockState> keptStates;
-  for (auto id : section.palette)
-    keptStates.push_back(BlockState::fromId(id));
-  std::set<int> palette(section.palette.begin(), section.palette.end());
+  // Sections are ordered from minY upward; y=-64 is the first one, y=-48 the
+  // second. The snapshot stores internal BlockState ids; the protocol id is
+  // produced when the section is encoded, so compare against the state object.
+  assert(snapshot.sections.size() >= 2);
   struct Expected {
     BlockState state;
     const char *what;
   };
-  for (const auto &[state, what] :
-       {Expected{water, "plain water"},
-        Expected{flowingLava, "flowing lava"},
-        Expected{host, "waterlogged host"},
-        Expected{dry, "dry host"}}) {
-    const bool kept = std::find(keptStates.begin(), keptStates.end(), state) !=
-                      keptStates.end();
-    std::string message = std::string("the snapshot palette keeps ") + what;
-    assert(kept && message.c_str());
-    // And every kept state must have an official protocol id to encode to.
-    (void)data.registry.stateId(state);
+  for (std::size_t si = 0; si < 2; ++si) {
+    std::vector<BlockState> keptStates;
+    for (auto id : snapshot.sections.at(si).palette)
+      keptStates.push_back(BlockState::fromId(id));
+    for (const auto &[state, what] :
+         {Expected{water, "plain water"},
+          Expected{flowingLava, "flowing lava"},
+          Expected{host, "waterlogged host"},
+          Expected{dry, "dry host"}}) {
+      if (si == 1 && state == flowingLava) continue; // only in section -4
+      const bool kept = std::find(keptStates.begin(), keptStates.end(), state) !=
+                        keptStates.end();
+      std::string message = std::string("snapshot section ") +
+                            std::to_string(si) + " keeps " + what;
+      assert(kept && message.c_str());
+      // And every kept state must have an official protocol id to encode to.
+      (void)data.registry.stateId(state);
+    }
   }
-  // The live world lost the two fluids, so the states are genuinely distinct.
-  assert(!world.getBlock({0, -64, 0}).is(Blocks::WATER));
-  assert(!world.getBlock({1, -64, 0}).is(Blocks::LAVA));
+  // The live world lost the fluids, so the encoded states are genuinely frozen.
+  assert(!world.getBlock({baseX, -64, baseZ}).is(Blocks::WATER));
+  assert(!world.getBlock({baseX + 1, -64, baseZ}).is(Blocks::LAVA));
+  assert(!world.getBlock({baseX, -48, baseZ}).is(Blocks::WATER));
 
   // Encode the frozen snapshot into a real chunk packet and decode it back.
   // Reading the internal palette alone would not prove the wire path carries
-  // the fluid states, their counts, or the section framing.
-  auto bytes = encodeChunk(snapshot, 0, 0, data.registry);
+  // the fluid states, their per-section counts, the signed coordinates, or the
+  // section framing.
+  auto bytes = encodeChunk(snapshot, chunkX, chunkZ, data.registry);
   Reader r(bytes);
-  assert(r.i32() == 0 && r.i32() == 0);
+  assert(r.i32() == chunkX && r.i32() == chunkZ);
   // Heightmaps come first (3 packed arrays of 256 entries), then the section
   // blob; encodeChunk writes them in that order (src/net/wire.cpp:546-554).
   assert(r.varInt() == 3);
@@ -772,58 +920,60 @@ static void fluidSectionSnapshot(const ProtocolData &data) {
   }
   Reader sections(r.raw(r.varInt()));
   int decodedSections = 0;
-  for (int y = snapshot.minY; y < snapshot.maxY; y += 16) {
+  const std::map<Pos, BlockState> expectedAtMinus64{
+      {{baseX, -64, baseZ}, water},
+      {{baseX + 1, -64, baseZ}, flowingLava},
+      {{baseX + 2, -64, baseZ}, host},
+      {{baseX + 3, -64, baseZ}, dry}};
+  const std::map<Pos, BlockState> expectedAtMinus48{
+      {{baseX, -48, baseZ}, water},
+      {{baseX + 1, -48, baseZ}, host},
+      {{baseX + 2, -48, baseZ}, dry}};
+  const int sectionCount = (snapshot.maxY - snapshot.minY) / 16;
+  for (int si = 0; si < sectionCount; ++si) {
+    const int y = snapshot.minY + si * 16;
     const int nonEmptyCount = sections.i16();
     const int fluidCount = sections.i16();
     const auto states = readSectionPalette(sections, 4096, true);
     (void)readSectionPalette(sections, 64, false);
-    if (nonEmptyCount == 0) {
-      assert(fluidCount == 0);
-      continue;
-    }
-    ++decodedSections;
     // Count what the decoded cells actually contain and compare with the
-    // header: non-empty excludes air, fluid counts the WATER/LAVA tag members.
-    // Only the first section holds anything, so its numbers are exact.
+    // header: non-empty excludes air, fluid uses the official per-state flag
+    // (it also covers waterlogged hosts). Re-deriving it from block names would
+    // silently disagree with the wire counter.
     int decodedNonEmpty = 0, decodedFluid = 0;
     for (int i = 0; i < 4096; ++i) {
       const auto decoded = data.registry.stateById(states[i]);
       if (!decoded.isAir())
         ++decodedNonEmpty;
-      // fluid in the header is the official per-state flag from the export,
-      // which also covers waterlogged hosts; re-deriving it from block names
-      // would silently disagree with the wire counter.
       if (data.registry.stateFlags(states[i]).fluid)
         ++decodedFluid;
     }
     assert(decodedNonEmpty == nonEmptyCount);
-    // The waterlogged host also reports a fluid state, so the fluid count
-    // covers it: two liquid blocks plus the waterlogged wall.
     assert(decodedFluid == fluidCount);
-    assert(nonEmptyCount == 4);
-    assert(fluidCount == 3);
+    if (y == -64) {
+      assert(nonEmptyCount == 4 && fluidCount == 3);
+      ++decodedSections;
+    } else if (y == -48) {
+      assert(nonEmptyCount == 3 && fluidCount == 2);
+      ++decodedSections;
+    } else {
+      assert(nonEmptyCount == 0 && fluidCount == 0);
+    }
     // Every cell must decode to the official id of the state the SNAPSHOT held.
-    // The section is the first of the chunk (y == minY), and the four fluid cells
-    // live at world y = minY, so the expected values come from the frozen
-    // snapshot, not from the (already mutated) live world.
-    std::map<int, BlockState> byId;
-    for (auto id : section.palette)
-      byId.emplace(id, BlockState::fromId(id));
-    const std::array<BlockState, 4> fluidCells{water, flowingLava, host, dry};
     for (int i = 0; i < 4096; ++i) {
       const int x = i & 15, z = (i >> 4) & 15, dy = (i >> 8) & 15;
+      const Pos pos{baseX + x, y + dy, baseZ + z};
       const auto decoded = data.registry.stateById(states[i]);
-      if (y + dy != snapshot.minY || z != 0 || x > 3) {
+      const auto *expected = y == -64   ? &expectedAtMinus64
+                             : y == -48 ? &expectedAtMinus48
+                                        : nullptr;
+      if (!expected || expected->find(pos) == expected->end())
         assert(decoded.isAir());
-        continue;
-      }
-      assert(decoded == fluidCells[x]);
+      else
+        assert(decoded == expected->at(pos));
     }
-    // The four fluid/host states must be reachable through the decoded palette.
-    std::set<int> ids(states.begin(), states.end());
-    for (int id : ids) (void)data.registry.stateById(id);
   }
-  assert(decodedSections == 1);
+  assert(decodedSections == 2);
 }
 void placementRules(const ProtocolData &data) {
   World world;

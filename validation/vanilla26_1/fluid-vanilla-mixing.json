@@ -1,0 +1,16 @@
+{
+ "format": "m01-cells-v1; cell order: north water, lava cell, south air, west wall, east wall, floor, ceiling",
+ "jar_sha1": "3872a7f07a1a595e651aef8b058dfc2bb3772f46",
+ "m01-source": {
+  "T0": ["water0", "air", "air", "stone", "stone", "stone", "stone"],
+  "T1": ["water0", "obsidian", "air", "stone", "stone", "stone", "stone"],
+  "T2": ["water0", "obsidian", "air", "stone", "stone", "stone", "stone"],
+  "T10": ["water0", "obsidian", "air", "stone", "stone", "stone", "stone"]
+ },
+ "m01-flowing": {
+  "T0": ["water0", "air", "air", "stone", "stone", "stone", "stone"],
+  "T1": ["water0", "cobblestone", "air", "stone", "stone", "stone", "stone"],
+  "T2": ["water0", "cobblestone", "air", "stone", "stone", "stone", "stone"],
+  "T10": ["water0", "cobblestone", "air", "stone", "stone", "stone", "stone"]
+ }
+}

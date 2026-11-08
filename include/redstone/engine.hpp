@@ -277,6 +277,11 @@ public:
   std::int64_t gameTime() const { return time_; }
   void setGameTime(std::int64_t value) { time_ = value; }
   bool isHandlingTick() const { return handlingTick_; }
+  // Lightweight work counters for benchmarks. Dispatches include stale/empty
+  // entries that were still handed to tickFluidAt; writes are successful
+  // setBlock calls made from inside a dispatched fluid tick.
+  std::uint64_t fluidDispatchCount() const { return fluidDispatches_; }
+  std::uint64_t fluidWriteCount() const { return fluidWrites_; }
   std::vector<LogEntry> log;
   std::function<void(World &)> blockEntityTicker;
   // Observational network hooks at Level.sendBlockUpdated / doBlockEvent.
@@ -491,6 +496,8 @@ private:
   void broadcastEntityRemovals();
   int minY_, maxY_, maxUpdates_, updateCount_ = 0;
   bool handlingTick_ = false;
+  bool insideFluidTick_ = false;
+  std::uint64_t fluidDispatches_ = 0, fluidWrites_ = 0;
   std::int64_t time_ = 0;
   // Level.nextSubTickCount: monotonic long counter, never persisted.
   std::int64_t subTickCount_ = 0;

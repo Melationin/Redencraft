@@ -145,7 +145,7 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/validation/protocol775/backpressure_test.py"
         --server "$<TARGET_FILE:redstone_vanilla_server>"
         --assets "${CMAKE_CURRENT_SOURCE_DIR}/assets/protocol775")
-      set_tests_properties(protocol_backpressure PROPERTIES TIMEOUT 40)
+      set_tests_properties(protocol_backpressure PROPERTIES TIMEOUT 60)
     endif()
     add_test(NAME safesave_order_parity COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/validation/safesave_order/compare.py"
@@ -158,6 +158,12 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid_differential_test.py"
       --probe "$<TARGET_FILE:fluid_differential_probe>"
       --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid-vanilla-states.json")
+    # M-01 real-server differential: the golden holds the transition and stable
+    # endpoints produced by fluid_mixing_validation.py on official 26.1.
+    add_test(NAME fluid_mixing_differential COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid_mixing_differential_test.py"
+      --probe "$<TARGET_FILE:fluid_differential_probe>"
+      --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid-vanilla-mixing.json")
   endif()
   foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")

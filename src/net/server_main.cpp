@@ -394,7 +394,7 @@ int runServer(int argc, char **argv) {
                           schematicPath;
     int port = 25565, maxTicks = 0, forceMargin = 2;
     bool explicitSpawn = false, explicitOffset = false;
-    bool consoleEnabled = true;
+    bool consoleEnabled = true, fluidFixture = false;
     LitematicOptions schematicOptions;
     ServerOptions options;
     for (int i = 1; i < argc; ++i) {
@@ -405,7 +405,7 @@ int runServer(int argc, char **argv) {
                "directory] [--world directory | --schematic file]\n"
                "  [--chunk x,z ...] [--ticks N] [--spawn x,y,z]\n"
                "  [--offset x,y,z] [--view-distance 3] [--force-margin 2]\n"
-               "  [--allow-unsupported] [--no-console]\n"
+               "  [--allow-unsupported] [--fluid-basin] [--no-console]\n"
                "Local offline protocol 775 creative editor. Fixed loaded "
                "simulation region; no saving. Litematic: anvils become "
                "obsidian, signs are omitted. Tick time sent to chat.\n";
@@ -419,6 +419,13 @@ int runServer(int argc, char **argv) {
         // Preview only: unimplemented schematic blocks become smooth_stone and
         // are reported on stdout as SUBSTITUTED lines.
         schematicOptions.substituteUnsupported = true;
+        continue;
+      }
+      if (arg == "--fluid-basin") {
+        // Validation fixture for validation/protocol775/backpressure_test.py:
+        // a set of sealed 1x1 shafts whose falling water touches several Y
+        // sections. It is not a world generator and does not run in normal use.
+        fluidFixture = true;
         continue;
       }
       if (i + 1 >= argc)
@@ -574,6 +581,48 @@ int runServer(int argc, char **argv) {
           for (int z = 0; z < 16; ++z)
             world.rawSetBlock({cx * 16 + x, 64, cz * 16 + z},
                               defaultState("smooth_stone"));
+      }
+      if (fluidFixture) {
+        std::size_t columns = 0;
+        for (auto [cx, cz] : options.chunks) {
+          const int bx = cx * 16 + 8, bz = cz * 16 + 8;
+          // A sealed vertical shaft: floor at y=48, air from y=49..63, and a
+          // stone ring around each shaft cell. Falling water therefore writes
+          // into the lower section (y=48..63) as well as the source section.
+          world.rawSetBlock({bx, 48, bz}, defaultState("smooth_stone"));
+          for (int y = 49; y <= 63; ++y) {
+            world.rawSetBlock({bx, y, bz}, Blocks::AIR.defaultState());
+            for (int dx = -1; dx <= 1; ++dx)
+              for (int dz = -1; dz <= 1; ++dz)
+                if (dx || dz)
+                  world.rawSetBlock({bx + dx, y, bz + dz},
+                                    defaultState("smooth_stone"));
+          }
+          for (int dx = -1; dx <= 1; ++dx)
+            for (int dz = -1; dz <= 1; ++dz)
+              if (dx || dz)
+                world.rawSetBlock({bx + dx, 64, bz + dz},
+                                  defaultState("smooth_stone"));
+          world.rawSetBlock({bx, 64, bz}, Blocks::AIR.defaultState());
+          // A small surface pool in the same chunk writes within the source
+          // section (y=64..79), while the shaft writes into y=48..63.
+          for (int dx = -1; dx <= 1; ++dx)
+            for (int dz = -1; dz <= 1; ++dz) {
+              world.rawSetBlock({bx + 4 + dx, 63, bz + 4 + dz},
+                                defaultState("smooth_stone"));
+              world.rawSetBlock({bx + 4 + dx, 64, bz + 4 + dz},
+                                Blocks::AIR.defaultState());
+            }
+          // Normal placement path: onPlace queues the first fluid tick.
+          world.setBlock({bx, 64, bz},
+                         defaultState("water").with("level", "0"));
+          world.setBlock({bx + 4, 64, bz + 4},
+                         defaultState("water").with("level", "0"));
+          ++columns;
+        }
+        std::cout << "FLUID_FIXTURE columns=" << columns
+                  << " y=48..64 source_section=4 lower_section=3"
+                  << std::endl;
       }
     }
     std::sort(options.chunks.begin(), options.chunks.end());
