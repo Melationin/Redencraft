@@ -8,6 +8,64 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## F-7 本轮验收收尾 · 原版逐刻差分（coder）
+
+**范围**：继续 F-7，只补可复验的真实 26.1 服务端差分证据。新增 **W-02 竖井下落**与 **M-03 魂土/蓝冰玄武岩（含不成立的负例）**夹具；两项均用同一输入、相对刻、逐格完整方块状态比较 C++ 与原版。再从 H-01/H-02 或 P-01/P-02 中选择一个本仓库已实现且能精确构造的切片，明确区分真实放置/容器/计划刻队列与 `setblock` 快照；无法证明原版的检查不冒充差分。最后逐条梳理仍缺的 F-7 验收，重点覆盖 N-04、agent 队列/进度、同存档重启、原版同阶段/世吞，并写明依赖与下一动作。不改光照，不领取 F-8，不改 `PLAN.md`。
+
+**源码依据**：26.1 `WaterFluid.getTickDelay`、`FlowingFluid.spread/getNewLiquid/canHoldSpecificFluid`、`LiquidBlock.shouldSpreadLiquid`（方向表及遍历顺序）、`SimpleWaterloggedBlock.canPlaceLiquid/placeLiquid`、`BaseRailBlock.updateShape/getFluidState`；玄武岩使用 `Blocks.BASALT` 的 `RotatedPillarBlock` 默认 `axis=y` 状态。具体夹具与断言按 `docs/fluid-testing.md` 的 W-02、M-03、H-01/H-02、P-01/P-02。
+
+**验收判据**：W-02 和 M-03 的官方服务端运行必须使用工作区内独立运行目录、本地隔离世界、官方 SHA-1 JAR 与 localhost；保存原始日志、manifest、候选黄金和唯一键的逐刻逐格状态，C++ 探针使用同一相对刻/格键并逐值比较。M-03 既要有生成玄武岩的正例，也要有缺条件/方向变化后不生成的负例。H/P 切片必须记录实际触发的生产路径及其边界。若无差分，明确列在验收表的 D 列和依赖中。只有差分查实 C++ 行为错误时才做最小 `src/` 修复，并补实际行为测试。最终 MSVC Release + jemalloc 完整构建；候选只跑一轮完整 CTest（本机回环按授权以 `require_escalated` 和工作区 `TMP/TEMP` 执行）。
+
+**计划文件**：`validation/vanilla26_1/` 下夹具、runner、黄金与差分测试，必要的聚焦探针/CTest 接入，`docs/fluid-acceptance.md` 与 `task/TASKS.md`；仅在差分证明需要时修改最小 `src/` 及行为测试。
+
+### 实际做了什么（实现提交 `7a03592`）
+
+本轮实现只新增验证代码、黄金和文档，没有修改 `src/`、`include/` 或客户端。实现提交内容：`CMakeLists.txt`、`tests/fluid_fixture_probe.cpp`、`validation/vanilla26_1/fluid_relative_validation.py`、`validation/vanilla26_1/fluid_fixture_differential_test.py`、`validation/vanilla26_1/fluid-relative-golden.json`、`docs/fluid-acceptance.md`。
+
+**W-02 竖井下落（D）**：官方服务端在冻结世界、无随机刻的独立目录中构造 y=83 源水、y=80 东侧出口的封闭竖井。T0 在放水前记录，T1…T20 每刻用精确 `gameTime` 推进，并采样 12 个格。原版与 C++ 共同观察到 T5/T10/T15 分别到 y=82/81/80 的 `water[level=8]`，T20 东侧出口为 `water[level=1]`；252/252 格一致。
+
+**M-03 玄武岩（D）**：同一相对刻夹具包含 6 组：魂土+西侧蓝冰、缺魂土、缺蓝冰、蓝冰位于下方、蓝冰在水之前的检查方向、水在蓝冰之前的检查方向。T0/T1 各采样 24 格。原版与 C++ 共同得到：前三组负例保持 `lava[level=0]`；正常组生成 `basalt[axis=y]`；方向交换后分别生成玄武岩和 `obsidian`。48/48 格一致。转换由冻结世界中的 `setblock lava` 触发 `LiquidBlock.onPlace` 同步规则，未冒充桶或随机刻路径。
+
+**H-01 真实容器切片（D，部分 H-01）**：用冻结世界 `setblock` 建造石壳和干铁轨，把两侧水源通过真实 `setblock` 放入。没有命令直接写含水铁轨。两水源自己的 T5 流体刻使目标格候选成为 exact water source，随后 `SimpleWaterloggedBlock.placeLiquid` 在 T5 把铁轨变为 `waterlogged=true`；单水源只产生 `flowing_water`，干铁轨始终被拒绝。T0…T10 × 9 格共 99/99 一致。该 runner 只观察方块状态，未用 agent 直接证明 `LevelTicks` 的条目/high priority，也未覆盖玩家物品、桶、H-02 破坏或掉落。
+
+**运行命令与原始证据**：
+
+```powershell
+# 本机回环权限下执行；每次创建唯一世界和端口
+python validation/vanilla26_1/fluid_relative_validation.py
+python validation/vanilla26_1/fluid_relative_validation.py --promote-golden
+python validation/vanilla26_1/fluid_fixture_differential_test.py `
+  --probe build-f7-nmake/fluid_fixture_probe.exe `
+  --golden validation/vanilla26_1/fluid-relative-golden.json
+```
+
+- 官方 JAR SHA-1：`3872a7f07a1a595e651aef8b058dfc2bb3772f46`。
+- 晋升运行目录：`build-fluid-validation/relative-runs/20261109-033148-29988-b823b70a/`；T0 为 W-02=101、M-03=121、H-01=122。
+- 原始 `server.log` SHA-256：`7aa4802431711b678cd40d0a8b777cb9ab0bc42729fc45e4ec23a108e54bf7d9`。
+- 候选与仓库黄金均为 399 个唯一观测，SHA-256：`61793b281a9d86163c33b435dc514dd55cc2adf94f09e496c566a7fb89cc25e6`；同一目录的 `run-manifest.json` SHA-256 为 `7ff1a440047666615b45c66fb7733ca75440fa75b603e4cfd59dab714de4bca2`。
+- C++ 比较输出：`fluid fixture differential matched over 399 cells`。
+
+**证据等级**：A 已重新核对上述 26.1 方法；B 新增 `fluid_fixture_differential` 并在最终 CTest 通过；C 本轮没有新增离线 JAR 探针；D 已真实执行 W-02、M-03 和 H-01 正/负例。D 的证据只覆盖列出的相对刻和格，不外推到未列分支或整个流体实现。
+
+**构建与测试**：MSVC 19.51、NMake、Release、jemalloc 完整构建通过。按用户指示，最终候选只跑一轮完整 CTest，**23/23 通过，22.34 s**；新增 `fluid_fixture_differential` 与既有协议、socket、背压、流体黄金和聚焦测试全部通过。原始日志：
+
+- `build-f7-nmake/build-f7-acceptance-final.log`，SHA-256 `308f17980540b3dac7064ee05eb32a7f2d94ac2cf24b05760264c72fd696daa8`。
+- `build-f7-nmake/ctest-f7-acceptance-final.log`，SHA-256 `03cb9bd6f1c5fd55a34fde18c5a6779731d3e955645a8b8cb79ce6a10589f32a`。
+- reviewer 按用户指示不重复执行 CTest，采用上述单轮结果；`TMP/TEMP` 指到工作区，`require_escalated` 仅用于本机回环协议测试。
+
+**仍缺的 F-7 验收与下一动作（没有写成通过）**：
+
+1. **N-04**：现有 C++ 证据包含跨 section 湿态帧、健康端和另一条 ping 连接触发的积压断连；同一湿态慢端自行越过阈值、断开后健康端继续这一条仍未取得。下一步放大同一慢端的湿态 section/批次，记录该连接首帧、队列高水位、断开 tick 和健康端后续 FIFO。原版 N-04 逐帧录包也未跑。
+2. **N-01/N-02 原版协议帧**：C++ 的编码、完整解帧和 socket 已测；没有启动客户端或代理录包，缺少原版同输入帧序与批次边界，下一步在隔离环境录 775 包流逐帧比较。
+3. **Agent 队列/进度**：Q-01…Q-06 和 P-01/P-02 仍缺 `LevelTicks.schedule`/`tickFluid` 的 due/priority/subTick、`ServerLevel.doBlockEvent` 与 `PistonMovingBlockEntity.progress/progressO/movedState` 原始记录。下一步扩展现有 `OrderAgent`/`ExactAgent`，先只读记录，再跑队列、提前撤回和正常完成。
+4. **同存档重启**：A-01/A-02 仍缺“原版未来流体刻保存 → 停服 → 同一副本重启 → 后续派发”的 D 证据。下一步在独立存档记录保存前后 hash、`fluid_ticks` 标签、重启 gameTime 和到期刻；C++ 只读加载同一副本。
+5. **A-03/A-04、H-02 与其他 P0**：加载票/实体就绪后的边界重启、H-02 的 EXACT 破坏/掉落、W-03/W-04/W-05/W-07、L-03/L-04、M-02 及 A-05 部分分支仍未跑真实原版；按 `docs/fluid-acceptance.md` §5 逐项保留。
+6. **性能同阶段与世吞**：当前 C++ 计 `World::tick`、原版计整服，且 W-01 1000 刻只有初始 12 次派发/6 次写入，不能按 10% 线判断。下一步接入相同阶段时间戳与派发/写入计数，使用持续动态水槽和静水负荷交替复测；世吞需先建立两端可重放的同布局、同区块资格和同工作量世界并核对逐刻工作量。
+
+**返工提交**：`7a03592`。该 hash 是相对末行原状态 `审查结束` 的本轮实现提交；`task/TASKS.md` 的交接记录随后单独提交。`PLAN.md` 的既有未提交改动以及 `build-f7-nmake-build3.log`、`build-f7-nmake-cleanbuild.log`、`scripts/wait-tasks.ps1`、`task/F7-FLUID-PERF-HANDOFF.md`、`validation/vanilla26_1/fluid-cpp-states.json` 等既有未跟踪文件均未纳入提交，也未改动其内容。
+
+---
+
 ## F-7 纯服务端流体性能返工（复审 `abd5236`）
 
 **范围**：只处理 `task/TASKS.md` 最新审查的扩展状态 fallback、干块冷查询分配、`SpreadContext` 越界引用别名、动态共享面测试和 `fluidTick` 读取契约说明；不改协议、发包或其他 F-7 缺项。**源码依据**：基线 `96fcafd:src/fluid.cpp`、`include/redstone/block.hpp` 的 property fallback，26.1 `FlowingFluid.java:166-199,285-319,369-400,443-460`，以及 `Shapes.mergedFaceOccludes`。**验收**：扩展状态恢复基线结果；普通干块在进入缓存前直接返回；所有越界查询按值返回；同一 state id 的动态地毯在 0.5/1.0 进度都非整块但共享面结果不同，源和目标分别验证；同方向状态对互换有其他断言；同一 `96fcafd` 基准驱动交错复测湿干，最终候选运行一轮完整 CTest。**计划文件**：`src/fluid.cpp`、`src/fluid_flow.cpp`、`tests/fluid_tests.cpp`、`tests/fluid_flow_tests.cpp`、必要验收文档与工作区基准产物。
@@ -485,5 +543,15 @@ MSVC 19.51 Release + jemalloc 构建通过；coder 的 CTest 在允许本机回�
 - **建议｜核对派发路径最后一次读取。** `src/fluid_flow.cpp:744` 仍读取原位置；`src/engine.cpp:1659–1686` 已在派发时读到同一状态且没有介入写入。可以使用传入状态，保留 spreadTo 写入前的实时读取（此前方向的回调可能改动邻格）。若有意照搬原版 `FlowingFluid.java:444–446` 的读取，请说明调用契约。
 
 **结论**：本轮性能方向和工作量对照成立，扩展状态行为阻塞验收。只返工以上 F-7 纯服务端问题，不改协议和其他 F-7 缺项。用同一基线、同一驱动复测最终候选，提交并在此文件交接；reviewer 采用 coder 对最终候选的一轮完整 CTest，不重复执行。既有原版差分及同阶段性能缺项仍有效。
+
+### 纯服务端流体性能复审结论（`e9148d0`）
+
+**本轮四项纯服务端性能优化通过复审。** `src/fluid.cpp:195–239` 恢复扩展状态的既有属性 fallback，空气及干块在缓存查找前返回；`tests/fluid_tests.cpp:308–390` 覆盖非法液面、未知含水属性、后注册及正常含水/下落。 `src/fluid_flow.cpp:307–338,410–430` 以值传递坡度查找结果，避免表外递归借用同一临时状态；现有最大半径、负坐标和等距写序测试保留。静态共享面使用有序状态对与方向，动态两侧绕过；`tests/fluid_flow_tests.cpp:509–612` 的非整块进度用例在错误启用缓存的变异版本中按预期失败。接受 `fluidTick` 保留与 `FlowingFluid.java:446` 对应的重读。
+
+采用 coder 对最终提交的 MSVC Release + jemalloc 完整构建和 **CTest 22/22（22.09 s）**；reviewer 未重复运行最终 CTest。三组 1000 tick 交错 C++ A/B：湿态均值的中位数 0.0418 → 0.0225 ms（−46.2%），P95 0.0374 → 0.0205 ms；每轮 1192 次派发、112 次写入、终态一致。干态均值 3.488 → 3.427 ms，P95 7.413 → 7.432 ms，四个检查点指纹一致，未见可区分于重复波动的退化。湿态数据衡量侧向搜索整体，不能拆分归因到共享面缓存。
+
+复核本机 CPU 拓扑：Windows 当前报告 24 个物理核、24 个逻辑 CPU，无可见 SMT 同核配对。A/B 的 affinity mask `0x4` 是组 0 的 CPU 2（性能级较高的一组）；线程探针验证该掩码能将自身临时固定在 CPU 2，随后恢复。进程亲和性不保留该核给基准进程。干态最终候选第 1 轮的主循环线程 CPU 时间为 3375 ms，刻内累计墙钟 3427 ms；测纯模拟时可继续固定整个基准进程，测整服可将模拟线程和网络/区块编码线程分配到不同核。
+
+**F-7 整体仍保持待审查返工。** 完整原版差分、同阶段同工作量的原版性能对跑及此前记录的协议待测项未纳入本轮；两项已有黄金回归通过，无新增真实 26.1 服务端差分。未释放 F-8。
 
 任务已完成
