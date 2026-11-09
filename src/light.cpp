@@ -582,7 +582,11 @@ public:
       found->second.generation = change.generation;
     }
     notePendingLocked();
-    wake.notify_one();
+    // Only the idle -> queued transition needs a wake-up. Reporting every block
+    // change re-entered the kernel for a notification that no worker was
+    // waiting for once a batch was already running.
+    if (wakePending.exchange(false, std::memory_order_acq_rel))
+      wake.notify_one();
     return true;
   }
 
@@ -2164,6 +2168,10 @@ private:
     const double workerCpuStart = currentThreadCpuMs();
     std::unique_lock lock(mutex);
     for (;;) {
+      // Advertise that this thread is about to sleep while only it can clear
+      // the flag. Producers then notify exactly once per sleep instead of once
+      // per submitted block change, and a wake-up cannot be lost in between.
+      wakePending.store(true, std::memory_order_release);
       wake.wait(lock,
                 [&] { return closing || (!paused && !pending.empty()); });
       if (closing && pending.empty())
@@ -2618,6 +2626,8 @@ private:
   bool busy = false;
   std::size_t busyChunks = 0;
   std::uint64_t nextGeneration = 0;
+  // Set while the worker is parked in wake.wait; see run() and reportBlockChange.
+  std::atomic<bool> wakePending{true};
   std::uint64_t nextPublicationRevision = 0;
   bool paused = false;
   bool pauseAfterBatch = false;
