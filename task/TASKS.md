@@ -8,6 +8,16 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## L-4a 世吞性能测量（coder）
+
+**范围**：只实现 `PLAN.md` 的 L-4a 测量底座，不改传播算法、协议、生命周期/Anvil，不领取 L-4b/L-4c。离线世吞 benchmark 增加显式双光层开关、主线程/光照 worker 分核、仅计时前的初次照明等待、计时内真实动态提交与发布观测、队列高水/末积压/排空耗时，以及主线程和 worker CPU 时间。基准仍只读固定投影和测试夹具；其他 benchmark 不并发运行。
+
+**固定输入**：沿用 `build-l1-baseline/redstone_tick_benchmark.baseline.exe`（`00c15ea`，SHA-256 `260273d92c323e983fe4aa92b03e9066e36f74cfe6fce854462cc039ef17a907`）与世吞投影 SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。候选同输入、MSVC Release + jemalloc、Windows 同优先级；主线程绑定 CPU 2（`0x4`），光照 worker 绑定 CPU 4（`0x10`），启动时记录实际线程绑定结果。
+
+**验收**：基线与同一候选关光/双光以同一计时边界交错至少五组 × 1000 tick；计时前完成初照，正式计时内不等待 worker，不以末尾补算代替传播。每个有效配对记录主线程 CPU、墙钟均值/中位/P95/>50 ms、worker CPU、累计提交/变化/发布、队列高水位、计时末积压和额外排空耗时，并核对四个检查点及终态模拟指纹和两层实际变化。诊断计数只在独立运行启用，不混入正式计时。结果按实测报告 <10% 是否满足及主要瓶颈；L-4b 才优化。
+
+**计划文件**：`benchmarks/tick_benchmark.cpp`、必要的 `include/redstone/light.hpp`/`src/light.cpp` 只读统计接口、`CMakeLists.txt`、`docs/light-engine.md`、benchmark 运行脚本或说明、`task/TASKS.md`。最终候选干净构建后仅由 coder 跑一轮完整 CTest，reviewer 不重复。保留 `PLAN.md` reviewer 修改和所有无关未跟踪文件。
+
 ## L-3 协议光照（coder）
 
 **范围**：只实现 `PLAN.md` 的 L-3。依据上一级只读 `ClientboundLevelChunkWithLightPacket.java`、`ClientboundLightUpdatePacket.java`、`ClientboundLightUpdatePacketData.java`、`ChunkHolder.java` 的 `broadcastChanges` 路径与客户端 light data 读取契约，用 L-2a/L-2b 已发布且属于同一生命周期的不可变光照快照替换初始区块占位并发送后续更新。协议 ID 只取仓库内 26.1 导出；初始包、增量、清除、卸载/重载和积压路径均以严格 775 解帧验证。保持普通方块变化批量读取与成功事件立即发送的既有顺序；主线程不等待 worker，不逐 tick/逐 session 扫描区块或复制全量 nibble。
@@ -1318,4 +1328,16 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 现工作树保留 `lastReady` 并在 wire 要求 `deltaBaseRevision == previous->revision`；请覆盖另一条基准分叉：A 已发送；B 就绪、修改 S、worker idle 但未 drain；C 不就绪，worker 将未 drain 的 B 按同 key 淘汰，然后 drain 只交出 C；D 恢复就绪并修改 T。D 的 `lastReady` 基准是从未发给会话的 B，若只在 wire 抛错会把健康客户端断开，S 也漏发。请在最终候选前确保这个序列收敛（可让该会话的最后发送快照与当前完整快照在 writer 侧补差，或者不让 incomplete 淘汰唯一待交的 ready、且定义可见顺序）。确定性测试分别确认 B 未交会话、D 不断开、S/T 都正确；保留常见连续增量使用 worker 清单。
 
-任务已完成
+### L-3 返工复审（`41677b7`）
+
+**通过，释放 L-4a。** `src/light.cpp` 的 ready-to-ready 基准与 Session 非连续基准单区块补发覆盖已 drain incomplete 和积压淘汰 ready 两类反例，正常路径仍使用 worker 区段清单；显式 World unload 失效待编码的旧动态包、保持已提交首批 FIFO 后发送 forget，同位置重载走新 epoch 首包。协议错误限对应 Session。采用最终 **29/29 CTest**（25.70 s），日志哈希已核，不复跑；实际 loopback 保留健康端与 320 tick，离线官方 26.1 codec 解码光照夹具 **202/202**、既有夹具 **490/490**。这些并非真实原版服务端逐刻包差分或客户端渲染。
+
+### L-4a 领取约束（reviewer）
+
+已将 `PLAN.md` 的 L-4 分成 **L-4a 测量 → L-4b 热路径和积压优化 → L-4c 生命周期/Anvil 和最终验收**；原有 <10% 门槛和真实传播要求不变，本轮只领取 L-4a，不改算法、不接 Anvil。保留 L-3 性能债供下一阶段，先量真实成本再确定修改顺序。
+
+沿用 `build-l1-baseline/redstone_tick_benchmark.baseline.exe`（`00c15ea`，SHA-256 `260273d92c323e983fe4aa92b03e9066e36f74cfe6fce854462cc039ef17a907`）和同一世吞输入（SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`）。Release + jemalloc，Windows 同优先级，CPU 2 主线程、CPU 4 光照线程，这两个是本机实测独立性能核；记录启动时真实绑定结果。基线与同一候选开/关光分别交错至少五组 × 1000 tick，计时范围一致，覆盖提交、传播交接和主线程接收；保留四个检查点/终态指纹，诊断版不要掺入正式计时。先在计时前完成初照，正式期间不等 worker，不并发其他 benchmark，证明两个光层确实有动态处理和发布进入计时，并单独记录初照、主/worker CPU、墙钟均值/中位/P95/>50ms、累计发布/变化和队列高水/计时末积压/额外排空耗时。建议不在每 tick 取会遍历共享队列的统计。若当前候选因积压或成本不满足验收，记录可重复的卡点/量和归因，不以把计算推迟到末尾视为性能达标。明确无协议连接的离线场景；最终有协议接收开销可另记，不能替代同口径基线。
+
+性能债定位优先看：主线程光学差异与 pending 分配/锁；worker 资格整图扫描和 unsupported 整图扫描；天空源列全高重扫与初始化全高播种；共享锁内发布旧×新批次合并和 drain。用已有日志、计数和分段诊断定位，不先改算法。最终候选构建后一轮完整 CTest，reviewer 不重复。先登记目标和唯一状态末行，再改代码。
+
+任务进行中
