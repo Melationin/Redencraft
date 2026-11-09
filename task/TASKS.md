@@ -52,6 +52,46 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 - 本轮实现提交为 `0af2805`（13 files，+1338/−37），交接记录随后单独提交；implementation 不包含 `task/TASKS.md` 或既有无关文件。
 
+### L-2b 返工实际（实现提交 `dfd32e2`）
+
+**稀疏天空存储**
+
+- `LightChunkSnapshot::lightValue(Sky,x,y,z)` 对缺席 raw layer 执行 `SkyLightSectionStorage` 派生查询：沿同一 chunk 向上寻找最近已存层并返回其 `localY=0` 平面；超出光照 section 范围才返回 0，已启用且无存层时返回 15。原始 `LightSectionSnapshot::light` 仍是 raw 读取，因此探针可分别断言 `Missing` 与显式零层。
+- `SkyLightPropagator` 不再把所有 section 写成 uniform 0。工作层按需分配；如果 section 为空且整层值都等于上方继承平面，commit 前会删除工作层，保持 raw 缺席。相邻非空 block section 及其上下 padding 显式分配，容纳 Java 空段补偿与底部已存平面；实际非空 section 每区段仍只保留一个 compact layer。
+- 初始/重载先按新状态重建入口。入口以上为 15，入口下方清到 0；顶部 water（dampening=1）从 top padding 的 15 向下 seed，得到 14/13。天空源队列不再标记 `fromEmpty=true`，而用实际源状态面和目标状态面执行水平遮挡。
+
+**同代权威刷新**
+
+同一 lifecycle epoch 的完整天空输入现在加入失效集合，先重建本 chunk，再从相邻已加载 chunk 的接触面发起 check。真实 worker 反例中，开放的东 chunk 先使整屋顶西 chunk 边界获得 14；东 chunk 同代权威快照加屋顶后，西边界的旧 14 降为 0，随后东 chunk 同代恢复开放又回到 14，两侧 epoch 始终不变。
+
+**完成标志**
+
+方块层和天空层分别保存 `blockLightComplete`、`skyLightComplete`；完整 `propagationComplete` 只在两层均完成时为真。未知状态同时使参与该 world 的两层保守 incomplete；`protocolReady` 仍固定 false。无天空光配置保持 `skyLightComplete=true` 且所有 queried sky 为 0。
+
+**C++ 回归**
+
+`tests/light_tests.cpp` 新增/扩展：开放空 chunk 两侧 padding 的继承值、roof 后底部底平面继承、同代去光/复亮、顶部单层 water 从 padding seed 的 14/13、负高度非空底部 section 的已存 0 平面，以及稀疏原生 `Missing` 查询。旧天空、方块光、epoch、加载顺序和无天空光回归全部通过。
+
+**原版 26.1 稀疏差分**
+
+- `SkyDiffAgent` 现在同时输出 18 个 `SkyLight` 查询值及 6 个指定 section 的 `raw layer == null` 标记。采样同一 x/z 的 y=200/150/320 与负 y/底部 padding；其中 raw 缺席的 y=150 查询值可继承上方底平面为 7/14/15，非空底部 section 保留已存 0 平面。
+- 官方 JAR SHA-1 仍为 `3872a7f07a1a595e651aef8b058dfc2bb3772f46`。提升运行 `build-light-validation/sky-light-runs/20261109-222825-19800-71c9985b/`：候选/黄金 SHA-256 `c58d6240c6782603f44a36f7bf6d8c037df725b9d456209d7c5b87d499992ac0`，server log `56009c24412d997deee9639c1239eb3a0b1f21da8b526fcc6734027a6cbe1ba3`，manifest `45bc87b9c78b77f43714e22c44041f2c741b03b06dda76e3bc8c2b2a01c51167`。
+- 独立重跑 `build-light-validation/sky-light-runs/20261109-222919-24488-88ea8b78/`：候选相同，server log `4b13100c98a15cdda573a981e6132970a7062dc9213f778b017a5ff0990d7e0f`，manifest `5e81b734ad06f8ff0d62d64099eb9084d0ef59e61c7ade979110aff27d7cb60b`。C++ 与官方为 **108 个 SkyLight 值 + 36 个 raw-layer 缺席标记**全部一致，原方块光 225 格继续通过。
+
+**最终构建与唯一一次完整 CTest**
+
+最终代码 NMake clean 后以 MSVC 19.51 Release + jemalloc 全量重建成功；构建日志 `build-f7-nmake/build-l2b-rework-acceptance-final.log` SHA-256 `13e31866c0e83fed8e04eac160b27dd6e005f891ac96ae61107ae429fcad9aa8`。随后唯一一轮完整 CTest **28/28 通过，23.48 s**；日志 `build-f7-nmake/ctest-l2b-rework-acceptance-final.log` SHA-256 `8732945d187d3a8da56aa1926c50b8c16b659a2d906e1df9113acc89ff514cef`，reviewer 不重复。
+
+- 聚焦 `light tests passed`：`build-f7-nmake/light-l2b-rework-acceptance-final.log` SHA-256 `b3d70361e83a410080b7d6d547ec5177ce3c3624cc31b6fa0047c7eb81e9521c`。
+- 方块光 225：`build-f7-nmake/block-light-differential-l2b-rework-acceptance-final.log` SHA-256 `8a0aa44e1e1282d66df96b87cc5023e02eb9fe6fa475d48fad4c8dd0a834b83c`。
+- 天空光 108+36：`build-f7-nmake/sky-light-differential-l2b-rework-acceptance-final.log` SHA-256 `20caf00aabd757ee944221ca88b539760478b3affef938f4fdf61729a8a5a8ca`。
+
+**明确没有做**
+
+没有接协议/Anvil 光照或领取 L-3/L-4；没有跑启用双层后的世吞性能门槛。当前仍按整 world 的 unsupportedCells 做保守层完成判断，精细域隔离与整图扫描优化保留 L-4。
+
+- 本轮实现提交为 `dfd32e2`（10 files，+574/−170），交接记录随后单独提交。
+
 ---
 
 ## L-2H 高度图按区段回扫（coder）
@@ -1074,5 +1114,17 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 #### L-2b 原版空区段审查用例（验收澄清，状态不变）
 
 请在最终差分前特意覆盖空区段「没分配光层」的行为：`SkyLightSectionStorage.java:24–46,86–117` 在上方有存储时，缺失层查询取最近上方已存层的底平面，不能一律读 0/15，亦不能把每个缺失区段当普通节点逐格向下衰减；`SkyLightEngine.java:199–259` 还对区块边缘的空区段做传播补偿。可用高处部分屋顶 + 低处少量方块，中间留多个真正无存储的空区段，确保探针记录「原版 raw layer 缺席、查询值与上方首层一致」，同时有至少一个底平面值介于 0 和 15，查相同 x/z 的多个 y 及邻区边界。若初始夹具因邻区非空导致存了层，调整相邻区段并在原版探针断言缺席。另核对完整区块最上/最下边缘的语义，无须接协议。
+
+### L-2b 审查记录（`0af2805`）
+
+采用 coder 的 MSVC Release + jemalloc 完整构建与 **28/28 CTest**（18.35 s），已核对最终日志哈希，不复跑。现有四区块原版 fence 与 90 格天空光差分可接受为该夹具证据；方块光 225 格继续有效。后台单写者、不改变主线程更新顺序和 no-sky 基础保留。以下反例不在 90 格夹具覆盖内：
+
+- **阻塞｜空区段缺层被当成稠密空气传播。** `src/light.cpp:1273–1310,1359–1367,1420–1480` 每个可玩区段都当作存有天空层；没有上方底平面继承，也没有空段边界补偿。Java `SkyLightSectionStorage.java:24–46,86–117` 查询缺层取最近上方有效层的 y=0 平面，`SkyLightEngine.java:199–259` 跨边界时补传跨空段；`LayerLightSectionStorage.java:220–245` 由本区段与周围 26 个区段的非空状态决定层存储。按该语义分别表示真实存储层与派生查询，空态变化、邻区加载/卸载时更新可用层，不把普通零层/满层当缺层。交接已要求的真实原版稀疏夹具尚未覆盖：探针同时采 raw layer 缺席及 1..14 的有效值，确认多个 y 继承上方底面，并采邻区边界；保留已跑 90 格。
+- **阻塞｜同代权威刷新可保留邻区旧天空光。** `src/light.cpp:1698–1742,1839–1865` 同代 load 虽复制旧天空层，`seedChunk` 随即在 `:1094–1108,1359–1376` 清掉本区块旧层并覆盖旧入口；`clearIncomingFrom` 只处理卸载或不同 epoch，后续 `updateColumn` 已没有旧入口可比较。两个相邻区块，B 整片有屋顶，A 开放，B 的贴边低处从 A 得 14；用同代权威快照给 A 加同高屋顶后，原 A 的低处源已不在，但 B 的 14 无 decrease 起点，甚至可能被 `seedIncoming` 回灌给 A。保留旧天空层和入口做光学 delta，或有界地失效邻区旧依赖后再播种。用真实 worker 验证同代刷新去光/复亮、相邻块最终状态和 epoch 不变，覆盖离屋顶更新格多层的采样；不要用卸载替代同代刷新。
+- **阻塞｜初始顶层衰减少一个光源，底部 padding 被一律屏蔽。** `src/light.cpp:1273–1283,1398–1420` 允许上 padding 写 15，却只从最高可玩 y 向下 seed；若最高层是 dampening=1 的水（`assets/light26_1/block_light.tsv:2348`），其入口在 maxY，完整水层中间没有从上 padding 入水的队列，初始可得到 0 而不是原版从 15 衰到 14。原版 `SkyLightEngine.java:299–348` 从存储的最上层开始播种，`LayerLightSectionStorage.java:220–245` 也允许与最低非空区段相邻的下 padding 存光；`SkyLightSectionStorage.java:24–46` 没有按可玩世界 minY 一律返回 0 的规则。当前 y=-65 夹具的单列 0 不足以证明底边界普遍为 0。用顶部衰减、底部已分配但露天空气的真实原版采样验证，按稀疏层规则接通有效 padding；另保留超出光照区段范围的边界。
+- **应修｜天空层源队列跳过真实遮蔽面，完成标志也交叉赋值。** `src/light.cpp:1175–1180,1426–1430,1477–1481` 强制标记天空源为 empty shape；直达天空只保证垂直入口，源格仍可能有水平遮蔽，Java `SkyLightEngine.java:19–20,127–134,154–163` 不会把 ADD_SKY_SOURCE_ENTRY 当空形状。用真实属性决定 fast path，并验证运行时增加直射光时不会跨被遮蔽面漏光。另 `src/light.cpp:1866–1893` 把 skyComplete 并入 metadataComplete 后赋给 blockLightComplete，却让未访问到未知格的 skyLightComplete 独立为 true。按两层各自覆盖的元数据/求解状态产生层完成标志，再做总合取；保持 no-sky 的定义明确。未知方块对域的精细隔离和整图扫描优化可留 L-4。
+- **后续性能关注｜** `src/light.cpp:1337–1356` 每个脏列从世界顶逐格重新找入口，`:1369–1376` 每加载一个区块遍历所有已暂存的天空层来清理。参考 Java `ChunkSkyLightSources.java:47–75,77–119` 初始跳空段、动态只看受影响边及必要回扫。稀疏修复应避免反复整列/整批扫描；正式启用双层世吞及积压仍在 L-4 验收。L-3 前还要核对单批跨区块发布可见性（当前逐区块入共享发布表）。
+
+**结论：退回 L-2b。** 只返工本条天空光、覆盖上述反例及其证据，不领取协议、Anvil 或性能阶段。保留原版 90 个天空光和 225 个方块光观察，新差分对照实际 26.1。最终新候选干净构建后由 coder 跑一轮完整 CTest，reviewer 不重跑。
 
 任务已完成
