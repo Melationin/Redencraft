@@ -1654,6 +1654,8 @@ private:
       }
       if (fromLevel != task.level)
         return;
+      const int emptySectionsBelow =
+          countEmptySectionsBelowIfAtBorder(task.position);
       const auto &fromQueued =
           task.fromEmpty ? emptyLightProperties() : stateAt(task.position);
       for (int direction = 0; direction < 6; ++direction) {
@@ -1669,15 +1671,20 @@ private:
         const int newLevel = fromLevel - lightOpacity(toState);
         if (newLevel <= toLevel || faceShapesOcclude(fromQueued, toState, direction))
           continue;
-        setStoredLevel(to, newLevel);
+        if (!setStoredLevel(to, newLevel))
+          continue;
         if (newLevel > 1)
           enqueueIncrease(to, static_cast<std::uint8_t>(newLevel),
                           static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))),
                           emptyShape(toState), false);
+        propagateFromEmptySections(to, direction, newLevel, true,
+                                   emptySectionsBelow);
       }
     }
 
     void propagateDecrease(const DecreaseTask &task) {
+      const int emptySectionsBelow =
+          countEmptySectionsBelowIfAtBorder(task.position);
       for (int direction = 0; direction < 6; ++direction) {
         if ((task.directions & (1u << direction)) == 0)
           continue;
@@ -1692,14 +1699,86 @@ private:
         if (toLevel == 0)
           continue;
         if (toLevel <= int(task.level) - 1) {
-          setStoredLevel(to, 0);
+          if (!setStoredLevel(to, 0))
+            continue;
           enqueueDecrease(to, static_cast<std::uint8_t>(toLevel),
                           static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))));
+          propagateFromEmptySections(to, direction, toLevel, false,
+                                     emptySectionsBelow);
         } else {
           enqueueIncrease(to, static_cast<std::uint8_t>(toLevel),
                           static_cast<std::uint8_t>(1u << (direction ^ 1)),
                           false, false);
         }
+      }
+    }
+
+    int countEmptySectionsBelowIfAtBorder(LightPos position) const {
+      if ((position.y & 15) != 0)
+        return 0;
+      const int localX = position.x & 15;
+      const int localZ = position.z & 15;
+      if (localX != 0 && localX != 15 && localZ != 0 && localZ != 15)
+        return 0;
+      const int sectionX = position.x >> 4;
+      const int sectionZ = position.z >> 4;
+      int sectionY = position.y >> 4;
+      int count = 0;
+      while (sectionY - count - 1 >= owner.minBlockSectionY - 1) {
+        const SectionPos3 key{sectionX, sectionY - count - 1, sectionZ};
+        if (storedEligible.contains(key))
+          break;
+        ++count;
+      }
+      return count;
+    }
+
+    static bool crossedSkySectionEdge(int direction, int localX,
+                                      int localZ) {
+      if (direction == 2)
+        return localZ == 15;
+      if (direction == 3)
+        return localZ == 0;
+      if (direction == 4)
+        return localX == 15;
+      if (direction == 5)
+        return localX == 0;
+      return false;
+    }
+
+    void propagateFromEmptySections(LightPos to, int direction, int level,
+                                    bool increase, int emptySectionsBelow) {
+      if (emptySectionsBelow == 0 ||
+          !crossedSkySectionEdge(direction, to.x & 15, to.z & 15))
+        return;
+      const int sectionX = to.x >> 4;
+      const int sectionZ = to.z >> 4;
+      int sectionY = (to.y >> 4) - 1;
+      const int bottomSectionY = sectionY - emptySectionsBelow + 1;
+      while (sectionY >= bottomSectionY) {
+        const SectionPos3 key{sectionX, sectionY, sectionZ};
+        if (!storedEligible.contains(key)) {
+          --sectionY;
+          continue;
+        }
+        for (int localY = 15; localY >= 0; --localY) {
+          const LightPos position{to.x, sectionY * 16 + localY, to.z};
+          if (increase) {
+            if (setStoredLevel(position, level) && level > 1)
+              enqueueIncrease(
+                  position, static_cast<std::uint8_t>(level),
+                  static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))),
+                  true, false);
+          } else {
+            if (storedLevel(position) == 0)
+              continue;
+            if (setStoredLevel(position, 0))
+              enqueueDecrease(
+                  position, static_cast<std::uint8_t>(level),
+                  static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))));
+          }
+        }
+        --sectionY;
       }
     }
 

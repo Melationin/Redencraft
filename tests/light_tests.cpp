@@ -893,6 +893,51 @@ void skyLightPropagation() {
                    .isMissing(),
           "previous immutable publication keeps its old raw zero layer");
 
+  LightService edge(0, 12);
+  require(edge.submitChunk(emptyChunkFixture(0, 0, 0, 12)) != 0 &&
+              edge.submitChunk(emptyChunkFixture(1, 0, 0, 12)) != 0 &&
+              edge.submitChunk(emptyChunkFixture(2, 0, 0, 12)) != 0,
+          "cross-empty-section sky fixture loads A/B/C");
+  (void)settledChunk(edge, 0, 0);
+  for (int chunk = 0; chunk < 2; ++chunk)
+    for (int x = 0; x < 16; ++x)
+      for (int z = 0; z < 16; ++z)
+        if (!(chunk == 0 && x == 14 && z == 8))
+          require(reportBlock(edge, chunk, 0, {chunk * 16 + x, 180, z},
+                              air, stone),
+                  "cross-empty-section roof enters worker");
+  require(reportBlock(edge, 2, 0, {40, 130, 8}, air, stone),
+          "third-chunk storage anchor enters worker");
+  auto edgeOpen = settledChunk(edge, 0, 0);
+  edge.drainPublished();
+  auto edgeTarget = edge.latestChunk(1, 0);
+  require(edgeOpen->section(9)->layers[static_cast<std::size_t>(
+              LightLayer::Sky)]
+              .isMissing() &&
+              !edgeTarget->section(9)->layers[static_cast<std::size_t>(
+                   LightLayer::Sky)]
+                   .isMissing(),
+          "source edge section is missing while target section is stored");
+  const std::string edgeValues =
+      std::to_string(skyLightAt(edgeOpen, 15, 160, 8)) + "/" +
+      std::to_string(skyLightAt(edgeTarget, 16, 160, 8)) + "/" +
+      std::to_string(skyLightAt(edgeTarget, 16, 159, 8)) + "/" +
+      std::to_string(skyLightAt(edgeTarget, 16, 145, 8));
+  require(skyLightAt(edgeOpen, 15, 160, 8) == 14 &&
+              skyLightAt(edgeTarget, 16, 160, 8) == 13 &&
+              skyLightAt(edgeTarget, 16, 159, 8) == 13 &&
+              skyLightAt(edgeTarget, 16, 145, 8) == 13,
+          "sky copies the horizontal edge level across a missing lower section: " +
+              edgeValues);
+  require(reportBlock(edge, 0, 0, {14, 180, 8}, air, stone),
+          "cover the only upper opening");
+  auto edgeClosed = settledChunk(edge, 0, 0);
+  edge.drainPublished();
+  auto edgeClosedTarget = edge.latestChunk(1, 0);
+  require(skyLightAt(edgeClosedTarget, 16, 159, 8) == 0 &&
+              skyLightAt(edgeClosedTarget, 16, 145, 8) == 0,
+          "closing the opening clears the compensated lower-section column");
+
 }
 
 void blockLightStaleAndAuthoritativeRefresh() {

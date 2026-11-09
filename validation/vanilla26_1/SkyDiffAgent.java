@@ -23,7 +23,7 @@ import net.minecraft.world.level.block.state.BlockState;
 
 public final class SkyDiffAgent {
   private static final int[][] CELLS = cells();
-  private static final int[] RAW_SAMPLES = {0, 9, 10, 11, 12, 15};
+  private static final int[] RAW_SAMPLES = {0, 9, 10, 11, 12, 15, 23, 26};
   private static volatile MinecraftServer server;
   private static int emittedStage = -1;
   private static int observedStage = -1;
@@ -105,11 +105,11 @@ public final class SkyDiffAgent {
       if (!(level.getLightEngine() instanceof ThreadedLevelLightEngine light))
         return;
       scheduledStage = stage;
-      CompletableFuture<?>[] fences = new CompletableFuture<?>[4];
-      int[][] chunks = {{0, 0}, {-1, 0}, {0, -1}, {-1, -1}};
+      int[][] chunks = {{0, 0}, {-1, 0}, {0, -1}, {-1, -1}, {1, 0}, {2, 0}};
+      CompletableFuture<?>[] fences = new CompletableFuture<?>[chunks.length];
       for (int i = 0; i < chunks.length; ++i)
         fences[i] = light.waitForPendingTasks(chunks[i][0], chunks[i][1]);
-      System.out.println("SKY_FENCE stage=" + stage + " chunks=4");
+      System.out.println("SKY_FENCE stage=" + stage + " chunks=" + chunks.length);
       System.out.flush();
       Object currentObject = current;
       CompletableFuture.allOf(fences).thenRun(
@@ -186,6 +186,12 @@ public final class SkyDiffAgent {
     values.add(new int[]{8, 319, 8});
     values.add(new int[]{8, 318, 8});
     values.add(new int[]{8, 320, 8});
+    values.add(new int[]{15, 224, 8});
+    values.add(new int[]{15, 223, 8});
+    values.add(new int[]{15, 208, 8});
+    values.add(new int[]{16, 224, 8});
+    values.add(new int[]{16, 223, 8});
+    values.add(new int[]{16, 208, 8});
     return values.toArray(int[][]::new);
   }
 }

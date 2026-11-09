@@ -51,6 +51,19 @@ STAGES = {
         "fill 0 319 0 15 319 15 minecraft:water",
         "setblock -8 250 -8 minecraft:note_block[note=7]",
     ],
+    8: [
+        "fill 0 202 0 15 202 15 minecraft:air",
+        "fill 0 319 0 15 319 15 minecraft:air",
+        "fill 0 249 0 31 251 15 minecraft:air",
+        "fill 0 250 0 31 250 15 minecraft:stone",
+        "setblock 14 250 8 minecraft:air",
+        "setblock 40 210 8 minecraft:stone",
+        "setblock -8 250 -8 minecraft:note_block[note=8]",
+    ],
+    9: [
+        "setblock 14 250 8 minecraft:stone",
+        "setblock -8 250 -8 minecraft:note_block[note=9]",
+    ],
 }
 
 

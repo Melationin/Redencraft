@@ -17,9 +17,10 @@ const std::vector<Pos> kCells = {
     {8, 203, 8},   {8, 320, 8},   {8, 150, 8},  {15, 150, 8},
     {16, 150, 8},  {0, -62, 0},   {0, -61, 0},  {0, -65, 0},
     {0, -60, 0},   {0, 100, 0},   {8, 319, 8},  {8, 318, 8},
-    {8, 320, 8},
+    {8, 320, 8},   {15, 224, 8},  {15, 223, 8}, {15, 208, 8},
+    {16, 224, 8},  {16, 223, 8},  {16, 208, 8},
 };
-constexpr std::array<int, 6> kRawSamples{0, 9, 10, 11, 12, 15};
+constexpr std::array<int, 8> kRawSamples{0, 9, 10, 11, 12, 15, 23, 26};
 
 void rawPlace(World &world, Pos position, const BlockState &state) {
   world.rawSetBlock(position, state);
@@ -99,7 +100,7 @@ void printStage(int stage,
 int main() {
   try {
     World world;
-    for (int x = -1; x <= 1; ++x)
+    for (int x = -1; x <= 2; ++x)
       for (int z = -1; z <= 1; ++z)
         world.loadChunk(x, z);
 
@@ -127,6 +128,16 @@ int main() {
     fill(world, {0, 319, 0}, {15, 319, 15},
          Blocks::WATER.defaultState());
     printStage(7, sample(world));
+
+    fill(world, {0, 202, 0}, {15, 202, 15}, air);
+    fill(world, {0, 319, 0}, {15, 319, 15}, air);
+    fill(world, {0, 249, 0}, {31, 251, 15}, air);
+    fill(world, {0, 250, 0}, {31, 250, 15}, stone);
+    place(world, {14, 250, 8}, air);
+    place(world, {40, 210, 8}, stone);
+    printStage(8, sample(world));
+    place(world, {14, 250, 8}, stone);
+    printStage(9, sample(world));
     world.disableLighting();
     return 0;
   } catch (const std::exception &error) {
