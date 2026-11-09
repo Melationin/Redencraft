@@ -167,6 +167,8 @@ struct LightWorkerOptions {
   std::size_t maxQueuedCommands = 4096;
   bool startPausedForTesting = false;
   bool hasSkyLight = true;
+  bool collectDiagnostics = false;
+  std::uintptr_t workerAffinityMask = 0;
 };
 
 // Main-thread submission and worker-thread owner. No method on the worker
@@ -185,6 +187,12 @@ public:
     std::uint64_t pendingChunks = 0;
     std::uint64_t pendingPublications = 0;
     std::uint64_t lightQueueEntries = 0;
+    std::uint64_t skySectionChanges = 0;
+    std::uint64_t blockSectionChanges = 0;
+    double workerCpuMs = 0;
+    std::uint64_t workerAffinityRequested = 0;
+    std::uint64_t workerAffinityMask = 0;
+    std::uint32_t workerAffinityError = 0;
   };
 
   explicit LightService(int minBlockSectionY, int blockSectionCount,
@@ -210,6 +218,9 @@ public:
       std::function<void(std::shared_ptr<const LightChunkSnapshot>)> callback);
 
   Stats stats() const;
+  // Resets monotonic counters after initial-lighting warmup. Pending work is
+  // left visible; benchmark callers must invoke it only after an idle drain.
+  void resetMeasurementStats();
   std::string workerError() const;
   bool waitIdleForTesting();
   void pauseForTesting();

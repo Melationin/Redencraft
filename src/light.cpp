@@ -12,6 +12,11 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace redstone {
 namespace {
@@ -53,6 +58,52 @@ struct OfficialLightFaceState {
 #include "light_occlusion.inc"
 
 const BlockLightProperties kUnsupportedLightProperties{};
+
+struct ThreadAffinityResult {
+  std::uint64_t mask = 0;
+  std::uint32_t error = 0;
+};
+
+double currentThreadCpuMs() {
+#ifdef _WIN32
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+    return 0;
+  const auto ticks = [](const FILETIME &value) {
+    return (static_cast<std::uint64_t>(value.dwHighDateTime) << 32) |
+           value.dwLowDateTime;
+  };
+  return static_cast<double>(ticks(kernel) + ticks(user)) / 10000.0;
+#else
+  return 0;
+#endif
+}
+
+ThreadAffinityResult applyThreadAffinity(void *threadHandle,
+                                        std::uintptr_t mask) {
+#ifdef _WIN32
+  if (!mask)
+    return {};
+  const HANDLE thread = static_cast<HANDLE>(threadHandle);
+  GROUP_AFFINITY current{};
+  if (!GetThreadGroupAffinity(thread, &current))
+    return {0, GetLastError()};
+  GROUP_AFFINITY requested = current;
+  requested.Mask = static_cast<KAFFINITY>(mask);
+  if (!SetThreadGroupAffinity(thread, &requested, nullptr)) {
+    return {0, GetLastError()};
+  }
+  GROUP_AFFINITY group{};
+  return {GetThreadGroupAffinity(thread, &group)
+              ? static_cast<std::uint64_t>(group.Mask)
+              : static_cast<std::uint64_t>(mask),
+          0};
+#else
+  (void)threadHandle;
+  (void)mask;
+  return {};
+#endif
+}
 
 std::uint64_t chunkKey(int x, int z) {
   return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
@@ -422,6 +473,13 @@ public:
     if (options.batchSize == 0 || options.maxQueuedCommands == 0)
       throw std::invalid_argument("light worker limits must be positive");
     worker = std::thread([this] { run(); });
+#ifdef _WIN32
+    const auto affinity =
+        applyThreadAffinity(worker.native_handle(), options.workerAffinityMask);
+    statsWorkerAffinity.store(affinity.mask, std::memory_order_relaxed);
+    statsWorkerAffinityError.store(affinity.error,
+                                   std::memory_order_relaxed);
+#endif
   }
 
   ~Impl() { close(); }
@@ -608,11 +666,35 @@ public:
     result.queueHighWater = statsHighWater.load(std::memory_order_relaxed);
     result.lightQueueEntries =
         statsLightQueueEntries.load(std::memory_order_relaxed);
+    result.skySectionChanges =
+        statsSkyChanges.load(std::memory_order_relaxed);
+    result.blockSectionChanges =
+        statsBlockChanges.load(std::memory_order_relaxed);
+    result.workerCpuMs = statsWorkerCpuMs.load(std::memory_order_relaxed);
+    result.workerAffinityMask =
+        statsWorkerAffinity.load(std::memory_order_relaxed);
+    result.workerAffinityRequested =
+        static_cast<std::uint64_t>(options.workerAffinityMask);
+    result.workerAffinityError =
+        statsWorkerAffinityError.load(std::memory_order_relaxed);
     std::lock_guard lock(mutex);
     result.pendingChunks = pending.size() + busyChunks;
     for (const auto &batch : published)
       result.pendingPublications += batch.size();
     return result;
+  }
+
+  void resetMeasurementStats() {
+    statsSubmitted.store(0, std::memory_order_relaxed);
+    statsRejected.store(0, std::memory_order_relaxed);
+    statsBatches.store(0, std::memory_order_relaxed);
+    statsChanges.store(0, std::memory_order_relaxed);
+    statsPublished.store(0, std::memory_order_relaxed);
+    statsStale.store(0, std::memory_order_relaxed);
+    statsHighWater.store(0, std::memory_order_relaxed);
+    statsLightQueueEntries.store(0, std::memory_order_relaxed);
+    statsSkyChanges.store(0, std::memory_order_relaxed);
+    statsBlockChanges.store(0, std::memory_order_relaxed);
   }
 
   std::string workerError() const {
@@ -1904,6 +1986,7 @@ private:
   }
 
   void run() {
+    const double workerCpuStart = currentThreadCpuMs();
     std::unique_lock lock(mutex);
     for (;;) {
       wake.wait(lock,
@@ -1951,6 +2034,8 @@ private:
       busy = false;
       busyChunks = 0;
       ++statsBatches;
+      statsWorkerCpuMs.store(currentThreadCpuMs() - workerCpuStart,
+                             std::memory_order_relaxed);
       if (pauseAfterBatch) {
         pauseAfterBatch = false;
         paused = true;
@@ -2209,6 +2294,7 @@ private:
     }
 
     const std::uint64_t publicationRevision = ++nextPublicationRevision;
+    std::uint64_t skySectionChanges = 0, blockSectionChanges = 0;
     std::vector<std::pair<std::uint64_t, std::shared_ptr<LightChunkSnapshot>>>
         publication;
     for (auto &[key, chunk] : working) {
@@ -2253,9 +2339,16 @@ private:
           if (skyChanged || blockChanged)
             chunk.snapshot->changedSections.push_back(
                 {now->sectionY, skyChanged, blockChanged});
+          skySectionChanges += skyChanged ? 1 : 0;
+          blockSectionChanges += blockChanged ? 1 : 0;
         }
       }
       publication.emplace_back(key, chunk.snapshot);
+    }
+    if (options.collectDiagnostics) {
+      statsSkyChanges.fetch_add(skySectionChanges, std::memory_order_relaxed);
+      statsBlockChanges.fetch_add(blockSectionChanges,
+                                  std::memory_order_relaxed);
     }
     if (!publication.empty()) {
       std::sort(publication.begin(), publication.end(),
@@ -2363,6 +2456,11 @@ private:
   mutable std::atomic<std::uint64_t> statsStale{0};
   mutable std::atomic<std::uint64_t> statsHighWater{0};
   mutable std::atomic<std::uint64_t> statsLightQueueEntries{0};
+  mutable std::atomic<std::uint64_t> statsSkyChanges{0};
+  mutable std::atomic<std::uint64_t> statsBlockChanges{0};
+  mutable std::atomic<double> statsWorkerCpuMs{0};
+  mutable std::atomic<std::uint64_t> statsWorkerAffinity{0};
+  mutable std::atomic<std::uint32_t> statsWorkerAffinityError{0};
 };
 
 LightService::LightService(int minBlockSectionY, int blockSectionCount,
@@ -2401,6 +2499,9 @@ void LightService::setPublishCallback(
 }
 
 LightService::Stats LightService::stats() const { return impl_->stats(); }
+void LightService::resetMeasurementStats() {
+  impl_->resetMeasurementStats();
+}
 std::string LightService::workerError() const { return impl_->workerError(); }
 bool LightService::waitIdleForTesting() { return impl_->waitIdleForTesting(); }
 void LightService::pauseForTesting() { impl_->pauseForTesting(); }

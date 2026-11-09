@@ -33,6 +33,34 @@ static double threadCpuMs() {
   };
   return double(ticks(kernel) + ticks(user)) / 10000.0;
 }
+
+static std::uint64_t currentThreadAffinityMask() {
+  GROUP_AFFINITY group{};
+  return GetThreadGroupAffinity(GetCurrentThread(), &group)
+             ? static_cast<std::uint64_t>(group.Mask)
+             : 0;
+}
+
+static std::uint64_t bindCurrentThread(std::uint64_t mask) {
+  if (!mask)
+    return currentThreadAffinityMask();
+  if (!SetThreadAffinityMask(GetCurrentThread(),
+                             static_cast<DWORD_PTR>(mask)))
+    throw std::runtime_error("SetThreadAffinityMask failed");
+  return currentThreadAffinityMask();
+}
+
+static std::uint64_t bindProcess(std::uint64_t mask) {
+  if (!mask)
+    return 0;
+  if (!SetProcessAffinityMask(GetCurrentProcess(),
+                              static_cast<DWORD_PTR>(mask)))
+    throw std::runtime_error("SetProcessAffinityMask failed");
+  DWORD_PTR processMask = 0, systemMask = 0;
+  if (!GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask))
+    throw std::runtime_error("GetProcessAffinityMask failed");
+  return static_cast<std::uint64_t>(processMask);
+}
 #endif
 
 struct Hash {
@@ -148,19 +176,91 @@ static void fingerprint(World &w, int tick, int minX, int maxX, int minZ,
       (unsigned long long)scheduled.value, (unsigned long long)entities.value,
       (unsigned long long)pistons.value, (unsigned long long)events.value,
       (unsigned long long)pendingEvents.value, w.blockEventCount());
+  if (const auto *service = w.lightService()) {
+    Hash sky, block;
+    for (int x = minX; x <= maxX; ++x)
+      for (int z = minZ; z <= maxZ; ++z) {
+        const auto snapshot = service->latestChunk(x, z);
+        if (!snapshot)
+          continue;
+        sky.add(snapshot->revision);
+        block.add(snapshot->revision);
+        for (const auto &section : snapshot->sections) {
+          for (std::size_t index = 0; index < kLightLayerCount; ++index) {
+            const auto &layer = section->layers[index];
+            auto &target = index == static_cast<std::size_t>(LightLayer::Sky)
+                               ? sky
+                               : block;
+            target.add(static_cast<std::uint64_t>(layer.storage()));
+            target.add(layer.uniformValue());
+            if (layer.isMixed())
+              for (std::size_t byte = 0; byte < kLightLayerBytes; ++byte)
+                target.add(layer.packedData()[byte]);
+          }
+        }
+      }
+    std::printf("LIGHT_FINGERPRINT tick=%d sky=%016llx block=%016llx\n", tick,
+                (unsigned long long)sky.value,
+                (unsigned long long)block.value);
+  }
 }
 
 int main(int argc, char **argv) {
   try {
-    if (argc < 2 || argc > 4)
+    if (argc < 2)
       throw std::runtime_error(
-          "usage: redstone_tick_benchmark <litematic> [ticks] [--fingerprint]");
+          "usage: redstone_tick_benchmark <litematic> [ticks] "
+          "[--fingerprint] [--lighting|--no-lighting] [--diagnose-light] "
+          "[--process-affinity mask] [--main-affinity mask] "
+          "[--light-affinity mask]");
     int ticks = 3000;
-    bool fingerprints = false, haveTicks = false;
+    bool fingerprints = false, haveTicks = false, lighting = false,
+         diagnostics = false;
+    std::uint64_t processAffinity = 0, mainAffinity = 0, lightAffinity = 0;
+    const auto parseMask = [](std::string_view text) {
+      int base = 10;
+      if (text.size() > 2 && text[0] == '0' &&
+          (text[1] == 'x' || text[1] == 'X')) {
+        base = 16;
+        text.remove_prefix(2);
+      }
+      std::uint64_t value = 0;
+      auto [end, error] =
+          std::from_chars(text.data(), text.data() + text.size(), value, base);
+      if (error != std::errc{} || end != text.data() + text.size() || !value)
+        throw std::runtime_error("affinity mask must be a positive integer");
+      return value;
+    };
     for (int i = 2; i < argc; ++i) {
       std::string_view arg(argv[i]);
       if (arg == "--fingerprint" && !fingerprints) {
         fingerprints = true;
+        diagnostics = true;
+        continue;
+      }
+      if (arg == "--lighting") {
+        lighting = true;
+        continue;
+      }
+      if (arg == "--no-lighting") {
+        lighting = false;
+        continue;
+      }
+      if (arg == "--diagnose-light") {
+        diagnostics = true;
+        continue;
+      }
+      if (arg == "--process-affinity" || arg == "--main-affinity" ||
+          arg == "--light-affinity") {
+        if (++i >= argc)
+          throw std::runtime_error("affinity option needs a mask");
+        const auto mask = parseMask(argv[i]);
+        if (arg == "--process-affinity")
+          processAffinity = mask;
+        else if (arg == "--main-affinity")
+          mainAffinity = mask;
+        else
+          lightAffinity = mask;
         continue;
       }
       if (haveTicks)
@@ -171,6 +271,17 @@ int main(int argc, char **argv) {
         throw std::runtime_error("ticks must be a positive integer");
       haveTicks = true;
     }
+    int actualProcessMask = 0, actualMainMask = 0;
+#ifdef _WIN32
+    actualProcessMask = static_cast<int>(bindProcess(processAffinity));
+#else
+    if (processAffinity || mainAffinity || lightAffinity)
+      throw std::runtime_error("affinity options require Windows");
+#endif
+    std::printf("AFFINITY process=0x%x main_requested=0x%llx "
+                "light_requested=0x%llx\n",
+                actualProcessMask, static_cast<unsigned long long>(mainAffinity),
+                static_cast<unsigned long long>(lightAffinity));
     LitematicOptions options;
     auto imported = loadLitematic(std::filesystem::path(argv[1]), options);
     World world;
@@ -203,6 +314,65 @@ int main(int argc, char **argv) {
       world.blockEvent(clicked, old.name(), 0, 0);
     std::printf("ACTIVATE note=%s->%s event=%d\n", old.get("note").c_str(),
                 tuned.get("note").c_str(), event);
+    LightService *light = nullptr;
+    LightService::Stats initialBeforeDrain{};
+    LightService::Stats initialAfterDrain{};
+    double initialWallMs = 0, initialMainCpuMs = 0;
+    bool mainBound = false;
+    const auto bindMain = [&] {
+      if (mainBound)
+        return;
+#ifdef _WIN32
+      actualMainMask = static_cast<int>(bindCurrentThread(mainAffinity));
+#endif
+      mainBound = true;
+      std::printf("AFFINITY main_actual=0x%x\n", actualMainMask);
+    };
+    if (lighting) {
+      LightWorkerOptions lightOptions;
+      lightOptions.workerAffinityMask =
+          static_cast<std::uintptr_t>(lightAffinity);
+      lightOptions.collectDiagnostics = diagnostics;
+      const auto initialWallStart = Clock::now();
+#ifdef _WIN32
+      const double initialCpuStart = threadCpuMs();
+#endif
+      world.enableLighting(lightOptions);
+      // Create the worker while the process mask contains both cores, then
+      // restrict the simulation thread. This avoids inherited creator affinity
+      // preventing the dedicated light thread from moving to CPU 4.
+      bindMain();
+      light = world.lightService();
+      if (!light || !light->waitIdleForTesting())
+        throw std::runtime_error("initial lighting failed");
+      initialBeforeDrain = light->stats();
+      light->drainPublished();
+      initialAfterDrain = light->stats();
+      initialWallMs =
+          std::chrono::duration<double, std::milli>(Clock::now() - initialWallStart)
+              .count();
+#ifdef _WIN32
+      initialMainCpuMs = threadCpuMs() - initialCpuStart;
+#endif
+      std::printf(
+          "LIGHT_INITIAL wall_ms=%.3f main_cpu_ms=%.3f worker_cpu_ms=%.3f "
+          "worker_affinity_requested=0x%llx worker_affinity=0x%llx "
+          "worker_affinity_error=%u submitted=%llu "
+          "batches=%llu changes=%llu "
+          "published=%llu pending_chunks=%llu pending_publications=%llu\n",
+          initialWallMs, initialMainCpuMs, initialAfterDrain.workerCpuMs,
+          (unsigned long long)initialAfterDrain.workerAffinityRequested,
+          (unsigned long long)initialAfterDrain.workerAffinityMask,
+          initialAfterDrain.workerAffinityError,
+          (unsigned long long)initialAfterDrain.submitted,
+          (unsigned long long)initialAfterDrain.processedBatches,
+          (unsigned long long)initialAfterDrain.processedBlockChanges,
+          (unsigned long long)initialAfterDrain.published,
+          (unsigned long long)initialBeforeDrain.pendingChunks,
+          (unsigned long long)initialBeforeDrain.pendingPublications);
+      light->resetMeasurementStats();
+    }
+    bindMain();
     Hash events;
     if (fingerprints)
       world.blockEventObserver = [&](const BlockEvent &e) {
@@ -238,18 +408,29 @@ int main(int argc, char **argv) {
 #endif
       total += ms;
       perTick.push_back(ms);
-      if (fingerprints && (tick % 250 == 0 || tick == ticks))
+      if (fingerprints && (tick % 250 == 0 || tick == ticks)) {
+        if (light) {
+          if (!light->waitIdleForTesting())
+            throw std::runtime_error("light worker failed during fingerprint");
+          light->drainPublished();
+        }
         fingerprint(world, tick, minX, maxX, minZ, maxZ, events);
+      }
     }
 #ifdef _WIN32
-    // Whole loop CPU, including diagnostics when --fingerprint is selected.
+    // Main-loop CPU only. Formal runs do not enable fingerprints.
     const auto cpuMs = threadCpuMs() - cpuStart;
 #endif
     std::sort(perTick.begin(), perTick.end());
+    const auto slowTicks = static_cast<std::size_t>(std::count_if(
+        perTick.begin(), perTick.end(), [](double ms) { return ms > 50.0; }));
     std::printf("TOTAL ticks=%d total_ms=%.3f mean_ms=%.3f median_ms=%.3f "
-                "p95_ms=%.3f\n",
+                "p95_ms=%.3f p99_ms=%.3f max_ms=%.3f over50=%zu "
+                "lighting=%s diagnostics=%s\n",
                 ticks, total, total / ticks, perTick[perTick.size() / 2],
-                perTick[perTick.size() * 95 / 100]);
+                perTick[perTick.size() * 95 / 100],
+                perTick[perTick.size() * 99 / 100], perTick.back(), slowTicks,
+                lighting ? "on" : "off", diagnostics ? "on" : "off");
     std::printf(
         "FINAL entities=%zu scheduled=%zu moving_pistons=%zu events=%zu\n",
         world.entities.size(), world.scheduledTickCount(),
@@ -257,6 +438,56 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     std::printf("CPU loop_thread_ms=%.3f\n", cpuMs);
 #endif
+    if (light) {
+      const auto atTickEnd = light->stats();
+      std::printf(
+          "LIGHT_TICK submitted=%llu rejected=%llu batches=%llu changes=%llu "
+          "published=%llu stale=%llu sky_sections=%llu block_sections=%llu "
+          "queue_high=%llu light_queue=%llu pending_chunks=%llu "
+          "pending_publications=%llu worker_cpu_ms=%.3f\n",
+          (unsigned long long)atTickEnd.submitted,
+          (unsigned long long)atTickEnd.rejected,
+          (unsigned long long)atTickEnd.processedBatches,
+          (unsigned long long)atTickEnd.processedBlockChanges,
+          (unsigned long long)atTickEnd.published,
+          (unsigned long long)atTickEnd.stalePublications,
+          (unsigned long long)atTickEnd.skySectionChanges,
+          (unsigned long long)atTickEnd.blockSectionChanges,
+          (unsigned long long)atTickEnd.queueHighWater,
+          (unsigned long long)atTickEnd.lightQueueEntries,
+          (unsigned long long)atTickEnd.pendingChunks,
+          (unsigned long long)atTickEnd.pendingPublications,
+          atTickEnd.workerCpuMs - initialAfterDrain.workerCpuMs);
+#ifdef _WIN32
+      const double drainCpuStart = threadCpuMs();
+#endif
+      const auto waitStart = Clock::now();
+      if (!light->waitIdleForTesting())
+        throw std::runtime_error("light worker failed before final drain");
+      const double waitMs =
+          std::chrono::duration<double, std::milli>(Clock::now() - waitStart)
+              .count();
+      const auto drainStart = Clock::now();
+      light->drainPublished();
+      const double drainMs =
+          std::chrono::duration<double, std::milli>(Clock::now() - drainStart)
+              .count();
+#ifdef _WIN32
+      const double drainMainCpuMs = threadCpuMs() - drainCpuStart;
+#else
+      const double drainMainCpuMs = 0;
+#endif
+      const auto afterDrain = light->stats();
+      std::printf(
+          "LIGHT_DRAIN wait_ms=%.3f drain_ms=%.3f main_cpu_ms=%.3f "
+          "worker_cpu_delta_ms=%.3f pending_chunks_after=%llu "
+          "pending_publications_after=%llu worker_affinity=0x%llx\n",
+          waitMs, drainMs, drainMainCpuMs,
+          afterDrain.workerCpuMs - initialAfterDrain.workerCpuMs,
+          (unsigned long long)afterDrain.pendingChunks,
+          (unsigned long long)afterDrain.pendingPublications,
+          (unsigned long long)afterDrain.workerAffinityMask);
+    }
 #ifdef REDSTONE_COUNT_ALLOCATIONS
     std::printf("ALLOCATIONS tick_new_calls=%zu tick_requested_bytes=%zu "
                 "(global C++ new only)\n",

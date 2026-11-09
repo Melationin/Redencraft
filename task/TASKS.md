@@ -1340,4 +1340,8 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 性能债定位优先看：主线程光学差异与 pending 分配/锁；worker 资格整图扫描和 unsupported 整图扫描；天空源列全高重扫与初始化全高播种；共享锁内发布旧×新批次合并和 drain。用已有日志、计数和分段诊断定位，不先改算法。最终候选构建后一轮完整 CTest，reviewer 不重复。先登记目标和唯一状态末行，再改代码。
 
+#### L-4a 正式计时边界澄清（状态不变）
+
+请在正式 A/B 前核对工作树 `benchmarks/tick_benchmark.cpp`：结束快照应紧跟最后一个计时 tick/主线程 CPU 取样，早于 sort/printf 和末尾 wait/drain。worker 在排序/输出期间也会跑，不能把那时的处理量算入计时。需要分别记录 worker 已生成/提交与主线程在 tick 内已接收的 publication（同一 snapshot 可能被合并或失效），正式有光轮要能证明确实接收了两光层的动态变化；仅 `--diagnostics` 异步条件下的 sky/block 计数或 `published` 总量不等同于正式窗口已接收。可在 drain 原有遍历用简单计数累计、避免额外锁/遍历；额外探针开销另记。当前 `workerCpuMs` 只在完成批次时刷新，会漏掉边界仍在运行的批次；Windows 可用真实 worker handle 的 GetThreadTimes 在区间边界读两次，或明确把这个数字标成「已结束批次的 CPU 下界」并保留 in-flight 证据。继续只在独立指纹诊断或计时外 wait，不在正式 tick 内等待。
+
 任务进行中
