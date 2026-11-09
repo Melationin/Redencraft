@@ -65,7 +65,8 @@ python validation/light_metadata/generate_light_occlusion.py `
 
 - 每列使用 `ceil(log2(worldHeight + 1))` 位，默认世界高度 384 时为 9 bits、256 列、37 个 `uint64_t`，与 `SimpleBitStorage` 的 little-endian 字段布局一致。
 - `primeHeightmaps` 先清空四张表，再从最高 section 顶向 minY 扫描，因此重复 prime 或二次导入会把已变空的列恢复到 `minY-1`。
-- `LevelChunk.setBlockState` 的四表判定语义保持为 `MOTION_BLOCKING`、`MOTION_BLOCKING_NO_LEAVES`、`OCEAN_FLOOR`、`WORLD_SURFACE`。共用早退取四张 `firstAvailable` 的最小值，保证低 `OCEAN_FLOOR` 不会被高水面挡住；深写在同一列只做一次状态谓词计算。删除顶层时四张待重扫表共享一次向下读取，各表仍独立选择首个命中。
+- `LevelChunk.setBlockState` 的四表判定语义保持为 `MOTION_BLOCKING`、`MOTION_BLOCKING_NO_LEAVES`、`OCEAN_FLOOR`、`WORLD_SURFACE`。共用早退取四张 `firstAvailable` 的最小值，保证低 `OCEAN_FLOOR` 不会被高水面挡住；深写在同一列只做一次状态谓词计算。删除顶层时四张待重扫表共享一次列扫描，各表仍独立选择首个命中。
+- 16 对齐世界直接复用 `World::setBlock` 已定位的 `Chunk`：从 `y-1` 起每降到一个光 section 时只取一次 `const Section&`，`hasOnlyAir()` 跳过整段，非空段只沿目标列以 256 为步长调用 `Section::get`，不经过 `World::getBlock`。非 16 对齐 `minY` 继续使用原有逐格路径，所以现有模拟布局、谓词和结果不变。诊断开关可记录扫描次数、访问/跳过 section 和直接读取格数，默认关闭。
 - `World::primeHeightmaps()` 在 `importWorld` 的 raw block 写入完成后重建；正常 `setBlock` 通过一次区块定位实时更新，`rawSetBlock` 不自动更新。
 
 高度图允许非 16 对齐的既有 `minY` 模拟输入；只有需要 `y >> 4` section 键的光照入口会显式拒绝这种世界，禁用光照的模拟契约不变。

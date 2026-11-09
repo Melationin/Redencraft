@@ -70,7 +70,7 @@ C++ 侧按 `LevelTicks`/`LevelChunkTicks` 实现：每个已加载区块一个�
 
 以下仍须明确区分：
 
-- 区块与子区块按原版 `LevelChunk`/`LevelChunkSection` 分层，子区块内部是 palette + 索引的压缩存储（单值 0 位、8 位、16 位三档切换，`hasOnlyAir` 快速路径），区块表是哈希表。每个方块类型是进程级单例 `Block`（对应原版 `Blocks` 的静态字段），构造时按 `StateDefinition` 注册自身与全部状态；`BlockState` 持有 `Block*` 与 32 位注册 ID，拷贝是两个机器字，`state.is(Blocks.SAND)` 就是原版 `getBlock() == Blocks.SAND` 的指针比较，`with` 是 `StateHolder.setValue` 的变体索引转移，属性读取按属性名二分查找。详见下文“方块状态与区块存储”。
+- 区块与子区块按原版 `LevelChunk`/`LevelChunkSection` 分层，子区块内部是 palette + 索引的压缩存储（单值 0 位、8 位、16 位三档切换，`hasOnlyAir` 快速路径），区块表是哈希表。四张 live heightmap 的下降回扫复用写入已定位区块，16 对齐时跳过空 section 并直接沿目标列读 `Section`，非对齐世界保留逐格路径。每个方块类型是进程级单例 `Block`（对应原版 `Blocks` 的静态字段），构造时按 `StateDefinition` 注册自身与全部状态；`BlockState` 持有 `Block*` 与 32 位注册 ID，拷贝是两个机器字，`state.is(Blocks.SAND)` 就是原版 `getBlock() == Blocks.SAND` 的指针比较，`with` 是 `StateHolder.setValue` 的变体索引转移，属性读取按属性名二分查找。详见下文“方块状态与区块存储”。
 - 尚未实现随机刻、天空光传播、天气、睡眠、世界边界动画、袭击和完整命令系统。L-1/L-2a 的 16³ 双层数据、官方光学与方向面元数据、opt-in 后台交接、四张 final-chunk 高度图和方块光增减队列已落地，见[光照底座](light-engine.md)；生产默认仍不启用，协议光照和天空光传播尚未实现。已有 `/tick` 命令骨架（`src/command.cpp:310`、[原版连接说明](protocol775.md)），不含原版命令树、权限、选择器与其余命令。草方块随机蔓延/退化不在当前循环中。
 - 时间目前只从 `level.dat` 的 `Time` 恢复 `gameTime` 并在内存中递增；26.1 World Clocks 生命周期、`world_clocks`、`advance_time`、睡眠跳转、`/time` 语义和时钟持久化仍未实现。光照底座不写回 Anvil，协议里的光照仍是占位。这两项分别属于[路线图](../PLAN.md#阶段-3--时间与世界保存)的 W-1 和[阶段 2](../PLAN.md#阶段-2--光照)。
 - 注册表覆盖本批方块、物品与实体类型，不包含全游戏内容。未支持的方块保留状态，碰撞形状保守按整方块处理；其回调和硬度/推动反应不保证原版一致。因此不能用含其他机制方块的存档推断本批逻辑错误或正确。

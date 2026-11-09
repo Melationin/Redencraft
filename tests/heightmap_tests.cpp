@@ -191,6 +191,114 @@ void updatesAndPrime() {
           "a write at least two blocks below firstAvailable is ignored");
 }
 
+void sectionedDownwardRescan() {
+  World world;
+  world.loadChunk(-1, -1);
+  world.heightmapScanStats.enabled = true;
+
+  require(world.setBlock({-1, -5, -1}, Blocks::STONE.defaultState()) &&
+              world.setBlock({-1, -4, -1}, Blocks::WATER.defaultState()),
+          "same-section rescan fixture builds its source column");
+  require(world.setBlock({-1, -4, -1}, airState()),
+          "remove the same-section top source");
+  require(world.height(HeightmapType::WorldSurface, -1, -1) == -5 &&
+              world.height(HeightmapType::OceanFloor, -1, -1) == -5 &&
+              world.height(HeightmapType::MotionBlocking, -1, -1) == -5 &&
+              world.height(HeightmapType::MotionBlockingNoLeaves, -1, -1) == -5,
+          "same-section rescan finds the stone one block below");
+
+  require(world.setBlock({-2, -17, -2}, Blocks::STONE.defaultState()) &&
+              world.setBlock({-2, -16, -2}, Blocks::STONE.defaultState()),
+          "adjacent-section fixture builds a two-block column");
+  world.heightmapScanStats = {};
+  world.heightmapScanStats.enabled = true;
+  require(world.setBlock({-2, -16, -2}, airState()),
+          "remove the upper block at a section boundary");
+  require(world.height(HeightmapType::WorldSurface, -2, -2) == -17 &&
+              world.height(HeightmapType::OceanFloor, -2, -2) == -17,
+          "downward scan crosses the adjacent section boundary");
+  require(world.heightmapScanStats.scans == 1 &&
+              world.heightmapScanStats.visitedSections == 1 &&
+              world.heightmapScanStats.skippedSections == 0 &&
+              world.heightmapScanStats.readCells == 1,
+          "adjacent-section scan reads only the target block once");
+
+  World longGap;
+  longGap.loadChunk(0, 0);
+  longGap.heightmapScanStats.enabled = true;
+  require(longGap.setBlock({1, -63, 1}, Blocks::STONE.defaultState()) &&
+              longGap.setBlock({0, 300, 0}, Blocks::STONE.defaultState()) &&
+              longGap.setBlock({1, 300, 1}, Blocks::WATER.defaultState()),
+          "long-gap fixture creates a nonempty upper section and bottom hit");
+  longGap.heightmapScanStats = {};
+  longGap.heightmapScanStats.enabled = true;
+  require(longGap.setBlock({1, 300, 1}, airState()),
+          "remove water above a long empty gap");
+  require(longGap.height(HeightmapType::WorldSurface, 1, 1) == -63 &&
+              longGap.height(HeightmapType::OceanFloor, 1, 1) == -63 &&
+              longGap.height(HeightmapType::MotionBlocking, 1, 1) == -63 &&
+              longGap.height(HeightmapType::MotionBlockingNoLeaves, 1, 1) == -63,
+          "one scan resolves all four maps through empty sections");
+  const std::string longStats =
+      " scans=" + std::to_string(longGap.heightmapScanStats.scans) +
+      " visited=" + std::to_string(longGap.heightmapScanStats.visitedSections) +
+      " skipped=" + std::to_string(longGap.heightmapScanStats.skippedSections) +
+      " reads=" + std::to_string(longGap.heightmapScanStats.readCells);
+  std::cout << "HEIGHTMAP_SCAN" << longStats << '\n';
+  require(longGap.heightmapScanStats.scans == 1 &&
+              longGap.heightmapScanStats.visitedSections == 23 &&
+              longGap.heightmapScanStats.skippedSections == 21 &&
+              longGap.heightmapScanStats.readCells == 27,
+          "long-gap scan visits each section once, skips 21, and reads 27 cells:" +
+              longStats);
+
+  longGap.heightmapScanStats = {};
+  longGap.heightmapScanStats.enabled = true;
+  require(longGap.setBlock({1, -63, 1}, airState()),
+          "remove the final bottom match");
+  require(longGap.height(HeightmapType::WorldSurface, 1, 1) == -65 &&
+              longGap.height(HeightmapType::OceanFloor, 1, 1) == -65 &&
+              longGap.height(HeightmapType::MotionBlocking, 1, 1) == -65 &&
+              longGap.height(HeightmapType::MotionBlockingNoLeaves, 1, 1) == -65,
+          "no bottom hit returns every map to the minY sentinel");
+  require(longGap.heightmapScanStats.scans == 1 &&
+              longGap.heightmapScanStats.visitedSections == 1 &&
+              longGap.heightmapScanStats.skippedSections == 1 &&
+              longGap.heightmapScanStats.readCells == 0,
+          "empty bottom section is skipped without a cell read");
+
+  World ocean;
+  ocean.loadChunk(0, 0);
+  require(ocean.setBlock({0, 50, 0}, Blocks::STONE.defaultState()) &&
+              ocean.setBlock({0, 64, 0}, Blocks::WATER.defaultState()),
+          "ocean fixture places seabed and water surface");
+  ocean.heightmapScanStats = {};
+  ocean.heightmapScanStats.enabled = true;
+  require(ocean.setBlock({0, 60, 0}, Blocks::STONE.defaultState()),
+          "place submerged stone below the water surface");
+  require(ocean.height(HeightmapType::OceanFloor, 0, 0) == 60 &&
+              ocean.height(HeightmapType::WorldSurface, 0, 0) == 64 &&
+              ocean.height(HeightmapType::MotionBlocking, 0, 0) == 64 &&
+              ocean.height(HeightmapType::MotionBlockingNoLeaves, 0, 0) == 64 &&
+              ocean.heightmapScanStats.scans == 0,
+          "submerged placement raises only OCEAN_FLOOR without a rescan");
+  require(ocean.setBlock({0, 60, 0}, airState()),
+          "remove submerged stone");
+  require(ocean.height(HeightmapType::OceanFloor, 0, 0) == 50 &&
+              ocean.height(HeightmapType::WorldSurface, 0, 0) == 64,
+          "submerged removal rescans OCEAN_FLOOR back to the seabed only");
+
+  World unaligned(-63, 312);
+  unaligned.loadChunk(-1, -1);
+  bool u1 = unaligned.setBlock({-1, -48, -1}, Blocks::STONE.defaultState());
+  bool u2 = unaligned.setBlock({-1, -47, -1}, Blocks::STONE.defaultState());
+  require(u1 && u2,
+          "unaligned fixture builds a column across its section layout");
+  bool u3 = unaligned.setBlock({-1, -47, -1}, airState());
+  require(u3 && unaligned.height(HeightmapType::WorldSurface, -1, -1) == -48,
+          "unaligned minY keeps the existing per-cell result");
+}
+
 void worldIntegration() {
   World world;
   world.loadChunk(0, 0);
@@ -252,6 +360,7 @@ int main() {
     typesAndEncoding();
     predicates();
     updatesAndPrime();
+    sectionedDownwardRescan();
     worldIntegration();
     std::cout << "heightmap tests passed\n";
     return 0;

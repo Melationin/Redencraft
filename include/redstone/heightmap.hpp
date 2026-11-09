@@ -29,6 +29,12 @@ bool heightmapKeepAfterWorldgen(HeightmapType type);
 bool heightmapIsLive(HeightmapType type);
 
 using HeightmapBlockGetter = std::function<BlockState(int, int, int)>;
+// One downward column scan shared by all requested FINAL_HEIGHTMAPS. The
+// returned array contains each map's first-available height, or minY when no
+// matching block exists. Section layout and direct storage reads remain in the
+// world; the four predicates remain in ChunkHeightmaps.
+using HeightmapColumnScanner = std::function<std::array<int, 4>(
+    int localX, int startY, int localZ, const std::array<bool, 4> &needed)>;
 
 // Heightmap.java's final-heightmap BitStorage: 256 column heights packed with
 // ceil(log2(height + 1)) bits in little-endian fields. Heights are relative to
@@ -86,8 +92,15 @@ public:
   void prime(int maxY, const HeightmapBlockGetter &getBlock);
   bool update(int localX, int localY, int localZ, const BlockState &state,
               const HeightmapBlockGetter &getBlock);
+  bool updateFromColumn(int localX, int localY, int localZ,
+                        const BlockState &state,
+                        const HeightmapColumnScanner &scanColumn);
+  static std::array<bool, 4> matchesFinalMaps(const BlockState &state);
 
 private:
+  bool applyUpdate(int localX, int localY, int localZ,
+                   const BlockState &state, std::array<bool, 4> &rescan);
+  void refreshMinimum(int localX, int localZ);
   std::array<Heightmap, 4> maps_;
   // Fast negative filter for LevelChunk.setBlockState. The minimum across all
   // four maps is conservative: a table with a lower height may still rise even

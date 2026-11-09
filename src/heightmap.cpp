@@ -90,7 +90,9 @@ Heightmap::Heightmap(HeightmapType type, int minY, int height)
       bits_(ceilLog2(height + 1)), valuesPerLong_(bits_ ? 64 / bits_ : 64),
       mask_(bits_ == 64 ? ~0ull : ((1ull << bits_) - 1ull)) {
   if (bits_ < 1 || bits_ > 32)
-    throw std::invalid_argument("heightmap bit width must be 1..32");
+    throw std::invalid_argument("heightmap bit width must be 1..32: minY=" +
+                                std::to_string(minY) + " height=" +
+                                std::to_string(height));
   const std::size_t count =
       (256u + static_cast<unsigned>(valuesPerLong_) - 1u) /
       static_cast<unsigned>(valuesPerLong_);
@@ -245,34 +247,8 @@ void ChunkHeightmaps::prime(int maxY, const HeightmapBlockGetter &getBlock) {
 bool ChunkHeightmaps::update(int localX, int localY, int localZ,
                              const BlockState &state,
                              const HeightmapBlockGetter &getBlock) {
-  const int column = Heightmap::index(localX, localZ);
-  // This filter is the union of the four independent Heightmap.update
-  // short-circuits. Most deep piston/redstone writes stop here after one array
-  // load instead of probing four packed heights and block predicates.
-  if (localY <= minFirstAvailable_[column] - 2)
-    return false;
-
-  // Match LevelChunk.setBlockState's four calls while sharing the new state's
-  // predicate evaluation. The maps remain independent; only the downward read
-  // for columns in the same write is merged.
-  static constexpr std::array<std::size_t, 4> updateOrder{2, 3, 1, 0};
-  const auto stateMatches = finalMapMatches(state);
   std::array<bool, 4> rescan{};
-  bool changed = false;
-  for (std::size_t mapIndex : updateOrder) {
-    Heightmap &map = maps_[mapIndex];
-    const int first = map.firstAvailable(localX, localZ);
-    if (localY <= first - 2)
-      continue;
-    if (stateMatches[mapIndex]) {
-      if (localY >= first) {
-        map.setHeight(localX, localZ, localY + 1);
-        changed = true;
-      }
-    } else if (first - 1 == localY) {
-      rescan[mapIndex] = true;
-    }
-  }
+  bool changed = applyUpdate(localX, localY, localZ, state, rescan);
 
   if (std::any_of(rescan.begin(), rescan.end(),
                   [](bool value) { return value; })) {
@@ -299,13 +275,75 @@ bool ChunkHeightmaps::update(int localX, int localY, int localZ,
     }
   }
 
-  if (changed) {
-    int minFirst = std::numeric_limits<int>::max();
-    for (const Heightmap &map : maps_)
-      minFirst = std::min(minFirst, map.firstAvailable(localX, localZ));
-    minFirstAvailable_[column] = minFirst;
-  }
+  if (changed)
+    refreshMinimum(localX, localZ);
   return changed;
+}
+
+bool ChunkHeightmaps::updateFromColumn(
+    int localX, int localY, int localZ, const BlockState &state,
+    const HeightmapColumnScanner &scanColumn) {
+  std::array<bool, 4> rescan{};
+  bool changed = applyUpdate(localX, localY, localZ, state, rescan);
+  if (std::any_of(rescan.begin(), rescan.end(),
+                  [](bool value) { return value; })) {
+    const auto first = scanColumn(localX, localY - 1, localZ, rescan);
+    for (std::size_t i = 0; i < maps_.size(); ++i) {
+      if (rescan[i]) {
+        maps_[i].setHeight(localX, localZ, first[i]);
+        changed = true;
+      }
+    }
+  }
+  if (changed)
+    refreshMinimum(localX, localZ);
+  return changed;
+}
+
+bool ChunkHeightmaps::applyUpdate(int localX, int localY, int localZ,
+                                  const BlockState &state,
+                                  std::array<bool, 4> &rescan) {
+  const int column = Heightmap::index(localX, localZ);
+  // This filter is the union of the four independent Heightmap.update
+  // short-circuits. Most deep piston/redstone writes stop here after one array
+  // load instead of probing four packed heights and block predicates.
+  if (localY <= minFirstAvailable_[column] - 2)
+    return false;
+
+  // Match LevelChunk.setBlockState's four calls while sharing the new state's
+  // predicate evaluation. The maps remain independent; only the downward read
+  // for columns in the same write is merged.
+  static constexpr std::array<std::size_t, 4> updateOrder{2, 3, 1, 0};
+  const auto stateMatches = finalMapMatches(state);
+  bool changed = false;
+  for (std::size_t mapIndex : updateOrder) {
+    Heightmap &map = maps_[mapIndex];
+    const int first = map.firstAvailable(localX, localZ);
+    if (localY <= first - 2)
+      continue;
+    if (stateMatches[mapIndex]) {
+      if (localY >= first) {
+        map.setHeight(localX, localZ, localY + 1);
+        changed = true;
+      }
+    } else if (first - 1 == localY) {
+      rescan[mapIndex] = true;
+    }
+  }
+
+  return changed;
+}
+
+void ChunkHeightmaps::refreshMinimum(int localX, int localZ) {
+  int minFirst = std::numeric_limits<int>::max();
+  for (const Heightmap &map : maps_)
+    minFirst = std::min(minFirst, map.firstAvailable(localX, localZ));
+  minFirstAvailable_[Heightmap::index(localX, localZ)] = minFirst;
+}
+
+std::array<bool, 4> ChunkHeightmaps::matchesFinalMaps(
+    const BlockState &state) {
+  return finalMapMatches(state);
 }
 
 } // namespace redstone

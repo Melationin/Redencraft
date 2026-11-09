@@ -313,6 +313,16 @@ public:
   std::function<void(const Entity &)> entityAddedObserver;
   std::function<void(int)> entityRemovedObserver;
   std::function<void(Vec3, float, int)> explosionObserver;
+  // Diagnostic counters for the direct section-column scan. They are disabled
+  // on the production path; tests enable them only for the long-gap fixture.
+  struct HeightmapScanStats {
+    bool enabled = false;
+    std::uint64_t scans = 0;
+    std::uint64_t visitedSections = 0;
+    std::uint64_t skippedSections = 0;
+    std::uint64_t readCells = 0;
+  };
+  HeightmapScanStats heightmapScanStats;
 
   void setPistonEntity(Pos pos,
                        std::shared_ptr<PistonMovingBlockEntity> entity);

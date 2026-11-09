@@ -1210,12 +1210,70 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
   if (!changedChunk->heightmaps)
     changedChunk->heightmaps = std::make_unique<ChunkHeightmaps>(
         minY_, sectionCount() * 16);
-  const int chunkX = chunkIndex(p.x), chunkZ = chunkIndex(p.z);
-  changedChunk->heightmaps->update(
-      p.x & 15, p.y, p.z & 15, state,
-      [this, chunkX, chunkZ](int x, int y, int z) {
-        return getBlock({chunkX * 16 + x, y, chunkZ * 16 + z});
-      });
+  // The regular 16-aligned layout keeps section grouping and local indices in
+  // a fixed relationship. Walk it once for all four maps: empty sections are
+  // skipped by their header and non-empty sections expose only the target
+  // column through Section::get. The unaligned contract keeps the existing
+  // per-cell path because its y&15 local index does not match section bases.
+  auto &heightmaps = *changedChunk->heightmaps;
+  if ((minY_ & 15) != 0) {
+    const int chunkX = chunkIndex(p.x), chunkZ = chunkIndex(p.z);
+    heightmaps.update(p.x & 15, p.y, p.z & 15, state,
+                      [this, chunkX, chunkZ](int x, int y, int z) {
+                        return getBlock(
+                            {chunkX * 16 + x, y, chunkZ * 16 + z});
+                      });
+  } else {
+    heightmaps.updateFromColumn(
+        p.x & 15, p.y, p.z & 15, state,
+        [this, changedChunk](int localX, int startY, int localZ,
+                            const std::array<bool, 4> &needed) {
+          std::array<int, 4> firstAvailable;
+          firstAvailable.fill(minY_);
+          std::array<bool, 4> pending = needed;
+          int remaining = 0;
+          for (bool value : pending)
+            remaining += value ? 1 : 0;
+          if (remaining == 0 || startY < minY_)
+            return firstAvailable;
+
+          HeightmapScanStats *stats =
+              heightmapScanStats.enabled ? &heightmapScanStats : nullptr;
+          if (stats)
+            ++stats->scans;
+          const int column = ((localZ & 15) << 4) | (localX & 15);
+          for (int sectionY = sectionIndex(startY);
+               sectionY >= 0 && startY >= minY_ && remaining != 0;
+               --sectionY) {
+            if (stats)
+              ++stats->visitedSections;
+            const Section &section = changedChunk->sections[sectionY];
+            const int sectionBase = minY_ + sectionY * 16;
+            if (section.hasOnlyAir()) {
+              if (stats)
+                ++stats->skippedSections;
+              startY = sectionBase - 1;
+              continue;
+            }
+            for (; startY >= sectionBase && startY >= minY_ && remaining != 0;
+                 --startY) {
+              if (stats)
+                ++stats->readCells;
+              const BlockState below = BlockState::fromId(
+                  section.get(((startY & 15) << 8) | column));
+              const auto matches = ChunkHeightmaps::matchesFinalMaps(below);
+              for (std::size_t i = 0; i < pending.size(); ++i) {
+                if (pending[i] && matches[i]) {
+                  firstAvailable[i] = startY + 1;
+                  pending[i] = false;
+                  --remaining;
+                }
+              }
+            }
+          }
+          return firstAvailable;
+        });
+  }
   if (lightService_) {
     const bool isEmpty = targetSection.hasOnlyAir();
     if (hasDifferentLightProperties(old, state) ||
