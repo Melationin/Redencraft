@@ -214,8 +214,9 @@ struct BlockLightProperties {
   bool useShapeForLightOcclusion = false;
   bool propagatesSkylightDown = true;
   bool supported = false;
-  std::array<std::uint16_t, 6> occlusionFace{};
-  std::uint8_t occlusionFaceValidMask = 0;
+  // Index into the immutable official directional face-shape table. Zero is
+  // the empty face shape; shape identity is independent from collision.
+  std::uint16_t occlusionShapeId = 0;
   bool operator==(const BlockLightProperties &) const = default;
 };
 

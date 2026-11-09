@@ -49,7 +49,7 @@ elseif(NOT REDSTONE_ALLOCATOR STREQUAL "system")
 endif()
 add_library(redstone_core src/state.cpp src/blocks.cpp src/fluid.cpp src/fluid_flow.cpp src/light.cpp src/heightmap.cpp src/engine.cpp src/entity.cpp src/rail.cpp src/piston.cpp src/shapes.cpp src/nbt.cpp src/storage.cpp src/litematic.cpp src/command.cpp vendor/lz4/lz4.c vendor/lz4/xxhash.c)
 set_source_files_properties(src/light.cpp PROPERTIES
-  OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/light_metadata.inc")
+  OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/light_metadata.inc;${CMAKE_CURRENT_SOURCE_DIR}/src/light_occlusion.inc")
 target_include_directories(redstone_core PUBLIC include)
 target_include_directories(redstone_core PUBLIC vendor/lz4)
 target_link_libraries(redstone_core PUBLIC ZLIB::ZLIB Threads::Threads)
@@ -67,6 +67,8 @@ if(REDSTONE_BUILD_BENCHMARKS)
   target_link_libraries(redstone_tick_benchmark PRIVATE redstone_core)
   add_executable(redstone_fluid_perf_benchmark benchmarks/fluid_perf_benchmark.cpp)
   target_link_libraries(redstone_fluid_perf_benchmark PRIVATE redstone_core redstone_allocator)
+  add_executable(redstone_block_light_benchmark benchmarks/block_light_benchmark.cpp)
+  target_link_libraries(redstone_block_light_benchmark PRIVATE redstone_core redstone_allocator)
   if(REDSTONE_BENCHMARK_COUNT_ALLOCATIONS)
     add_library(redstone_counted_allocator OBJECT src/allocator.cpp)
     target_include_directories(redstone_counted_allocator PUBLIC include)
@@ -142,6 +144,8 @@ if(BUILD_TESTING)
   target_link_libraries(fluid_differential_probe PRIVATE redstone_core redstone_allocator)
   add_executable(fluid_fixture_probe tests/fluid_fixture_probe.cpp)
   target_link_libraries(fluid_fixture_probe PRIVATE redstone_core redstone_allocator)
+    add_executable(block_light_probe tests/block_light_probe.cpp)
+    target_link_libraries(block_light_probe PRIVATE redstone_core redstone_allocator)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
     if(REDSTONE_BUILD_VANILLA_SERVER)
@@ -178,12 +182,20 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid_fixture_differential_test.py"
       --probe "$<TARGET_FILE:fluid_fixture_probe>"
       --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/fluid-relative-golden.json")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/block-light-golden.json")
+      add_test(NAME block_light_differential COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/block_light_differential_test.py"
+        --probe "$<TARGET_FILE:block_light_probe>"
+        --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/block-light-golden.json")
+    endif()
     add_test(NAME light_metadata_asset COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/validation/light_metadata/check.py"
       --tsv "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_light.tsv"
       --names "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_names.txt"
       --manifest "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/manifest.json"
-      --source "${CMAKE_CURRENT_SOURCE_DIR}/src/light_metadata.inc")
+      --source "${CMAKE_CURRENT_SOURCE_DIR}/src/light_metadata.inc"
+      --faces "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_light_faces.tsv"
+      --faces-source "${CMAKE_CURRENT_SOURCE_DIR}/src/light_occlusion.inc")
   endif()
   foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")

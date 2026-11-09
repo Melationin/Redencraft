@@ -41,6 +41,12 @@ $manifest = [ordered]@{
   tsv_sha256 = (Get-FileHash $output -Algorithm SHA256).Hash.ToLowerInvariant()
   rows = (Get-Content $output).Count
 }
+$faces = Join-Path $root 'assets/light26_1/block_light_faces.tsv'
+if (Test-Path $faces) {
+  $manifest.faces_sha256 =
+    (Get-FileHash $faces -Algorithm SHA256).Hash.ToLowerInvariant()
+  $manifest.face_rows = (Get-Content $faces).Count
+}
 [IO.File]::WriteAllText(
   (Join-Path $root 'assets/light26_1/manifest.json'),
   ($manifest | ConvertTo-Json) + "`n",

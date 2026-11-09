@@ -91,6 +91,48 @@ LightChunkInput chunkFixture(int chunkX, int chunkZ, int minBlockSectionY,
   return input;
 }
 
+LightChunkInput emptyChunkFixture(int chunkX, int chunkZ,
+                                  int minBlockSectionY,
+                                  int blockSectionCount) {
+  LightChunkInput input;
+  input.chunkX = chunkX;
+  input.chunkZ = chunkZ;
+  input.minBlockSectionY = minBlockSectionY;
+  input.blockSectionCount = blockSectionCount;
+  input.sections.push_back(std::make_shared<const LightSectionSnapshot>(
+      airSection(minBlockSectionY - 1)));
+  for (int section = 0; section < blockSectionCount; ++section)
+    input.sections.push_back(std::make_shared<const LightSectionSnapshot>(
+        airSection(minBlockSectionY + section)));
+  input.sections.push_back(std::make_shared<const LightSectionSnapshot>(
+      airSection(minBlockSectionY + blockSectionCount)));
+  return input;
+}
+
+bool reportBlock(LightService &service, int chunkX, int chunkZ, Pos position,
+                 const BlockState &oldState, const BlockState &newState) {
+  LightBlockChange change;
+  change.chunkX = chunkX;
+  change.chunkZ = chunkZ;
+  change.sectionY = position.y >> 4;
+  change.localIndex = static_cast<std::uint16_t>(
+      lightIndex(position.x, position.y, position.z));
+  change.oldProperties = lightPropertiesOf(oldState);
+  change.newProperties = lightPropertiesOf(newState);
+  change.wasEmpty = false;
+  change.isEmpty = false;
+  return service.reportBlockChange(change);
+}
+
+int blockLightAt(const std::shared_ptr<const LightChunkSnapshot> &snapshot,
+                 int x, int y, int z) {
+  if (!snapshot)
+    return -1;
+  const LightSectionSnapshot *section = snapshot->section(y >> 4);
+  return section ? section->light(LightLayer::Block, x & 15, y & 15, z & 15)
+                 : -1;
+}
+
 void dataLayerLayout() {
   require(kLightLayerBytes == 2048, "DataLayer is 2048 bytes");
   require(kLightVolume == 4096, "a section has 4096 cells");
@@ -180,8 +222,9 @@ void sectionRangesAndSnapshots() {
           "L-1 snapshots never claim propagation or protocol readiness");
   require(snapshot->lightSectionCount() == 5,
           "published snapshot keeps all light padding sections");
-  require(snapshot->section(-4)->light(LightLayer::Block, 1, 2, 3) == 12,
-          "published immutable snapshot preserves block light");
+  require(snapshot->section(-4)->light(LightLayer::Block, 1, 2, 3) == 15 &&
+              snapshot->section(-4)->light(LightLayer::Sky, 1, 2, 3) == 6,
+          "published snapshot recomputes block light and preserves sky light");
 }
 
 void opticalMetadata() {
@@ -483,8 +526,9 @@ void recoverableChangesAndBoundedPublication() {
   auto newest = service.latestChunk(10, 0);
   require(newest && newest->section(-1)->at(3, 1, 1).emission == 15,
           "all coalesced live changes remain visible after overflow");
-  require(newest->generation == 5,
-          "load plus four cells preserves the per-chunk generation");
+  require(newest->lifecycleEpoch != 0 &&
+              newest->revision == newest->generation,
+          "coalesced result keeps revision and lifecycle identity");
 
   for (int i = 0; i < 200; ++i) {
     LightBlockChange change;
@@ -540,6 +584,205 @@ void recoverableChangesAndBoundedPublication() {
           "coalesced fill-clear-fill keeps final cell contents");
 }
 
+std::shared_ptr<const LightChunkSnapshot>
+settledChunk(LightService &service, int chunkX, int chunkZ) {
+  require(service.waitIdleForTesting(), "light worker reaches a complete batch");
+  service.drainPublished();
+  auto snapshot = service.latestChunk(chunkX, chunkZ);
+  require(snapshot != nullptr, "settled chunk is published");
+  return snapshot;
+}
+
+void blockLightPropagation() {
+  const auto air = airState();
+  const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  const auto lampOff = Blocks::REDSTONE_LAMP.defaultState();
+  LightService service(0, 1);
+  require(service.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "block-light fixture loads");
+  auto initial = settledChunk(service, 0, 0);
+  require(initial->blockLightComplete && !initial->propagationComplete &&
+              !initial->protocolReady && blockLightAt(initial, 8, 8, 8) == 0,
+          "empty block light is complete only for the block layer");
+
+  require(reportBlock(service, 0, 0, {7, 8, 8}, air, lamp),
+          "source placement enters worker");
+  auto lit = settledChunk(service, 0, 0);
+  const std::string lit_values =
+      std::to_string(blockLightAt(lit, 7, 8, 8)) + "/" +
+      std::to_string(blockLightAt(lit, 8, 8, 8)) + "/" +
+      std::to_string(blockLightAt(lit, 9, 8, 8)) + "/" +
+      std::to_string(blockLightAt(lit, 7, 9, 8));
+  require(blockLightAt(lit, 7, 8, 8) == 15 &&
+              blockLightAt(lit, 8, 8, 8) == 14 &&
+              blockLightAt(lit, 9, 8, 8) == 13 &&
+              blockLightAt(lit, 7, 9, 8) == 14,
+          "single source propagates with one-level falloff: " + lit_values);
+  require(service.stats().lightQueueEntries > 0,
+          "benchmark-visible counter records propagated queue entries");
+
+  require(reportBlock(service, 0, 0, {8, 8, 8}, air,
+                      Blocks::WATER.defaultState()),
+          "dampening-one host enters worker");
+  auto water = settledChunk(service, 0, 0);
+  require(blockLightAt(water, 8, 8, 8) == 14 &&
+              blockLightAt(water, 9, 8, 8) == 13,
+          "max(1,dampening) is applied to water");
+  require(reportBlock(service, 0, 0, {8, 8, 8},
+                      Blocks::WATER.defaultState(),
+                      Blocks::STONE.defaultState()),
+          "opaque state change enters worker");
+  auto opaque = settledChunk(service, 0, 0);
+  const std::string opaque_values =
+      std::to_string(blockLightAt(opaque, 7, 8, 8)) + "/" +
+      std::to_string(blockLightAt(opaque, 8, 8, 8)) + "/" +
+      std::to_string(blockLightAt(opaque, 9, 8, 8));
+  require(blockLightAt(opaque, 8, 8, 8) == 0 &&
+              blockLightAt(opaque, 9, 8, 8) < 13,
+          "opaque neighbor blocks the face and downstream light: " +
+              opaque_values);
+  require(reportBlock(service, 0, 0, {8, 8, 8},
+                      Blocks::STONE.defaultState(), air),
+          "opening the cell enters worker");
+  auto reopened = settledChunk(service, 0, 0);
+  require(blockLightAt(reopened, 8, 8, 8) == 14 &&
+              blockLightAt(reopened, 9, 8, 8) == 13,
+          "opening a cell restores downstream light");
+
+  require(reportBlock(service, 0, 0, {7, 8, 8}, lamp, lampOff),
+          "source state removal enters worker");
+  auto removed = settledChunk(service, 0, 0);
+  require(blockLightAt(removed, 7, 8, 8) == 0,
+          "unlit lamp drops its emitted light");
+
+  require(reportBlock(service, 0, 0, {2, 8, 8}, air, lamp) &&
+              reportBlock(service, 0, 0, {8, 8, 8}, air, lamp),
+          "overlapping sources enter one pending batch");
+  auto overlap = settledChunk(service, 0, 0);
+  require(blockLightAt(overlap, 5, 8, 8) == 12,
+          "overlapping light takes maximum instead of summing: " +
+              std::to_string(blockLightAt(overlap, 5, 8, 8)));
+
+  require(reportBlock(service, 0, 0, {2, 8, 8}, lamp, air) &&
+              reportBlock(service, 0, 0, {8, 8, 8}, lamp, air),
+          "remaining sources remove cleanly");
+  auto empty = settledChunk(service, 0, 0);
+  require(blockLightAt(empty, 5, 8, 8) == 0,
+          "decrease propagation clears the decayed region");
+}
+
+void blockLightBoundariesAndEpochs() {
+  const auto air = airState();
+  const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  LightService cross(-1, 1);
+  require(cross.submitChunk(emptyChunkFixture(0, 0, -1, 1)) != 0,
+          "east chunk loads first");
+  (void)settledChunk(cross, 0, 0);
+  require(reportBlock(cross, 0, 0, {0, -8, 0}, air, lamp),
+          "negative-coordinate boundary source enters");
+  auto eastOnly = settledChunk(cross, 0, 0);
+  require(blockLightAt(eastOnly, 0, -8, 0) == 15 &&
+              blockLightAt(eastOnly, 1, -8, 0) == 14,
+          "unloaded west neighbor behaves as a barrier");
+
+  require(cross.submitChunk(emptyChunkFixture(-1, 0, -1, 1)) != 0,
+          "west chunk loads later");
+  auto west = settledChunk(cross, -1, 0);
+  require(blockLightAt(west, -1, -8, 0) == 14 &&
+              blockLightAt(west, -2, -8, 0) == 13,
+          "loading a neighbor admits light across the chunk boundary");
+
+  cross.pauseForTesting();
+  auto visibleBefore = settledChunk(cross, 0, 0);
+  require(reportBlock(cross, 0, 0, {0, -8, 0}, lamp, air),
+          "paused source removal is retained");
+  require(cross.latestChunk(0, 0) == visibleBefore,
+          "readers keep the previous complete revision while new work is pending");
+  cross.resumeForTesting();
+  auto changed = settledChunk(cross, 0, 0);
+  require(changed->lifecycleEpoch == visibleBefore->lifecycleEpoch &&
+              changed->revision > visibleBefore->revision,
+          "same lifetime advances revision after a complete batch");
+
+  require(reportBlock(cross, -1, 0, {-1, -8, 0}, air, lamp),
+          "west source enters after load");
+  auto across = settledChunk(cross, 0, 0);
+  require(blockLightAt(across, 0, -8, 0) == 14,
+          "west source propagates into the east chunk");
+  const auto oldEpoch = cross.latestChunk(-1, 0)->lifecycleEpoch;
+  require(cross.unloadChunk(-1, 0), "west chunk unloads");
+  require(cross.latestChunk(-1, 0) == nullptr,
+          "unload hides the old lifecycle immediately");
+  auto decayed = settledChunk(cross, 0, 0);
+  require(blockLightAt(decayed, 0, -8, 0) == 0,
+          "unload removes cross-boundary light from the loaded side");
+
+  require(cross.submitChunk(emptyChunkFixture(-1, 0, -1, 1)) != 0,
+          "west chunk reloads");
+  auto reloaded = settledChunk(cross, -1, 0);
+  require(reloaded->lifecycleEpoch > oldEpoch,
+          "reload advances lifecycle epoch");
+  require(blockLightAt(settledChunk(cross, 0, 0), 0, -8, 0) == 0,
+          "reloaded empty chunk does not resurrect old light");
+  require(reportBlock(cross, -1, 0, {-1, -8, 0}, air, lamp),
+          "new-lifetime source enters");
+  auto newAcross = settledChunk(cross, 0, 0);
+  require(blockLightAt(newAcross, 0, -8, 0) == 14,
+          "new lifecycle propagates across the boundary");
+
+  LightService vertical(0, 2);
+  require(vertical.submitChunk(emptyChunkFixture(0, 0, 0, 2)) != 0,
+          "two-section fixture loads");
+  (void)settledChunk(vertical, 0, 0);
+  require(reportBlock(vertical, 0, 0, {8, 15, 8}, air, lamp),
+          "section-edge source enters");
+  auto crossSection = settledChunk(vertical, 0, 0);
+  require(blockLightAt(crossSection, 8, 16, 8) == 14 &&
+              blockLightAt(crossSection, 8, 17, 8) == 13,
+          "block light crosses the y-section boundary");
+}
+
+void directionalShapeOcclusion() {
+  const auto &air = lightPropertiesOf(airState());
+  const auto pistonNorth = Blocks::PISTON.defaultState()
+                               .with("facing", "north")
+                               .with("extended", "true");
+  const auto &piston = lightPropertiesOf(pistonNorth);
+  const std::string piston_metadata =
+      "supported=" + std::to_string(piston.supported) +
+      " shape=" + std::to_string(piston.occlusionShapeId) +
+      " use=" + std::to_string(piston.useShapeForLightOcclusion) +
+      " occlude=" + std::to_string(piston.canOcclude);
+  require(piston.supported && piston.useShapeForLightOcclusion,
+          "piston light shape comes from official metadata");
+  require(!lightFaceShapesOcclude(air, piston, LightDirection::South),
+          "piston north face is open to southbound light");
+  require(lightFaceShapesOcclude(air, piston, LightDirection::North),
+          "piston south face blocks northbound light: " + piston_metadata);
+  const auto &retracted = lightPropertiesOf(Blocks::PISTON.defaultState());
+  require(!retracted.useShapeForLightOcclusion,
+          "retracted piston uses its full dampening instead of a face shape");
+}
+
+void incompleteMetadataIsExplicit() {
+  auto input = emptyChunkFixture(0, 0, 0, 1);
+  std::vector<std::uint16_t> cells(kLightVolume, 0);
+  cells[lightIndex(4, 5, 6)] = 1;
+  input.sections[1] = std::make_shared<const LightSectionSnapshot>(
+      0, false,
+      std::vector<BlockLightProperties>{lightPropertiesOf(airState()),
+                                        BlockLightProperties{}},
+      std::move(cells));
+  LightService service(0, 1);
+  require(service.submitChunk(std::move(input)) != 0,
+          "incomplete metadata fixture loads");
+  auto snapshot = settledChunk(service, 0, 0);
+  require(!snapshot->blockLightComplete && snapshot->unsupportedCells == 1,
+          "missing optical metadata remains explicitly incomplete");
+  require(!snapshot->propagationComplete && !snapshot->protocolReady,
+          "incomplete block light is never exposed as fully ready");
+}
+
 void destructorClosesWorker() {
   World world;
   world.loadChunk(0, 0);
@@ -582,6 +825,9 @@ void worldHooks() {
           "World setBlock advances the light generation");
   require(changed->section(6)->at(0, 4, 0).emission == 15,
           "World setBlock forwards official emission metadata");
+  require(blockLightAt(changed, 0, 100, 0) == 15 &&
+              blockLightAt(changed, 1, 100, 0) == 14,
+          "World setBlock runs real block-light propagation");
 
   require(world.setBlock({0, 150, 0}, Blocks::STONE.defaultState()),
           "place into an empty block section");
@@ -650,6 +896,8 @@ void pausedWorldRecoveryAndImport() {
   auto authoritative = service->latestChunk(1, 0);
   require(authoritative && authoritative->section(6)->at(0, 5, 0).emission == 15,
           "import updates light from owned post-raw-write data");
+  require(blockLightAt(authoritative, 16, 101, 0) == 15,
+          "imported source participates in block-light propagation");
   world.disableLighting();
 }
 } // namespace
@@ -664,6 +912,10 @@ int main(int argc, char **argv) {
     workerPublicationAndInvalidation();
     workerQueueAndClose();
     recoverableChangesAndBoundedPublication();
+    blockLightPropagation();
+    blockLightBoundariesAndEpochs();
+    directionalShapeOcclusion();
+    incompleteMetadataIsExplicit();
     destructorClosesWorker();
     worldHooks();
     pausedWorldRecoveryAndImport();

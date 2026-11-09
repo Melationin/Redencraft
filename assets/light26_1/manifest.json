@@ -4,5 +4,7 @@
     "java":  "C:/Program Files/Zulu/zulu-26/bin/java.exe",
     "names_sha256":  "b0ceda3e4553f115550f3d09f525139ad95256afdf77a2f62712ff2e36b5c950",
     "tsv_sha256":  "d2e60ad07a59b1ec0a1f2550c3127ee5f937a2f3b85183f9db145522bb8fac49",
-    "rows":  2366
+    "rows":  2366,
+    "faces_sha256":  "635909ec7c1a92009b3a624e394e3faba1f6a461a4579752dfb02c8d6214ba42",
+    "face_rows":  44
 }

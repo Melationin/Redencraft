@@ -1,8 +1,8 @@
-# 26.1 光照底座（L-1）
+# 26.1 光照底座与方块光（L-1/L-2a）
 
 ## 当前边界
 
-L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主线程到单写者后台线程的快照交接、代际失效和完整结果发布基础。它**没有实现光照传播**：新增或更新的 snapshot 仍保持 `propagationComplete=false`、`protocolReady=false`，不能作为真实亮度发布。协议 775 的区块光照段仍是占位，Anvil 光照读写也未接入。
+L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主线程到单写者后台线程的快照交接、代际失效和完整结果发布基础。L-2a 在同一 worker 上实现了真实的方块光 decrease/increase 传播、动态 source 检查、方向遮蔽面及跨已加载 section/chunk 收敛。天空光传播仍未实现，因此完整 `propagationComplete` 与 `protocolReady` 始终为 false；仅 `blockLightComplete` 可表示方块层在该 revision 已完成。协议 775 的区块光照段仍是占位，Anvil 光照读写也未接入。
 
 生产服务端默认不启用该路径。`World::enableLighting()` 是 opt-in 测试/后续集成入口；核心 tick 不等待 worker，也不在方块写入时扫描区段。
 
@@ -25,7 +25,7 @@ L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主
 - `canOcclude`
 - `useShapeForLightOcclusion`
 - `propagatesSkylightDown`
-- 六个方向的 16×16 face mask 与 validity mask（结构已保留；L-1 未生成遮蔽形状，实际 validity 为 0）
+- 六个方向的官方面矩形 mask；只有 `useShapeForLightOcclusion` 状态引用预构建 mask，和碰撞形状完全分开。
 
 数据来自未修改官方 26.1 `server.jar`（SHA-1 `3872a7f07a1a595e651aef8b058dfc2bb3772f46`）的离线 Java 探针，不覆盖 `assets/protocol775`：
 
@@ -33,11 +33,16 @@ L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主
 powershell -NoProfile -ExecutionPolicy Bypass -File validation/vanilla26_1/run_light_metadata.ps1
 python validation/light_metadata/generate_cpp.py `
   --tsv assets/light26_1/block_light.tsv --out src/light_metadata.inc
+powershell -NoProfile -ExecutionPolicy Bypass -File validation/vanilla26_1/run_light_occlusion.ps1
+python validation/light_metadata/generate_light_occlusion.py `
+  --tsv assets/light26_1/block_light_faces.tsv --out src/light_occlusion.inc
 ```
 
 资产包含当前注册名单的 68 个方块、2,366 个官方状态，manifest 位于 `assets/light26_1/manifest.json`。TSV SHA-256 为 `d2e60ad07a59b1ec0a1f2550c3127ee5f937a2f3b85183f9db145522bb8fac49`。C++ schema 中不存在的官方组合不会伪造；没有官方记录的 extension/后注册状态显式返回 `supported=false`。`light_metadata_asset` CTest 会核对 manifest、唯一键、行数和生成表是否陈旧。
 
 `hasDifferentLightProperties` 与 `LightEngine.java:42-49` 一致：同一状态返回 false；emission 或 dampening 变化、任一状态使用 shape-for-light-occlusion 时返回 true。`canOcclude` 是独立元数据，不额外加入这个 Java 判定。未知元数据保守返回 true。空 section 的 false/true 转换由 `hasDifferentSectionLightProperties` 单独处理。
+
+`block_light_faces.tsv` 由同一官方 JAR 导出 44 个 `useShapeForLightOcclusion` 状态的六方向面矩形，归并为 20 个唯一 mask；没有从碰撞形状推导，也没有按方块名猜测。传播使用 `Shapes.faceShapeOccludes` 的并集覆盖判据：分别取源状态在传播方向、目标状态在反方向的面形状，二者必须覆盖完整 16×16 面才阻断。缺失光学状态的区块不会产生 `blockLightComplete=true`。
 
 ## 后台交接
 
@@ -45,13 +50,14 @@ python validation/light_metadata/generate_cpp.py `
 
 1. 主线程构造完全拥有的 `LightChunkInput`：区块坐标、连续光 section、per-section palette/cell 索引、双层光值和 `BlockLightProperties`。不传 `World`、内部 palette 或可变注册表指针。全空 section 和上下 padding 复用世界内同一组不可变输入；均匀非空 section 只保存一个 palette 值。
 2. 主线程按区块合并 load、section-empty、cell 和 unload，维护每区块最新的可重试状态，不为每个格子创建线程任务。有效光照更新不会因 worker 容量而丢弃；暂停或积压时状态留在 pending map，直到 worker 真正接收。`Stats::rejected` 只记录关闭后的提交或非法 section/cell 输入。
-3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作；传播入口尚未实现。同一区段的多个 cell 使用状态键合批，最终 section 空态在全部 cell 之后应用。
-4. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。
-5. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。待发布结果按区块只保留最新 snapshot，旧代结果不会覆盖新代。
+3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作。方块光先处理 `checkBlock`，再完全排空 decrease 队列，最后排空 increase 队列；source、遮挡开关和邻格回灌都通过 `LightEngine.QueueEntry` 的方向位语义执行。未加载邻区块不进入光存储，按 Java 读取屏障阻止传播。
+4. 加载区块时扫描真实光源并检查旧光层；加载/卸载后从相邻已加载区块的边界格重新发起 increase/decrease，使跨 chunk 两侧收敛。普通方块变更只检查对应格，不扫描整块或全区块。
+5. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。
+6. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。待发布结果按区块只保留最新 snapshot。生命周期 epoch 标识加载代，revision 标识同代更新；同代结果在完整批次后可见，卸载/重载后的旧代一律拒绝。
 
 默认每次最多取 1000 个区块（另受 pending 容量配置约束）。每区块 pending 状态只保留最新 load、按 section 合并的 cell delta 和每 section 最新空态；已 drain 的发布结果也按区块合并，不随写入代数无限增长。unload 会立即对读者失效，并作为有序 tombstone 保留到 worker 清除旧内部代；若其后立即 reload，worker 先清除旧代再安装完整新快照。worker 错误保存在 `workerError()`。`close()` 停止接收新命令、排空 pending 并 join。`World::~World` 与 `disableLighting()` 会先关闭 worker。
 
-`World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和光学属性/section emptiness 变更。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生逐格光照任务；`importWorld` 完成 raw block 写入后调用 `refreshLightSnapshots()`，用当前权威区块状态替换导入前排队快照。
+`World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和光学属性/section emptiness 变更。方块光传播只在 worker 内进行；主线程不等待，也不读取活区块进行传播。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生逐格光照任务；`importWorld` 完成 raw block 写入后调用 `refreshLightSnapshots()`，用当前权威区块状态替换导入前排队快照。
 
 ## 高度图
 
@@ -68,13 +74,13 @@ python validation/light_metadata/generate_cpp.py `
 
 ## 未实现与后续
 
-// TODO(L-2a/L-2b): implement block/sky increase-decrease propagation, retained queues, section/neighbor constraints, exact face masks and published light values.
+// TODO(L-2b): implement sky-light source heights and increase-decrease propagation.
 
 // TODO(L-3): encode only a published snapshot into protocol light masks/data and reject unloaded generations.
 
 // TODO(W-2/W-3): read and write Anvil `SkyLight`, `BlockLight` and `isLightOn`.
 
-L-1 关闭传播时的世吞回归只用于确认底座没有越过当前预算；具体候选、日志和结果只在 `task/TASKS.md` 交接。最终启用真实传播与发布后的 L-4 仍须重新做至少五组交错 A/B，并判断主线程额外 CPU/平均刻墙钟 <10%；L-1 的关闭光照数据不能替代 L-4 的门槛。
+L-2a 的 benchmark 只观察正常 worker 接收的变更、传播队列条目、批次和等待完成后的墙钟，不改变模拟输入，也不作为 L-4 性能结论。启用方块光传播、天空光和发布后的 L-4 仍须做至少五组交错 A/B，并判断主线程额外 CPU/平均刻墙钟 <10%。
 
 ## 聚焦验证
 
@@ -84,7 +90,19 @@ cmake --build build-f7-nmake --target light_tests heightmap_tests
 .\build-f7-nmake\heightmap_tests.exe
 python validation\light_metadata\check.py --tsv assets\light26_1\block_light.tsv `
   --names assets\light26_1\block_names.txt --manifest assets\light26_1\manifest.json `
-  --source src\light_metadata.inc
+  --source src\light_metadata.inc --faces assets\light26_1/block_light_faces.tsv `
+  --faces-source src/light_occlusion.inc
 ```
 
-`light` 覆盖双层 nibble、世界高度 padding、均匀 section、可恢复 pending、卸载 tombstone、有界发布、光学状态与线程/代际交接；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV/manifest 与生成 C++ 表一致。
+官方方块光差分需要工作区已有且 SHA-1 校验通过的隔离服务端：
+
+```powershell
+python validation\vanilla26_1\run_block_light_validation.py --promote-golden
+python validation\vanilla26_1\block_light_differential_test.py `
+  --probe build-f7-nmake\block_light_probe.exe `
+  --golden validation\vanilla26_1\block-light-golden.json
+```
+
+runner 使用独立世界和 loopback 端口，在 `ThreadedLevelLightEngine.runUpdate()` 完成后继续等到后续真实服务器 tick，确认 `hasLightWork()==false` 才读取 `LightLayer.BLOCK`；它不使用固定睡眠或伪造亮度。原始 server log、候选、命令和 manifest 保存在唯一运行目录。
+
+`light` 覆盖双层 nibble、世界高度 padding、均匀 section、可恢复 pending、卸载 tombstone、有界发布、方块光增减/重叠/遮挡/跨边界/epoch-revision 和线程生命周期；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方服务端与本仓库探针的三阶段 117 个逐格观测。

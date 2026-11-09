@@ -16,6 +16,7 @@ namespace redstone {
 // LightLayer matches net.minecraft.world.level.LightLayer. Block first mirrors
 // LevelLightEngine.updateSectionStatus's block-then-sky calls.
 enum class LightLayer : std::uint8_t { Block = 0, Sky = 1 };
+enum class LightDirection : std::uint8_t { Down = 0, Up, North, South, West, East };
 inline constexpr std::size_t kLightLayerCount = 2;
 inline constexpr int kLightVolume = 16 * 16 * 16;
 inline constexpr std::size_t kLightLayerBytes = 2048;
@@ -66,6 +67,9 @@ bool hasDifferentLightProperties(const BlockState &oldState,
 bool hasDifferentLightProperties(const BlockLightProperties &oldProperties,
                                  const BlockLightProperties &newProperties);
 bool hasDifferentSectionLightProperties(bool wasEmpty, bool isEmpty);
+bool lightFaceShapesOcclude(const BlockLightProperties &from,
+                            const BlockLightProperties &to,
+                            LightDirection direction);
 
 struct LightSectionSnapshot {
   explicit LightSectionSnapshot(
@@ -107,7 +111,14 @@ struct LightChunkSnapshot {
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
   std::uint64_t generation = 0;
-  // TODO(L-2a/L-2b): propagation fills the owned layers before publication.
+  // Lifecycle rejects unload/reload results; revision distinguishes completed
+  // results within one loaded lifetime.
+  std::uint64_t lifecycleEpoch = 0;
+  std::uint64_t revision = 0;
+  // L-2a may complete the block layer while sky propagation and protocol
+  // publication remain unfinished.
+  bool blockLightComplete = false;
+  // TODO(L-2b): sky propagation remains unfinished.
   bool propagationComplete = false;
   // TODO(L-3): protocol encoding consumes only complete published snapshots.
   bool protocolReady = false;
@@ -152,6 +163,7 @@ public:
     std::uint64_t queueHighWater = 0;
     std::uint64_t pendingChunks = 0;
     std::uint64_t pendingPublications = 0;
+    std::uint64_t lightQueueEntries = 0;
   };
 
   explicit LightService(int minBlockSectionY, int blockSectionCount,
@@ -178,6 +190,7 @@ public:
   Stats stats() const;
   std::string workerError() const;
   bool waitIdleForTesting();
+  void pauseForTesting();
   void resumeForTesting();
   void close();
 
