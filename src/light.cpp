@@ -1070,6 +1070,489 @@ private:
     mutable bool incomplete = false;
   };
 
+  using SkyColumnSources = std::array<int, 256>;
+
+  class SkyLightPropagator {
+  public:
+    SkyLightPropagator(
+        Impl &light,
+        std::unordered_map<std::uint64_t, WorkingChunk> &workingChunks,
+        const std::unordered_set<std::uint64_t> &removedChunks,
+        std::unordered_map<std::uint64_t, SkyColumnSources> &sources)
+        : owner(light), working(workingChunks), removed(removedChunks),
+          sourceHeights(sources) {}
+
+    void enqueueCheck(LightPos position) {
+      if (checks.insert(position).second)
+        checkQueue.push_back(position);
+    }
+
+    void seedChunk(std::uint64_t key) {
+      WorkingChunk *chunk = workingChunk(key);
+      if (!chunk)
+        return;
+      SkyColumnSources sources = computeSources(*chunk);
+      sourceHeights[key] = sources;
+      clearLines(*chunk);
+      const int minY = owner.minBlockSectionY * 16;
+      const int lightBottom = (owner.minBlockSectionY - 1) * 16;
+      const int lightTop =
+          (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16;
+      for (int z = 0; z < 16; ++z) {
+        for (int x = 0; x < 16; ++x) {
+          const int source = sources[HeightmapColumnKey(x, z)];
+          const int first = source == minY - 1 ? lightBottom : source;
+          for (int y = lightTop - 1; y >= first; --y)
+            setStoredLevel({chunk->chunkX * 16 + x, y,
+                            chunk->chunkZ * 16 + z}, 15);
+          seedColumn(key, chunk, x, z, source);
+        }
+      }
+    }
+
+    void seedIncoming(std::uint64_t key) {
+      const LightChunkSnapshot *chunk = stateFor(key);
+      if (!chunk)
+        return;
+      for (int direction = 2; direction < 6; ++direction) {
+        const LightPos delta = kDirectionOffsets[direction];
+        const std::uint64_t neighborKey =
+            chunkKey(chunk->chunkX + delta.x, chunk->chunkZ + delta.z);
+        const LightChunkSnapshot *neighbor = stateFor(neighborKey);
+        if (!neighbor)
+          continue;
+        forEachFaceCell(neighbor, direction ^ 1, [&](LightPos position) {
+          const int level = storedLevel(position);
+          if (level > 1)
+            enqueueIncrease(position, static_cast<std::uint8_t>(level),
+                            static_cast<std::uint8_t>(1u << (direction ^ 1)),
+                            emptyShape(stateAt(position)), false);
+        });
+      }
+    }
+
+    void clearIncomingFrom(std::uint64_t removedKey) {
+      const int chunkX = static_cast<int>(removedKey >> 32);
+      const int chunkZ =
+          static_cast<int>(static_cast<std::uint32_t>(removedKey));
+      for (int direction = 2; direction < 6; ++direction) {
+        const LightPos delta = kDirectionOffsets[direction];
+        const LightChunkSnapshot *neighbor =
+            stateFor(chunkKey(chunkX + delta.x, chunkZ + delta.z));
+        if (!neighbor)
+          continue;
+        forEachFaceCell(neighbor, direction ^ 1, [&](LightPos position) {
+          enqueueCheck(position);
+        });
+      }
+    }
+
+    int updateColumn(std::uint64_t key, int localX, int localZ) {
+      WorkingChunk *chunk = workingChunk(key);
+      if (!chunk)
+        return owner.minBlockSectionY * 16 - 1;
+      auto &sources = sourceHeights[key];
+      const int column = HeightmapColumnKey(localX, localZ);
+      const int oldSource = sources[column];
+      const int newSource = computeSource(*chunk, localX, localZ);
+      if (oldSource == newSource)
+        return newSource;
+
+      const int blockMinY = owner.minBlockSectionY * 16;
+      const int lightBottom = (owner.minBlockSectionY - 1) * 16;
+      if (newSource > oldSource) {
+        const int oldFirst = oldSource == blockMinY - 1 ? lightBottom : oldSource;
+        for (int y = oldFirst; y < newSource; ++y) {
+          const LightPos position{chunk->chunkX * 16 + localX, y,
+                                  chunk->chunkZ * 16 + localZ};
+          const int oldLevel = storedLevel(position);
+          if (oldLevel > 0) {
+            setStoredLevel(position, 0);
+            enqueueDecrease(position, static_cast<std::uint8_t>(oldLevel), 63);
+          }
+        }
+      } else {
+        const int newFirst = newSource == blockMinY - 1 ? lightBottom : newSource;
+        for (int y = newFirst; y < oldSource; ++y) {
+          const LightPos position{chunk->chunkX * 16 + localX, y,
+                                  chunk->chunkZ * 16 + localZ};
+          setStoredLevel(position, 15);
+          enqueueIncrease(position, 15, 63, true, true);
+        }
+      }
+      sources[column] = newSource;
+      seedColumn(key, chunk, localX, localZ, newSource);
+      return newSource;
+    }
+
+    void run() {
+      while (!checkQueue.empty()) {
+        const LightPos position = checkQueue.front();
+        checkQueue.pop_front();
+        checks.erase(position);
+        checkNode(position);
+      }
+      while (!decreaseQueue.empty()) {
+        const DecreaseTask task = decreaseQueue.front();
+        decreaseQueue.pop_front();
+        ++owner.statsLightQueueEntries;
+        propagateDecrease(task);
+      }
+      while (!increaseQueue.empty()) {
+        const IncreaseTask task = increaseQueue.front();
+        increaseQueue.pop_front();
+        ++owner.statsLightQueueEntries;
+        propagateIncrease(task);
+      }
+    }
+
+    void commitLayers() {
+      for (const SectionPos3 &position : dirtySections) {
+        WorkingChunk *chunk = ensureWorking(chunkKey(position.x, position.z));
+        if (!chunk)
+          continue;
+        LightSectionSnapshot *section = chunk->sectionForEdit(position.y);
+        if (!section)
+          continue;
+        const auto found = values.find(position);
+        if (found == values.end())
+          continue;
+        const LightValues &layer = found->second;
+        if (std::all_of(layer.begin(), layer.end(), [&](std::uint8_t value) {
+              return value == layer.front();
+            }))
+          section->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+              LightLayerSnapshot::uniform(layer.front());
+        else
+          section->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+              LightLayerSnapshot::mixed(layer);
+        chunk->dirty = true;
+      }
+    }
+
+    bool isComplete() const { return !incomplete; }
+
+  private:
+    static int HeightmapColumnKey(int x, int z) { return x + z * 16; }
+
+    WorkingChunk *workingChunk(std::uint64_t key) {
+      const auto found = working.find(key);
+      if (found != working.end())
+        return &found->second;
+      return ensureWorking(key);
+    }
+
+    const LightChunkSnapshot *stateFor(std::uint64_t key) const {
+      if (removed.contains(key))
+        return nullptr;
+      const auto current = working.find(key);
+      if (current != working.end())
+        return current->second.snapshot.get();
+      const auto stored = owner.internal.find(key);
+      return stored == owner.internal.end() ? nullptr : stored->second.get();
+    }
+
+    WorkingChunk *ensureWorking(std::uint64_t key) {
+      if (removed.contains(key))
+        return nullptr;
+      const auto current = working.find(key);
+      if (current != working.end())
+        return &current->second;
+      const auto stored = owner.internal.find(key);
+      if (stored == owner.internal.end())
+        return nullptr;
+      WorkingChunk next;
+      next.key = key;
+      next.lifecycleEpoch = stored->second->lifecycleEpoch;
+      next.chunkX = stored->second->chunkX;
+      next.chunkZ = stored->second->chunkZ;
+      next.snapshot = std::make_shared<LightChunkSnapshot>(*stored->second);
+      return &working.emplace(key, std::move(next)).first->second;
+    }
+
+    const LightSectionSnapshot *sectionAt(LightPos position) const {
+      // Sky storage has no meaningful data below the playable world; the
+      // bottom padding is a read barrier. The upper padding remains sky data.
+      if (position.y < owner.minBlockSectionY * 16 ||
+          position.y >=
+              (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16)
+        return nullptr;
+      const LightChunkSnapshot *chunk =
+          stateFor(chunkKey(position.x >> 4, position.z >> 4));
+      return chunk ? chunk->section(position.y >> 4) : nullptr;
+    }
+
+    const BlockLightProperties &stateAt(LightPos position) const {
+      if (position.y < owner.minBlockSectionY * 16 ||
+          position.y >=
+              (owner.minBlockSectionY + owner.blockSectionCount) * 16)
+        return emptyLightProperties();
+      const LightSectionSnapshot *section = sectionAt(position);
+      if (!section)
+        return unsupportedLightProperties();
+      const auto &properties =
+          section->at(position.x & 15, position.y & 15, position.z & 15);
+      if (!properties.supported)
+        incomplete = true;
+      return properties;
+    }
+
+    int storedLevel(LightPos position) const {
+      const LightSectionSnapshot *section = sectionAt(position);
+      if (!section)
+        return 0;
+      const SectionPos3 key{position.x >> 4, position.y >> 4,
+                            position.z >> 4};
+      const auto found = values.find(key);
+      if (found != values.end())
+        return found->second[lightIndex(position.x, position.y, position.z)];
+      return section->light(LightLayer::Sky, position.x & 15,
+                            position.y & 15, position.z & 15);
+    }
+
+    bool setStoredLevel(LightPos position, int level) {
+      const LightSectionSnapshot *section = sectionAt(position);
+      if (!section)
+        return false;
+      const SectionPos3 key{position.x >> 4, position.y >> 4,
+                            position.z >> 4};
+      auto inserted = values.try_emplace(key);
+      LightValues &layer = inserted.first->second;
+      if (inserted.second) {
+        for (int y = 0; y < 16; ++y)
+          for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x)
+              layer[lightIndex(x, y, z)] =
+                  section->light(LightLayer::Sky, x, y, z);
+      }
+      const auto index = lightIndex(position.x, position.y, position.z);
+      if (layer[index] == level)
+        return false;
+      layer[index] = static_cast<std::uint8_t>(level);
+      dirtySections.insert(key);
+      return true;
+    }
+
+    int computeSource(WorkingChunk &chunk, int x, int z) const {
+      const int minY = owner.minBlockSectionY * 16;
+      const int maxY =
+          (owner.minBlockSectionY + owner.blockSectionCount) * 16;
+      const BlockLightProperties *top = &emptyLightProperties();
+      for (int y = maxY - 1; y >= minY; --y) {
+        const auto &bottom = stateAt({chunk.chunkX * 16 + x, y,
+                                      chunk.chunkZ * 16 + z});
+        if (bottom.supported && bottom.dampening != 0)
+          return y + 1;
+        if (faceShapesOcclude(*top, bottom, 0))
+          return y + 1;
+        top = &bottom;
+      }
+      return minY - 1;
+    }
+
+    SkyColumnSources computeSources(WorkingChunk &chunk) const {
+      SkyColumnSources result{};
+      for (int z = 0; z < 16; ++z)
+        for (int x = 0; x < 16; ++x)
+          result[HeightmapColumnKey(x, z)] = computeSource(chunk, x, z);
+      return result;
+    }
+
+    void clearLines(WorkingChunk &chunk) {
+      for (auto &section : chunk.snapshot->sections) {
+        auto copy = std::make_shared<LightSectionSnapshot>(*section);
+        copy->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+            LightLayerSnapshot::uniform(0);
+        section = copy;
+      }
+      chunk.mutableSections.clear();
+      for (auto current = values.begin(); current != values.end();) {
+        if (chunkKey(current->first.x, current->first.z) == chunk.key)
+          current = values.erase(current);
+        else
+          ++current;
+      }
+    }
+
+    int sourceFor(int blockX, int blockZ) {
+      const int chunkX = blockX >> 4;
+      const int chunkZ = blockZ >> 4;
+      const std::uint64_t key = chunkKey(chunkX, chunkZ);
+      auto found = sourceHeights.find(key);
+      if (found == sourceHeights.end()) {
+        const LightChunkSnapshot *state = stateFor(key);
+        if (!state)
+          return owner.minBlockSectionY * 16 - 1;
+        WorkingChunk temp;
+        temp.key = key;
+        temp.chunkX = state->chunkX;
+        temp.chunkZ = state->chunkZ;
+        temp.snapshot = std::make_shared<LightChunkSnapshot>(*state);
+        found = sourceHeights.emplace(key, computeSources(temp)).first;
+      }
+      return found->second[HeightmapColumnKey(blockX & 15, blockZ & 15)];
+    }
+
+    void seedColumn(std::uint64_t, WorkingChunk *chunk, int x, int z,
+                    int source) {
+      const int minY = owner.minBlockSectionY * 16;
+      const int maxY =
+          (owner.minBlockSectionY + owner.blockSectionCount) * 16;
+      const int sentinel = minY - 1;
+      const int bx = chunk->chunkX * 16 + x;
+      const int bz = chunk->chunkZ * 16 + z;
+      const int north = sourceFor(bx, bz - 1);
+      const int south = sourceFor(bx, bz + 1);
+      const int west = sourceFor(bx - 1, bz);
+      const int east = sourceFor(bx + 1, bz);
+      const int neighborHighest = std::max({north, south, west, east});
+      const int first = source == sentinel ? minY : source;
+      for (int y = maxY - 1; y >= first; --y) {
+        if (y != source && y >= neighborHighest)
+          continue;
+        std::uint8_t directions = 0;
+        if (y == source)
+          directions |= 1u << 0;
+        if (y < north)
+          directions |= 1u << 2;
+        if (y < south)
+          directions |= 1u << 3;
+        if (y < west)
+          directions |= 1u << 4;
+        if (y < east)
+          directions |= 1u << 5;
+        if (directions)
+          enqueueIncrease({bx, y, bz}, 15, directions,
+                          emptyShape(stateAt({bx, y, bz})), true);
+      }
+    }
+
+    bool isSource(LightPos position) {
+      return position.y >= sourceFor(position.x, position.z);
+    }
+
+    void checkNode(LightPos position) {
+      if (!sectionAt(position))
+        return;
+      if (isSource(position)) {
+        enqueueDecrease(position, 15, 63u & ~(1u << 1));
+        enqueueIncrease(position, 15, 63u & ~(1u << 1), true, true);
+      } else {
+        const int oldLevel = storedLevel(position);
+        if (oldLevel > 0) {
+          setStoredLevel(position, 0);
+          enqueueDecrease(position, static_cast<std::uint8_t>(oldLevel), 63);
+        } else {
+          enqueueDecrease(position, 1, 63);
+        }
+      }
+    }
+
+    void propagateIncrease(const IncreaseTask &task) {
+      int fromLevel = storedLevel(task.position);
+      if (task.fromEmission) {
+        if (fromLevel < task.level) {
+          setStoredLevel(task.position, task.level);
+          fromLevel = task.level;
+        }
+      }
+      if (fromLevel != task.level)
+        return;
+      const auto &fromQueued =
+          task.fromEmpty ? emptyLightProperties() : stateAt(task.position);
+      for (int direction = 0; direction < 6; ++direction) {
+        if ((task.directions & (1u << direction)) == 0)
+          continue;
+        const LightPos to = offset(task.position, direction);
+        if (!sectionAt(to))
+          continue;
+        const int toLevel = storedLevel(to);
+        if (fromLevel - 1 <= toLevel)
+          continue;
+        const auto &toState = stateAt(to);
+        const int newLevel = fromLevel - lightOpacity(toState);
+        if (newLevel <= toLevel || faceShapesOcclude(fromQueued, toState, direction))
+          continue;
+        setStoredLevel(to, newLevel);
+        if (newLevel > 1)
+          enqueueIncrease(to, static_cast<std::uint8_t>(newLevel),
+                          static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))),
+                          emptyShape(toState), false);
+      }
+    }
+
+    void propagateDecrease(const DecreaseTask &task) {
+      for (int direction = 0; direction < 6; ++direction) {
+        if ((task.directions & (1u << direction)) == 0)
+          continue;
+        const LightPos to = offset(task.position, direction);
+        if (!sectionAt(to))
+          continue;
+        if (isSource(to)) {
+          enqueueIncrease(to, 15, 63, true, true);
+          continue;
+        }
+        const int toLevel = storedLevel(to);
+        if (toLevel == 0)
+          continue;
+        if (toLevel <= int(task.level) - 1) {
+          setStoredLevel(to, 0);
+          enqueueDecrease(to, static_cast<std::uint8_t>(toLevel),
+                          static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))));
+        } else {
+          enqueueIncrease(to, static_cast<std::uint8_t>(toLevel),
+                          static_cast<std::uint8_t>(1u << (direction ^ 1)),
+                          false, false);
+        }
+      }
+    }
+
+    template <class Visitor>
+    void forEachFaceCell(const LightChunkSnapshot *chunk, int direction,
+                         Visitor visitor) const {
+      const int minX = chunk->chunkX * 16;
+      const int minZ = chunk->chunkZ * 16;
+      const int minY = (owner.minBlockSectionY - 1) * 16;
+      const int maxY =
+          (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16;
+      if (direction == 2 || direction == 3) {
+        const int z = direction == 2 ? minZ : minZ + 15;
+        for (int y = minY; y < maxY; ++y)
+          for (int x = 0; x < 16; ++x)
+            visitor(LightPos{minX + x, y, z});
+      } else if (direction == 4 || direction == 5) {
+        const int x = direction == 4 ? minX : minX + 15;
+        for (int y = minY; y < maxY; ++y)
+          for (int z = 0; z < 16; ++z)
+            visitor(LightPos{x, y, minZ + z});
+      }
+    }
+
+    void enqueueIncrease(LightPos position, std::uint8_t level,
+                         std::uint8_t directions, bool fromEmpty,
+                         bool source) {
+      if (level > 0)
+        increaseQueue.push_back({position, level, directions, fromEmpty, source});
+    }
+
+    void enqueueDecrease(LightPos position, std::uint8_t level,
+                         std::uint8_t directions) {
+      decreaseQueue.push_back({position, level, directions});
+    }
+
+    Impl &owner;
+    std::unordered_map<std::uint64_t, WorkingChunk> &working;
+    const std::unordered_set<std::uint64_t> &removed;
+    std::unordered_map<std::uint64_t, SkyColumnSources> &sourceHeights;
+    std::unordered_set<LightPos, LightPosHash> checks;
+    std::deque<LightPos> checkQueue;
+    std::deque<DecreaseTask> decreaseQueue;
+    std::deque<IncreaseTask> increaseQueue;
+    std::unordered_map<SectionPos3, LightValues, SectionPos3Hash> values;
+    std::unordered_set<SectionPos3, SectionPos3Hash> dirtySections;
+    mutable bool incomplete = false;
+  };
+
   bool validSection(int sectionY) const {
     return sectionY >= minBlockSectionY &&
            sectionY < minBlockSectionY + blockSectionCount;
@@ -1222,15 +1705,15 @@ private:
                i < snapshot->sections.size() &&
                i < old->second->sections.size();
                ++i) {
-            if (!snapshot->sections[i]->layers[
-                    static_cast<std::size_t>(LightLayer::Block)].isMissing())
-              continue;
-            auto section = std::make_shared<LightSectionSnapshot>(
-                *snapshot->sections[i]);
-            section->layers[static_cast<std::size_t>(LightLayer::Block)] =
-                old->second->sections[i]->layers[
-                    static_cast<std::size_t>(LightLayer::Block)];
-            snapshot->sections[i] = section;
+            for (LightLayer layer : {LightLayer::Block, LightLayer::Sky}) {
+              const auto index = static_cast<std::size_t>(layer);
+              if (!snapshot->sections[i]->layers[index].isMissing())
+                continue;
+              auto section = std::make_shared<LightSectionSnapshot>(
+                  *snapshot->sections[i]);
+              section->layers[index] = old->second->sections[i]->layers[index];
+              snapshot->sections[i] = section;
+            }
           }
           // A full authoritative snapshot is also an optical delta. The old
           // light layer is retained until propagation completes, but every
@@ -1256,6 +1739,21 @@ private:
                   {snapshot->chunkX * 16 + x, sectionY * 16 + y,
                    snapshot->chunkZ * 16 + z});
             }
+          }
+        }
+
+        if (!options.hasSkyLight) {
+          for (std::size_t i = 0; i < snapshot->sections.size(); ++i) {
+            const auto &layer = snapshot->sections[i]
+                                    ->layers[static_cast<std::size_t>(LightLayer::Sky)];
+            if (layer.isMissing() ||
+                (layer.isUniform() && layer.uniformValue() == 0))
+              continue;
+            auto section = std::make_shared<LightSectionSnapshot>(
+                *snapshot->sections[i]);
+            section->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+                LightLayerSnapshot::uniform(0);
+            snapshot->sections[i] = section;
           }
         }
 
@@ -1337,6 +1835,37 @@ private:
     propagation.commitLayers();
 
     bool metadataComplete = propagation.isComplete();
+    bool skyComplete = true;
+    if (options.hasSkyLight) {
+      SkyLightPropagator sky(*this, working, removed, skyColumnSources);
+      for (std::uint64_t key : loaded) {
+        sky.seedChunk(key);
+        sky.seedIncoming(key);
+      }
+      for (std::uint64_t key : removed)
+        sky.clearIncomingFrom(key);
+      for (std::uint64_t key : replaced)
+        if (!removed.contains(key))
+          sky.clearIncomingFrom(key);
+
+      std::unordered_set<std::uint64_t> changedColumns;
+      for (const LightPos &position : changedPositions)
+        changedColumns.insert(
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(position.x))
+             << 32) |
+            static_cast<std::uint32_t>(position.z));
+      for (std::uint64_t column : changedColumns) {
+        const int x = static_cast<int>(column >> 32);
+        const int z = static_cast<int>(static_cast<std::uint32_t>(column));
+        sky.updateColumn(chunkKey(x >> 4, z >> 4), x & 15, z & 15);
+      }
+      for (const LightPos &position : changedPositions)
+        sky.enqueueCheck(position);
+      sky.run();
+      sky.commitLayers();
+      skyComplete = sky.isComplete();
+      metadataComplete = metadataComplete && skyComplete;
+    }
     for (const auto &[key, chunk] : working) {
       if (removed.contains(key))
         continue;
@@ -1360,7 +1889,8 @@ private:
       chunk.snapshot->revision = publicationRevision;
       chunk.snapshot->lifecycleEpoch = chunk.lifecycleEpoch;
       chunk.snapshot->blockLightComplete = metadataComplete;
-      chunk.snapshot->propagationComplete = false;
+      chunk.snapshot->skyLightComplete = skyComplete;
+      chunk.snapshot->propagationComplete = metadataComplete && skyComplete;
       chunk.snapshot->protocolReady = false;
       std::shared_ptr<const LightChunkSnapshot> immutable = chunk.snapshot;
       internal[key] = immutable;
@@ -1368,8 +1898,10 @@ private:
       published[key] = immutable;
       ++statsPublished;
     }
-    for (std::uint64_t key : removed)
+    for (std::uint64_t key : removed) {
       internal.erase(key);
+      skyColumnSources.erase(key);
+    }
   }
 
   int minBlockSectionY;
@@ -1390,6 +1922,7 @@ private:
       latest;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       internal;
+  std::unordered_map<std::uint64_t, SkyColumnSources> skyColumnSources;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       published;
   std::function<void(std::shared_ptr<const LightChunkSnapshot>)> publishCallback;

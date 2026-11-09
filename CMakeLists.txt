@@ -146,6 +146,8 @@ if(BUILD_TESTING)
   target_link_libraries(fluid_fixture_probe PRIVATE redstone_core redstone_allocator)
     add_executable(block_light_probe tests/block_light_probe.cpp)
     target_link_libraries(block_light_probe PRIVATE redstone_core redstone_allocator)
+    add_executable(sky_light_probe tests/sky_light_probe.cpp)
+    target_link_libraries(sky_light_probe PRIVATE redstone_core redstone_allocator)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
     if(REDSTONE_BUILD_VANILLA_SERVER)
@@ -187,6 +189,12 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/block_light_differential_test.py"
         --probe "$<TARGET_FILE:block_light_probe>"
         --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/block-light-golden.json")
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/sky-light-golden.json")
+      add_test(NAME sky_light_differential COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/sky_light_differential_test.py"
+        --probe "$<TARGET_FILE:sky_light_probe>"
+        --golden "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/sky-light-golden.json")
     endif()
     add_test(NAME light_metadata_asset COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/validation/light_metadata/check.py"

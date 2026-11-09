@@ -1,8 +1,8 @@
-# 26.1 光照底座与方块光（L-1/L-2a）
+# 26.1 光照底座与天空光/方块光（L-1/L-2a/L-2b）
 
 ## 当前边界
 
-L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主线程到单写者后台线程的快照交接、代际失效和完整结果发布基础。L-2a 在同一 worker 上实现了真实的方块光 decrease/increase 传播、动态 source 检查、方向遮蔽面及跨已加载 section/chunk 收敛。天空光传播仍未实现，因此完整 `propagationComplete` 与 `protocolReady` 始终为 false；仅 `blockLightComplete` 可表示方块层在该 revision 已完成。协议 775 的区块光照段仍是占位，Anvil 光照读写也未接入。
+L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主线程到单写者后台线程的快照交接、代际失效和完整结果发布基础。L-2a 在同一 worker 上实现真实方块光传播；L-2b 根据每列天空入口实现满光向下、侧向衰减、共享面遮挡、跨 section/chunk、负高度和无天空光配置。`blockLightComplete`、`skyLightComplete` 与完整 `propagationComplete` 分开记录；协议 775 的区块光照段仍是占位，`protocolReady` 保持 false，Anvil 光照读写也未接入。
 
 生产服务端默认不启用该路径。`World::enableLighting()` 是 opt-in 测试/后续集成入口；核心 tick 不等待 worker，也不在方块写入时扫描区段。
 
@@ -50,14 +50,14 @@ python validation/light_metadata/generate_light_occlusion.py `
 
 1. 主线程构造完全拥有的 `LightChunkInput`：区块坐标、连续光 section、per-section palette/cell 索引、双层光值和 `BlockLightProperties`。不传 `World`、内部 palette 或可变注册表指针。全空 section 和上下 padding 复用世界内同一组不可变输入；均匀非空 section 只保存一个 palette 值。
 2. 主线程按区块合并 load、section-empty、cell 和 unload，维护每区块最新的可重试状态，不为每个格子创建线程任务。有效光照更新不会因 worker 容量而丢弃；暂停或积压时状态留在 pending map，直到 worker 真正接收。`Stats::rejected` 只记录关闭后的提交或非法 section/cell 输入。
-3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作。方块光先处理 `checkBlock`，再完全排空 decrease 队列，最后排空 increase 队列；source、遮挡开关和邻格回灌都通过 `LightEngine.QueueEntry` 的方向位语义执行。未加载邻区块不进入光存储，按 Java 读取屏障阻止传播。
-4. 加载区块时扫描真实光源并检查旧光层；加载/卸载后从相邻已加载区块的边界格重新发起 increase/decrease，使跨 chunk 两侧收敛。普通方块变更只检查对应格，不扫描整块或全区块。
+3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作。方块光和天空光各自拥有 check/decrease/increase 队列并依次完全排空。天空光先按 `ChunkSkyLightSources` 的垂直相邻面判据维护每列入口，再直接填充入口以上为 15，只从入口边界和相邻低入口的侧向边入队。未加载邻区块不进入光存储，按 Java 读取屏障阻止传播。
+4. 加载区块时扫描真实方块光源和天空入口；加载/卸载后从相邻已加载区块的边界格重新发起两层 increase/decrease，使跨 chunk 两侧收敛。普通方块变更只更新受影响天空列并检查对应格，不扫描整块或全区块。
 5. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。
 6. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。待发布结果按区块只保留最新 snapshot。生命周期 epoch 标识加载代；revision 是单写者按完成批次递增的发布序号，独立于无序 pending 批次携带的输入请求号。同代结果在完整批次后可见，卸载/重载后的旧代一律拒绝。
 
 默认每次最多取 1000 个区块（另受 pending 容量配置约束）。每区块 pending 状态只保留最新 load、按 section 合并的 cell delta 和每 section 最新空态；已 drain 的发布结果也按区块合并，不随写入代数无限增长。unload 会立即对读者失效，并作为有序 tombstone 保留到 worker 清除旧内部代；若其后立即 reload，worker 先清除旧代再安装完整新快照。worker 错误保存在 `workerError()`。`close()` 停止接收新命令、排空 pending 并 join。`World::~World` 与 `disableLighting()` 会先关闭 worker。
 
-`World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和光学属性/section emptiness 变更。方块光传播只在 worker 内进行；主线程不等待，也不读取活区块进行传播。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生逐格光照任务；`importWorld` 完成 raw block 写入后调用 `refreshLightSnapshots()`，用当前权威区块状态替换导入前排队快照。
+`World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和光学属性/section emptiness 变更。两层传播都只在 worker 内进行；主线程不等待，也不读取活区块进行传播。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生逐格光照任务；`importWorld` 完成 raw block 写入后调用 `refreshLightSnapshots()`，用当前权威区块状态替换导入前排队快照。
 
 ## 高度图
 
@@ -75,13 +75,11 @@ python validation/light_metadata/generate_light_occlusion.py `
 
 ## 未实现与后续
 
-// TODO(L-2b): implement sky-light source heights and increase-decrease propagation.
-
 // TODO(L-3): encode only a published snapshot into protocol light masks/data and reject unloaded generations.
 
 // TODO(W-2/W-3): read and write Anvil `SkyLight`, `BlockLight` and `isLightOn`.
 
-L-2a 的 benchmark 只观察正常 worker 接收的变更、传播队列条目、批次和等待完成后的墙钟，不改变模拟输入，也不作为 L-4 性能结论。启用方块光传播、天空光和发布后的 L-4 仍须做至少五组交错 A/B，并判断主线程额外 CPU/平均刻墙钟 <10%。
+方块光 benchmark 只观察正常 worker 工作量。启用天空光、方块光和发布后的 L-4 仍须做至少五组交错 A/B，并把主线程固定在同一性能核、worker 固定在另一物理核，判断主线程额外 CPU/平均刻墙钟 <10%。
 
 ## 聚焦验证
 
@@ -106,4 +104,4 @@ python validation\vanilla26_1\block_light_differential_test.py `
 
 runner 使用独立世界和 loopback 端口。每个阶段对四个受影响 chunk 调用 `ThreadedLevelLightEngine.waitForPendingTasks` 发出 POST_UPDATE fence；所有 future 完成后，agent 把取样任务排回服务端主线程读取 `LightLayer.BLOCK`，tick 本身不等待。它不使用固定睡眠或伪造亮度。原始 server log、fence 记录、候选、命令和 manifest 保存在唯一运行目录。
 
-`light` 覆盖双层 nibble、均匀 section、可恢复 pending、卸载 tombstone、有界发布、方块光增减/重叠/遮挡/跨边界/epoch-revision、旧增光任务失效、权威快照移除/新增、底顶 padding 正负例、跨批发布排序和线程生命周期；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方服务端与本仓库探针的五阶段 225 个逐格观测。
+`light` 还覆盖天空入口、露天满光、整块屋顶、侧漏衰减、开顶/复盖、加载顺序、负 y、顶部 padding、底部读取屏障、无天空光配置和双层互不串扰；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方五阶段 225 个方块光观察，`sky_light_differential` 比较官方六阶段 90 个天空光观察。

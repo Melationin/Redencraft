@@ -120,7 +120,7 @@ struct LightChunkSnapshot {
   // L-2a may complete the block layer while sky propagation and protocol
   // publication remain unfinished.
   bool blockLightComplete = false;
-  // TODO(L-2b): sky propagation remains unfinished.
+  bool skyLightComplete = false;
   bool propagationComplete = false;
   // TODO(L-3): protocol encoding consumes only complete published snapshots.
   bool protocolReady = false;
@@ -148,6 +148,7 @@ struct LightWorkerOptions {
   std::size_t batchSize = 1000;
   std::size_t maxQueuedCommands = 4096;
   bool startPausedForTesting = false;
+  bool hasSkyLight = true;
 };
 
 // Main-thread submission and worker-thread owner. No method on the worker

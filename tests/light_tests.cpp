@@ -133,6 +133,15 @@ int blockLightAt(const std::shared_ptr<const LightChunkSnapshot> &snapshot,
                  : -1;
 }
 
+int skyLightAt(const std::shared_ptr<const LightChunkSnapshot> &snapshot,
+               int x, int y, int z) {
+  if (!snapshot)
+    return -1;
+  const LightSectionSnapshot *section = snapshot->section(y >> 4);
+  return section ? section->light(LightLayer::Sky, x & 15, y & 15, z & 15)
+                 : -1;
+}
+
 void dataLayerLayout() {
   require(kLightLayerBytes == 2048, "DataLayer is 2048 bytes");
   require(kLightVolume == 4096, "a section has 4096 cells");
@@ -210,7 +219,7 @@ void sectionRangesAndSnapshots() {
   require(rejectedUniformPalette,
           "uniform section cannot carry unused palette entries");
 
-  LightService service(-4, 3);
+  LightService service(-4, 3, LightWorkerOptions{1000, 4096, false, false});
   const auto generation = service.submitChunk(std::move(input));
   require(generation != 0, "chunk snapshot is accepted");
   require(service.waitIdleForTesting(), "light worker finishes snapshot");
@@ -218,13 +227,14 @@ void sectionRangesAndSnapshots() {
   auto snapshot = service.latestChunk(-2, 3);
   require(snapshot && snapshot->generation == generation,
           "published chunk keeps its generation");
-  require(!snapshot->propagationComplete && !snapshot->protocolReady,
-          "L-1 snapshots never claim propagation or protocol readiness");
+  require(snapshot->skyLightComplete && snapshot->propagationComplete &&
+              !snapshot->protocolReady,
+          "completed light layers remain distinct from protocol readiness");
   require(snapshot->lightSectionCount() == 5,
           "published snapshot keeps all light padding sections");
   require(snapshot->section(-4)->light(LightLayer::Block, 1, 2, 3) == 15 &&
-              snapshot->section(-4)->light(LightLayer::Sky, 1, 2, 3) == 6,
-          "published snapshot recomputes block light and preserves sky light");
+              snapshot->section(-4)->light(LightLayer::Sky, 1, 2, 3) == 0,
+          "disabled sky dimension clears input sky data");
 }
 
 void opticalMetadata() {
@@ -366,14 +376,15 @@ void opticalAssetCoverage(const std::filesystem::path &assets) {
 
 void workerPublicationAndInvalidation() {
   const auto mainThread = std::this_thread::get_id();
-  LightService service(-4, 3);
+  LightService service(-4, 3, LightWorkerOptions{1000, 4096, false, false});
   std::thread::id callbackThread;
   int callbacks = 0;
   service.setPublishCallback([&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
     callbackThread = std::this_thread::get_id();
     ++callbacks;
-    require(snapshot && !snapshot->propagationComplete,
-            "callback receives a complete but not propagated snapshot");
+    require(snapshot && snapshot->propagationComplete &&
+                !snapshot->protocolReady,
+            "callback receives a complete snapshot before protocol readiness");
   });
   const auto firstGeneration =
       service.submitChunk(chunkFixture(3, -2, -4, 3));
@@ -601,9 +612,10 @@ void blockLightPropagation() {
   require(service.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
           "block-light fixture loads");
   auto initial = settledChunk(service, 0, 0);
-  require(initial->blockLightComplete && !initial->propagationComplete &&
+  require(initial->blockLightComplete && initial->skyLightComplete &&
+              initial->propagationComplete &&
               !initial->protocolReady && blockLightAt(initial, 8, 8, 8) == 0,
-          "empty block light is complete only for the block layer");
+          "empty chunk completes both propagated light layers");
 
   require(reportBlock(service, 0, 0, {7, 8, 8}, air, lamp),
           "source placement enters worker");
@@ -669,6 +681,117 @@ void blockLightPropagation() {
   auto empty = settledChunk(service, 0, 0);
   require(blockLightAt(empty, 5, 8, 8) == 0,
           "decrease propagation clears the decayed region");
+}
+
+void skyLightPropagation() {
+  const auto air = airState();
+  const auto stone = Blocks::STONE.defaultState();
+  LightService service(0, 1);
+  require(service.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "sky-light fixture loads an open chunk");
+  auto open = settledChunk(service, 0, 0);
+  require(open->blockLightComplete && open->skyLightComplete &&
+              open->propagationComplete && !open->protocolReady,
+          "open sky completes both propagated layers without protocol ready");
+  require(skyLightAt(open, 0, 0, 0) == 15 &&
+              skyLightAt(open, 8, 8, 8) == 15 &&
+              skyLightAt(open, 15, 15, 15) == 15 &&
+              skyLightAt(open, 4, -1, 4) == 0 &&
+              skyLightAt(open, 4, 16, 4) == 15,
+          "open sky fills block and upper padding while bottom padding is a barrier");
+
+  require(service.submitChunk(emptyChunkFixture(1, 0, 0, 1)) != 0,
+          "east open chunk loads for cross-boundary sky");
+  (void)settledChunk(service, 0, 0);
+
+  for (int x = 0; x < 16; ++x)
+    for (int z = 0; z < 16; ++z)
+      require(reportBlock(service, 0, 0, {x, 8, z}, air, stone),
+              "roof change enters the worker");
+  auto roofed = settledChunk(service, 0, 0);
+  const std::string skyRoof =
+      std::to_string(skyLightAt(roofed, 8, 8, 8)) + "/" +
+      std::to_string(skyLightAt(roofed, 8, 7, 8)) + "/" +
+      std::to_string(skyLightAt(roofed, 8, 9, 8)) + "/" +
+      std::to_string(skyLightAt(roofed, 15, 7, 8)) + "/" +
+      std::to_string(skyLightAt(roofed, 8, -1, 8)) + "/" +
+      std::to_string(skyLightAt(roofed, 8, 16, 8));
+  require(skyLightAt(roofed, 8, 8, 8) == 0 &&
+              skyLightAt(roofed, 8, 7, 8) == 7 &&
+              skyLightAt(roofed, 8, 9, 8) == 15 &&
+              skyLightAt(roofed, 15, 7, 8) == 14 &&
+              skyLightAt(roofed, 8, -1, 8) == 0 &&
+              skyLightAt(roofed, 8, 16, 8) == 15,
+          "roof blocks direct sky and side light attenuates across the chunk edge: " +
+              skyRoof);
+
+  require(reportBlock(service, 0, 0, {8, 8, 8}, stone, air),
+          "opening the roof enters the worker");
+  auto opened = settledChunk(service, 0, 0);
+  require(skyLightAt(opened, 8, 8, 8) == 15 &&
+              skyLightAt(opened, 8, 7, 8) == 15 &&
+              skyLightAt(opened, 8, -1, 8) == 0,
+          "removing roof restores full sky down the source column");
+  require(reportBlock(service, 0, 0, {8, 8, 8}, air, stone),
+          "closing the roof again enters the worker");
+  auto reclosed = settledChunk(service, 0, 0);
+  require(skyLightAt(reclosed, 8, 7, 8) == 7 &&
+              skyLightAt(reclosed, 8, -1, 8) == 0,
+          "closing roof keeps side attenuation and the lower padding barrier");
+
+  const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  require(reportBlock(service, 0, 0, {4, 7, 4}, air, lamp),
+          "block source enters a shadowed sky column");
+  auto independent = settledChunk(service, 0, 0);
+  require(blockLightAt(independent, 4, 7, 4) == 15 &&
+              blockLightAt(independent, 5, 7, 4) == 14 &&
+              skyLightAt(independent, 8, 7, 8) == 7,
+          "sky and block layers propagate independently");
+
+  LightService disabled(0, 1,
+                        LightWorkerOptions{1000, 4096, false, false});
+  require(disabled.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "no-sky fixture loads");
+  auto withoutSky = settledChunk(disabled, 0, 0);
+  require(withoutSky->skyLightComplete && withoutSky->propagationComplete &&
+              skyLightAt(withoutSky, 8, 8, 8) == 0 &&
+              skyLightAt(withoutSky, 8, 16, 8) == 0,
+          "a dimension without sky never receives implicit full light");
+
+  LightService negative(-1, 1);
+  require(negative.submitChunk(emptyChunkFixture(0, 0, -1, 1)) != 0,
+          "negative-height sky fixture loads");
+  auto negativeOpen = settledChunk(negative, 0, 0);
+  require(skyLightAt(negativeOpen, 3, -16, 3) == 15 &&
+              skyLightAt(negativeOpen, 3, -17, 3) == 0 &&
+              skyLightAt(negativeOpen, 3, 0, 3) == 15,
+          "open negative-height column keeps lower padding as a barrier");
+  for (int x = 0; x < 16; ++x)
+    for (int z = 0; z < 16; ++z)
+      require(reportBlock(negative, 0, 0, {x, -16, z}, air, stone),
+              "negative-height roof writes enter worker");
+  auto negativeRoof = settledChunk(negative, 0, 0);
+  require(skyLightAt(negativeRoof, 3, -16, 3) == 0 &&
+              skyLightAt(negativeRoof, 3, -17, 3) == 0 &&
+              skyLightAt(negativeRoof, 3, -15, 3) == 15,
+          "negative-y roof blocks block and bottom-padding sky");
+
+  LightService loadOrder(0, 1);
+  require(loadOrder.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "shadowed east chunk loads first");
+  (void)settledChunk(loadOrder, 0, 0);
+  for (int x = 0; x < 16; ++x)
+    for (int z = 0; z < 16; ++z)
+      require(reportBlock(loadOrder, 0, 0, {x, 8, z}, air, stone),
+              "east chunk roof enters worker");
+  auto beforeWest = settledChunk(loadOrder, 0, 0);
+  require(skyLightAt(beforeWest, 0, 7, 8) == 0,
+          "unloaded west neighbor remains a sky-light barrier");
+  require(loadOrder.submitChunk(emptyChunkFixture(-1, 0, 0, 1)) != 0,
+          "west open chunk loads later");
+  auto afterWest = settledChunk(loadOrder, 0, 0);
+  require(skyLightAt(afterWest, 0, 7, 8) == 14,
+          "later west load admits attenuated sky across the boundary");
 }
 
 void blockLightStaleAndAuthoritativeRefresh() {
@@ -928,7 +1051,7 @@ void incompleteMetadataIsExplicit() {
 void destructorClosesWorker() {
   World world;
   world.loadChunk(0, 0);
-  world.enableLighting();
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, false});
   // Do not drain or disable explicitly: ~World must stop and join the owned
   // single-writer thread before its chunk storage is destroyed.
 }
@@ -941,7 +1064,7 @@ void worldHooks() {
   world.loadChunk(1, 0);
   require(world.setBlock({0, 100, 0}, Blocks::SMOOTH_STONE.defaultState()),
           "place pre-enable fixture block");
-  world.enableLighting();
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, false});
   require(world.lightingEnabled() && world.lightService(),
           "lighting can be enabled opt-in on a world");
   auto *service = world.lightService();
@@ -1005,7 +1128,7 @@ void pausedWorldRecoveryAndImport() {
   World world;
   world.loadChunk(0, 0);
   world.loadChunk(1, 0);
-  world.enableLighting(LightWorkerOptions{1, 1, true});
+  world.enableLighting(LightWorkerOptions{1, 1, true, false});
   auto *service = world.lightService();
   require(service, "paused world lighting is enabled");
 
@@ -1055,6 +1178,7 @@ int main(int argc, char **argv) {
     workerQueueAndClose();
     recoverableChangesAndBoundedPublication();
     blockLightPropagation();
+    skyLightPropagation();
     blockLightStaleAndAuthoritativeRefresh();
     blockLightVerticalPadding();
     crossBatchPublicationOrdering();
