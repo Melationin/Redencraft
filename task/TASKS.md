@@ -72,6 +72,42 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 - 没有 Anvil `SkyLight`/`BlockLight`/`isLightOn` 导入或写回、真实客户端渲染、完整 chunk 生命周期/加载票、L-4 世吞性能门槛或 `<10%` 结论。`protocolReady` 按当前加载域保守合取，未知光学会使相关初包与位置持续待发而不是伪造完成。
 - 没有做本轮真实 26.1 服务端逐 tick 光照包差分；L-3 证据边界是 Java 源码、官方 codec、C++ 行为测试和本机 headless loopback。没有改 `PLAN.md`。
 
+### L-3 返工实际与证据（实现提交 `41677b7`）
+
+**返工实现**
+
+- 领取记录为 `ee5b3df`。`LightChunkSnapshot` 新增 `deltaBaseRevision`；worker 只为 `protocolReady` 快照计算相对上一个 ready 快照的 `changedSections`，中间 drain 的 incomplete revision 不推进基准。尚未 drain 的多个 ready 发布仍按 key 合并并保留最早 ready 基准；incomplete 淘汰未交 ready 后，若后续 ready 的基准无法由 Session 的最后发送快照承接，Session 只为该 chunk 生成一次全量光照更新，不扫全部 session/chunk，也不断开健康连接。
+- `lightPublished` 在进入编码前校验 chunk/生命周期，并捕获 `ProtocolError` 为对应连接的 disconnect；异常不会穿过世界 tick 或影响其他连接。
+- `World` 新增显式 `lightChunkLifecycleObserver`。`unloadChunk` 立即取消旧动态光并发送有序 `forget_level_chunk`；首包 deferred 项不再带单独取消 token，`chunk_batch_start`、实际区块和 `chunk_batch_finished(count)` 保持 FIFO 一致。`loadChunk` 通知仍可见的同坐标 Session 等待新 epoch 首包。玩家移出视野路径继续独立工作。
+- 修复行首包/Missing 与服务端批次逻辑保持与上一轮一致；没有改普通方块批量读取、成功事件立即发送、协议 ID、流体语义或 `PLAN.md`。
+
+**新增反例**
+
+- `ready(A) → drained incomplete(B) → ready(C)`：B 中变化的 S 与 C 中变化的 T 在最终严格解帧中都存在；`deltaBaseRevision == A`。
+- `ready B 未 drain → incomplete C 以同 key 淘汰 B → drain C → ready D`：B 未到 Session、C 不发送、D 不断连并使用单块全量补差，S/T 都在 D 中；继续验证常见连续增量仍使用 worker 清单。
+- 真实 `World::unloadChunk`：玩家坐标不变，先排入旧动态光，再显式 unload/load。旧动态包被取消，forget 可见，已提交首包的 count 一致；同视野 reload 后收到新 epoch 首包。
+- 双 Session 反例：一个连接收到跨生命周期光快照后只关闭自身，另一连接保持打开并继续收到有效 `light_update`。
+- 既有 `light` 整批发布、连续/合并增量、末块、缺层、负坐标、双层隔离和 `light_protocol` 初包/socket/积压测试全部保留。
+
+**官方 26.1 与聚焦日志**
+
+- 官方 JAR SHA-1 仍为 `3872a7f07a1a595e651aef8b058dfc2bb3772f46`。官方 PLAY codec 解码更新后的光照协议夹具 **202/202**，其中包含 above ready/incomplete/ready、淘汰 ready 基准、显式 World reload 和连接隔离包；既有交互/实体夹具 **490/490**。
+- 光照夹具 SHA-256 `51084bd4f850ba50f04236a4914ec67e73526307e39833769822eafa0722b7a0`；codec 日志 SHA-256 `91b771ceb8c57f9143504f7357f47cb2a907772950b3116f442a1bb125b85b96`。既有协议夹具 SHA-256 `05a884a7f2ee08b7d4ad18e39339f7190c693434f83bcf1f0d922e89ab67603d`，日志 SHA-256 `395ed1a9ba581b9927a10d1308fc22eb532b4a4ad6c13266455ba99afce632dd`。
+- `light_tests`：`build-f7-nmake/light-l3-acceptance.log`，SHA-256 `b3d70361e83a410080b7d6d547ec5177ce3c3624cc31b6fa0047c7eb81e9521c`。
+- `light_protocol_tests`：202 packets，`build-f7-nmake/light-protocol-l3-acceptance.log`，SHA-256 `7ead92222c0549a89f20228a98c0773fa4f34a1e3d7ddef988a432c9d5c83692`。
+- `wire_tests`/`protocol_tests` 通过；日志 SHA-256 `d75012844e9f9eb89cde33319f1ed07268072e0d54072fe6be511b8af80f167c`、`502b009f5f437909d7d83079ab2dda267c2cd09b0a15cc8bd19e0c083b8a27d6`。
+- headless socket 通过（SHA-256 `3ca79d368b02b5a8b0ed6bf7125de422ee660f6fa8903e41d68d0860ac2dcc26`）；流体慢端背压仍断开 1 个慢端、健康端继续且服务端完成 320 tick，日志 SHA-256 `5b6e2759988a377ba3aa8b1688cffcc64c8d4e06bece0cdbeaf2a119ba82de04`。
+
+**最终构建与唯一一次完整 CTest**
+
+- NMake `clean` 后 MSVC 19.51 Release + jemalloc 全量构建通过；`build-f7-nmake/build-l3-rework-acceptance-final.log`，SHA-256 `454f84df9ca9dc2d898a974f8e068a8dd7b2b2d64f72f40755c38ac904846366`。
+- 最终 CTest **29/29 通过，25.70 s**；`build-f7-nmake/ctest-l3-rework-acceptance-final.log`，SHA-256 `d30cd9e8d9d17426d9a38f7660a173abba6d41c52ca8026906903963a41ca04a`。reviewer 不重复执行。
+
+**明确没有做**
+
+- L-4 的共享锁/旧批次配对/全 loaded 资格扫描性能优化、加载票、Anvil `SkyLight`/`BlockLight`/`isLightOn`、真实客户端渲染和世吞 `<10%` 均未做。
+- 没有声称真实 26.1 服务端逐 tick 等价；本轮回环测试和官方 codec 不替代该差分。未改 `PLAN.md` 或无关文件。
+
 ## L-2b 天空光传播（coder）
 
 **范围**：只实现 26.1 `ChunkSkyLightSources`、`SkyLightEngine`、`SkyLightSectionStorage` 与共享 `LightEngine` 对应的天空光入口、满光向下、非满光侧向衰减、共享面遮挡、跨 section/chunk、负 y、上下 padding 和空 section 处理；复用 L-1/L-2a 的单写者 worker、owned/immutable 输入、生命周期 epoch 与单调发布，不在主线程传播或等待。天空光与方块光独立队列/层写入，不得把四张 heightmap 直接当入口，不得默认给无天空光维度满光。
@@ -1278,4 +1314,8 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 **结论：退回 L-3，仅处理前两条。** 保留 FIFO 首包计数和原版 null 分支、既有方块广播与成功事件顺序、非阻塞发布。最终新候选只由 coder 完整构建并执行一轮 CTest。先按流程在唯一末行登记 `任务进行中`。
 
-任务进行中
+#### L-3 返工最终 CTest 前：ready 基准再加一个积压反例（状态不变）
+
+现工作树保留 `lastReady` 并在 wire 要求 `deltaBaseRevision == previous->revision`；请覆盖另一条基准分叉：A 已发送；B 就绪、修改 S、worker idle 但未 drain；C 不就绪，worker 将未 drain 的 B 按同 key 淘汰，然后 drain 只交出 C；D 恢复就绪并修改 T。D 的 `lastReady` 基准是从未发给会话的 B，若只在 wire 抛错会把健康客户端断开，S 也漏发。请在最终候选前确保这个序列收敛（可让该会话的最后发送快照与当前完整快照在 writer 侧补差，或者不让 incomplete 淘汰唯一待交的 ready、且定义可见顺序）。确定性测试分别确认 B 未交会话、D 不断开、S/T 都正确；保留常见连续增量使用 worker 清单。
+
+任务已完成
