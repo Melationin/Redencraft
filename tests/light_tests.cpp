@@ -475,6 +475,8 @@ void coalescedProtocolDeltaIsCumulative() {
           "cumulative-delta fixture loads");
   require(service.waitIdleForTesting(), "cumulative-delta baseline completes");
   service.drainPublished();
+  auto baseline = service.latestChunk(0, 0);
+  require(baseline != nullptr, "cumulative-delta baseline published");
   service.pauseForTesting();
   require(reportBlock(service, 0, 0, {1, 1, 1}, air, lamp) &&
               service.processChunkBatchForTesting(0, 0),
@@ -497,6 +499,8 @@ void coalescedProtocolDeltaIsCumulative() {
   require(sectionZero != latest->changedSections.end() &&
               sectionOne != latest->changedSections.end(),
           "coalesced publication preserves both undrained layer deltas");
+  require(latest->deltaBaseRevision == baseline->revision,
+          "coalesced ready delta keeps the last drained base revision");
 }
 
 void workerQueueAndClose() {

@@ -134,9 +134,10 @@ struct LightChunkSnapshot {
   bool protocolReady = false;
   std::uint32_t unsupportedCells = 0;
   std::vector<std::shared_ptr<const LightSectionSnapshot>> sections;
-  // Computed by the worker against the immediately preceding published
-  // revision. Protocol paths use this immutable delta instead of comparing or
-  // copying every section on the main thread.
+  // changedSections is a ready-to-ready delta. deltaBaseRevision identifies
+  // the last protocol-ready snapshot it was computed from; incomplete drained
+  // revisions do not advance that base.
+  std::uint64_t deltaBaseRevision = 0;
   std::vector<LayerChange> changedSections;
 
   int minLightSectionY() const { return minBlockSectionY - 1; }

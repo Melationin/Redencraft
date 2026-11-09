@@ -63,12 +63,12 @@ python validation/light_metadata/generate_light_occlusion.py `
 
 ## 协议光照
 
-`ClientboundLevelChunkWithLightPacket` 和后续 `ClientboundLightUpdatePacket` 都只读取 `LightChunkSnapshot`，不读取活 `World`。worker 发布时已算出相对上一次持久发布 revision 的 `changedSections`，并合并尚未 drain 的后续修改；Session 只读取这份不可变增量清单，网络写线程随后读取不可变快照并打包每层 2048 bytes 的 nibble。非均匀值与均匀非零值发送 data mask 和数据，显式存储的均匀零发送 empty mask；raw `Missing` 对应原版 `getDataLayerData == null`，首包和增量都不设 data/empty mask，不能伪造成零层。这样 `Missing`、存储 0、存储 15/mixed 不混用，上下额外 section 也按 `minLightSectionY + index` 编码；缺层的客户端状态由普通 section 生命周期移除，而不是光照层清除。
+`ClientboundLevelChunkWithLightPacket` 和后续 `ClientboundLightUpdatePacket` 都只读取 `LightChunkSnapshot`，不读取活 `World`。worker 发布 ready 快照时计算相对上一个 ready 快照的 `changedSections`，以 `deltaBaseRevision` 标出基准，并合并尚未 drain 的同代后续修改；中途 drain 的 incomplete 快照不推进该基准。Session 正常只读取这份不可变增量清单；若最终会话的上一发送 revision 仍不等于基准，则只为该 chunk 回退到当前快照的全量光照，不逐 tick 扫全部区块。网络写线程随后读取不可变快照并打包每层 2048 bytes 的 nibble。非均匀值与均匀非零值发送 data mask 和数据，显式存储的均匀零发送 empty mask；raw `Missing` 对应原版 `getDataLayerData == null`，首包和增量都不设 data/empty mask，不能伪造成零层。这样 `Missing`、存储 0、存储 15/mixed 不混用，上下额外 section 也按 `minLightSectionY + index` 编码；缺层的客户端状态由普通 section 生命周期移除，而不是光照层清除。
 
 - 初包在 `level_chunk_with_light` 的区块、高度图、section 和方块实体之后写四个 bitset、天空数据列表、方块数据列表。快照坐标、高度范围、生命周期或 `protocolReady` 不符时拒绝编码。
 - 增量由 worker 计算并累积实际改变的区段索引，主线程不比较整段、不扫描 per-session 全区块；编码仍在 writer 中进行，不复制整区块或全量 nibble。普通方块变化仍在同一 chunk broadcast 阶段批量读取，成功方块事件仍立即发送。
 - `World::tick` 在普通方块广播之前 drain 完整光照批次，因此 `light_update` 保持先于该阶段的方块变化包。初始区块未发布时，Session 只记住待发送区块，不等待 worker；玩家位置延后到区块包已排队之后，避免客户端先进入无区块状态。
-- 每个已发送区块持有一个加载代 validity token。离开视野或重载会使已排队但尚未由 writer 编码的旧动态光照包失效；`light_update` 同时拒绝跨 chunk 坐标或生命周期比较。首包不单独取消，确保 `chunk_batch_start`、有效区块、`chunk_batch_finished(count)` 在 FIFO 中一致；已提交首包之后才按序发送 `forget_level_chunk`。
+- 每个已发送区块持有一个加载代 validity token。玩家离开视野或 World 显式 unload 都会立即使已排队但尚未编码的旧动态光照失败；World load/unload 通过独立主线程 observer 通知每个 Session，不依赖玩家坐标变化。`light_update` 拒绝跨 chunk 坐标或生命周期比较，协议错误只关闭对应连接，不会抛穿 `World::tick`。首包不单独取消，确保 `chunk_batch_start`、有效区块、`chunk_batch_finished(count)` 在 FIFO 中一致；显式 unload 的 `forget_level_chunk` 排在该批之后，同视野 reload 会等待新 epoch 的 ready 首包。
 - 无天空光世界不生成虚构满光。输入 raw sky layer 若缺席则不发送 sky data；Java 风格的显式均匀零则只发送 empty mask。`protocolReady` 只在该世界两层求解、已发布快照和光学元数据均完成时为 true。
 - 未知光学状态或未完成传播继续保守地保持 `protocolReady=false`。这类区块不会发送伪光照，也不会阻塞主线程；初包和玩家位置保持待发，直到后续完整快照出现。
 

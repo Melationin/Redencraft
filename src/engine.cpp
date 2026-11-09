@@ -938,6 +938,7 @@ void World::loadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
   const auto key = chunkKey(x, z);
   auto &c = chunks_[key];
+  const bool wasLoaded = c.loaded;
   c.loaded = true;
   if (!c.heightmaps)
     c.heightmaps = std::make_unique<ChunkHeightmaps>(minY_, sectionCount() * 16);
@@ -950,16 +951,23 @@ void World::loadChunk(int x, int z) {
   // already had.
   tickQueue_->addContainer(chunkKey(x, z));
   fluidTickQueue_->addContainer(chunkKey(x, z));
-  if (lightService_)
+  if (lightService_) {
     lightService_->submitChunk(std::move(*makeLightChunkInput(x, z)));
+    if (!wasLoaded && lightChunkLifecycleObserver)
+      lightChunkLifecycleObserver(x, z, true);
+  }
 }
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
   auto it = chunks_.find(chunkKey(x, z));
-  if (it != chunks_.end())
+  const bool wasLoaded = it != chunks_.end() && it->second.loaded;
+  if (wasLoaded)
     it->second.loaded = false;
-  if (lightService_)
+  if (lightService_) {
     lightService_->unloadChunk(x, z);
+    if (wasLoaded && lightChunkLifecycleObserver)
+      lightChunkLifecycleObserver(x, z, false);
+  }
 }
 
 std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const {

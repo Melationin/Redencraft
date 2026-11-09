@@ -300,6 +300,7 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
   // light packet while the forget packet remains deliverable.
   auto stale = std::make_shared<LightChunkSnapshot>(*cleared);
   stale->revision = cleared->revision + 100;
+  stale->deltaBaseRevision = cleared->revision;
   auto changedSection = std::make_shared<LightSectionSnapshot>(
       *stale->sections[1]);
   changedSection->layers[static_cast<std::size_t>(LightLayer::Block)] =
@@ -360,11 +361,260 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
           "first-packet backlog keeps start/chunk/finished counts before forget");
 }
 
+void readyIncompleteReadyDelta(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(), "delta-gap initial batch");
+  service->drainPublished();
+  auto initial = service->latestChunk(0, 0);
+  require(initial && initial->protocolReady, "delta-gap initial snapshot ready");
+  ServerOptions options;
+  options.chunks.push_back({0, 0});
+  options.spawn = {8.5, 70, 8.5};
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  world.lightPublicationObserver =
+      [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        session.lightPublished(std::move(snapshot));
+      };
+  (void)join(session, data);
+
+  // S changes while an unknown optical state makes the same worker revision
+  // incomplete. Session correctly ignores that drained revision.
+  service->pauseForTesting();
+  require(world.setBlock({2, 8, 2},
+                         Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")) &&
+              world.setBlock({3, 8, 3},
+                             BlockState("minecraft:unmapped_delta_gap")),
+          "supported and unknown delta-gap blocks enter");
+  require(service->processChunkBatchForTesting(0, 0),
+          "incomplete delta-gap batch completes");
+  world.tick();
+  auto incomplete = service->latestChunk(0, 0);
+  require(incomplete && !incomplete->protocolReady,
+          "incomplete middle revision is drained but not ready");
+  auto ignored = drainPlay(session);
+  require(packetOf(ignored, data.packet("play", "clientbound", "light_update"))
+              .empty(),
+          "session does not send the drained incomplete revision");
+
+  // T changes only in the next ready revision. Its ready-to-ready delta must
+  // still include the earlier S change that the client never received.
+  require(world.setBlock({3, 8, 3}, Blocks::AIR.defaultState()) &&
+              world.setBlock({2, 24, 2},
+                             Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")),
+          "unknown removal and later visible change enter");
+  require(service->processChunkBatchForTesting(0, 0),
+          "ready delta-gap batch completes");
+  world.tick();
+  auto current = service->latestChunk(0, 0);
+  require(current && current->protocolReady &&
+              current->deltaBaseRevision == initial->revision,
+          "ready delta spans the drained incomplete revision");
+  auto packets = drainPlay(session);
+  auto body = packetOf(packets, data.packet("play", "clientbound", "light_update"));
+  require(!body.empty(), "ready delta-gap update is sent");
+  Reader update(body);
+  require(update.varInt() == data.packet("play", "clientbound", "light_update") &&
+              update.varInt() == 0 && update.varInt() == 0,
+          "delta-gap update has the exact 775 header");
+  verifyLightData(update, *current, initial.get(), "ready/incomplete/ready");
+  service->resumeForTesting();
+}
+
+void evictedReadyBaseFallsBack(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(), "evicted-base initial batch");
+  service->drainPublished();
+  auto initial = service->latestChunk(0, 0);
+  require(initial && initial->protocolReady, "evicted-base initial snapshot");
+  ServerOptions options;
+  options.chunks.push_back({0, 0});
+  options.spawn = {8.5, 70, 8.5};
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  world.lightPublicationObserver =
+      [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        session.lightPublished(std::move(snapshot));
+      };
+  (void)join(session, data);
+
+  service->pauseForTesting();
+  require(world.setBlock({2, 8, 2},
+                         Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")) &&
+              service->processChunkBatchForTesting(0, 0),
+          "ready B with S completes without drain");
+  require(world.setBlock({3, 8, 3},
+                         BlockState("minecraft:unmapped_evicted_base")) &&
+              service->processChunkBatchForTesting(0, 0),
+          "incomplete C replaces undrained B");
+  world.tick();
+  require(session.takeOutput().empty(),
+          "drained incomplete C never reaches the session");
+  require(!session.closed(), "incomplete C does not close the session");
+
+  require(world.setBlock({3, 8, 3}, Blocks::AIR.defaultState()) &&
+              world.setBlock({2, 24, 2},
+                             Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")) &&
+              service->processChunkBatchForTesting(0, 0),
+          "ready D with T completes");
+  world.tick();
+  auto current = service->latestChunk(0, 0);
+  require(current && current->protocolReady &&
+              current->deltaBaseRevision > initial->revision &&
+              current->deltaBaseRevision != initial->revision,
+          "D refers to the evicted ready B base");
+  auto packets = drainPlay(session);
+  auto body = packetOf(packets, data.packet("play", "clientbound", "light_update"));
+  require(!body.empty() && !session.closed(),
+          "session falls back to a full D delta instead of disconnecting");
+  Reader update(body);
+  require(update.varInt() == data.packet("play", "clientbound", "light_update") &&
+              update.varInt() == 0 && update.varInt() == 0,
+          "evicted-base fallback has an exact light_update header");
+  verifyLightData(update, *current, initial.get(), "evicted ready base");
+  service->resumeForTesting();
+}
+
+void explicitWorldLifecycleIsolation(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(), "lifecycle initial batch");
+  service->drainPublished();
+  auto initial = service->latestChunk(0, 0);
+  require(initial && initial->protocolReady, "lifecycle initial snapshot");
+  ServerOptions options;
+  options.chunks.push_back({0, 0});
+  options.spawn = {8.5, 70, 8.5};
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  world.lightPublicationObserver =
+      [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        session.lightPublished(std::move(snapshot));
+      };
+  world.lightChunkLifecycleObserver = [&](int x, int z, bool loaded) {
+    session.lightChunkLifecycle(x, z, loaded);
+  };
+  (void)join(session, data);
+
+  require(world.setBlock({4, 8, 4},
+                         Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")),
+          "lifecycle fixture change enters");
+  require(service->waitIdleForTesting(), "lifecycle old revision completes");
+  service->drainPublished();
+  world.unloadChunk(0, 0);
+  auto packets = drainPlay(session);
+  require(packetOf(packets, data.packet("play", "clientbound",
+                                        "light_update")).empty(),
+          "explicit unload cancels queued old dynamic light");
+  require(!packetOf(packets, data.packet("play", "clientbound",
+                                         "forget_level_chunk")).empty(),
+          "explicit unload sends forget without moving the player");
+
+  world.loadChunk(0, 0);
+  require(service->waitIdleForTesting(), "reloaded light batch completes");
+  service->drainPublished();
+  session.tick();
+  world.unloadChunk(0, 0);
+  packets = drainPlay(session);
+  int started = 0, chunks = 0, finished = 0, finishedCount = -1, forgotten = 0;
+  for (int index = 0; index < static_cast<int>(packets.size()); ++index) {
+    Reader packet(packets[index]);
+    const int id = packet.varInt();
+    if (id == data.packet("play", "clientbound", "chunk_batch_start")) {
+      started = index + 1;
+    } else if (id == data.packet("play", "clientbound",
+                                 "level_chunk_with_light")) {
+      ++chunks;
+    } else if (id == data.packet("play", "clientbound",
+                                 "chunk_batch_finished")) {
+      finished = index + 1;
+      finishedCount = packet.varInt();
+    } else if (id == data.packet("play", "clientbound",
+                                 "forget_level_chunk")) {
+      forgotten = index + 1;
+    }
+  }
+  require(started && chunks == 1 && finishedCount == chunks &&
+              started < finished && finished < forgotten,
+          "explicit unload preserves submitted first-packet FIFO count");
+
+  Writer ack;
+  ack.f32(9);
+  session.receive(frame(
+      data.packet("play", "serverbound", "chunk_batch_received"), ack.data));
+  world.loadChunk(0, 0);
+  require(service->waitIdleForTesting(), "final reload light completes");
+  service->drainPublished();
+  session.tick();
+  packets = drainPlay(session);
+  auto reload = packetOf(packets, data.packet("play", "clientbound",
+                                               "level_chunk_with_light"));
+  require(!reload.empty(), "same-view reload sends the new epoch first packet");
+  Reader reloaded(reload);
+  require(reloaded.varInt() == data.packet("play", "clientbound",
+                                          "level_chunk_with_light") &&
+              reloaded.i32() == 0 && reloaded.i32() == 0,
+          "same-view reload first packet has exact coordinates");
+  auto latest = service->latestChunk(0, 0);
+  require(latest && latest->protocolReady &&
+              latest->lifecycleEpoch > initial->lifecycleEpoch,
+          "same-view reload uses a newer lifecycle epoch");
+  verifyChunkLight(reloaded, *latest);
+}
+
+void protocolFailureIsConnectionLocal(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(), "connection-error initial batch");
+  service->drainPublished();
+  auto initial = service->latestChunk(0, 0);
+  require(initial && initial->protocolReady, "connection-error initial snapshot");
+  ServerOptions options;
+  options.chunks.push_back({0, 0});
+  options.viewDistance = 2;
+  Session failing(world, data, options);
+  Session healthy(world, data, options);
+  (void)join(failing, data);
+  (void)join(healthy, data);
+
+  auto wrongLifetime = std::make_shared<LightChunkSnapshot>(*initial);
+  wrongLifetime->lifecycleEpoch = initial->lifecycleEpoch + 1;
+  wrongLifetime->revision = initial->revision + 1;
+  wrongLifetime->deltaBaseRevision = initial->revision;
+  wrongLifetime->changedSections = {{0, true, true}};
+  failing.lightPublished(wrongLifetime);
+  require(failing.closed(),
+          "cross-lifetime light error is contained to its connection");
+  require(!healthy.closed(), "a different connection remains open");
+
+  require(world.setBlock({5, 8, 5},
+                         Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")),
+          "healthy connection update enters");
+  require(service->waitIdleForTesting(), "healthy connection light completes");
+  service->drainPublished();
+  healthy.lightPublished(service->latestChunk(0, 0));
+  auto packets = drainPlay(healthy);
+  require(!packetOf(packets, data.packet("play", "clientbound", "light_update"))
+               .empty(),
+          "healthy connection continues receiving light updates");
+}
+
 std::shared_ptr<LightChunkSnapshot>
 denseSnapshot(const LightChunkSnapshot &base, std::uint64_t revision,
               std::uint8_t seed) {
   auto result = std::make_shared<LightChunkSnapshot>(base);
   result->revision = revision;
+  result->deltaBaseRevision = base.revision;
   result->sections.clear();
   result->changedSections.clear();
   std::array<std::uint8_t, kLightVolume> values{};
@@ -463,6 +713,7 @@ void noSkyUsesExplicitZero() {
       LightLayerSnapshot::missing();
   withoutSky->sections[1] = missingSection;
   withoutSky->changedSections = {{missingSection->sectionY, true, false}};
+  withoutSky->deltaBaseRevision = withSky->revision;
   auto missingDelta = prepareLightUpdate(withoutSky, withSky);
   require(missingDelta.sky.dataSections.empty() &&
               missingDelta.sky.emptySections.empty(),
@@ -565,6 +816,10 @@ int main(int argc, char **argv) {
     require(argc == 2, "light_protocol_tests needs assets/protocol775");
     ProtocolData data(argv[1]);
     strictInitialDynamicClearAndReload(data);
+    readyIncompleteReadyDelta(data);
+    evictedReadyBaseFallsBack(data);
+    explicitWorldLifecycleIsolation(data);
+    protocolFailureIsConnectionLocal(data);
     noSkyUsesExplicitZero();
     nativeServerFixturePublishesEveryChunk();
     unpublishedLightDefersJoin(data);

@@ -52,6 +52,9 @@ public:
   // protocol-ready snapshot; subsequent updates are encoded from immutable
   // snapshots after this callback returns.
   void lightPublished(std::shared_ptr<const LightChunkSnapshot> snapshot);
+  // Explicit World lifecycle notification. This is distinct from a tracking-
+  // view edge and is safe to invoke from the server's main-thread callbacks.
+  void lightChunkLifecycle(int chunkX, int chunkZ, bool loaded);
   // Command tree and tick state. Both owners live in the server loop and outlive
   // every session.
   void attachCommands(const command::Dispatcher *, const command::Context *);

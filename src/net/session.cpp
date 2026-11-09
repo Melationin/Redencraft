@@ -1304,43 +1304,88 @@ void Session::sendChunkBatch() {
 }
 void Session::lightPublished(
     std::shared_ptr<const LightChunkSnapshot> snapshot) {
-  if (closed() || phase_ != Phase::Play || !snapshot ||
-      !snapshot->protocolReady)
+  try {
+    if (closed() || phase_ != Phase::Play || !snapshot ||
+        !snapshot->protocolReady)
+      return;
+    const std::pair key{snapshot->chunkX, snapshot->chunkZ};
+    if (awaitingLightChunks_.contains(key)) {
+      awaitingLightChunks_.erase(key);
+      queuePendingChunk(key);
+      return;
+    }
+    if (!sentChunks_.contains(key))
+      return;
+    auto previous = sentChunkLight_.find(key);
+    if (previous == sentChunkLight_.end() ||
+        snapshot->revision <= previous->second->revision)
+      return;
+    if (snapshot->lifecycleEpoch != previous->second->lifecycleEpoch ||
+        snapshot->chunkX != previous->second->chunkX ||
+        snapshot->chunkZ != previous->second->chunkZ)
+      throw ProtocolError("stale light lifecycle reached the session");
+    // A drained incomplete revision does not advance the ready-to-ready base.
+    // Normally the worker's delta already spans that gap. If a lifecycle or
+    // coalescing gap still exists, send all current layer metadata for this one
+    // chunk rather than scanning every chunk/session on each tick.
+    auto update = snapshot->deltaBaseRevision == previous->second->revision
+                      ? prepareLightUpdate(snapshot, previous->second)
+                      : prepareLightUpdate(snapshot);
+    previous->second = std::move(snapshot);
+    if (update.sky.dataSections.empty() &&
+        update.sky.emptySections.empty() &&
+        update.block.dataSections.empty() &&
+        update.block.emptySections.empty())
+      return;
+    const auto generation = chunkGenerations_.find(key);
+    if (generation == chunkGenerations_.end())
+      return;
+    const auto token = generation->second;
+    const int packetId =
+        data_.packet(phaseName(phase_), "clientbound", "light_update");
+    const auto retained = update.retainedBytes();
+    queueDeferred([update = std::move(update), packetId, token]() {
+      if (!token->load(std::memory_order_acquire))
+        return Bytes{};
+      return frame(packetId, encodeLightUpdate(update));
+    }, retained, [token] {
+      return token->load(std::memory_order_acquire);
+    });
+  } catch (const ProtocolError &) {
+    disconnect("Light update failed for this connection");
+  }
+}
+void Session::lightChunkLifecycle(int chunkX, int chunkZ, bool loaded) {
+  if (closed() || phase_ != Phase::Play)
     return;
-  const std::pair key{snapshot->chunkX, snapshot->chunkZ};
-  if (awaitingLightChunks_.contains(key)) {
+  const std::pair key{chunkX, chunkZ};
+  if (!loaded) {
+    const bool hadSentChunk = sentChunks_.contains(key);
+    expireChunk(key);
+    std::erase(pendingChunks_, key);
     awaitingLightChunks_.erase(key);
-    queuePendingChunk(key);
+    if (hadSentChunk) {
+      sentChunks_.erase(key);
+      try {
+        Writer out;
+        // FriendlyByteBuf.writeChunkPos: x in the low i32, z in the high i32.
+        out.i32(chunkZ);
+        out.i32(chunkX);
+        send("forget_level_chunk", out);
+      } catch (const ProtocolError &) {
+        disconnect("Explicit chunk unload failed for this connection");
+      }
+    }
     return;
   }
-  const auto sent = sentChunks_.contains(key);
-  if (!sent)
+  if (!availableChunks_.contains(key) || !chunkVisible(key) ||
+      !world_.isChunkLoaded(chunkX, chunkZ))
     return;
-  auto previous = sentChunkLight_.find(key);
-  if (previous == sentChunkLight_.end() ||
-      snapshot->revision <= previous->second->revision)
-    return;
-  auto update = prepareLightUpdate(snapshot, previous->second);
-  previous->second = std::move(snapshot);
-  if (update.sky.dataSections.empty() &&
-      update.sky.emptySections.empty() &&
-      update.block.dataSections.empty() &&
-      update.block.emptySections.empty())
-    return;
-  const auto generation = chunkGenerations_.find(key);
-  if (generation == chunkGenerations_.end())
-    return;
-  const auto token = generation->second;
-  const int packetId =
-      data_.packet(phaseName(phase_), "clientbound", "light_update");
-  const auto retained = update.retainedBytes();
-  queueDeferred([update = std::move(update), packetId, token]() {
-    if (!token->load(std::memory_order_acquire))
-      return Bytes{};
-    return frame(packetId, encodeLightUpdate(update));
-  }, retained, [token] {
-    return token->load(std::memory_order_acquire);
-  });
+  const auto light = world_.lightService()->latestChunk(chunkX, chunkZ);
+  if (light && light->protocolReady)
+    queuePendingChunk(key);
+  else
+    awaitingLightChunks_.insert(key);
 }
 void Session::sendTickTime(double milliseconds, std::int64_t tick, std::size_t samples) {
   if (phase_ != Phase::Play || !std::isfinite(milliseconds) || milliseconds < 0)

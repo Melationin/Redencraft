@@ -699,6 +699,7 @@ ProtocolLightUpdate prepareLightUpdate(
        previous->chunkZ != current->chunkZ ||
        previous->lifecycleEpoch != current->lifecycleEpoch ||
        previous->revision >= current->revision ||
+       current->deltaBaseRevision != previous->revision ||
        previous->minLightSectionY() != current->minLightSectionY() ||
        previous->lightSectionCount() != current->lightSectionCount()))
     throw ProtocolError("light update crossed a chunk lifecycle");

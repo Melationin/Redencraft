@@ -2222,28 +2222,38 @@ private:
       chunk.snapshot->propagationComplete = blockComplete && skyComplete;
       chunk.snapshot->protocolReady = chunk.snapshot->propagationComplete;
       chunk.snapshot->changedSections.clear();
-      const auto old = internal.find(key);
-      for (const auto &now : chunk.snapshot->sections) {
-        bool skyChanged = true;
-        bool blockChanged = true;
-        if (old != internal.end() &&
-            old->second->lifecycleEpoch == chunk.snapshot->lifecycleEpoch) {
-          const LightSectionSnapshot *before = old->second->section(now->sectionY);
-          if (before == now.get()) {
-            skyChanged = false;
-            blockChanged = false;
-          } else if (before) {
-            skyChanged =
-                before->layers[static_cast<std::size_t>(LightLayer::Sky)] !=
-                now->layers[static_cast<std::size_t>(LightLayer::Sky)];
-            blockChanged =
-                before->layers[static_cast<std::size_t>(LightLayer::Block)] !=
-                now->layers[static_cast<std::size_t>(LightLayer::Block)];
+      chunk.snapshot->deltaBaseRevision = 0;
+      if (chunk.snapshot->protocolReady) {
+        const auto base = lastReady.find(key);
+        if (base != lastReady.end() && base->second &&
+            base->second->lifecycleEpoch == chunk.snapshot->lifecycleEpoch &&
+            base->second->minLightSectionY() ==
+                chunk.snapshot->minLightSectionY() &&
+            base->second->lightSectionCount() ==
+                chunk.snapshot->lightSectionCount())
+          chunk.snapshot->deltaBaseRevision = base->second->revision;
+        for (const auto &now : chunk.snapshot->sections) {
+          bool skyChanged = true;
+          bool blockChanged = true;
+          if (chunk.snapshot->deltaBaseRevision != 0) {
+            const LightSectionSnapshot *before =
+                base->second->section(now->sectionY);
+            if (before == now.get()) {
+              skyChanged = false;
+              blockChanged = false;
+            } else if (before) {
+              skyChanged =
+                  before->layers[static_cast<std::size_t>(LightLayer::Sky)] !=
+                  now->layers[static_cast<std::size_t>(LightLayer::Sky)];
+              blockChanged =
+                  before->layers[static_cast<std::size_t>(LightLayer::Block)] !=
+                  now->layers[static_cast<std::size_t>(LightLayer::Block)];
+            }
           }
+          if (skyChanged || blockChanged)
+            chunk.snapshot->changedSections.push_back(
+                {now->sectionY, skyChanged, blockChanged});
         }
-        if (skyChanged || blockChanged)
-          chunk.snapshot->changedSections.push_back(
-              {now->sectionY, skyChanged, blockChanged});
       }
       publication.emplace_back(key, chunk.snapshot);
     }
@@ -2261,8 +2271,10 @@ private:
           for (auto &newEntry : publication) {
             if (newEntry.first != entry.first)
               continue;
-            if (entry.second->lifecycleEpoch ==
-                newEntry.second->lifecycleEpoch) {
+            if (entry.second->protocolReady &&
+                newEntry.second->protocolReady &&
+                entry.second->lifecycleEpoch ==
+                    newEntry.second->lifecycleEpoch) {
               std::map<int, std::pair<bool, bool>> merged;
               for (const auto &change : entry.second->changedSections)
                 merged[change.sectionY] = {change.sky, change.block};
@@ -2275,6 +2287,8 @@ private:
               for (const auto &[sectionY, flags] : merged)
                 newEntry.second->changedSections.push_back(
                     {sectionY, flags.first, flags.second});
+              newEntry.second->deltaBaseRevision =
+                  entry.second->deltaBaseRevision;
             }
             return true;
           }
@@ -2291,6 +2305,8 @@ private:
       committed.reserve(publication.size());
       for (auto &[key, snapshot] : publication) {
         internal[key] = snapshot;
+        if (snapshot->protocolReady)
+          lastReady[key] = snapshot;
         committed.emplace_back(key, std::move(snapshot));
       }
       statsPublished.fetch_add(committed.size(), std::memory_order_relaxed);
@@ -2298,6 +2314,7 @@ private:
     }
     for (std::uint64_t key : removed) {
       internal.erase(key);
+      lastReady.erase(key);
       skyColumnSources.erase(key);
     }
   }
@@ -2320,6 +2337,8 @@ private:
       latest;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       internal;
+  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+      lastReady;
   std::unordered_map<std::uint64_t, SkyColumnSources> skyColumnSources;
   std::vector<std::vector<std::pair<
       std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>>>

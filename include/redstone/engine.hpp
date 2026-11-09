@@ -312,6 +312,9 @@ public:
   // and before ChunkHolder.broadcastChanges drains ordinary block updates.
   std::function<void(std::shared_ptr<const LightChunkSnapshot>)>
       lightPublicationObserver;
+  // Explicit World load/unload, separate from a Session's tracking-view edge.
+  // Runs on the main thread after the light service accepted the lifecycle.
+  std::function<void(int, int, bool)> lightChunkLifecycleObserver;
   std::function<void()> blockUpdatesBroadcastObserver;
   std::function<void()> entityTrackingBroadcastObserver;
   std::function<void(const Entity &)> entityAddedObserver;

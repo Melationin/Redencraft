@@ -678,6 +678,13 @@ int runServer(int argc, char **argv) {
               writer.submit(c, c->session.takeOutputItems());
             }
         };
+    world.lightChunkLifecycleObserver = [&](int x, int z, bool loaded) {
+      for (auto &c : connections)
+        if (!c->dead) {
+          c->session.lightChunkLifecycle(x, z, loaded);
+          writer.submit(c, c->session.takeOutputItems());
+        }
+    };
     world.blockUpdateObserver = [&](Pos p, const BlockState &s, int) {
       for (auto &c : connections)
         if (!c->dead)
