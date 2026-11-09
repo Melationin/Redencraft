@@ -29,6 +29,67 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 **计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`tests/light_tests.cpp`、`include/redstone/heightmap.hpp`、`src/heightmap.cpp`、`tests/heightmap_tests.cpp`、`src/engine.cpp`/`include/redstone/engine.hpp` 的必要 opt-in 挂钩、CMake、`docs/light-engine.md`、必要的兼容性边界文档、光学生成/校验工具与资产、`task/TASKS.md`。不改 `PLAN.md`。
 
+### L-1 返工范围（针对 `cde93ce` 审查）
+
+**范围**：只修最新 L-1 审查的两条阻塞和两条应修。后台交接必须在容量拒绝后保留可恢复的最新状态，保证同次 section/cell 提交的原子可见性、unload tombstone 最终送达和非法坐标显式拒绝；禁用光照时保留四张实时高度图及逐列回扫语义，同时消除重复区块定位与重复列扫描，使 `00c15ea` 封存基线对最终候选的至少五组交错基准中，主线程 CPU 与平均刻墙钟增幅都回落到 `<10%` 并留有余量。修复重复 prime、已启用光照后的导入权威快照和高度非 16 对齐边界；把均匀/空 section 输入与未 drain 发布结果改为有界表示，记录全空区块不再分配 4096 索引。
+
+**验收判据**：小容量暂停 worker 的真实线程测试覆盖 load/section/cell 拒绝后的恢复、同次 section+cell 不拆分、连续变更最终完整可见、unload 拒绝后旧代不复活且 tombstone 最终送达；正常提交路径不等待 worker。`heightmap` 覆盖非空列清空后重新 prime、二次导入、四张表及原版回扫；非 16 对齐 `minY` 明确拒绝或正确转换。`light` 覆盖均匀空 section 和全空区块不分配 4096 cell 索引、未 drain 发布结果按区块有界、旧不可变读者仍有效。使用 `build-l1-baseline/redstone_tick_benchmark.baseline.exe` 与同一 workload、MSVC Release + jemalloc、CPU mask `0x4`、High，至少五组交错 × 1000 tick，记录主线程 CPU、墙钟均值和 P95、检查点/终态指纹，并给出逐组增幅。最终候选完整构建并只跑一轮 CTest；不写传播、不改协议、不领 L-2a，不改变流体或其他核心更新顺序。
+
+**计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`include/redstone/heightmap.hpp`、`src/heightmap.cpp`、`include/redstone/engine.hpp`、`src/engine.cpp`、`src/storage.cpp`、`tests/light_tests.cpp`、`tests/heightmap_tests.cpp`、`docs/light-engine.md` 与 `task/TASKS.md`；仅在必要处更新兼容性边界。
+
+### L-1 返工实际（实现提交 `08369f9`）
+
+**高度图回归与两段验收反例**
+
+- `ChunkHeightmaps::update` 的共用早退改用四张表 `firstAvailable` 的**最小值**。新增水面 y=64、海床 y=50、写入 y=60 石头的反例：只抬升 `OCEAN_FLOOR`；移除该石头后，共享一次向下读取，只把 `OCEAN_FLOOR` 回退到海床。
+- 复用同一状态的 `WORLD_SURFACE`/`MOTION_BLOCKING` 谓词，四个独立结果只计算一次碰撞与流体状态。正常 `setBlock` 只定位一次区块；四张 map 仍在每次有效状态写入后实时更新。
+- `prime` 先清空四张表和列阈值，再重建。测试覆盖曾经非空的列清空后重新 prime 到 `minY-1`，以及同一下列二次导入清空旧高度。
+- 非 16 对齐 `minY` 的高度图/禁用光照模拟契约保留；只有 `World::enableLighting()` 显式拒绝该组合，失败不会留下 worker 或改变世界数据。
+
+**可恢复后台交接与第二段验收反例**
+
+- 有效提交改为每区块一个 `PendingChunk`：最新 generation、可选的完整 load、unload tombstone、按 section/cell 键合并的 delta，以及每 section 最新空态。暂停/积压时 pending map 只保留每区块最新状态；容量只限制 worker 每次取走的区块数，不丢弃合法更新。`Stats::rejected` 仅记录关闭后的提交或非法 section/cell 坐标。
+- `World::setBlock` 的 section 空态和 cell 变更作为同一个 `LightBlockChange` 入队，不再拆成可部分失败的两次提交。worker 先应用全部 cell，再应用入队时记录的最终 section 空态；新增“填 A → 清 A → 填 B”的无序 cell 合批反例。
+- worker 对受影响 section 分配真正的可变 `LightSectionSnapshot` 工作副本，所有写入完成后再放入 `shared_ptr<const>` 发布；不再对 `make_shared<const T>` 做 `const_cast`。
+- unload 立刻隐藏旧 latest，并保留有序 tombstone 直到 worker 清除内部旧代；unload 后立即 reload 时先执行 tombstone 再安装完整新快照。待 drain 结果改为每区块只保留最新 snapshot；`pendingPublications` 可用于观察其不随写入代数增长。
+- 空 block section 和上下 padding 复用世界中同一组不可变 section 输入；非空均匀 section 以空 `cells` + 单 palette 值表示，只有实际非均匀输入或首次 cell 变更才分配 4096 索引。
+- `importWorld` 在 raw block 写入和 prime 完成后调用 `refreshLightSnapshots()`；已启用光照时，导入前的排队快照会被当前权威区块快照替换。
+
+**新增/调整测试**
+
+`heightmap` 覆盖四表最小阈值反例、低海床抬升与反向回扫、重复 prime、二次导入、非对齐世界仅拒绝光照入口。`light` 覆盖暂停 worker 下两区块/一个容量继续可恢复、非法坐标显式拒绝、合批最终状态、卸载后旧代不复活、每区块发布结果有界、空 section 指针复用、导入后权威快照和 worker 可变副本路径；既有双层 nibble、常见/未知光学元数据和线程发布测试继续通过。
+
+**封存基线与最终 A/B**
+
+基线二进制为 `build-l1-baseline/redstone_tick_benchmark.baseline.exe`（SHA-256 `260273d92c323e983fe4aa92b03e9066e36f74cfe6fce854462cc039ef17a907`，对应 `00c15ea`）；最终候选二进制 SHA-256 `f5c6c86779244c4a507c582526f36a4d3d034425b95a9424f76a463a6631facd`。两边使用同一投影 `workload.litematic`（SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`）、MSVC Release + jemalloc、CPU mask `0x4`、High，交错 5 组 × 1000 tick。
+
+| 组 | 基线均值/候选均值 ms | 墙钟增幅 | 基线/候选主线程 CPU ms | CPU 增幅 | 基线/候选 P95 ms | 终态一致 |
+|---|---:|---:|---:|---:|---:|---|
+| 1 | 3.300 / 3.500 | +6.06% | 3187.5 / 3390.625 | +6.37% | 6.917 / 7.561 | 是 |
+| 2 | 3.359 / 3.532 | +5.15% | 3125.0 / 3359.375 | +7.50% | 6.963 / 7.536 | 是 |
+| 3 | 3.349 / 3.528 | +5.34% | 3125.0 / 3359.375 | +7.50% | 7.017 / 7.630 | 是 |
+| 4 | 3.366 / 3.506 | +4.16% | 3156.25 / 3390.625 | +7.43% | 7.090 / 7.545 | 是 |
+| 5 | 3.341 / 3.515 | +5.21% | 3140.625 / 3328.125 | +5.97% | 6.954 / 7.584 | 是 |
+
+墙钟增幅中位 **+5.21%**、主线程 CPU 增幅中位 **+7.43%**，两项均低于当前关闭传播的 L-1 `<10%` 回归预算。额外的 `--fingerprint` 基线/候选各一轮，tick 250/500/750/1000 的 blocks、scheduled、entities、pistons、accepted/pending events 与终态 5 行逐字相同；非计时指纹结果 SHA-256 分别为 `731796ef90e7873de325d52b7514e873cfb637ff2528b1a4927129dbb50769cf`、`e22ce66d2c731944104f2114147a9b0848a557c22e2d79aa70ea26badea8c36e`。
+
+原始 A/B 位于 `build-l1-baseline/rework-ab-verified/`；`SUMMARY.txt` SHA-256 `ae4cac6687d0426b5b167131591e736284839afce2f4a88867b995da201ad8c2`，全部日志/摘要索引 `HASHES.sha256` SHA-256 `ae246138c1265cad6c710d4cb9618afc29cfed5ccc2eaafdb8a585f296af16d1`。这仅证明 L-1 关闭传播的回归预算；启用真实传播/发布后的 L-4 `<10%` 门槛仍未验收。
+
+**最终构建与唯一一次 CTest**
+
+清掉旧对象后，使用 MSVC 19.51、NMake、Release、jemalloc 做完整构建，全部目标成功；随后最终候选只运行一轮完整 CTest：**26/26 通过，23.33 s**。包含 `protocol_socket`、`protocol_backpressure`、流体黄金、`light_metadata_asset`、`heightmap`、`light` 及全部既有测试。reviewer 不重复执行 CTest。
+
+- 构建日志 `build-f7-nmake/build-l1-rework-acceptance-final.log`，SHA-256 `91069bda2c0d640274433a1fb5b1e884a87f2c5946745b29d1ec288eb6f3ec42`。
+- CTest 日志 `build-f7-nmake/ctest-l1-rework-acceptance-final.log`，SHA-256 `723eada5a007cd81d2e43f302258119602d375303e3e130ffabade29bd1b767d`。
+- 最终聚焦 `heightmap` 日志 SHA-256 `0beb2b75e7cdf612374df06511e79f333888f34b51dbfa48cce8450200e6c0eb`；`light` 日志 SHA-256 `b3d70361e83a410080b7d6d547ec5177ce3c3624cc31b6fa0047c7eb81e9521c`。
+- 复验命令：用 `VsDevCmd.bat -arch=x64 -host_arch=x64` 初始化 VC，`TMP/TEMP` 指向工作区 `.tmp/`；构建 `cmake --build build-f7-nmake --config Release`，CTest `ctest --test-dir build-f7-nmake -C Release --output-on-failure`。
+
+**没有做**
+
+没有实现天空/方块光增减传播、保留传播队列、shape face occlusion（L-2a/L-2b）；没有接协议光照或发送真实亮度（L-3）；没有 Anvil 光照读写、协议高度图切换或世界生成 `_WG` 高度图；没有领取 L-2a，没有修改 `PLAN.md`、协议、客户端、流体谓词或其他核心更新顺序。snapshot 仍为 `propagationComplete=false`、`protocolReady=false`，生产默认不启用光照。
+
+`task/TASKS.md` 的交接记录随后单独提交；`.tmp/`、既有构建日志、`scripts/wait-tasks.ps1`、`task/F7-FLUID-PERF-HANDOFF.md`、`validation/vanilla26_1/fluid-cpp-states.json` 等无关文件均未纳入提交。
+
 ### 实际做了什么（实现提交 `cde93ce`）
 
 **光照数据层**
@@ -743,5 +804,22 @@ MSVC 19.51 Release + jemalloc 构建通过；coder 的 CTest 在允许本机回�
 ### M0-2 审查结论（`b95e7f8`）
 
 **通过。** 提交只含路线图与文档；`docs/handover.md` 区分历史段和当前边界，`docs/compatibility.md` 明确 26.1 World Clocks、`advance_time` 和持久化待做，`docs/protocol775.md` 同时反映流体已运行和光照仍占位。F-7 原始日志 SHA-256 与实测一致，后续证据归 F-9a/F-9b。光照拆分及 <10% 世吞验收口径已纳入 `PLAN.md`。文档路径/锚点检查通过，无生产改动，沿用 F-8 的 23/23 CTest。释放 L-1。
+
+### L-1 审查记录（`cde93ce`）
+
+接受 coder 的 MSVC Release + jemalloc 构建及 **26/26 CTest**（24.37 s），reviewer 没有重跑。双光层 nibble/额外区段、官方光学资产和线程所有权已有基础；光值尚未传播，资产是离线原版探针证据，不能算真实服务器传播差分。以下问题须先修，再领取 L-2a。
+
+- **阻塞｜`World` 丢弃队列拒绝结果，后续代际可能发布缺失变更的快照。** `src/light.cpp:218–326,519–624` 的 load、section、cell 和 unload 在容量满时可拒绝；`src/engine.cpp:953–962,1009–1025,1183–1200` 不处理返回值。一次 cell 变更被拒后，下一次成功变更可在旧 worker 数据上生成新的 generation，此时已通过 `drainPublished` 的过滤仍是错误快照；拒绝 unload 还遗留 worker 内部区块。改成不阻塞且可恢复的提交：同次写的区段和 cell 一起承诺，发生拒绝后使区块失效并保留可重试的最新完整输入/脏标记或合并增量，直到后台真正接收；unload tombstone 也必须送达。用小容量暂停 worker 的确定性 World 测试验证拒绝后新旧变更最终都可见，拒绝 unload 后 worker 旧代不复活，正常 tick 不等待。公开接口非法坐标也应显式拒绝；不能把失败输入标为已处理。别用统计计数替代恢复。
+- **阻塞｜光照禁用时世吞主线程已经明显超出预算。** 独立对照保存的 `00c15ea` 与本次候选，Release + jemalloc、同一投影、CPU mask `0x4`、High、交错 3 组 × 1000 tick。基线平均刻 3.184/3.165/3.312 ms → 候选 3.683/3.739/3.928 ms（各组 +15.7%/+18.1%/+18.6%）；主线程 CPU 3031/3078/3172 → 3563/3594/3688 ms（各组 +17.5%/+16.8%/+16.3%），P95 6.719/6.633/7.091 → 8.591/8.733/9.165 ms，终态计数一致。原始日志 `build-l1-baseline/reviewer-ab/`。已证实本提交有开销，具体归因需测量：`src/engine.cpp:1161–1184` 即使光照禁用仍重复定位区块并做四张表更新，`src/heightmap.cpp:123–140,222–235` 可对同一列重复向下读与算谓词。保留四张实时高度图，以同一次区块定位、合并必要的列扫描、跳过空区段/不相关高度、复用状态谓词等减负；勿改变现有流体谓词及更新顺序。用相同基线、同构建、同亲和性做至少五组交错，记录主线程 CPU、墙钟和检查点指纹；在关闭传播的当前 L-1 先把两项增幅压回 <10% 并尽量留下余量。最终启用传播的 <10% 门槛仍由 L-4 实测。
+- **应修｜重建高度图和已启用光照的导入会留下旧数据。** `src/heightmap.cpp:199–219` 重建时只给命中列赋值，无匹配的列保留旧高；`src/engine.cpp:1043–1062` 与 `src/storage.cpp:529–536` 明确把它用作重算，未必是首次构建。清空/重建后，无匹配列须恢复 minY−1；测试曾非空的列变空后重新 prime 及二次导入。若光照已启用，`loadChunk` 会先发送写入前快照，而 `rawSetBlock` 跳过光照（`src/engine.cpp:953,1123–1134`）；导入后安排权威快照，或在任何导入写入前明确拒绝这条组合并测试。非 16 对齐高度需明示拒绝或正确转换，避免 `(y-minY)>>4` 与 `y>>4` 不一致。
+- **应修｜后台交接的空区段与未读取结果成本。** `src/engine.cpp:975–1006` 对每个 16³ 区段（含空和 padding）构造 4096 个 cell 并扫描；2916 区块 × 26 层仅索引约 592 MiB，未算快照及队列。给均匀光学输入单值表示，重用空区段输入，仅非均匀 palette 才需要逐格数据。 `src/light.cpp:329–351,621–640` 完成结果列表无限追加且 drain 持锁遍历；按区块保留最新结果或提供有界交接，保持卸载失效和不可变读者，缩短主线程共享锁持有。验收长时间不 drain 的积压不会随同区块写入次数增长，并记录全空区块不分配 4096 索引的证据。
+
+**结论**：L-1 退回返工。本次只修底座、高度图回归及其验证，不做传播、协议或其他任务。采用 coder 对最终新候选的一轮 CTest，reviewer 不复跑。
+
+#### L-1 返工期间的验收反例（仅供 coder，状态不变）
+
+合并高度图的快速跳过条件要用四张表 `firstAvailable` 的**最小值**，不能取最大值：水面 y=64，实心海床 y=50，写入 y=60 的石头虽低于水面两格，仍应抬升 `OCEAN_FLOOR`，其余三图不变。用最大值会在 `ChunkHeightmaps::update` 的共用早退直接丢掉这次写。请在最终完整 CTest 前加入此行为反例，并覆盖海床顶块的反向回扫；性能仍保留四张实时高度图。
+
+同一返工的后台合并反例（最终测试前）：当前工作树 `src/light.cpp` 的 `mutableSection` 使用 `make_shared<const LightSectionSnapshot>` 后 `const_cast` 写入，目标本身是 const，属于未定义行为；请用真正可变、仅 worker 拥有的工作副本，发布时再转只读。同一区段的多个 cell 变更按无序 map 应用时，不能每次用历史 `change.isEmpty` 覆盖区段空态（先填 A 再清 A/填 B 的各种顺序会出错）。在入队时每区段保留最新空态，应用所有 cell 后再应用最终区段状态，补多格合批反例。对齐高度限制优先仅限制光照入口，不改变原有禁用光照的模拟输入契约。
 
 任务已完成
