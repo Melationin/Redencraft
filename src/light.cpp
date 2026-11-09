@@ -497,7 +497,7 @@ public:
       return 0;
     }
     auto &active = versions[key];
-    const bool newLifetime = inactive.contains(key) || active.requestRevision == 0;
+    const bool newLifetime = active.inactive || active.requestRevision == 0;
     if (newLifetime) {
       ++active.epoch;
       active.requestRevision = 0;
@@ -505,7 +505,7 @@ public:
     }
     const auto generation = ++nextGeneration;
     ++active.requestRevision;
-    inactive.erase(key);
+    active.inactive = false;
     const bool preserveUnload = pending.contains(key) && pending.at(key).unload;
     PendingChunk state;
     state.key = key;
@@ -530,7 +530,7 @@ public:
     const auto key = chunkKey(chunkX, chunkZ);
     std::lock_guard lock(mutex);
     auto active = versions.find(key);
-    if (!accepting || active == versions.end() || inactive.contains(key)) {
+    if (!accepting || active == versions.end() || active->second.inactive) {
       ++statsRejected;
       return false;
     }
@@ -558,13 +558,16 @@ public:
     const auto key = chunkKey(change.chunkX, change.chunkZ);
     std::lock_guard lock(mutex);
     auto active = versions.find(key);
-    if (!accepting || active == versions.end() || inactive.contains(key)) {
+    if (!accepting || active == versions.end() || active->second.inactive) {
       ++statsRejected;
       return false;
     }
     change.generation = ++nextGeneration;
     ++active->second.requestRevision;
-    PendingChunk &state = pending[key];
+    auto stateIt = pending.find(key);
+    if (stateIt == pending.end())
+      stateIt = pending.emplace(key, PendingChunk{}).first;
+    PendingChunk &state = stateIt->second;
     state.key = key;
     state.generation = change.generation;
     state.lifecycleEpoch = active->second.epoch;
@@ -602,7 +605,7 @@ public:
     ++active->second.epoch;
     active->second.requestRevision = 0;
     latest.erase(key);
-    inactive.insert(key);
+    active->second.inactive = true;
     PendingChunk state;
     state.key = key;
     state.generation = generation;
@@ -629,7 +632,7 @@ public:
           const auto active = versions.find(key);
           if (active != versions.end() &&
               active->second.epoch == snapshot->lifecycleEpoch &&
-              !inactive.contains(key)) {
+              !active->second.inactive) {
             const auto current = latest.find(key);
             if (current == latest.end() ||
                 current->second->revision <= snapshot->revision) {
@@ -2606,9 +2609,11 @@ private:
   struct ChunkVersion {
     std::uint64_t epoch = 0;
     std::uint64_t requestRevision = 0;
+    // Merged from the former inactive set: block-change reporting probed it
+    // with a second hash lookup on every write.
+    bool inactive = false;
   };
   std::unordered_map<std::uint64_t, ChunkVersion> versions;
-  std::unordered_set<std::uint64_t> inactive;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       latest;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
