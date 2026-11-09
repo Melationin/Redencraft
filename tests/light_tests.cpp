@@ -850,6 +850,49 @@ void skyLightPropagation() {
               skyLightAt(topWaterSnapshot, 8, 16, 8) == 15,
           "top padding seeds attenuated sky through a dampening-one water layer");
 
+  LightService storage(0, 1);
+  require(storage.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "storage-eligibility fixture loads");
+  (void)settledChunk(storage, 0, 0);
+  require(reportBlock(storage, 0, 0, {8, 8, 8}, air, stone),
+          "sole anchor block enters worker");
+  auto anchored = settledChunk(storage, 0, 0);
+  require(skyLightAt(anchored, 8, 8, 8) == 0 &&
+              skyLightAt(anchored, 8, 20, 8) == 15 &&
+              !anchored->section(0)->layers[static_cast<std::size_t>(
+                   LightLayer::Sky)]
+                   .isMissing() &&
+              !anchored->section(1)->layers[static_cast<std::size_t>(
+                   LightLayer::Sky)]
+                   .isMissing(),
+          "nonempty section allocates its sky layer and neighboring full plane");
+  LightBlockChange removeAnchor;
+  removeAnchor.chunkX = 0;
+  removeAnchor.chunkZ = 0;
+  removeAnchor.sectionY = 0;
+  removeAnchor.localIndex = static_cast<std::uint16_t>(lightIndex(8, 8, 8));
+  removeAnchor.oldProperties = lightPropertiesOf(stone);
+  removeAnchor.newProperties = lightPropertiesOf(air);
+  removeAnchor.wasEmpty = false;
+  removeAnchor.isEmpty = true;
+  require(storage.reportBlockChange(removeAnchor),
+          "removing the sole anchor enters worker with final empty status");
+  auto released = settledChunk(storage, 0, 0);
+  require(skyLightAt(released, 8, 8, 8) == 15 &&
+              skyLightAt(released, 8, 20, 8) == 15 &&
+              released->section(0)->layers[static_cast<std::size_t>(
+                  LightLayer::Sky)]
+                  .isMissing() &&
+              released->section(1)->layers[static_cast<std::size_t>(
+                  LightLayer::Sky)]
+                  .isMissing(),
+          "removing the final block drops raw layers and restores inherited full sky");
+  require(anchored->lightValue(LightLayer::Sky, 8, 8, 8) == 0 &&
+              !anchored->section(0)->layers[static_cast<std::size_t>(
+                   LightLayer::Sky)]
+                   .isMissing(),
+          "previous immutable publication keeps its old raw zero layer");
+
 }
 
 void blockLightStaleAndAuthoritativeRefresh() {

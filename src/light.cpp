@@ -1172,25 +1172,64 @@ private:
       }
     }
 
-    void ensureStoredSections() {
+    void syncStorageEligibility() {
+      std::unordered_set<std::uint64_t> affected;
+      for (auto &[key, chunk] : working) {
+        (void)chunk;
+        affected.insert(key);
+        const int x = static_cast<int>(key >> 32);
+        const int z = static_cast<int>(static_cast<std::uint32_t>(key));
+        for (int dx = -1; dx <= 1; ++dx)
+          for (int dz = -1; dz <= 1; ++dz)
+            affected.insert(chunkKey(x + dx, z + dz));
+      }
+      for (std::uint64_t key : removed) {
+        const int x = static_cast<int>(key >> 32);
+        const int z = static_cast<int>(static_cast<std::uint32_t>(key));
+        for (int dx = -1; dx <= 1; ++dx)
+          for (int dz = -1; dz <= 1; ++dz)
+            affected.insert(chunkKey(x + dx, z + dz));
+      }
+      storedEligible.clear();
+      for (std::uint64_t key : affected)
+        (void)ensureWorking(key);
+
       for (auto &[key, chunk] : working) {
         if (removed.contains(key))
           continue;
-        const int minBlock = chunk.snapshot->minBlockSectionY;
-        const int count = chunk.snapshot->blockSectionCount;
-        for (int y = minBlock; y < minBlock + count; ++y) {
-          const LightSectionSnapshot *section = chunk.snapshot->section(y);
-          if (section && !section->empty)
+        const int sectionX = static_cast<int>(key >> 32);
+        const int sectionZ =
+            static_cast<int>(static_cast<std::uint32_t>(key));
+        for (int y = chunk.snapshot->minLightSectionY();
+             y < chunk.snapshot->minBlockSectionY +
+                     chunk.snapshot->blockSectionCount + 1;
+             ++y) {
+          bool eligible = false;
+          for (int dx = -1; dx <= 1 && !eligible; ++dx)
+            for (int dz = -1; dz <= 1 && !eligible; ++dz)
+              for (int dy = -1; dy <= 1 && !eligible; ++dy)
+                eligible = blockSectionNonEmpty(sectionX + dx, y + dy,
+                                                sectionZ + dz);
+          const SectionPos3 sectionKey{sectionX, y, sectionZ};
+          if (eligible) {
+            storedEligible.insert(sectionKey);
             allocateSection(key, y);
+          } else {
+            values.erase(sectionKey);
+            dirtySections.erase(sectionKey);
+            const auto *old = chunk.snapshot->section(y);
+            if (old &&
+                !old->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                     .isMissing()) {
+              auto *edit = chunk.sectionForEdit(y);
+              edit->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+                  LightLayerSnapshot::missing();
+              chunk.dirty = true;
+            }
+          }
         }
-        const LightSectionSnapshot *bottom = chunk.snapshot->section(minBlock);
-        if (bottom && !bottom->empty)
-          allocateSection(key, minBlock - 1);
-        const LightSectionSnapshot *top =
-            chunk.snapshot->section(minBlock + count - 1);
-        if (top && !top->empty)
-          allocateSection(key, minBlock + count);
       }
+      storageReady = true;
     }
 
     int updateColumn(std::uint64_t key, int localX, int localZ) {
@@ -1273,43 +1312,6 @@ private:
         if (found == values.end())
           continue;
         const LightValues &layer = found->second;
-        const bool blockSection =
-            position.y >= chunk->snapshot->minBlockSectionY &&
-            position.y < chunk->snapshot->minBlockSectionY +
-                             chunk->snapshot->blockSectionCount;
-        bool needsStorage = false;
-        if (blockSection) {
-          const auto *block = chunk->snapshot->section(position.y);
-          needsStorage = block && !block->empty;
-        } else if (position.y == chunk->snapshot->minBlockSectionY - 1) {
-          const auto *block =
-              chunk->snapshot->section(chunk->snapshot->minBlockSectionY);
-          needsStorage = block && !block->empty;
-        } else if (position.y == chunk->snapshot->minBlockSectionY +
-                                   chunk->snapshot->blockSectionCount) {
-          const auto *block = chunk->snapshot->section(
-              chunk->snapshot->minBlockSectionY +
-              chunk->snapshot->blockSectionCount - 1);
-          needsStorage = block && !block->empty;
-        }
-        if (!needsStorage) {
-          bool inherited = true;
-          for (int z = 0; z < 16 && inherited; ++z) {
-            for (int x = 0; x < 16 && inherited; ++x) {
-              const int plane = inheritedPlane(position, x, z);
-              for (int y = 0; y < 16; ++y)
-                if (layer[lightIndex(x, y, z)] != plane) {
-                  inherited = false;
-                  break;
-                }
-            }
-          }
-          if (inherited) {
-            values.erase(position);
-            dirtySections.erase(position);
-            continue;
-          }
-        }
         if (std::all_of(layer.begin(), layer.end(), [&](std::uint8_t value) {
               return value == layer.front();
             }))
@@ -1327,25 +1329,13 @@ private:
   private:
     static int HeightmapColumnKey(int x, int z) { return x + z * 16; }
 
-    int inheritedPlane(const SectionPos3 &key, int x, int z) const {
-      const LightChunkSnapshot *chunk =
-          stateFor(chunkKey(key.x, key.z));
-      if (!chunk)
-        return 15;
-      for (int aboveY = key.y + 1;
-           aboveY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
-           ++aboveY) {
-        const SectionPos3 aboveKey{key.x, aboveY, key.z};
-        const auto edited = values.find(aboveKey);
-        if (edited != values.end())
-          return edited->second[lightIndex(x, aboveY * 16, z)];
-        const LightSectionSnapshot *above = chunk->section(aboveY);
-        if (above &&
-            !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
-                 .isMissing())
-          return above->light(LightLayer::Sky, x, 0, z);
-      }
-      return 15;
+    bool blockSectionNonEmpty(int x, int y, int z) const {
+      const LightChunkSnapshot *chunk = stateFor(chunkKey(x, z));
+      if (!chunk || y < chunk->minBlockSectionY ||
+          y >= chunk->minBlockSectionY + chunk->blockSectionCount)
+        return false;
+      const LightSectionSnapshot *section = chunk->section(y);
+      return section && !section->empty;
     }
 
     WorkingChunk *workingChunk(std::uint64_t key) {
@@ -1450,6 +1440,9 @@ private:
         return false;
       const SectionPos3 key{position.x >> 4, position.y >> 4,
                             position.z >> 4};
+      if (storageReady && !storedEligible.contains(key) &&
+          !values.contains(key))
+        return false;
       auto inserted = values.try_emplace(key);
       LightValues &layer = inserted.first->second;
       if (inserted.second) {
@@ -1753,6 +1746,8 @@ private:
     std::deque<IncreaseTask> increaseQueue;
     std::unordered_map<SectionPos3, LightValues, SectionPos3Hash> values;
     std::unordered_set<SectionPos3, SectionPos3Hash> dirtySections;
+    std::unordered_set<SectionPos3, SectionPos3Hash> storedEligible;
+    bool storageReady = false;
     mutable bool incomplete = false;
   };
 
@@ -2069,7 +2064,7 @@ private:
       }
       for (const LightPos &position : changedPositions)
         sky.enqueueCheck(position);
-      sky.ensureStoredSections();
+      sky.syncStorageEligibility();
       sky.run();
       sky.commitLayers();
       skyComplete = sky.isComplete();

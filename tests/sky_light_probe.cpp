@@ -16,7 +16,8 @@ const std::vector<Pos> kCells = {
     {8, 200, 0},   {8, 200, 15},  {8, 200, 16}, {8, 202, 8},
     {8, 203, 8},   {8, 320, 8},   {8, 150, 8},  {15, 150, 8},
     {16, 150, 8},  {0, -62, 0},   {0, -61, 0},  {0, -65, 0},
-    {0, -60, 0},   {0, 100, 0},
+    {0, -60, 0},   {0, 100, 0},   {8, 319, 8},  {8, 318, 8},
+    {8, 320, 8},
 };
 constexpr std::array<int, 6> kRawSamples{0, 9, 10, 11, 12, 15};
 
@@ -122,6 +123,10 @@ int main() {
     printStage(5, sample(world));
     fill(world, {-1, -60, -1}, {1, -60, 1}, air);
     printStage(6, sample(world));
+
+    fill(world, {0, 319, 0}, {15, 319, 15},
+         Blocks::WATER.defaultState());
+    printStage(7, sample(world));
     world.disableLighting();
     return 0;
   } catch (const std::exception &error) {

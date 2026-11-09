@@ -183,6 +183,9 @@ public final class SkyDiffAgent {
     values.add(new int[]{0, -65, 0});
     values.add(new int[]{0, -60, 0});
     values.add(new int[]{0, 100, 0});
+    values.add(new int[]{8, 319, 8});
+    values.add(new int[]{8, 318, 8});
+    values.add(new int[]{8, 320, 8});
     return values.toArray(int[][]::new);
   }
 }

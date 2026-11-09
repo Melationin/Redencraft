@@ -104,4 +104,4 @@ python validation\vanilla26_1\block_light_differential_test.py `
 
 runner 使用独立世界和 loopback 端口。每个阶段对四个受影响 chunk 调用 `ThreadedLevelLightEngine.waitForPendingTasks` 发出 POST_UPDATE fence；所有 future 完成后，agent 把取样任务排回服务端主线程读取 `LightLayer.BLOCK` 或 `LightLayer.SKY`，tick 本身不等待。天空夹具还同时记录指定 section 的 raw layer 是否缺席。它不使用固定睡眠或伪造亮度。原始 server log、fence 记录、候选、命令和 manifest 保存在唯一运行目录。
 
-`light` 还覆盖天空入口、露天满光、整块屋顶、侧漏衰减、开顶/复盖、同代权威刷新、加载顺序、负 y、顶部水层衰减、底部已分配光、稀疏缺层派生、无天空光配置和双层互不串扰；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方五阶段 225 个方块光观察，`sky_light_differential` 比较官方六阶段 108 个天空光值及 36 个 raw-layer 缺席标记。
+`light` 还覆盖天空入口、露天满光、整块屋顶、侧漏衰减、开顶/复盖、同代权威刷新、加载顺序、负 y、顶部水层衰减、底部已分配光、稀疏缺层派生、删除最后锚块后的 raw 层释放、无天空光配置和双层互不串扰；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方五阶段 225 个方块光观察，`sky_light_differential` 比较官方七阶段 147 个天空光值及 42 个 raw-layer 缺席标记。
