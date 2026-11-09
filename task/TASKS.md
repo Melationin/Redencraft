@@ -54,6 +54,52 @@ MSVC 19.51、NMake、Release、`REDSTONE_ALLOCATOR=jemalloc` 完整构建成功�
 - 官方运行没有启动 Minecraft 客户端；隔离服务端已在运行结束后关闭。一次 `doMobSpawning` 命令拼写失败且只产生零值的诊断运行 `20261109-174007-27564-0027a593` 不计入证据。
 - 本轮实现提交为 `63058af`（23 files，+2190/−102），交接记录单独提交；实现提交不包含 `task/TASKS.md`、`PLAN.md` 或既有无关文件。`git diff --cached --check` 只提示方向 TSV 两行末尾空方向面制表符和 CRLF 规范化；末尾 tab 保留第八列空面位置，删除会改变资产格式。
 
+### L-2a 返工范围（针对 `63058af` 审查）
+
+**范围**：只修复最新 L-2a 复审中的方块光三条阻塞与官方批次证据一条应修，不领 L-2H、L-2b、L-3/L-4，不改 `PLAN.md`、协议或其他核心更新顺序。
+
+**行为修复**：增光任务出队时读取当前 stored level，发射任务仅可先把本格抬到 target，随后只有 `stored == target` 才向邻居传播，阻止 decrease 前排入的旧边界任务在来源变暗后复活。同一 `lifecycleEpoch` 的权威完整快照继续复用旧已发布光层，但逐格比较新旧光学输入并为所有变化提交 check/decrease/increase；覆盖 raw import/`refreshLightSnapshots` 的移除与新增源、跨边界清除，旧同代完整结果保留到正确结果发布。worker 的 light section 查找和写入覆盖 `minBlockSectionY-1..minBlockSectionY+blockSectionCount` 两个 padding；世界高度外状态按空气读取，最底/最顶发光方块的上下入射、衰减、移除与未加载水平邻块屏障分别验证。输入请求号与 worker 发布 revision 分离，后者由单写者按完成批次递增；强制“较新 A 先发布、较旧 B 后跨区更新 A”的反例验证 A 不被低输入号拒收。
+
+**原版证据**：`LightDiffAgent` 对夹具四个受影响 chunk 调用 `ThreadedLevelLightEngine.waitForPendingTasks`，取得 POST_UPDATE futures 后通过服务端主线程排队取样；不在 tick 上阻塞。保留旧三阶段 117 个观察，新增底部/顶部 padding 发光、两格衰减和移除阶段，重新实跑官方隔离 localhost 26.1、提升黄金并做独立重跑；记录 JAR SHA-1、运行目录、服务器日志/候选/manifest/黄金哈希。
+
+**验收**：`light` 在真实 worker 上覆盖旧边界增光任务失效、权威刷新移除/新增及跨边界清除、底/顶 padding 正负例；旧传播、重叠、epoch/revision、缺失 metadata 回归继续通过。官方新旧阶段逐格匹配，fence 证明取样发生在提交批次完成后；最终新候选干净 MSVC Release + jemalloc 构建并只跑一轮完整 CTest，reviewer 不复跑。性能仍只记录 worker 工作量，不宣称 L-4 `<10%` 通过。
+
+**计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`tests/light_tests.cpp`、`tests/block_light_probe.cpp`、`validation/vanilla26_1/LightDiffAgent.java`、`validation/vanilla26_1/block_light_differential_test.py`、`validation/vanilla26_1/block-light-golden.json`、官方运行脚本/README 与必要文档、`task/TASKS.md`。
+
+### L-2a 返工实际（实现提交 `3534375`）
+
+**旧任务、权威输入与 padding**
+
+- `src/light.cpp:952-996` 的 increase dequeue 先读取当前 stored level；emission task 只可先把本格抬到 target，随即要求 `stored == target` 才传播。真实 worker 反例把“加载西邻区块 + 移除东邻边界旧光源”合入同一批：未校验时旧 seed 会把已变暗的 `x=0` 当作 15 级源，修复后东西两侧最终均为 0，重叠与既有跨边界回归不变。
+- `src/light.cpp:1226-1260` 对同一 `lifecycleEpoch` 的权威完整快照保留旧光层作为发布前的可见结果，同时逐格比较新旧 `BlockLightProperties`，把差异交给 check/decrease/increase。回归覆盖权威输入移除本地/跨边界旧光、用另一份权威输入新增源并跨边界传播；两种结果都只在正确传播完成后发布，`blockLightComplete` 仍只表示方块层完整。
+- `src/light.cpp:713-786,871-895,1015-1040` 把 worker 的光值 section 范围扩到 `minBlockSectionY-1..minBlockSectionY+blockSectionCount`；世界可玩高度外按空气读取并允许光值存入 padding，水平边界扫描也覆盖 padding。测试覆盖底部 `-64 -> -65=14 -> -66=13`、顶部 `319 -> 320=14 -> 321=13` 以及上下 source 移除；既有未加载邻区块屏障保持。
+- 输入请求号与对外发布号分离：`ChunkVersion::requestRevision` 仍记录每区块输入顺序，`src/light.cpp:1355-1360` 的 `nextPublicationRevision` 由单写者按完成批次递增。`processChunkBatchForTesting` 只让测试使用当前暂停的 worker 强制选择指定 chunk，先发布较新的 A 请求，再处理较旧 B 请求；B 跨边界改变 A 后，A 以更大的发布 revision 被接收，`x=0` 从 A 自身衰减值 8 更新到 B 源的 14。
+
+**行为反例与回归**
+
+- `tests/light_tests.cpp:674-779` 新增旧边界增光任务、同代权威移除/新增、底部/顶部 padding 插入/衰减/移除；`tests/light_tests.cpp:779-824` 新增强制跨批请求顺序反例。最终聚焦 `light` 为 `light tests passed`，日志 `build-f7-nmake/light-l2a-rework-acceptance-final.log` SHA-256 `b3d70361e83a410080b7d6d547ec5177ce3c3624cc31b6fa0047c7eb81e9521c`。
+- 临时把发布 revision 变异回 `maxGeneration` 后，跨批测试在 `worker publication revision advances despite lower input generation` 按预期失败，证明该用例覆盖旧缺陷；失败日志 `build-f7-nmake/light-l2a-revision-mutation.log` SHA-256 `e5e9472a3e51b432131587c5e4da35ce353299b1e0a0dbeb62777fbfe2bbd628`。随后已恢复单调发布号并完成最终构建。
+
+**官方 26.1 fence 与逐格差分**
+
+- `LightDiffAgent.java` 对 `(0,0)、(-1,0)、(0,-1)、(-1,-1)` 四个受影响 chunk 调用 `ThreadedLevelLightEngine.waitForPendingTasks`，每个阶段记录 `LIGHT_FENCE stage=N chunks=4`。所有 future 完成后才通过 `MinecraftServer.execute` 把取样排回主线程；服务器 tick 不调用 future 的阻塞 get/join。
+- 官方 JAR 仍为 `validation/vanilla26_1/server.jar`，SHA-1 `3872a7f07a1a595e651aef8b058dfc2bb3772f46`。夹具保留原三阶段 39 格/阶段的顺序和值，共 117 个旧观察；新增 stage 4 底/顶 source 与 stage 5 移除，总计 5×45=225 个观察。stage 4 的底/顶序列均为 `15,14,13`，stage 5 全 0。
+- 提升黄金运行 `build-light-validation/block-light-runs/20261109-180455-29340-b72d1011/`：候选与 `validation/vanilla26_1/block-light-golden.json` SHA-256 同为 `ff45f20c24ff3916fe9c187b3a90bd584d451fdf2e77be087955fa7961e8d416`，server log `fef284e201d8e7f50bc9fc5441a8c56d812c081bf30ef30e0292ee2fe990a918`，run manifest `d874e3d2e78c7ae81ec7383cebb4300a2ae322a17f0ea84f07945e0dadc268ff`。
+- 独立重跑 `build-light-validation/block-light-runs/20261109-180520-19476-e0dff2c8/`：候选 SHA-256 同为 `ff45f20c24ff3916fe9c187b3a90bd584d451fdf2e77be087955fa7961e8d416`，server log `fc0e03d4bf74605dd1d4888d9eb4529fe61c8b7076ef16020e9e901aa9a46789`，run manifest `7493924796a3ae350b009aab86fe8eb6a20b150e7c5350ad6e8038e1668356e3`。C++ probe 与黄金比较为 `block-light differential matched: 5 stages, 45 cells each, 225 observations`，日志 SHA-256 `8a0aa44e1e1282d66df96b87cc5023e02eb9fe6fa475d48fad4c8dd0a834b83c`。
+- 两次 agent 接入诊断不计证据：一次因新增 lambda 签名提前加载 `MinecraftServer` 而未转换，一次因本 JVM 不允许 retransform 而在 premain 退出。最终代码不依赖 retransform，成功运行均显示 `LIGHT_AGENT premain`、`LIGHT_TRANSFORM ... tickServer` 及五条 fence。未启动客户端。
+
+**构建、CTest 与性能边界**
+
+- 最终候选先执行 NMake `clean`，再用 MSVC 19.51 Release + `REDSTONE_ALLOCATOR=jemalloc` 全量重建成功；构建日志 `build-f7-nmake/build-l2a-rework-acceptance-final.log` SHA-256 `0b67c7ad9960e373ec0f912fe8be58d4e99c56edc6a93cfd28b1ab27596b8362`。随后只运行一轮完整 CTest：**27/27 通过，23.20 s**；日志 `build-f7-nmake/ctest-l2a-rework-acceptance-final.log` SHA-256 `2439626e9e734bc9fa885d6db4e5351d69a82cbaefa7aef2d1b8d8b9c8fdd6a1`，reviewer 不重复执行。
+- 聚焦 `heightmap tests passed`、`optical metadata valid: 2366 states, 44 face states`；对应日志 SHA-256 分别为 `0beb2b75e7cdf612374df06511e79f333888f34b51dbfa48cce8450200e6c0eb`、`4ca7a603e23efcb043401aff53664696cbe322afcba89919b84a2d78259e9904`。最终 `light_tests.exe` SHA-256 `05d1de416cf65596777ef4fbf740cf012d6edc544a5bacb7d572e491ad1a0ce5`，`block_light_probe.exe` `a8ca3a8b2f5d78ce375ae4b1182f8bbd790bc779776134ba7a81e11f7fcc7eda`。
+- `redstone_block_light_benchmark` 最终观察 `cycles=500 changes=1000 light_queue_entries=2609644 batches=1001 mean_pair_ms=0.8898 error=none`，日志 SHA-256 `f4b59d339439cf37b118bfaa6cedb1a216d676713bc0faa7733a0412a31b7dab`。这是 worker 正常传播工作量记录，**不是主线程额外 CPU/平均刻墙钟的 L-4 `<10%` 验收**。
+
+**明确没有做**
+
+没有实现天空光、协议光照、Anvil 光照或 L-2H；没有改变协议数值、客户端、流体/方块更新顺序。官方 fixture 仍只覆盖已构造的五阶段方块光，不证明存档重启或完整“已照明”。没有领取后续任务，也没有修改 `PLAN.md`。
+
+- 本轮实现提交为 `3534375`（10 files，+474/−48），交接记录随后单独提交；implementation 不包含 `task/TASKS.md`、`PLAN.md` 或既有无关文件。
+
 ---
 
 ## L-1 光照数据与线程交接（coder）
@@ -886,5 +932,21 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 - 从 `y - 1` 起，按区段从高到低取 `const Section&`。`hasOnlyAir()` 为真即跳到该区段下界的前一格；非空时只遍历目标列。固定 `column = (z & 15) << 4 | (x & 15)`，16 对齐常见路径首索引 `((y & 15) << 8) | column`，区段内向下以 256 为步长，直接 `Section::get` + `BlockState::fromId`；不走 `World::getBlock`、不碰它的读缓存、不逐格构造世界坐标。四表共用一个从高到低的遍历，记录每张待下降表的首个匹配，待处理全清即结束。不要根据区段别列是否非空推出目标列非空。不要顺手改存储或做每列永久缓存。
 - 界限：`sectionIndex(y)=(y-minY)>>4`，而现有格索引用 `y & 15`（`src/engine.cpp:1098–1120`）。非 16 对齐的 `minY` 不能盲用减 256；可保留现有逐格路径，或区段内每格按原索引计算并测试。首个区段从 `y-1` 开始、每段下界与世界底界正确夹紧，没找到的表回到 `minY-1` 可见高度。保留方块回调/光照提交顺序、空列、流体/海床、独立谓词与高度图打包。
 - 验收：实际 World 写入驱动的测试覆盖同区段、边界相邻格、跨多段空隙、非空但目标列无匹配、负 x/z 与负 y、到底无命中、非对齐范围，以及只有 `OCEAN_FLOOR` 变化的水面/海床；现有高度图及其他回归继续通过。用有长空隙的固定夹具记录访问区段/跳过区段/读格数及相同高度结果，计数只在诊断开启。再用 L-2H 紧邻基线与候选、同配置固定 CPU 2、关闭光照、交错五组 × 1000 刻测世吞主线程 CPU、均值、P95 和相同世界指纹。不给光照整体 <10% 结论。最终候选一轮完整 CTest，由 coder 运行，reviewer 不重复。
+
+### L-2a 审查记录（`63058af`）
+
+已核对官方候选/黄金、原版日志与 CTest SHA-256；采用 coder 的 Release + jemalloc 构建与 **27/27 CTest**（23.86 s），不重复。现有真实 26.1 三阶段 117 个光值匹配，不能覆盖下述路径。
+
+- **阻塞｜旧增光任务能从已经变暗的格子传播。** `src/light.cpp:765–782,921–950` 直接用 task.level；Java `LightEngine.java:157–171` 在取出任务时读取当前 stored level，光源任务可先抬高本格，之后只有 stored == target 才传播。C++ 的 seedIncoming（726–744）可在 decrease 前排入边界旧光，再在同批灭灯/卸载时使其来源变暗；不校验会从变暗格重新向新区块放光。补 dequeue 校验，添加真实 worker 反例：一批内加载邻区块并移除旧边界附近光源，旧来源和新邻区块最终都为 0；保留重叠光源与跨界回归。
+- **阻塞｜同一加载代的权威输入可以永久保留已移除光源。** `src/light.cpp:1161–1181,1245–1258,695–721` 把旧光层复制到新状态，随后将所有旧非零亮度排进增光队列，却未比较旧/新光学状态或清除旧依赖。`World::refreshLightSnapshots` 和 `importWorld` 会触发此路径（`src/engine.cpp:1040–1053`、`src/storage.cpp:529–539`）。反例：先点亮并发布，已启用光照时 raw 导入/权威刷新把灯替换为普通空气，再等待完成；当前旧光层可保持原样并把快照标 complete。权威刷新须对新旧光学输入作增减重查，或在这类替换时安全重建本区及邻区依赖；旧同代可见结果应保留到正确的新结果发布。测移除/新增源，含跨边界旧光清除。
+- **阻塞｜上下光照 padding 实际被拒绝。** `src/light.cpp:848–855,984–1005` 限定在方块高度，区块最底/最顶非空 section 的相邻 padding 永不参与传播。Java `LayerLightSectionStorage.java:220–250` 会为相邻光区段建立存储，`BlockLightSectionStorage.getLightValue` 可读该层，`LevelChunk.java:223–248` 对高度外返回空气。用现有 padding 输入实现实际方块光边界，验证上下发光方块的入射、衰减及移除；缺失邻区块仍按屏障。不要把只有数组存在写成 padding 光值已验证。
+- **应修｜原版采样尚无真实批次屏障。** `LightDiffAgent.java:33–42,88–100` 只 hook 服务器 tick，观察两刻加 `hasLightWork()==false`，不等同于 dispatcher 已处理提交；交接称 hook 了 `runUpdate()`，代码未见。按 `ThreadedLevelLightEngine.java:219–221` 对夹具受影响区块发 POST_UPDATE fence，主线程只在 futures 完成后取样（不在 tick 上阻塞）；或者用同等明确的批次完成探针。至少复验旧 117 格，加入能在真实原版构造的边界夹具，如底/顶 padding；修正证据说明。
+- **后续性能关注｜`src/light.cpp:1260–1274` 每批遍历全部 loaded 区块检查 unsupported，且无关远区块可阻止当前区块报告 complete。** 保守 incomplete 暂可接受；L-4 必须以受影响域/增量统计取代全世界每批扫描，明确跨区块依赖，避免大世界单格变化也线性扫全图。
+
+**结论：退回 L-2a。** 只返工方块光和证据，不混入 L-2H、天空光或发包。最终新候选完整构建后一轮 CTest，reviewer 采用结果、不复跑。
+
+#### L-2a 返工前的额外验收反例：跨批发布号反例（状态不变）
+
+`LightService::Impl::run` 从无序 `pending` 中取有限批，主线程请求号不保证按 worker 批次递增。旧实现 `processBatch` 用批内最大请求号覆盖所有受影响区块的 `snapshot->revision`，`drainPublished` 又拒绝比 latest 小的 revision。例：相邻区块 A、B 都已加载，较新 A 请求先处理且发布了 A；随后较旧 B 请求才处理，它的光可跨界改变 A，worker 内的 A 是正确新结果，但对外 A 可能因低请求号被拒收，直到无关后续写入。区分输入请求/加载 epoch 与 worker 的有序发布号（或等效的单调机制），测试不同批次请求顺序下，已发布的 A 能继续收到 B 导致的正确邻区更新。请在最终 CTest 前核对；不扩大到协议。
 
 任务已完成
