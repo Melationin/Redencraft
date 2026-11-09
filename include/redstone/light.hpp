@@ -82,6 +82,9 @@ struct LightSectionSnapshot {
   std::array<LightLayerSnapshot, kLightLayerCount> layers{};
   std::uint16_t unsupportedCells = 0;
 
+  // An empty cell vector is the uniform representation: every cell uses
+  // palette[0]. Non-uniform sections carry exactly kLightVolume indices.
+  bool isUniform() const { return cells.empty(); }
   const BlockLightProperties &at(int x, int y, int z) const;
   std::uint8_t light(LightLayer layer, int x, int y, int z) const;
 };
@@ -131,7 +134,6 @@ struct LightBlockChange {
 struct LightWorkerOptions {
   std::size_t batchSize = 1000;
   std::size_t maxQueuedCommands = 4096;
-  std::size_t maxBlockChangesPerBatch = 4096;
   bool startPausedForTesting = false;
 };
 
@@ -148,6 +150,8 @@ public:
     std::uint64_t published = 0;
     std::uint64_t stalePublications = 0;
     std::uint64_t queueHighWater = 0;
+    std::uint64_t pendingChunks = 0;
+    std::uint64_t pendingPublications = 0;
   };
 
   explicit LightService(int minBlockSectionY, int blockSectionCount,
@@ -156,7 +160,8 @@ public:
   LightService(const LightService &) = delete;
   LightService &operator=(const LightService &) = delete;
 
-  // Returns the generation assigned to this snapshot, or 0 when rejected.
+  // Valid updates are coalesced per chunk and are not rejected by queue
+  // capacity. Returns 0 only when the service is closing or input is invalid.
   std::uint64_t submitChunk(LightChunkInput input);
   bool reportSectionStatus(int chunkX, int chunkZ, int sectionY, bool empty);
   bool reportBlockChange(LightBlockChange change);

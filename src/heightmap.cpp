@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -32,6 +33,16 @@ bool matches(HeightmapType type, const BlockState &state) {
            !leavesBlock(state);
   }
   return false;
+}
+
+// ChunkHeightmaps evaluates all four final maps for one block state. Compute
+// the expensive motion/fluid predicates once while preserving each map's
+// independent result.
+std::array<bool, 4> finalMapMatches(const BlockState &state) {
+  const bool nonAir = !state.isAir();
+  const bool motion = blocksMotion(state);
+  const bool motionOrFluid = motion || !fluidStateOf(state).isEmpty();
+  return {nonAir, motion, motionOrFluid, motionOrFluid};
 }
 
 int ceilLog2(int value) {
@@ -114,6 +125,8 @@ void Heightmap::setHeight(int x, int z, int height) {
   set(index(x & 15, z & 15), height - minY_);
 }
 
+void Heightmap::reset() { std::fill(data_.begin(), data_.end(), 0); }
+
 bool Heightmap::matches(const BlockState &state) const {
   return redstone::matches(type_, state);
 }
@@ -148,7 +161,7 @@ bool Heightmap::setRawData(const std::vector<std::uint64_t> &data, int maxY,
     data_ = data;
     return true;
   }
-  data_.assign(data_.size(), 0);
+  reset();
   for (int x = 0; x < 16; ++x) {
     for (int z = 0; z < 16; ++z) {
       for (int y = maxY - 1; y >= minY_; --y) {
@@ -166,7 +179,9 @@ ChunkHeightmaps::ChunkHeightmaps(int minY, int height)
     : maps_{Heightmap(HeightmapType::WorldSurface, minY, height),
             Heightmap(HeightmapType::OceanFloor, minY, height),
             Heightmap(HeightmapType::MotionBlocking, minY, height),
-            Heightmap(HeightmapType::MotionBlockingNoLeaves, minY, height)} {}
+            Heightmap(HeightmapType::MotionBlockingNoLeaves, minY, height)} {
+  minFirstAvailable_.fill(minY);
+}
 
 Heightmap *ChunkHeightmaps::find(HeightmapType type) {
   for (Heightmap &map : maps_)
@@ -197,16 +212,20 @@ const Heightmap &ChunkHeightmaps::get(HeightmapType type) const {
 }
 
 void ChunkHeightmaps::prime(int maxY, const HeightmapBlockGetter &getBlock) {
-  std::array<bool, 4> pending{true, true, true, true};
+  for (Heightmap &map : maps_)
+    map.reset();
+  minFirstAvailable_.fill(maps_.front().minY());
   for (int x = 0; x < 16; ++x) {
     for (int z = 0; z < 16; ++z) {
+      std::array<bool, 4> pending{true, true, true, true};
       pending.fill(true);
       for (int y = maxY - 1; y >= maps_.front().minY(); --y) {
         const BlockState state = getBlock(x, y, z);
         if (state.is(Blocks::AIR))
           continue;
+        const auto stateMatches = finalMapMatches(state);
         for (std::size_t i = 0; i < maps_.size(); ++i) {
-          if (pending[i] && maps_[i].matches(state)) {
+          if (pending[i] && stateMatches[i]) {
             maps_[i].setHeight(x, z, y + 1);
             pending[i] = false;
           }
@@ -215,24 +234,78 @@ void ChunkHeightmaps::prime(int maxY, const HeightmapBlockGetter &getBlock) {
                          [](bool value) { return value; }))
           break;
       }
+      int minFirst = std::numeric_limits<int>::max();
+      for (const Heightmap &map : maps_)
+        minFirst = std::min(minFirst, map.firstAvailable(x, z));
+      minFirstAvailable_[Heightmap::index(x, z)] = minFirst;
     }
   }
 }
 
-void ChunkHeightmaps::update(int localX, int localY, int localZ,
+bool ChunkHeightmaps::update(int localX, int localY, int localZ,
                              const BlockState &state,
                              const HeightmapBlockGetter &getBlock) {
-  // LevelChunk.setBlockState order is MOTION_BLOCKING, NO_LEAVES, OCEAN_FLOOR,
-  // WORLD_SURFACE. Keep that observable callback order even though independent
-  // maps do not share state.
-  get(HeightmapType::MotionBlocking)
-      .update(localX, localY, localZ, state, getBlock);
-  get(HeightmapType::MotionBlockingNoLeaves)
-      .update(localX, localY, localZ, state, getBlock);
-  get(HeightmapType::OceanFloor)
-      .update(localX, localY, localZ, state, getBlock);
-  get(HeightmapType::WorldSurface)
-      .update(localX, localY, localZ, state, getBlock);
+  const int column = Heightmap::index(localX, localZ);
+  // This filter is the union of the four independent Heightmap.update
+  // short-circuits. Most deep piston/redstone writes stop here after one array
+  // load instead of probing four packed heights and block predicates.
+  if (localY <= minFirstAvailable_[column] - 2)
+    return false;
+
+  // Match LevelChunk.setBlockState's four calls while sharing the new state's
+  // predicate evaluation. The maps remain independent; only the downward read
+  // for columns in the same write is merged.
+  static constexpr std::array<std::size_t, 4> updateOrder{2, 3, 1, 0};
+  const auto stateMatches = finalMapMatches(state);
+  std::array<bool, 4> rescan{};
+  bool changed = false;
+  for (std::size_t mapIndex : updateOrder) {
+    Heightmap &map = maps_[mapIndex];
+    const int first = map.firstAvailable(localX, localZ);
+    if (localY <= first - 2)
+      continue;
+    if (stateMatches[mapIndex]) {
+      if (localY >= first) {
+        map.setHeight(localX, localZ, localY + 1);
+        changed = true;
+      }
+    } else if (first - 1 == localY) {
+      rescan[mapIndex] = true;
+    }
+  }
+
+  if (std::any_of(rescan.begin(), rescan.end(),
+                  [](bool value) { return value; })) {
+    const int minY = maps_.front().minY();
+    for (int y = localY - 1; y >= minY; --y) {
+      const BlockState below = getBlock(localX, y, localZ);
+      const auto belowMatches = finalMapMatches(below);
+      for (std::size_t i = 0; i < maps_.size(); ++i) {
+        if (rescan[i] && belowMatches[i]) {
+          maps_[i].setHeight(localX, localZ, y + 1);
+          rescan[i] = false;
+          changed = true;
+        }
+      }
+      if (std::none_of(rescan.begin(), rescan.end(),
+                       [](bool value) { return value; }))
+        break;
+    }
+    for (std::size_t i = 0; i < maps_.size(); ++i) {
+      if (rescan[i]) {
+        maps_[i].setHeight(localX, localZ, minY);
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    int minFirst = std::numeric_limits<int>::max();
+    for (const Heightmap &map : maps_)
+      minFirst = std::min(minFirst, map.firstAvailable(localX, localZ));
+    minFirstAvailable_[column] = minFirst;
+  }
+  return changed;
 }
 
 } // namespace redstone

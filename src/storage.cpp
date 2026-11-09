@@ -534,6 +534,9 @@ void importWorld(const LoadedWorld &input, World &world) {
   for (auto &[pos, block] : input.blocks)
     world.rawSetBlock(pos, block);
   world.primeHeightmaps();
+  // If lighting was enabled before import, loadChunk's pre-write snapshots are
+  // superseded by one complete post-import snapshot per chunk.
+  world.refreshLightSnapshots();
   // LevelChunkTicks.unpack assigns -N..-1 in saved-list order per chunk.
   // Its scheduleUnchecked path preserves duplicate saved entries. Unknown
   // vanilla block IDs cannot yet be validated against the complete registry.

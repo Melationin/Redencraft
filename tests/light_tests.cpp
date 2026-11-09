@@ -1,5 +1,6 @@
 #include "redstone/engine.hpp"
 #include "redstone/light.hpp"
+#include "redstone/storage.hpp"
 
 #include <algorithm>
 #include <array>
@@ -28,7 +29,7 @@ void require(bool condition, const std::string &message) {
 LightSectionSnapshot airSection(int sectionY) {
   return LightSectionSnapshot(sectionY, true,
                               {lightPropertiesOf(airState())},
-                              std::vector<std::uint16_t>(kLightVolume, 0));
+                              std::vector<std::uint16_t>{});
 }
 
 std::shared_ptr<const LightSectionSnapshot> sectionWithLayers(
@@ -152,6 +153,20 @@ void sectionRangesAndSnapshots() {
           "block layer is independent from sky light");
   require(block.light(LightLayer::Sky, 2, 2, 3) == 7,
           "second layer value remains independent");
+  require(input.sections[2]->isUniform() && input.sections[2]->cells.empty(),
+          "uniform sections store one optical value without 4096 indices");
+  bool rejectedUniformPalette = false;
+  try {
+    (void)LightSectionSnapshot(
+        -2, false,
+        {lightPropertiesOf(airState()),
+         lightPropertiesOf(Blocks::STONE.defaultState())},
+        {});
+  } catch (const std::invalid_argument &) {
+    rejectedUniformPalette = true;
+  }
+  require(rejectedUniformPalette,
+          "uniform section cannot carry unused palette entries");
 
   LightService service(-4, 3);
   const auto generation = service.submitChunk(std::move(input));
@@ -362,25 +377,41 @@ void workerPublicationAndInvalidation() {
   auto reloaded = staleService.latestChunk(1, 1);
   require(reloaded && reloaded->generation == reloadGeneration,
           "stale worker result cannot replace a reloaded chunk");
-  require(staleService.stats().stalePublications >= 1,
-          "old generation publication is counted");
 }
 
 void workerQueueAndClose() {
-  LightService service(-1, 1, LightWorkerOptions{1, 1, 16, true});
-  const auto accepted = service.submitChunk(chunkFixture(0, 0, -1, 1));
-  const auto rejected = service.submitChunk(chunkFixture(1, 0, -1, 1));
-  require(accepted != 0 && rejected == 0,
-          "bounded queue rejects explicitly instead of silently dropping");
-  require(service.stats().rejected == 1, "rejected light command is counted");
+  LightService service(-1, 1, LightWorkerOptions{1, 1, true});
+  const auto first = service.submitChunk(chunkFixture(0, 0, -1, 1));
+  const auto second = service.submitChunk(chunkFixture(1, 0, -1, 1));
+  require(first != 0 && second != 0,
+          "capacity coalesces valid chunks instead of dropping them");
+  require(service.stats().rejected == 0 &&
+              service.stats().pendingChunks == 2,
+          "paused overflow remains owned and retryable");
+  require(!service.reportSectionStatus(0, 0, 0, false),
+          "out-of-range section status is rejected explicitly");
+  LightBlockChange invalid;
+  invalid.chunkX = 0;
+  invalid.chunkZ = 0;
+  invalid.sectionY = -1;
+  invalid.localIndex = kLightVolume;
+  require(!service.reportBlockChange(invalid),
+          "out-of-range light cell is rejected explicitly");
+  const auto invalidGeneration = service.stats().rejected;
+  require(invalidGeneration == 2, "invalid requests are counted as rejected");
   service.resumeForTesting();
-  require(service.waitIdleForTesting(), "paused worker drains queued work");
-  require(service.stats().queueHighWater >= 1, "queue high-water is observed");
+  require(service.waitIdleForTesting(), "paused worker drains coalesced work");
+  service.drainPublished();
+  require(service.latestChunk(0, 0) && service.latestChunk(1, 0),
+          "both coalesced chunks are published after capacity recovery");
+  require(service.stats().queueHighWater >= 2,
+          "coalesced pending high-water is observed");
   service.close();
-  require(service.submitChunk(chunkFixture(2, 0, -1, 1)) == 0,
+  require(service.submitChunk(chunkFixture(2, 0, -1, 1)) == 0 &&
+              service.stats().rejected == 3,
           "closed service refuses new work");
 
-  LightService draining(-1, 1, LightWorkerOptions{1, 4, 16, true});
+  LightService draining(-1, 1, LightWorkerOptions{1, 4, true});
   const auto generation = draining.submitChunk(chunkFixture(4, 0, -1, 1));
   require(generation != 0, "close fixture queues a snapshot");
   draining.close();
@@ -389,7 +420,7 @@ void workerQueueAndClose() {
   require(delivered && delivered->generation == generation,
           "close drains queued work before joining the worker");
 
-  LightService batching(-1, 1, LightWorkerOptions{1000, 16, 16, true});
+  LightService batching(-1, 1, LightWorkerOptions{1000, 16, true});
   const auto loadGeneration = batching.submitChunk(chunkFixture(5, 0, -1, 1));
   require(loadGeneration == 1, "batched fixture loads once");
   for (int x = 0; x < 2; ++x) {
@@ -418,6 +449,97 @@ void workerQueueAndClose() {
           "coalesced changes carry the newest generation");
 }
 
+void recoverableChangesAndBoundedPublication() {
+  LightService service(-1, 1, LightWorkerOptions{1, 1, true});
+  require(service.submitChunk(chunkFixture(9, 0, -1, 1)) != 0 &&
+              service.submitChunk(chunkFixture(10, 0, -1, 1)) != 0,
+          "small-capacity worker retains both pending chunks");
+
+  for (int x = 0; x < 4; ++x) {
+    LightBlockChange change;
+    change.chunkX = 10;
+    change.chunkZ = 0;
+    change.sectionY = -1;
+    change.localIndex = static_cast<std::uint16_t>(lightIndex(x, 1, 1));
+    change.oldProperties = lightPropertiesOf(airState());
+    change.newProperties = lightPropertiesOf(
+        Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
+    change.wasEmpty = true;
+    change.isEmpty = false;
+    require(service.reportBlockChange(change),
+            "cell write remains retryable after overflow");
+  }
+  require(service.unloadChunk(9, 0), "unload tombstone is retained");
+  require(service.stats().pendingChunks == 2,
+          "per-chunk pending state does not grow with write count");
+
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(), "recovery state drains completely");
+  require(service.stats().pendingPublications == 1,
+          "undrained publication results are bounded per chunk");
+  service.drainPublished();
+  require(service.latestChunk(9, 0) == nullptr,
+          "delivered unload tombstone prevents old-generation resurrection");
+  auto newest = service.latestChunk(10, 0);
+  require(newest && newest->section(-1)->at(3, 1, 1).emission == 15,
+          "all coalesced live changes remain visible after overflow");
+  require(newest->generation == 5,
+          "load plus four cells preserves the per-chunk generation");
+
+  for (int i = 0; i < 200; ++i) {
+    LightBlockChange change;
+    change.chunkX = 10;
+    change.chunkZ = 0;
+    change.sectionY = -1;
+    change.localIndex = static_cast<std::uint16_t>(lightIndex(i & 15, 0, 0));
+    change.oldProperties = lightPropertiesOf(airState());
+    change.newProperties = lightPropertiesOf(
+        i & 1 ? Blocks::STONE.defaultState()
+              : Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
+    change.wasEmpty = false;
+    change.isEmpty = false;
+    require(service.reportBlockChange(change), "long pending write is accepted");
+  }
+  require(service.waitIdleForTesting(), "long pending write reaches worker");
+  require(service.stats().pendingPublications == 1,
+          "many same-chunk generations keep only one undrained result");
+
+  LightService sectionBatch(-1, 1, LightWorkerOptions{100, 16, true});
+  auto empty = chunkFixture(11, 0, -1, 1);
+  empty.sections[1] = std::make_shared<const LightSectionSnapshot>(airSection(-1));
+  require(sectionBatch.submitChunk(std::move(empty)) != 0,
+          "empty section batch fixture loads");
+  const auto appendChange = [&](int index, const BlockState &oldState,
+                                const BlockState &newState, bool wasEmpty,
+                                bool isEmpty) {
+    LightBlockChange change;
+    change.chunkX = 11;
+    change.chunkZ = 0;
+    change.sectionY = -1;
+    change.localIndex = static_cast<std::uint16_t>(lightIndex(index, 1, 1));
+    change.oldProperties = lightPropertiesOf(oldState);
+    change.newProperties = lightPropertiesOf(newState);
+    change.wasEmpty = wasEmpty;
+    change.isEmpty = isEmpty;
+    require(sectionBatch.reportBlockChange(change),
+            "section batch change is accepted");
+  };
+  appendChange(1, airState(), Blocks::STONE.defaultState(), true, false);
+  appendChange(1, Blocks::STONE.defaultState(), airState(), false, true);
+  appendChange(2, airState(),
+               Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"), true,
+               false);
+  sectionBatch.resumeForTesting();
+  require(sectionBatch.waitIdleForTesting(), "unordered cell batch completes");
+  sectionBatch.drainPublished();
+  auto sectionSnapshot = sectionBatch.latestChunk(11, 0);
+  require(sectionSnapshot && !sectionSnapshot->section(-1)->empty,
+          "final per-section state wins over historical cell emptiness");
+  require(sectionSnapshot->section(-1)->at(1, 1, 1).emission == 0 &&
+              sectionSnapshot->section(-1)->at(2, 1, 1).emission == 15,
+          "coalesced fill-clear-fill keeps final cell contents");
+}
+
 void destructorClosesWorker() {
   World world;
   world.loadChunk(0, 0);
@@ -431,6 +553,7 @@ void worldHooks() {
   require(!world.lightingEnabled() && world.lightService() == nullptr,
           "production worlds keep the light worker disabled by default");
   world.loadChunk(0, 0);
+  world.loadChunk(1, 0);
   require(world.setBlock({0, 100, 0}, Blocks::SMOOTH_STONE.defaultState()),
           "place pre-enable fixture block");
   world.enableLighting();
@@ -443,6 +566,10 @@ void worldHooks() {
   require(initial && initial->section(6) &&
               initial->section(6)->at(0, 4, 0).dampening == 15,
           "World load snapshot owns official section metadata");
+  auto emptyPeer = service->latestChunk(1, 0);
+  require(emptyPeer && emptyPeer->section(-3)->isUniform() &&
+              initial->section(-3) == emptyPeer->section(-3),
+          "empty block sections reuse one immutable uniform input");
 
   const auto initialGeneration = initial->generation;
   require(world.setBlock({0, 100, 0},
@@ -485,6 +612,46 @@ void worldHooks() {
   world.disableLighting();
   require(!world.lightingEnabled(), "light service closes without a live World");
 }
+
+void pausedWorldRecoveryAndImport() {
+  World world;
+  world.loadChunk(0, 0);
+  world.loadChunk(1, 0);
+  world.enableLighting(LightWorkerOptions{1, 1, true});
+  auto *service = world.lightService();
+  require(service, "paused world lighting is enabled");
+
+  require(world.setBlock({0, 100, 0},
+                         Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")),
+          "paused world accepts an emission change");
+  require(world.setBlock({17, 100, 0}, Blocks::STONE.defaultState()),
+          "paused world accepts a later change");
+  world.unloadChunk(0, 0);
+  require(service->stats().pendingChunks == 2,
+          "World keeps chunk-coalesced recovery state without waiting");
+  service->resumeForTesting();
+  require(service->waitIdleForTesting(), "paused World worker drains");
+  service->drainPublished();
+  require(service->latestChunk(0, 0) == nullptr,
+          "World unload tombstone rejects an older load publication");
+  auto live = service->latestChunk(1, 0);
+  require(live && live->section(6)->at(1, 4, 0).dampening == 15,
+          "surviving World chunk carries its coalesced cell change");
+
+  world.refreshLightSnapshots();
+  LoadedWorld imported;
+  imported.gameTime = world.gameTime();
+  imported.chunks.push_back({1, 0});
+  imported.blocks[{16, 101, 0}] =
+      Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  importWorld(imported, world);
+  require(service->waitIdleForTesting(), "post-import authoritative snapshot drains");
+  service->drainPublished();
+  auto authoritative = service->latestChunk(1, 0);
+  require(authoritative && authoritative->section(6)->at(0, 5, 0).emission == 15,
+          "import updates light from owned post-raw-write data");
+  world.disableLighting();
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -496,8 +663,10 @@ int main(int argc, char **argv) {
     opticalAssetCoverage(argv[1]);
     workerPublicationAndInvalidation();
     workerQueueAndClose();
+    recoverableChangesAndBoundedPublication();
     destructorClosesWorker();
     worldHooks();
+    pausedWorldRecoveryAndImport();
     std::cout << "light tests passed\n";
     return 0;
   } catch (const std::exception &error) {

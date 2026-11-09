@@ -135,6 +135,47 @@ void updatesAndPrime() {
   require(chunk.get(HeightmapType::WorldSurface).height(0, 0) == -65,
           "removing the final block returns the pre-minY sentinel");
 
+  std::map<Pos, BlockState> layeredBlocks;
+  const auto layeredGet = [&](int x, int y, int z) {
+    const auto found = layeredBlocks.find({x, y, z});
+    return found == layeredBlocks.end() ? airState() : found->second;
+  };
+  layeredBlocks[{2, 50, 2}] = Blocks::STONE.defaultState();
+  layeredBlocks[{2, 64, 2}] = Blocks::WATER.defaultState();
+  ChunkHeightmaps layered(-64, 384);
+  layered.prime(100, layeredGet);
+  require(layered.get(HeightmapType::OceanFloor).height(2, 2) == 50 &&
+              layered.get(HeightmapType::WorldSurface).height(2, 2) == 64,
+          "fixture has a low ocean floor and higher water surface");
+  layeredBlocks[{2, 60, 2}] = Blocks::STONE.defaultState();
+  require(layered.update(2, 60, 2, Blocks::STONE.defaultState(), layeredGet),
+          "shared shortcut must not hide a lower map's update");
+  require(layered.get(HeightmapType::OceanFloor).height(2, 2) == 60 &&
+              layered.get(HeightmapType::WorldSurface).height(2, 2) == 64 &&
+              layered.get(HeightmapType::MotionBlocking).height(2, 2) == 64,
+          "y=60 raises only the lower OCEAN_FLOOR table");
+  layeredBlocks.erase({2, 60, 2});
+  require(layered.update(2, 60, 2, airState(), layeredGet),
+          "removing the sub-surface stone rescans the affected table");
+  require(layered.get(HeightmapType::OceanFloor).height(2, 2) == 50 &&
+              layered.get(HeightmapType::WorldSurface).height(2, 2) == 64,
+          "reverse rescan returns OCEAN_FLOOR to the seabed only");
+
+  std::map<Pos, BlockState> reprimeBlocks;
+  const auto reprimeGet = [&](int x, int y, int z) {
+    const auto found = reprimeBlocks.find({x, y, z});
+    return found == reprimeBlocks.end() ? airState() : found->second;
+  };
+  reprimeBlocks[{4, 10, 4}] = Blocks::STONE.defaultState();
+  ChunkHeightmaps repeated(-64, 384);
+  repeated.prime(100, reprimeGet);
+  require(repeated.get(HeightmapType::WorldSurface).height(4, 4) == 10,
+          "first prime records the test column");
+  reprimeBlocks.erase({4, 10, 4});
+  repeated.prime(100, reprimeGet);
+  require(repeated.get(HeightmapType::WorldSurface).height(4, 4) == -65,
+          "re-prime clears a formerly occupied column to minY-1");
+
   Heightmap lower(HeightmapType::WorldSurface, -64, 384);
   blocks[{3, -10, 4}] = Blocks::STONE.defaultState();
   require(lower.update(3, -10, 4, Blocks::STONE.defaultState(), get),
@@ -178,6 +219,31 @@ void worldIntegration() {
   require(imported.height(HeightmapType::WorldSurface, 17, -1) == -2 &&
               imported.height(HeightmapType::OceanFloor, 17, -1) == -3,
           "importWorld primes raw block data after loading chunks");
+
+  imported.rawSetBlock({17, -3, -1}, airState());
+  imported.rawSetBlock({17, -2, -1}, airState());
+  LoadedWorld emptied;
+  emptied.chunks.push_back({1, -1});
+  importWorld(emptied, imported);
+  require(imported.height(HeightmapType::WorldSurface, 17, -1) == -65 &&
+              imported.height(HeightmapType::OceanFloor, 17, -1) == -65,
+          "a second import clears formerly occupied heightmap columns");
+
+  World shifted(-63, 312);
+  shifted.loadChunk(0, 0);
+  require(shifted.setBlock({0, -5, 0}, Blocks::STONE.defaultState()) &&
+              shifted.height(HeightmapType::WorldSurface, 0, 0) == -5,
+          "heightmaps retain the existing unaligned-minY simulation contract");
+  bool rejectedShiftedLight = false;
+  try {
+    shifted.enableLighting();
+  } catch (const std::invalid_argument &) {
+    rejectedShiftedLight = true;
+  }
+  require(rejectedShiftedLight,
+          "only the section-addressed light entry rejects unaligned minY");
+  require(shifted.getBlock({0, -5, 0}).is(Blocks::STONE),
+          "rejected lighting opt-in leaves the world usable");
 }
 } // namespace
 

@@ -162,8 +162,17 @@ LightSectionSnapshot::LightSectionSnapshot(
       cells(std::move(lightCells)), layers(std::move(lightLayers)) {
   if (palette.empty())
     throw std::invalid_argument("light section needs a palette");
-  if (cells.size() != kLightVolume)
-    throw std::invalid_argument("light section needs exactly 4096 cells");
+  if (!cells.empty() && cells.size() != kLightVolume)
+    throw std::invalid_argument(
+        "light section needs zero or exactly 4096 cells");
+  if (cells.empty() && palette.size() != 1)
+    throw std::invalid_argument(
+        "uniform light section needs exactly one palette value");
+  if (cells.empty()) {
+    if (!palette.front().supported)
+      unsupportedCells = kLightVolume;
+    return;
+  }
   for (std::uint16_t index : cells) {
     if (index >= palette.size())
       throw std::invalid_argument("light section cell has invalid palette index");
@@ -178,7 +187,8 @@ LightSectionSnapshot::LightSectionSnapshot(
 
 const BlockLightProperties &LightSectionSnapshot::at(int x, int y,
                                                      int z) const {
-  return palette.at(cells.at(lightIndex(x, y, z)));
+  const auto index = cells.empty() ? 0 : cells.at(lightIndex(x, y, z));
+  return palette.at(index);
 }
 
 std::uint8_t LightSectionSnapshot::light(LightLayer layer, int x, int y,
@@ -207,8 +217,7 @@ public:
         options(workerOptions), paused(workerOptions.startPausedForTesting) {
     if (sectionCount <= 0)
       throw std::invalid_argument("light service needs block sections");
-    if (options.batchSize == 0 || options.maxQueuedCommands == 0 ||
-        options.maxBlockChangesPerBatch == 0)
+    if (options.batchSize == 0 || options.maxQueuedCommands == 0)
       throw std::invalid_argument("light worker limits must be positive");
     worker = std::thread([this] { run(); });
   }
@@ -216,7 +225,10 @@ public:
   ~Impl() { close(); }
 
   std::uint64_t submitChunk(LightChunkInput input) {
-    validateInput(input);
+    if (!validInput(input)) {
+      ++statsRejected;
+      return 0;
+    }
     const auto key = chunkKey(input.chunkX, input.chunkZ);
     std::lock_guard lock(mutex);
     if (!accepting) {
@@ -225,78 +237,77 @@ public:
     }
     const auto generation = ++generations[key];
     latest.erase(key);
-    if (queue.size() >= options.maxQueuedCommands) {
-      ++statsRejected;
-      inactive.insert(key);
-      return 0;
-    }
     inactive.erase(key);
-    Command command;
-    command.type = CommandType::Load;
-    command.key = key;
-    command.generation = generation;
-    command.input = std::make_unique<LightChunkInput>(std::move(input));
-    queue.push_back(std::move(command));
-    noteEnqueueLocked();
+    const bool preserveUnload = pending.contains(key) && pending.at(key).unload;
+    PendingChunk state;
+    state.key = key;
+    state.generation = generation;
+    state.load = std::make_unique<LightChunkInput>(std::move(input));
+    // An unload enqueued before this reload remains an ordered tombstone. The
+    // worker clears the old internal generation before installing this load.
+    state.unload = preserveUnload;
+    pending[key] = std::move(state);
+    notePendingLocked();
     wake.notify_one();
     return generation;
   }
 
   bool reportSectionStatus(int chunkX, int chunkZ, int sectionY, bool empty) {
-    const auto key = chunkKey(chunkX, chunkZ);
-    std::lock_guard lock(mutex);
-    auto active = generations.find(key);
-    if (!accepting || active == generations.end() || inactive.contains(key))
-      return false;
-    const auto generation = ++active->second;
-    latest.erase(key);
-    if (queue.size() >= options.maxQueuedCommands) {
+    if (!validSection(sectionY)) {
       ++statsRejected;
       return false;
     }
-    Command command;
-    command.type = CommandType::SectionStatus;
-    command.key = key;
-    command.generation = generation;
-    command.sectionY = sectionY;
-    command.empty = empty;
-    queue.push_back(std::move(command));
-    noteEnqueueLocked();
+    const auto key = chunkKey(chunkX, chunkZ);
+    std::lock_guard lock(mutex);
+    auto active = generations.find(key);
+    if (!accepting || active == generations.end() || inactive.contains(key)) {
+      ++statsRejected;
+      return false;
+    }
+    const auto generation = ++active->second;
+    latest.erase(key);
+    PendingChunk &state = pending[key];
+    state.key = key;
+    state.generation = generation;
+    state.sectionStatus[sectionY] = empty;
+    notePendingLocked();
     wake.notify_one();
     return true;
   }
 
   bool reportBlockChange(LightBlockChange change) {
-    const auto key = chunkKey(change.chunkX, change.chunkZ);
-    std::lock_guard lock(mutex);
-    auto active = generations.find(key);
-    if (!accepting || active == generations.end() || inactive.contains(key))
+    if (!validSection(change.sectionY) || change.localIndex >= kLightVolume) {
+      ++statsRejected;
       return false;
+    }
     if (!hasDifferentLightProperties(change.oldProperties, change.newProperties) &&
         !hasDifferentSectionLightProperties(change.wasEmpty, change.isEmpty))
       return true;
-    change.generation = ++active->second;
-    latest.erase(key);
-    if (!queue.empty() && queue.back().type == CommandType::BlockChanges &&
-        queue.back().key == key &&
-        queue.back().changes.size() < options.maxBlockChangesPerBatch) {
-      queue.back().generation = change.generation;
-      queue.back().changes.push_back(change);
-      ++pendingBlockChanges;
-      return true;
-    }
-    if (queue.size() >= options.maxQueuedCommands) {
-      rejectLocked(key);
+    const auto key = chunkKey(change.chunkX, change.chunkZ);
+    std::lock_guard lock(mutex);
+    auto active = generations.find(key);
+    if (!accepting || active == generations.end() || inactive.contains(key)) {
+      ++statsRejected;
       return false;
     }
-    Command command;
-    command.type = CommandType::BlockChanges;
-    command.key = key;
-    command.generation = change.generation;
-    command.changes.push_back(change);
-    queue.push_back(std::move(command));
-    ++pendingBlockChanges;
-    noteEnqueueLocked();
+    change.generation = ++active->second;
+    latest.erase(key);
+    PendingChunk &state = pending[key];
+    state.key = key;
+    state.generation = change.generation;
+    state.sectionStatus[change.sectionY] = change.isEmpty;
+    const auto slot = changeSlot(change.sectionY, change.localIndex);
+    const auto found = state.changes.find(slot);
+    if (found == state.changes.end()) {
+      state.changes.emplace(slot, std::move(change));
+    } else {
+      // Preserve the first old state (the worker's current base) while folding
+      // later writes into the latest authoritative state for the same cell.
+      found->second.newProperties = change.newProperties;
+      found->second.isEmpty = change.isEmpty;
+      found->second.generation = change.generation;
+    }
+    notePendingLocked();
     wake.notify_one();
     return true;
   }
@@ -305,49 +316,48 @@ public:
     const auto key = chunkKey(chunkX, chunkZ);
     std::lock_guard lock(mutex);
     auto active = generations.find(key);
-    if (active == generations.end())
-      return false;
-    const auto generation = ++active->second;
-    latest.erase(key);
-    inactive.insert(key);
-    if (!accepting)
-      return false;
-    if (queue.size() >= options.maxQueuedCommands) {
+    if (!accepting || active == generations.end()) {
       ++statsRejected;
       return false;
     }
-    Command command;
-    command.type = CommandType::Unload;
-    command.key = key;
-    command.generation = generation;
-    queue.push_back(std::move(command));
-    noteEnqueueLocked();
+    const auto generation = ++active->second;
+    latest.erase(key);
+    inactive.insert(key);
+    PendingChunk state;
+    state.key = key;
+    state.generation = generation;
+    state.unload = true;
+    pending[key] = std::move(state);
+    notePendingLocked();
     wake.notify_one();
     return true;
   }
 
   void drainPublished() {
-    std::vector<Published> ready;
+    std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+        ready;
     std::vector<std::shared_ptr<const LightChunkSnapshot>> callbacks;
     std::function<void(std::shared_ptr<const LightChunkSnapshot>)> callback;
     {
       std::lock_guard lock(mutex);
       ready.swap(published);
       callback = publishCallback;
-      for (auto &item : ready) {
-        const auto active = generations.find(item.key);
+      for (auto &[key, snapshot] : ready) {
+        const auto active = generations.find(key);
         if (active != generations.end() &&
-            active->second == item.snapshot->generation &&
-            !inactive.contains(item.key)) {
-          latest[item.key] = item.snapshot;
-          if (callback) callbacks.push_back(item.snapshot);
+            active->second == snapshot->generation &&
+            !inactive.contains(key)) {
+          latest[key] = snapshot;
+          if (callback)
+            callbacks.push_back(std::move(snapshot));
         } else {
           ++statsStale;
         }
       }
     }
-    for (const auto &snapshot : callbacks)
-      callback(snapshot);
+    if (callback)
+      for (const auto &snapshot : callbacks)
+        callback(snapshot);
   }
 
   std::shared_ptr<const LightChunkSnapshot> latestChunk(int x, int z) const {
@@ -371,6 +381,9 @@ public:
     result.published = statsPublished.load(std::memory_order_relaxed);
     result.stalePublications = statsStale.load(std::memory_order_relaxed);
     result.queueHighWater = statsHighWater.load(std::memory_order_relaxed);
+    std::lock_guard lock(mutex);
+    result.pendingChunks = pending.size() + busyChunks;
+    result.pendingPublications = published.size();
     return result;
   }
 
@@ -381,7 +394,7 @@ public:
 
   bool waitIdleForTesting() {
     std::unique_lock lock(mutex);
-    idle.wait(lock, [&] { return !busy && queue.empty(); });
+    idle.wait(lock, [&] { return !busy && pending.empty(); });
     return error.empty();
   }
 
@@ -407,43 +420,42 @@ public:
   }
 
 private:
-  enum class CommandType { Load, SectionStatus, BlockChanges, Unload };
-  struct Command {
-    CommandType type = CommandType::Load;
+  struct PendingChunk {
     std::uint64_t key = 0;
     std::uint64_t generation = 0;
-    int sectionY = 0;
-    bool empty = false;
-    std::unique_ptr<LightChunkInput> input;
-    std::vector<LightBlockChange> changes;
-  };
-  struct Published {
-    std::uint64_t key = 0;
-    std::shared_ptr<const LightChunkSnapshot> snapshot;
+    std::unique_ptr<LightChunkInput> load;
+    bool unload = false;
+    std::unordered_map<std::uint32_t, LightBlockChange> changes;
+    std::unordered_map<int, bool> sectionStatus;
   };
 
-  void validateInput(const LightChunkInput &input) const {
+  bool validSection(int sectionY) const {
+    return sectionY >= minBlockSectionY &&
+           sectionY < minBlockSectionY + blockSectionCount;
+  }
+
+  bool validInput(const LightChunkInput &input) const {
     if (input.minBlockSectionY != minBlockSectionY ||
         input.blockSectionCount != blockSectionCount)
-      throw std::invalid_argument("light chunk vertical range differs from service");
-    if (input.sections.size() != static_cast<std::size_t>(blockSectionCount + 2))
-      throw std::invalid_argument("light chunk needs block sections plus two padding sections");
-    for (std::size_t i = 0; i < input.sections.size(); ++i) {
+      return false;
+    if (input.sections.size() !=
+        static_cast<std::size_t>(blockSectionCount + 2))
+      return false;
+    for (std::size_t i = 0; i < input.sections.size(); ++i)
       if (!input.sections[i] ||
-          input.sections[i]->sectionY != minBlockSectionY - 1 + static_cast<int>(i))
-        throw std::invalid_argument("light chunk sections are not contiguous");
-    }
+          input.sections[i]->sectionY !=
+              minBlockSectionY - 1 + static_cast<int>(i))
+        return false;
+    return true;
   }
 
-  std::uint64_t rejectLocked(std::uint64_t key) {
-    ++statsRejected;
-    latest.erase(key);
-    return 0;
+  static std::uint32_t changeSlot(int sectionY, std::uint16_t localIndex) {
+    return (static_cast<std::uint32_t>(sectionY) << 12) | localIndex;
   }
 
-  void noteEnqueueLocked() {
+  void notePendingLocked() {
     ++statsSubmitted;
-    const auto current = queue.size() + static_cast<std::size_t>(busy ? 1 : 0);
+    const auto current = pending.size() + busyChunks;
     auto previous = statsHighWater.load(std::memory_order_relaxed);
     while (current > previous &&
            !statsHighWater.compare_exchange_weak(previous, current,
@@ -454,22 +466,24 @@ private:
   void run() {
     std::unique_lock lock(mutex);
     for (;;) {
-      wake.wait(lock, [&] { return closing || !paused; });
-      if (closing && queue.empty())
+      wake.wait(lock,
+                [&] { return closing || (!paused && !pending.empty()); });
+      if (closing && pending.empty())
         break;
-      wake.wait(lock, [&] { return closing || !queue.empty(); });
-      if (closing && queue.empty())
-        break;
-      std::vector<Command> batch;
-      const std::size_t count = std::min(options.batchSize, queue.size());
+      if (paused && !closing)
+        continue;
+
+      std::vector<PendingChunk> batch;
+      const std::size_t count = std::min(
+          {options.batchSize, options.maxQueuedCommands, pending.size()});
       batch.reserve(count);
-      std::size_t changes = 0;
       for (std::size_t i = 0; i < count; ++i) {
-        changes += queue.front().changes.size();
-        batch.push_back(std::move(queue.front()));
-        queue.pop_front();
+        auto it = pending.begin();
+        batch.push_back(std::move(it->second));
+        pending.erase(it);
       }
       busy = true;
+      busyChunks = count;
       lock.unlock();
 
       try {
@@ -486,140 +500,111 @@ private:
 
       lock.lock();
       busy = false;
-      pendingBlockChanges -= std::min(pendingBlockChanges, changes);
+      busyChunks = 0;
       ++statsBatches;
-      statsChanges += changes;
       idle.notify_all();
-      if (closing && queue.empty())
+      if (closing && pending.empty())
         break;
     }
   }
 
-  void processBatch(std::vector<Command> &batch) {
-    struct WorkingChunk {
-      std::vector<std::shared_ptr<const LightSectionSnapshot>> sections;
-      std::unordered_set<int> copiedSections;
-    };
-    std::unordered_map<std::uint64_t, WorkingChunk> working;
-    std::unordered_set<std::uint64_t> dirty;
-    std::unordered_set<std::uint64_t> removed;
-
-    const auto ensure = [&](std::uint64_t key) -> WorkingChunk & {
-      auto it = working.find(key);
-      if (it != working.end())
-        return it->second;
-      const auto existing = internal.find(key);
-      WorkingChunk next;
-      if (existing != internal.end())
-        next.sections = existing->second->sections;
-      auto inserted = working.emplace(key, std::move(next)).first;
-      return inserted->second;
-    };
-
-    for (Command &command : batch) {
-      if (command.type == CommandType::Unload) {
-        internal.erase(command.key);
-        working.erase(command.key);
-        removed.insert(command.key);
-        continue;
-      }
-      if (command.type == CommandType::Load) {
-        removed.erase(command.key);
-        auto snapshot = std::make_shared<LightChunkSnapshot>();
-        snapshot->chunkX = command.input->chunkX;
-        snapshot->chunkZ = command.input->chunkZ;
-        snapshot->minBlockSectionY = command.input->minBlockSectionY;
-        snapshot->blockSectionCount = command.input->blockSectionCount;
-        snapshot->generation = command.generation;
-        snapshot->sections = std::move(command.input->sections);
-        for (const auto &section : snapshot->sections)
-          snapshot->unsupportedCells += section->unsupportedCells;
-        internal[command.key] = snapshot;
-        WorkingChunk next;
-        next.sections = snapshot->sections;
-        working[command.key] = std::move(next);
-        dirty.insert(command.key);
-        continue;
-      }
-      auto found = internal.find(command.key);
-      if (found == internal.end() ||
-          command.generation < found->second->generation)
-        continue;
-      WorkingChunk &chunk = ensure(command.key);
-      if (command.type == CommandType::SectionStatus) {
-        const auto index = vectorIndex(chunk.sections, command.sectionY);
-        if (index >= chunk.sections.size())
+  void processBatch(std::vector<PendingChunk> &batch) {
+    for (PendingChunk &command : batch) {
+      const auto key = command.key;
+      if (command.unload) {
+        internal.erase(key);
+        if (!command.load)
           continue;
-        auto section = chunk.copiedSections.contains(command.sectionY)
-                           ? std::static_pointer_cast<const LightSectionSnapshot>(
-                                 chunk.sections[index])
-                           : std::make_shared<LightSectionSnapshot>(
-                                 *chunk.sections[index]);
-        auto mutableSection =
-            std::const_pointer_cast<LightSectionSnapshot>(section);
-        mutableSection->empty = command.empty;
-        chunk.sections[index] = mutableSection;
-        chunk.copiedSections.insert(command.sectionY);
-      } else if (command.type == CommandType::BlockChanges) {
-        for (const LightBlockChange &change : command.changes) {
-          const auto index = vectorIndex(chunk.sections, change.sectionY);
-          if (index >= chunk.sections.size() || change.localIndex >= kLightVolume)
-            continue;
-          auto mutableSection =
-              chunk.copiedSections.contains(change.sectionY)
-                  ? std::const_pointer_cast<LightSectionSnapshot>(
-                        chunk.sections[index])
-                  : std::make_shared<LightSectionSnapshot>(*chunk.sections[index]);
-          auto paletteIt = std::find(mutableSection->palette.begin(),
-                                    mutableSection->palette.end(),
-                                    change.newProperties);
-          std::uint16_t paletteIndex = 0;
-          if (paletteIt == mutableSection->palette.end()) {
-            if (mutableSection->palette.size() >= 65536)
-              continue;
-            paletteIndex = static_cast<std::uint16_t>(mutableSection->palette.size());
-            mutableSection->palette.push_back(change.newProperties);
-          } else {
-            paletteIndex = static_cast<std::uint16_t>(
-                paletteIt - mutableSection->palette.begin());
-          }
-          const auto oldIndex = mutableSection->cells[change.localIndex];
-          if (!mutableSection->palette[oldIndex].supported)
-            --mutableSection->unsupportedCells;
-          mutableSection->cells[change.localIndex] = paletteIndex;
-          if (!change.newProperties.supported)
-            ++mutableSection->unsupportedCells;
-          mutableSection->empty = change.isEmpty;
-          chunk.sections[index] = mutableSection;
-          chunk.copiedSections.insert(change.sectionY);
-        }
       }
-      dirty.insert(command.key);
-    }
 
-    // L-1 intentionally stops at the PRE_UPDATE boundary.
-    // TODO(L-2a/L-2b): run block/sky propagation here and only then set
-    // propagationComplete; no placeholder brightness is written in L-1.
-    for (auto &[key, chunk] : working) {
-      if (removed.contains(key) || !dirty.contains(key))
-        continue;
-      auto snapshot = std::make_shared<LightChunkSnapshot>();
       const auto old = internal.find(key);
-      snapshot->chunkX = static_cast<int>(key >> 32);
-      snapshot->chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+      if (!command.load &&
+          (old == internal.end() ||
+           command.generation < old->second->generation))
+        continue;
+
+      std::vector<std::shared_ptr<const LightSectionSnapshot>> sections;
+      int chunkX = 0;
+      int chunkZ = 0;
+      if (command.load) {
+        chunkX = command.load->chunkX;
+        chunkZ = command.load->chunkZ;
+        sections = command.load->sections;
+      } else {
+        chunkX = static_cast<int>(key >> 32);
+        chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+        sections = old->second->sections;
+      }
+
+      std::unordered_map<int, std::shared_ptr<LightSectionSnapshot>>
+          mutableSections;
+      const auto mutableSection = [&](int sectionY) -> LightSectionSnapshot * {
+        const auto working = mutableSections.find(sectionY);
+        if (working != mutableSections.end())
+          return working->second.get();
+        const auto index = vectorIndex(sections, sectionY);
+        if (index >= sections.size())
+          return nullptr;
+        // Allocate a genuinely mutable worker-owned copy. The previous
+        // const_cast of make_shared<const T> would mutate a const object.
+        auto copy = std::make_shared<LightSectionSnapshot>(*sections[index]);
+        sections[index] = copy;
+        auto inserted = mutableSections.emplace(sectionY, std::move(copy)).first;
+        return inserted->second.get();
+      };
+
+      for (const auto &[slot, change] : command.changes) {
+        (void)slot;
+        LightSectionSnapshot *section = mutableSection(change.sectionY);
+        if (!section)
+          throw std::runtime_error("light change references a missing section");
+        const auto paletteIt = std::find(section->palette.begin(),
+                                         section->palette.end(),
+                                         change.newProperties);
+        std::uint16_t paletteIndex = 0;
+        if (paletteIt == section->palette.end()) {
+          if (section->palette.size() >= 65536)
+            throw std::runtime_error("light section palette exceeds uint16");
+          paletteIndex = static_cast<std::uint16_t>(section->palette.size());
+          section->palette.push_back(change.newProperties);
+        } else {
+          paletteIndex =
+              static_cast<std::uint16_t>(paletteIt - section->palette.begin());
+        }
+        if (section->cells.empty()) {
+          section->cells.assign(kLightVolume, 0);
+          if (!section->palette.front().supported)
+            section->unsupportedCells = kLightVolume;
+        }
+        const auto oldIndex = section->cells[change.localIndex];
+        if (!section->palette[oldIndex].supported)
+          --section->unsupportedCells;
+        section->cells[change.localIndex] = paletteIndex;
+        if (!change.newProperties.supported)
+          ++section->unsupportedCells;
+        ++statsChanges;
+      }
+      // Cell-key iteration is intentionally unordered. Apply the final empty
+      // state only after every cell write, using the state captured at enqueue
+      // time, so a historical intermediate emptiness cannot win.
+      for (const auto &[sectionY, empty] : command.sectionStatus) {
+        if (auto *section = mutableSection(sectionY))
+          section->empty = empty;
+      }
+
+      auto snapshot = std::make_shared<LightChunkSnapshot>();
+      snapshot->chunkX = chunkX;
+      snapshot->chunkZ = chunkZ;
       snapshot->minBlockSectionY = minBlockSectionY;
       snapshot->blockSectionCount = blockSectionCount;
-      snapshot->sections = std::move(chunk.sections);
-      snapshot->generation = old == internal.end() ? 0 : old->second->generation;
-      for (const auto &command : batch)
-        if (command.key == key)
-          snapshot->generation = std::max(snapshot->generation, command.generation);
-      snapshot->unsupportedCells = 0;
+      snapshot->generation = command.generation;
+      snapshot->sections = std::move(sections);
       for (const auto &section : snapshot->sections)
         snapshot->unsupportedCells += section->unsupportedCells;
       internal[key] = snapshot;
+
       std::lock_guard lock(mutex);
-      published.push_back({key, snapshot});
+      published[key] = snapshot;
       ++statsPublished;
     }
   }
@@ -630,21 +615,22 @@ private:
   mutable std::mutex mutex;
   std::condition_variable wake;
   std::condition_variable idle;
-  std::deque<Command> queue;
+  std::unordered_map<std::uint64_t, PendingChunk> pending;
   std::unordered_map<std::uint64_t, std::uint64_t> generations;
   std::unordered_set<std::uint64_t> inactive;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       latest;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       internal;
-  std::vector<Published> published;
+  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+      published;
   std::function<void(std::shared_ptr<const LightChunkSnapshot>)> publishCallback;
   std::thread worker;
   bool accepting = true;
   bool closing = false;
   bool busy = false;
+  std::size_t busyChunks = 0;
   bool paused = false;
-  std::size_t pendingBlockChanges = 0;
   std::string error;
   mutable std::atomic<std::uint64_t> statsSubmitted{0};
   mutable std::atomic<std::uint64_t> statsRejected{0};

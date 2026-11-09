@@ -18,6 +18,7 @@
 #include "redstone/fluid.hpp"
 #include "redstone/flat_hash_map.hpp"
 #include "redstone/heightmap.hpp"
+#include "redstone/light.hpp"
 
 namespace redstone {
 enum class Direction { Down, Up, North, South, West, East };
@@ -168,8 +169,6 @@ struct PistonTickerSlot {
   bool removed = false;
 };
 class Entity;
-class LightService;
-struct LightChunkInput;
 // Chunk data exported for the network encoder: palette + index copies and the
 // moving piston block entities, so wire encoding can run off the tick thread.
 struct SectionSnapshot {
@@ -217,7 +216,7 @@ public:
   bool isLoaded(Pos pos) const;
   // Opt-in L-1 handoff. Production servers currently leave this disabled; the
   // profile still has neither propagation nor a protocol-ready light snapshot.
-  void enableLighting();
+  void enableLighting(LightWorkerOptions options = {});
   void disableLighting();
   bool lightingEnabled() const { return lightService_ != nullptr; }
   LightService *lightService() const { return lightService_.get(); }
@@ -228,6 +227,9 @@ public:
   const Heightmap *heightmap(int chunkX, int chunkZ, HeightmapType type) const;
   int height(HeightmapType type, int blockX, int blockZ) const;
   void primeHeightmaps();
+  // Replaces any queued pre-import snapshots after raw writes with the current
+  // authoritative chunk state. No-op when lighting is disabled.
+  void refreshLightSnapshots();
   // Copy of one chunk's paletted sections (mutable state is never exported).
   ChunkSnapshot snapshotChunk(int chunkX, int chunkZ) const;
   bool setBlock(Pos pos, BlockState state, int flags = 3, int limit = 512);
@@ -531,6 +533,7 @@ private:
   std::unique_ptr<FluidTickQueue> fluidTickQueue_ =
       std::make_unique<FluidTickQueue>();
   std::unique_ptr<LightService> lightService_;
+  std::vector<std::shared_ptr<const LightSectionSnapshot>> emptyLightSections_;
   // ServerLevel.blockEvents (ObjectLinkedOpenHashSet) + reschedule list.
   struct BlockEventQueue;
   std::unique_ptr<BlockEventQueue> blockEventQueue_ =

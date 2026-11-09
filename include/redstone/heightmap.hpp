@@ -61,6 +61,7 @@ private:
   int get(int index) const;
   void set(int index, int value);
   void setHeight(int x, int z, int height);
+  void reset();
   static int index(int x, int z) { return x + z * 16; }
 
   HeightmapType type_;
@@ -83,11 +84,15 @@ public:
   const Heightmap &get(HeightmapType type) const;
 
   void prime(int maxY, const HeightmapBlockGetter &getBlock);
-  void update(int localX, int localY, int localZ, const BlockState &state,
+  bool update(int localX, int localY, int localZ, const BlockState &state,
               const HeightmapBlockGetter &getBlock);
 
 private:
   std::array<Heightmap, 4> maps_;
+  // Fast negative filter for LevelChunk.setBlockState. The minimum across all
+  // four maps is conservative: a table with a lower height may still rise even
+  // when another table's surface is higher.
+  std::array<int, 256> minFirstAvailable_{};
 };
 
 } // namespace redstone

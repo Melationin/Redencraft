@@ -972,16 +972,20 @@ std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const 
   input->minBlockSectionY = minY_ >> 4;
   input->blockSectionCount = sectionCount();
 
-  const auto air = lightPropertiesOf(airState());
-  std::vector<std::uint16_t> airCells(kLightVolume, 0);
-  input->sections.push_back(std::make_shared<const LightSectionSnapshot>(
-      input->minBlockSectionY - 1, true,
-      std::vector<BlockLightProperties>{air}, airCells));
+  if (emptyLightSections_.size() !=
+      static_cast<std::size_t>(input->blockSectionCount + 2))
+    throw std::logic_error("light empty-section cache is not initialized");
+  input->sections.push_back(emptyLightSections_.front());
 
   for (int section = 0; section < sectionCount(); ++section) {
     const Section &data = chunk->sections[section];
+    if (data.hasOnlyAir()) {
+      input->sections.push_back(
+          emptyLightSections_[static_cast<std::size_t>(section + 1)]);
+      continue;
+    }
     std::vector<BlockLightProperties> palette;
-    std::vector<std::uint16_t> cells(kLightVolume);
+    std::vector<std::uint16_t> cells;
     std::unordered_map<BlockState::Id, std::uint16_t> byState;
     for (int index = 0; index < kLightVolume; ++index) {
       const BlockState::Id state = data.get(index);
@@ -994,23 +998,48 @@ std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const 
       } else {
         paletteIndex = found->second;
       }
-      cells[index] = paletteIndex;
+      if (!cells.empty()) {
+        cells[static_cast<std::size_t>(index)] = paletteIndex;
+      } else if (palette.size() > 1) {
+        // A previously uniform section changed representation. All preceding
+        // cells use palette[0].
+        cells.assign(kLightVolume, 0);
+        cells[static_cast<std::size_t>(index)] = paletteIndex;
+      }
     }
     input->sections.push_back(std::make_shared<const LightSectionSnapshot>(
         input->minBlockSectionY + section, data.hasOnlyAir(), std::move(palette),
         std::move(cells)));
   }
-  input->sections.push_back(std::make_shared<const LightSectionSnapshot>(
-      input->minBlockSectionY + sectionCount(), true,
-      std::vector<BlockLightProperties>{air}, airCells));
+  input->sections.push_back(emptyLightSections_.back());
   return input;
 }
 
-void World::enableLighting() {
+void World::enableLighting(LightWorkerOptions options) {
   if (lightService_)
     return;
-  lightService_ =
-      std::make_unique<LightService>(minY_ >> 4, sectionCount());
+  // Heightmaps and the existing simulation permit an unaligned minY. The light
+  // handoff alone requires section alignment because its keys use y >> 4.
+  if ((minY_ & 15) != 0)
+    throw std::invalid_argument(
+        "lighting requires minY aligned to a 16-block section");
+  const auto air = lightPropertiesOf(airState());
+  emptyLightSections_.clear();
+  emptyLightSections_.reserve(static_cast<std::size_t>(sectionCount() + 2));
+  for (int section = -1; section <= sectionCount(); ++section) {
+    emptyLightSections_.push_back(
+        std::make_shared<const LightSectionSnapshot>(
+            (minY_ >> 4) + section, true,
+            std::vector<BlockLightProperties>{air}, std::vector<std::uint16_t>{}));
+  }
+  lightService_ = std::make_unique<LightService>(
+      minY_ >> 4, sectionCount(), options);
+  refreshLightSnapshots();
+}
+
+void World::refreshLightSnapshots() {
+  if (!lightService_)
+    return;
   std::vector<std::uint64_t> keys;
   keys.reserve(chunks_.size());
   for (const auto &[key, chunk] : chunks_)
@@ -1020,11 +1049,15 @@ void World::enableLighting() {
   for (std::uint64_t key : keys) {
     const int chunkX = static_cast<int>(key >> 32);
     const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
-    lightService_->submitChunk(std::move(*makeLightChunkInput(chunkX, chunkZ)));
+    if (auto input = makeLightChunkInput(chunkX, chunkZ))
+      lightService_->submitChunk(std::move(*input));
   }
 }
 
-void World::disableLighting() { lightService_.reset(); }
+void World::disableLighting() {
+  lightService_.reset();
+  emptyLightSections_.clear();
+}
 bool World::isChunkLoaded(int x, int z) const { return chunkAt(x, z) != nullptr; }
 bool World::isLoaded(Pos p) const {
   // Level.getBlockState: bounds check, then the chunk cache (hash) lookup.
@@ -1159,35 +1192,34 @@ std::map<Pos, BlockState> World::allBlocks() const {
   return result;
 }
 bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
-  if (!isLoaded(p))
+  if (p.y < minY_ || p.y >= maxY_)
     return false;
-  auto old = getBlock(p);
+  Chunk *changedChunk = chunkAt(chunkIndex(p.x), chunkIndex(p.z));
+  if (!changedChunk)
+    return false;
+  Section &targetSection = changedChunk->sections[sectionIndex(p.y)];
+  const int localIndex =
+      ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
+  const BlockState old = targetSection.hasOnlyAir()
+                             ? airState()
+                             : BlockState::fromId(targetSection.get(localIndex));
   if (old == state)
     return false;
-  const bool wasSectionEmpty =
-      chunkAt(chunkIndex(p.x), chunkIndex(p.z))
-          ->sections[sectionIndex(p.y)]
-          .hasOnlyAir();
-  rawSetBlock(p, state);
-  if (Chunk *changedChunk = chunkAt(chunkIndex(p.x), chunkIndex(p.z))) {
-    if (!changedChunk->heightmaps)
-      changedChunk->heightmaps = std::make_unique<ChunkHeightmaps>(
-          minY_, sectionCount() * 16);
-    const int chunkX = chunkIndex(p.x), chunkZ = chunkIndex(p.z);
-    changedChunk->heightmaps->update(
-        p.x & 15, p.y, p.z & 15, state,
-        [this, chunkX, chunkZ](int x, int y, int z) {
-          return getBlock({chunkX * 16 + x, y, chunkZ * 16 + z});
-        });
-  }
+  const bool wasSectionEmpty = targetSection.hasOnlyAir();
+  targetSection.set(localIndex, state.id());
+  if (!changedChunk->heightmaps)
+    changedChunk->heightmaps = std::make_unique<ChunkHeightmaps>(
+        minY_, sectionCount() * 16);
+  const int chunkX = chunkIndex(p.x), chunkZ = chunkIndex(p.z);
+  changedChunk->heightmaps->update(
+      p.x & 15, p.y, p.z & 15, state,
+      [this, chunkX, chunkZ](int x, int y, int z) {
+        return getBlock({chunkX * 16 + x, y, chunkZ * 16 + z});
+      });
   if (lightService_) {
-    const bool isEmpty = chunkAt(chunkIndex(p.x), chunkIndex(p.z))
-                             ->sections[sectionIndex(p.y)]
-                             .hasOnlyAir();
-    if (hasDifferentSectionLightProperties(wasSectionEmpty, isEmpty))
-      lightService_->reportSectionStatus(chunkIndex(p.x), chunkIndex(p.z),
-                                         p.y >> 4, isEmpty);
-    if (hasDifferentLightProperties(old, state)) {
+    const bool isEmpty = targetSection.hasOnlyAir();
+    if (hasDifferentLightProperties(old, state) ||
+        hasDifferentSectionLightProperties(wasSectionEmpty, isEmpty)) {
       LightBlockChange change;
       change.chunkX = chunkIndex(p.x);
       change.chunkZ = chunkIndex(p.z);

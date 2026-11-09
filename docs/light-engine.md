@@ -12,7 +12,7 @@ L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主
 
 - `LightLayerSnapshot` 区分 `Missing`、`Uniform`、`Mixed`；mixed 使用恰好 2048 bytes 的 nibble 数组。
 - 索引严格为 `y << 8 | z << 4 | x`；偶数索引在低半字节，奇数索引在高半字节。
-- `LightLayer::Block=0`、`LightLayer::Sky=1`，一个 `LightSectionSnapshot` 同时保存两层，两层不共享数据。
+- `LightLayer::Block=0`、`LightLayer::Sky=1`，一个 `LightSectionSnapshot` 同时保存两层，两层不共享数据。光学输入的 `cells` 为空表示整个 16³ section 都使用 `palette[0]`；只有非均匀 palette 才保存 4096 个索引。
 - 光 section 范围由 `minBlockSectionY - 1` 起，数量为 `blockSectionCount + 2`；输入由 `LightService` 校验连续且完整。
 - 发布单元是 `std::shared_ptr<const LightChunkSnapshot>`。后续改动复制受影响的 section，旧读者持有的 chunk/section 保持不变。
 
@@ -43,24 +43,26 @@ python validation/light_metadata/generate_cpp.py `
 
 `LightService` 是每个启用世界自己的单写者 executor：
 
-1. 主线程构造完全拥有的 `LightChunkInput`：区块坐标、连续光 section、per-section palette/cell 索引、双层光值和 `BlockLightProperties`。不传 `World`、内部 palette 或可变注册表指针。
-2. 主线程提交 load、section-empty、block-change 和 unload；连续方块变更合并成一个 owned batch，不为每个格子创建线程任务。
-3. worker 每次最多取 `batchSize=1000` 个命令，按到达顺序执行 PRE_UPDATE 类操作；传播入口尚未实现。
-4. 受影响 section 每批至多复制一次；未变化 section 由 shared immutable snapshot 复用，随后发布完整 chunk snapshot。
-5. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。旧代结果不会覆盖新代。
+1. 主线程构造完全拥有的 `LightChunkInput`：区块坐标、连续光 section、per-section palette/cell 索引、双层光值和 `BlockLightProperties`。不传 `World`、内部 palette 或可变注册表指针。全空 section 和上下 padding 复用世界内同一组不可变输入；均匀非空 section 只保存一个 palette 值。
+2. 主线程按区块合并 load、section-empty、cell 和 unload，维护每区块最新的可重试状态，不为每个格子创建线程任务。有效光照更新不会因 worker 容量而丢弃；暂停或积压时状态留在 pending map，直到 worker 真正接收。`Stats::rejected` 只记录关闭后的提交或非法 section/cell 输入。
+3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作；传播入口尚未实现。同一区段的多个 cell 使用状态键合批，最终 section 空态在全部 cell 之后应用。
+4. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。
+5. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。待发布结果按区块只保留最新 snapshot，旧代结果不会覆盖新代。
 
-默认队列上限为 4096 个命令、每个变更批最多 4096 个 block change。队列满时提交返回 false 并增加 `Stats::rejected`，不会静默成功；worker 错误保存在 `workerError()`。`close()` 停止接收新命令、排空已有命令并 join。`World::~World` 与 `disableLighting()` 会先关闭 worker。
+默认每次最多取 1000 个区块（另受 pending 容量配置约束）。每区块 pending 状态只保留最新 load、按 section 合并的 cell delta 和每 section 最新空态；已 drain 的发布结果也按区块合并，不随写入代数无限增长。unload 会立即对读者失效，并作为有序 tombstone 保留到 worker 清除旧内部代；若其后立即 reload，worker 先清除旧代再安装完整新快照。worker 错误保存在 `workerError()`。`close()` 停止接收新命令、排空 pending 并 join。`World::~World` 与 `disableLighting()` 会先关闭 worker。
 
-`World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和光学属性/section emptiness 变更。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生光照任务；批量导入完成后应重新启用或显式重建初始快照。
+`World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和光学属性/section emptiness 变更。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生逐格光照任务；`importWorld` 完成 raw block 写入后调用 `refreshLightSnapshots()`，用当前权威区块状态替换导入前排队快照。
 
 ## 高度图
 
 同一地基同时实现 26.1 `Heightmap` 数据。六种 `Heightmap.Types` 的 id、序列化键和 Usage 独立定义；final chunk 按 `ChunkStatus.FINAL_HEIGHTMAPS` 创建 `OCEAN_FLOOR`、`WORLD_SURFACE`、`MOTION_BLOCKING`、`MOTION_BLOCKING_NO_LEAVES` 四张 live map。世界生成阶段的 `*_WG` 类型可由类构造，但当前没有生成阶段，也不放入 final chunk。
 
 - 每列使用 `ceil(log2(worldHeight + 1))` 位，默认世界高度 384 时为 9 bits、256 列、37 个 `uint64_t`，与 `SimpleBitStorage` 的 little-endian 字段布局一致。
-- `primeHeightmaps` 从最高 section 顶向 minY 扫描；`update` 严格保留 Java 的 `localY <= firstAvailable - 2` 短路、向上抬升、以及删除顶层后向下重扫条件。
-- `LevelChunk.setBlockState` 的更新顺序保持为 `MOTION_BLOCKING`、`MOTION_BLOCKING_NO_LEAVES`、`OCEAN_FLOOR`、`WORLD_SURFACE`。
-- `World::primeHeightmaps()` 在 `importWorld` 的 raw block 写入完成后重建；正常 `setBlock` 实时更新，`rawSetBlock` 不自动更新。
+- `primeHeightmaps` 先清空四张表，再从最高 section 顶向 minY 扫描，因此重复 prime 或二次导入会把已变空的列恢复到 `minY-1`。
+- `LevelChunk.setBlockState` 的四表判定语义保持为 `MOTION_BLOCKING`、`MOTION_BLOCKING_NO_LEAVES`、`OCEAN_FLOOR`、`WORLD_SURFACE`。共用早退取四张 `firstAvailable` 的最小值，保证低 `OCEAN_FLOOR` 不会被高水面挡住；深写在同一列只做一次状态谓词计算。删除顶层时四张待重扫表共享一次向下读取，各表仍独立选择首个命中。
+- `World::primeHeightmaps()` 在 `importWorld` 的 raw block 写入完成后重建；正常 `setBlock` 通过一次区块定位实时更新，`rawSetBlock` 不自动更新。
+
+高度图允许非 16 对齐的既有 `minY` 模拟输入；只有需要 `y >> 4` section 键的光照入口会显式拒绝这种世界，禁用光照的模拟契约不变。
 
 当前没有注册 `LeavesBlock`，因此 no-leaves 类型对已注册状态使用同一 motion-blocking 谓词；未知导入方块不伪造 leaves 身份。协议仍沿用既有区块编码高度图，尚未切换到这份 live map。
 
@@ -72,7 +74,7 @@ python validation/light_metadata/generate_cpp.py `
 
 // TODO(W-2/W-3): read and write Anvil `SkyLight`, `BlockLight` and `isLightOn`.
 
-L-1 不包含任何性能门槛结论。固定世吞的 1000 tick 基线已保存在工作区 `build-l1-baseline/`，后续 L-4 才会在启用真实传播和发布的同一阶段边界上做至少五组交错 A/B，并判断主线程额外 CPU/平均刻墙钟 <10%。当前数据不能用于该判断。
+L-1 关闭传播时的世吞回归只用于确认底座没有越过当前预算；具体候选、日志和结果只在 `task/TASKS.md` 交接。最终启用真实传播与发布后的 L-4 仍须重新做至少五组交错 A/B，并判断主线程额外 CPU/平均刻墙钟 <10%；L-1 的关闭光照数据不能替代 L-4 的门槛。
 
 ## 聚焦验证
 
@@ -85,4 +87,4 @@ python validation\light_metadata\check.py --tsv assets\light26_1\block_light.tsv
   --source src\light_metadata.inc
 ```
 
-`light` 覆盖双层 nibble、世界高度 padding、光学状态与线程/代际交接；`heightmap` 覆盖六类元数据、四张 live map、bit storage、prime/update 和 World/import 接线；`light_metadata_asset` 检查官方 TSV/manifest 与生成 C++ 表一致。
+`light` 覆盖双层 nibble、世界高度 padding、均匀 section、可恢复 pending、卸载 tombstone、有界发布、光学状态与线程/代际交接；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV/manifest 与生成 C++ 表一致。
