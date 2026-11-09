@@ -9,10 +9,12 @@ import java.lang.constant.MethodTypeDesc;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
+import java.util.concurrent.CompletableFuture;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ThreadedLevelLightEngine;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.NoteBlock;
@@ -23,12 +25,14 @@ public final class LightDiffAgent {
   private static volatile MinecraftServer server;
   private static int emittedStage = -1;
   private static int observedStage = -1;
+  private static int scheduledStage = -1;
   private static long observedTick = -1;
   private static long tickCounter = 0;
 
   private LightDiffAgent() {}
 
   public static void premain(String args, Instrumentation instrumentation) {
+    System.err.println("LIGHT_AGENT premain");
     instrumentation.addTransformer(new ClassFileTransformer() {
       @Override
       public byte[] transform(Module module, ClassLoader loader, String name,
@@ -94,8 +98,35 @@ public final class LightDiffAgent {
         observedTick = tickCounter;
         return;
       }
-      if (tickCounter - observedTick < 2 ||
-          level.getLightEngine().hasLightWork())
+      if (tickCounter - observedTick < 2 || stage == scheduledStage)
+        return;
+      if (!(level.getLightEngine() instanceof ThreadedLevelLightEngine light))
+        return;
+      scheduledStage = stage;
+      CompletableFuture<?>[] fences = new CompletableFuture<?>[4];
+      int[][] chunks = {{0, 0}, {-1, 0}, {0, -1}, {-1, -1}};
+      for (int i = 0; i < chunks.length; ++i)
+        fences[i] = light.waitForPendingTasks(chunks[i][0], chunks[i][1]);
+      System.out.println("LIGHT_FENCE stage=" + stage + " chunks=4");
+      System.out.flush();
+      Object currentObject = current;
+      CompletableFuture.allOf(fences).thenRun(
+          () -> ((MinecraftServer) currentObject)
+                    .execute(() -> emitStage(stage)));
+    } catch (Throwable failure) {
+      failure.printStackTrace(System.out);
+      System.out.println("BLOCKLIGHT_FAILED " + failure);
+      System.out.flush();
+    }
+  }
+
+  private static void emitStage(int stage) {
+    MinecraftServer current = server;
+    if (current == null)
+      return;
+    try {
+      ServerLevel level = current.overworld();
+      if (level == null)
         return;
       var listener = level.getLightEngine().getLayerListener(LightLayer.BLOCK);
       var output = new StringBuilder();
@@ -129,6 +160,12 @@ public final class LightDiffAgent {
       values.add(new int[]{0, y, 0});
     for (int z = -1; z <= 1; ++z)
       values.add(new int[]{5, 200, z});
+    values.add(new int[]{4, -64, 4});
+    values.add(new int[]{4, -65, 4});
+    values.add(new int[]{4, -66, 4});
+    values.add(new int[]{4, 319, 4});
+    values.add(new int[]{4, 320, 4});
+    values.add(new int[]{4, 321, 4});
     return values.toArray(int[][]::new);
   }
 }

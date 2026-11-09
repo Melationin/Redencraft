@@ -19,6 +19,12 @@ const std::vector<Pos> kCells = [] {
     cells.push_back({0, y, 0});
   for (int z = -1; z <= 1; ++z)
     cells.push_back({5, 200, z});
+  cells.push_back({4, -64, 4});
+  cells.push_back({4, -65, 4});
+  cells.push_back({4, -66, 4});
+  cells.push_back({4, 319, 4});
+  cells.push_back({4, 320, 4});
+  cells.push_back({4, 321, 4});
   return cells;
 }();
 
@@ -110,6 +116,16 @@ int main() {
     place(world, {-10, 200, 0}, air);
     place(world, {8, 200, 0}, air);
     printStage(3, sample(world));
+
+    const auto lamp =
+        Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+    place(world, {4, -64, 4}, lamp);
+    place(world, {4, 319, 4}, lamp);
+    printStage(4, sample(world));
+
+    place(world, {4, -64, 4}, air);
+    place(world, {4, 319, 4}, air);
+    printStage(5, sample(world));
     world.disableLighting();
     return 0;
   } catch (const std::exception &error) {

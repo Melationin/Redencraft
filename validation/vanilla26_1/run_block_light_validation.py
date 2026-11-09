@@ -40,6 +40,16 @@ STAGES = {
         "setblock 8 200 0 minecraft:air",
         "setblock 0 250 0 minecraft:note_block[note=3]",
     ],
+    4: [
+        "setblock 4 -64 4 minecraft:redstone_lamp[lit=true]",
+        "setblock 4 319 4 minecraft:redstone_lamp[lit=true]",
+        "setblock 0 250 0 minecraft:note_block[note=4]",
+    ],
+    5: [
+        "setblock 4 -64 4 minecraft:air",
+        "setblock 4 319 4 minecraft:air",
+        "setblock 0 250 0 minecraft:note_block[note=5]",
+    ],
 }
 
 

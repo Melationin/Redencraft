@@ -20,8 +20,11 @@ def main():
     golden = json.loads(pathlib.Path(args.golden).read_text(encoding="utf-8"))
     if candidate != golden["stages"]:
         raise SystemExit("C++ block-light stages differ from official golden")
-    print("block-light differential matched: %d stages, %d cells" %
-          (len(candidate), len(candidate["1"])))
+    cells = len(candidate["1"])
+    if any(len(stage) != cells for stage in candidate.values()):
+        raise SystemExit("C++ block-light stages have inconsistent cell counts")
+    print("block-light differential matched: %d stages, %d cells each, "
+          "%d observations" % (len(candidate), cells, len(candidate) * cells))
 
 
 if __name__ == "__main__":

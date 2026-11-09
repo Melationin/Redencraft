@@ -527,8 +527,8 @@ void recoverableChangesAndBoundedPublication() {
   require(newest && newest->section(-1)->at(3, 1, 1).emission == 15,
           "all coalesced live changes remain visible after overflow");
   require(newest->lifecycleEpoch != 0 &&
-              newest->revision == newest->generation,
-          "coalesced result keeps revision and lifecycle identity");
+              newest->revision != 0,
+          "coalesced result has a worker publication revision");
 
   for (int i = 0; i < 200; ++i) {
     LightBlockChange change;
@@ -669,6 +669,148 @@ void blockLightPropagation() {
   auto empty = settledChunk(service, 0, 0);
   require(blockLightAt(empty, 5, 8, 8) == 0,
           "decrease propagation clears the decayed region");
+}
+
+void blockLightStaleAndAuthoritativeRefresh() {
+  const auto air = airState();
+  const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+
+  LightService stale(0, 1);
+  require(stale.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "stale boundary fixture loads east chunk");
+  (void)settledChunk(stale, 0, 0);
+  require(reportBlock(stale, 0, 0, {0, 8, 0}, air, lamp),
+          "stale boundary fixture places its old source");
+  (void)settledChunk(stale, 0, 0);
+
+  stale.pauseForTesting();
+  require(stale.submitChunk(emptyChunkFixture(-1, 0, 0, 1)) != 0,
+          "new west chunk and old boundary increase share one pending batch");
+  require(reportBlock(stale, 0, 0, {0, 8, 0}, lamp, air),
+          "old boundary source is removed before the batch resumes");
+  stale.resumeForTesting();
+  auto staleEast = settledChunk(stale, 0, 0);
+  stale.drainPublished();
+  auto staleWest = stale.latestChunk(-1, 0);
+  require(staleWest != nullptr, "west chunk publishes after the shared batch");
+  require(blockLightAt(staleEast, 0, 8, 0) == 0 &&
+              blockLightAt(staleWest, -1, 8, 0) == 0,
+          "an increase dequeued after the source darkened cannot relight either chunk");
+
+  LightService refresh(0, 1);
+  require(refresh.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0 &&
+              refresh.submitChunk(emptyChunkFixture(-1, 0, 0, 1)) != 0,
+          "authoritative refresh fixture loads both chunks");
+  (void)settledChunk(refresh, 0, 0);
+  require(reportBlock(refresh, 0, 0, {0, 8, 0}, air, lamp),
+          "authoritative refresh fixture lights the boundary");
+  (void)settledChunk(refresh, 0, 0);
+  require(blockLightAt(refresh.latestChunk(-1, 0), -1, 8, 0) == 14,
+          "initial source crosses the loaded boundary");
+
+  require(refresh.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "same-epoch authoritative snapshot removes the source");
+  auto refreshedEast = settledChunk(refresh, 0, 0);
+  refresh.drainPublished();
+  auto refreshedWest = refresh.latestChunk(-1, 0);
+  require(refreshedEast->blockLightComplete && refreshedWest,
+          "authoritative removal still publishes a complete block layer");
+  require(blockLightAt(refreshedEast, 0, 8, 0) == 0 &&
+              blockLightAt(refreshedWest, -1, 8, 0) == 0,
+          "authoritative input removes local and cross-boundary old light");
+
+  auto withSource = emptyChunkFixture(0, 0, 0, 1);
+  std::vector<std::uint16_t> cells(kLightVolume, 0);
+  cells[lightIndex(0, 8, 0)] = 1;
+  withSource.sections[1] = std::make_shared<const LightSectionSnapshot>(
+      0, false,
+      std::vector<BlockLightProperties>{lightPropertiesOf(air),
+                                        lightPropertiesOf(lamp)},
+      std::move(cells));
+  require(refresh.submitChunk(std::move(withSource)) != 0,
+          "same-epoch authoritative snapshot adds a source");
+  auto addedEast = settledChunk(refresh, 0, 0);
+  refresh.drainPublished();
+  auto addedWest = refresh.latestChunk(-1, 0);
+  require(addedEast->blockLightComplete && addedWest,
+          "authoritative source addition publishes a complete block layer");
+  require(blockLightAt(addedEast, 0, 8, 0) == 15 &&
+              blockLightAt(addedWest, -1, 8, 0) == 14,
+          "authoritative source addition propagates across the loaded boundary");
+}
+
+void blockLightVerticalPadding() {
+  auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  const auto air = airState();
+  LightService service(0, 1);
+  require(service.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "vertical padding fixture loads");
+  (void)settledChunk(service, 0, 0);
+
+  require(reportBlock(service, 0, 0, {8, 0, 8}, air, lamp),
+          "bottom block-layer source enters worker");
+  auto bottom = settledChunk(service, 0, 0);
+  require(bottom->blockLightComplete && blockLightAt(bottom, 8, 0, 8) == 15 &&
+              blockLightAt(bottom, 8, -1, 8) == 14 &&
+              blockLightAt(bottom, 8, -2, 8) == 13,
+          "block light enters and attenuates through bottom padding");
+  require(reportBlock(service, 0, 0, {8, 0, 8}, lamp, air),
+          "bottom source removal enters worker");
+  auto bottomCleared = settledChunk(service, 0, 0);
+  require(blockLightAt(bottomCleared, 8, -1, 8) == 0 &&
+              blockLightAt(bottomCleared, 8, -2, 8) == 0,
+          "bottom padding light decays when its source is removed");
+
+  require(reportBlock(service, 0, 0, {8, 15, 8}, air, lamp),
+          "top block-layer source enters worker");
+  auto top = settledChunk(service, 0, 0);
+  require(top->blockLightComplete && blockLightAt(top, 8, 15, 8) == 15 &&
+              blockLightAt(top, 8, 16, 8) == 14 &&
+              blockLightAt(top, 8, 17, 8) == 13,
+          "block light enters and attenuates through top padding");
+  require(reportBlock(service, 0, 0, {8, 15, 8}, lamp, air),
+          "top source removal enters worker");
+  auto topCleared = settledChunk(service, 0, 0);
+  require(blockLightAt(topCleared, 8, 16, 8) == 0 &&
+              blockLightAt(topCleared, 8, 17, 8) == 0,
+          "top padding light decays when its source is removed");
+}
+
+void crossBatchPublicationOrdering() {
+  const auto air = airState();
+  const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  LightService service(0, 1);
+  require(service.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0 &&
+              service.submitChunk(emptyChunkFixture(-1, 0, 0, 1)) != 0,
+          "cross-batch publication fixture loads adjacent chunks");
+  (void)settledChunk(service, 0, 0);
+  (void)settledChunk(service, -1, 0);
+
+  service.pauseForTesting();
+  require(reportBlock(service, -1, 0, {-1, 8, 0}, air, lamp),
+          "older request is queued for the west chunk");
+  require(reportBlock(service, 0, 0, {7, 8, 0}, air, lamp),
+          "newer request is queued for the east chunk");
+
+  require(service.processChunkBatchForTesting(0, 0),
+          "newer east request is processed first in isolation");
+  service.drainPublished();
+  auto eastFirst = service.latestChunk(0, 0);
+  require(eastFirst && blockLightAt(eastFirst, 7, 8, 0) == 15 &&
+              blockLightAt(eastFirst, 0, 8, 0) == 8,
+          "east publication exists before the older west request is processed");
+
+  require(service.processChunkBatchForTesting(-1, 0),
+          "older west request is processed in the following batch");
+  service.drainPublished();
+  auto eastAfterWest = service.latestChunk(0, 0);
+  auto west = service.latestChunk(-1, 0);
+  require(eastAfterWest && west &&
+              eastAfterWest->revision > eastFirst->revision,
+          "worker publication revision advances despite lower input generation");
+  require(blockLightAt(eastAfterWest, 0, 8, 0) == 14 &&
+              blockLightAt(west, -1, 8, 0) == 15,
+          "west batch's cross-boundary result is not rejected for published east");
 }
 
 void blockLightBoundariesAndEpochs() {
@@ -913,6 +1055,9 @@ int main(int argc, char **argv) {
     workerQueueAndClose();
     recoverableChangesAndBoundedPublication();
     blockLightPropagation();
+    blockLightStaleAndAuthoritativeRefresh();
+    blockLightVerticalPadding();
+    crossBatchPublicationOrdering();
     blockLightBoundariesAndEpochs();
     directionalShapeOcclusion();
     incompleteMetadataIsExplicit();

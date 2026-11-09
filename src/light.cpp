@@ -6,6 +6,7 @@
 #include <iterator>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -416,21 +417,21 @@ public:
       return 0;
     }
     auto &active = versions[key];
-    const bool newLifetime = inactive.contains(key) || active.revision == 0;
+    const bool newLifetime = inactive.contains(key) || active.requestRevision == 0;
     if (newLifetime) {
       ++active.epoch;
-      active.revision = 0;
+      active.requestRevision = 0;
       latest.erase(key);
     }
     const auto generation = ++nextGeneration;
-    ++active.revision;
+    ++active.requestRevision;
     inactive.erase(key);
     const bool preserveUnload = pending.contains(key) && pending.at(key).unload;
     PendingChunk state;
     state.key = key;
     state.generation = generation;
     state.lifecycleEpoch = active.epoch;
-    state.revision = active.revision;
+    state.revision = active.requestRevision;
     state.load = std::make_unique<LightChunkInput>(std::move(input));
     // An unload enqueued before this reload remains an ordered tombstone. The
     // worker clears the old internal generation before installing this load.
@@ -454,12 +455,12 @@ public:
       return false;
     }
     const auto generation = ++nextGeneration;
-    ++active->second.revision;
+    ++active->second.requestRevision;
     PendingChunk &state = pending[key];
     state.key = key;
     state.generation = generation;
     state.lifecycleEpoch = active->second.epoch;
-    state.revision = active->second.revision;
+    state.revision = active->second.requestRevision;
     state.sectionStatus[sectionY] = empty;
     notePendingLocked();
     wake.notify_one();
@@ -482,12 +483,12 @@ public:
       return false;
     }
     change.generation = ++nextGeneration;
-    ++active->second.revision;
+    ++active->second.requestRevision;
     PendingChunk &state = pending[key];
     state.key = key;
     state.generation = change.generation;
     state.lifecycleEpoch = active->second.epoch;
-    state.revision = active->second.revision;
+    state.revision = active->second.requestRevision;
     state.sectionStatus[change.sectionY] = change.isEmpty;
     const auto slot = changeSlot(change.sectionY, change.localIndex);
     const auto found = state.changes.find(slot);
@@ -515,7 +516,7 @@ public:
     }
     const auto generation = ++nextGeneration;
     ++active->second.epoch;
-    active->second.revision = 0;
+    active->second.requestRevision = 0;
     latest.erase(key);
     inactive.insert(key);
     PendingChunk state;
@@ -611,6 +612,23 @@ public:
     paused = true;
   }
 
+  bool processChunkBatchForTesting(int chunkX, int chunkZ) {
+    const auto key = chunkKey(chunkX, chunkZ);
+    std::unique_lock lock(mutex);
+    if (!paused || closing || forcedChunk || !pending.contains(key))
+      return false;
+    const auto before = statsBatches.load(std::memory_order_relaxed);
+    forcedChunk = key;
+    pauseAfterBatch = true;
+    paused = false;
+    wake.notify_all();
+    batchDone.wait(lock, [&] {
+      return statsBatches.load(std::memory_order_relaxed) > before || closing;
+    });
+    return error.empty() &&
+           statsBatches.load(std::memory_order_relaxed) > before;
+  }
+
   void close() {
     std::thread selected;
     {
@@ -696,22 +714,27 @@ private:
       const LightChunkSnapshot *chunk = stateFor(key);
       if (!chunk)
         return;
-      for (int section = 0; section < owner.blockSectionCount; ++section) {
-        const LightSectionSnapshot *data =
-            chunk->section(owner.minBlockSectionY + section);
+      for (int sectionY = chunk->minLightSectionY();
+           sectionY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
+           ++sectionY) {
+        const LightSectionSnapshot *data = chunk->section(sectionY);
         if (!data)
           continue;
+        const bool inBlockRange =
+            sectionY >= chunk->minBlockSectionY &&
+            sectionY < chunk->minBlockSectionY + chunk->blockSectionCount;
         for (int index = 0; index < kLightVolume; ++index) {
           const int x = index & 15;
           const int z = (index >> 4) & 15;
           const int y = (index >> 8) & 15;
-          const BlockLightProperties &properties = data->at(x, y, z);
-          if (!properties.supported)
+          const BlockLightProperties &properties =
+              inBlockRange ? data->at(x, y, z) : emptyLightProperties();
+          if (inBlockRange && !properties.supported)
             incomplete = true;
           const LightPos position{chunk->chunkX * 16 + x,
-                                  (owner.minBlockSectionY + section) * 16 + y,
+                                  sectionY * 16 + y,
                                   chunk->chunkZ * 16 + z};
-          if (properties.supported && properties.emission > 0)
+          if (inBlockRange && properties.supported && properties.emission > 0)
             enqueueIncrease(position, properties.emission, 63,
                             emptyShape(properties), true);
           const std::uint8_t stored =
@@ -846,8 +869,9 @@ private:
     }
 
     const LightSectionSnapshot *sectionAt(LightPos position) const {
-      if (position.y < owner.minBlockSectionY * 16 ||
-          position.y >= (owner.minBlockSectionY + owner.blockSectionCount) * 16)
+      if (position.y < (owner.minBlockSectionY - 1) * 16 ||
+          position.y >=
+              (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16)
         return nullptr;
       const LightChunkSnapshot *chunk =
           stateFor(position.x >> 4, position.z >> 4);
@@ -855,6 +879,13 @@ private:
     }
 
     const BlockLightProperties &stateAt(LightPos position) const {
+      // LevelChunk.getBlockState returns air outside the playable height, while
+      // block-light storage still owns one section of vertical padding above
+      // and below it.
+      if (position.y < owner.minBlockSectionY * 16 ||
+          position.y >=
+              (owner.minBlockSectionY + owner.blockSectionCount) * 16)
+        return emptyLightProperties();
       const LightSectionSnapshot *section = sectionAt(position);
       if (!section)
         return unsupportedLightProperties();
@@ -919,11 +950,19 @@ private:
     }
 
     void propagateIncrease(const IncreaseTask &task) {
+      int fromLevel = storedLevel(task.position);
+      const int targetLevel = task.level;
       if (task.fromEmission) {
-        const int stored = storedLevel(task.position);
-        if (stored < task.level)
-          setStoredLevel(task.position, task.level);
+        if (fromLevel < targetLevel) {
+          setStoredLevel(task.position, targetLevel);
+          fromLevel = targetLevel;
+        }
       }
+      // LightEngine.propagateIncreases reads the current stored level when the
+      // task leaves the queue. A task seeded before a decrease must not carry
+      // its old level into a neighbor after the source has already gone dark.
+      if (fromLevel != targetLevel)
+        return;
       const auto &fromQueued =
           task.fromEmpty ? emptyLightProperties() : stateAt(task.position);
       for (int direction = 0; direction < 6; ++direction) {
@@ -934,10 +973,10 @@ private:
         if (!toSection)
           continue;
         const int toLevel = storedLevel(to);
-        if (int(task.level) - 1 <= toLevel)
+        if (fromLevel - 1 <= toLevel)
           continue;
         const auto &toState = stateAt(to);
-        const int newLevel = int(task.level) - lightOpacity(toState);
+        const int newLevel = fromLevel - lightOpacity(toState);
         if (newLevel <= toLevel)
           continue;
         if (faceShapesOcclude(fromQueued, toState, direction))
@@ -985,8 +1024,9 @@ private:
                          Visitor visitor) const {
       const int minX = chunk->chunkX * 16;
       const int minZ = chunk->chunkZ * 16;
-      const int minY = owner.minBlockSectionY * 16;
-      const int maxY = (owner.minBlockSectionY + owner.blockSectionCount) * 16;
+      const int minY = (owner.minBlockSectionY - 1) * 16;
+      const int maxY =
+          (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16;
       if (direction == 0 || direction == 1) {
         const int y = direction == 0 ? minY : maxY - 1;
         for (int x = 0; x < 16; ++x)
@@ -1075,16 +1115,25 @@ private:
         continue;
 
       std::vector<PendingChunk> batch;
-      const std::size_t count = std::min(
-          {options.batchSize, options.maxQueuedCommands, pending.size()});
-      batch.reserve(count);
-      for (std::size_t i = 0; i < count; ++i) {
-        auto it = pending.begin();
-        batch.push_back(std::move(it->second));
-        pending.erase(it);
+      if (forcedChunk) {
+        const auto selected = pending.find(*forcedChunk);
+        forcedChunk.reset();
+        if (selected != pending.end()) {
+          batch.push_back(std::move(selected->second));
+          pending.erase(selected);
+        }
+      } else {
+        const std::size_t count = std::min(
+            {options.batchSize, options.maxQueuedCommands, pending.size()});
+        batch.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+          auto it = pending.begin();
+          batch.push_back(std::move(it->second));
+          pending.erase(it);
+        }
       }
       busy = true;
-      busyChunks = count;
+      busyChunks = batch.size();
       lock.unlock();
 
       try {
@@ -1103,7 +1152,12 @@ private:
       busy = false;
       busyChunks = 0;
       ++statsBatches;
+      if (pauseAfterBatch) {
+        pauseAfterBatch = false;
+        paused = true;
+      }
       idle.notify_all();
+      batchDone.notify_all();
       if (closing && pending.empty())
         break;
     }
@@ -1155,7 +1209,7 @@ private:
         snapshot->blockSectionCount = command.load->blockSectionCount;
         snapshot->generation = command.generation;
         snapshot->lifecycleEpoch = command.lifecycleEpoch;
-        snapshot->revision = command.revision;
+        snapshot->revision = 0;
         snapshot->sections = command.load->sections;
 
         const auto old = internal.find(key);
@@ -1177,6 +1231,31 @@ private:
                 old->second->sections[i]->layers[
                     static_cast<std::size_t>(LightLayer::Block)];
             snapshot->sections[i] = section;
+          }
+          // A full authoritative snapshot is also an optical delta. The old
+          // light layer is retained until propagation completes, but every
+          // changed property must re-check its old emission/dependency.
+          for (int section = 0; section < command.load->blockSectionCount;
+               ++section) {
+            const int sectionY = command.load->minBlockSectionY + section;
+            const LightSectionSnapshot *oldSection =
+                old->second->section(sectionY);
+            const LightSectionSnapshot *newSection = snapshot->section(sectionY);
+            if (!oldSection || !newSection)
+              continue;
+            if (oldSection->isUniform() && newSection->isUniform() &&
+                oldSection->at(0, 0, 0) == newSection->at(0, 0, 0))
+              continue;
+            for (int index = 0; index < kLightVolume; ++index) {
+              const int x = index & 15;
+              const int z = (index >> 4) & 15;
+              const int y = (index >> 8) & 15;
+              if (oldSection->at(x, y, z) == newSection->at(x, y, z))
+                continue;
+              changedPositions.push_back(
+                  {snapshot->chunkX * 16 + x, sectionY * 16 + y,
+                   snapshot->chunkZ * 16 + z});
+            }
           }
         }
 
@@ -1273,11 +1352,12 @@ private:
         metadataComplete = false;
     }
 
+    const std::uint64_t publicationRevision = ++nextPublicationRevision;
     for (auto &[key, chunk] : working) {
       if (removed.contains(key) || !chunk.dirty)
         continue;
       chunk.snapshot->generation = maxGeneration;
-      chunk.snapshot->revision = maxGeneration;
+      chunk.snapshot->revision = publicationRevision;
       chunk.snapshot->lifecycleEpoch = chunk.lifecycleEpoch;
       chunk.snapshot->blockLightComplete = metadataComplete;
       chunk.snapshot->propagationComplete = false;
@@ -1298,10 +1378,11 @@ private:
   mutable std::mutex mutex;
   std::condition_variable wake;
   std::condition_variable idle;
+  std::condition_variable batchDone;
   std::unordered_map<std::uint64_t, PendingChunk> pending;
   struct ChunkVersion {
     std::uint64_t epoch = 0;
-    std::uint64_t revision = 0;
+    std::uint64_t requestRevision = 0;
   };
   std::unordered_map<std::uint64_t, ChunkVersion> versions;
   std::unordered_set<std::uint64_t> inactive;
@@ -1318,7 +1399,10 @@ private:
   bool busy = false;
   std::size_t busyChunks = 0;
   std::uint64_t nextGeneration = 0;
+  std::uint64_t nextPublicationRevision = 0;
   bool paused = false;
+  bool pauseAfterBatch = false;
+  std::optional<std::uint64_t> forcedChunk;
   std::string error;
   mutable std::atomic<std::uint64_t> statsSubmitted{0};
   mutable std::atomic<std::uint64_t> statsRejected{0};
@@ -1370,6 +1454,9 @@ std::string LightService::workerError() const { return impl_->workerError(); }
 bool LightService::waitIdleForTesting() { return impl_->waitIdleForTesting(); }
 void LightService::pauseForTesting() { impl_->pauseForTesting(); }
 void LightService::resumeForTesting() { impl_->resumeForTesting(); }
+bool LightService::processChunkBatchForTesting(int chunkX, int chunkZ) {
+  return impl_->processChunkBatchForTesting(chunkX, chunkZ);
+}
 void LightService::close() { impl_->close(); }
 
 } // namespace redstone

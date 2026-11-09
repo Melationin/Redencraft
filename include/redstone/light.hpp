@@ -110,9 +110,11 @@ struct LightChunkSnapshot {
   int chunkZ = 0;
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
+  // Latest input request that touched this chunk.
   std::uint64_t generation = 0;
   // Lifecycle rejects unload/reload results; revision distinguishes completed
-  // results within one loaded lifetime.
+  // results within one loaded lifetime and is ordered by the single writer,
+  // independently of the unordered batch's input generation.
   std::uint64_t lifecycleEpoch = 0;
   std::uint64_t revision = 0;
   // L-2a may complete the block layer while sky propagation and protocol
@@ -192,6 +194,10 @@ public:
   bool waitIdleForTesting();
   void pauseForTesting();
   void resumeForTesting();
+  // Lets a paused service choose exactly one pending chunk for the worker's
+  // next batch and pause again after it completes. Used to exercise publication
+  // ordering without depending on unordered_map iteration.
+  bool processChunkBatchForTesting(int chunkX, int chunkZ);
   void close();
 
 private:

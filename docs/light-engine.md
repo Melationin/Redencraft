@@ -53,7 +53,7 @@ python validation/light_metadata/generate_light_occlusion.py `
 3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作。方块光先处理 `checkBlock`，再完全排空 decrease 队列，最后排空 increase 队列；source、遮挡开关和邻格回灌都通过 `LightEngine.QueueEntry` 的方向位语义执行。未加载邻区块不进入光存储，按 Java 读取屏障阻止传播。
 4. 加载区块时扫描真实光源并检查旧光层；加载/卸载后从相邻已加载区块的边界格重新发起 increase/decrease，使跨 chunk 两侧收敛。普通方块变更只检查对应格，不扫描整块或全区块。
 5. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。
-6. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。待发布结果按区块只保留最新 snapshot。生命周期 epoch 标识加载代，revision 标识同代更新；同代结果在完整批次后可见，卸载/重载后的旧代一律拒绝。
+6. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。待发布结果按区块只保留最新 snapshot。生命周期 epoch 标识加载代；revision 是单写者按完成批次递增的发布序号，独立于无序 pending 批次携带的输入请求号。同代结果在完整批次后可见，卸载/重载后的旧代一律拒绝。
 
 默认每次最多取 1000 个区块（另受 pending 容量配置约束）。每区块 pending 状态只保留最新 load、按 section 合并的 cell delta 和每 section 最新空态；已 drain 的发布结果也按区块合并，不随写入代数无限增长。unload 会立即对读者失效，并作为有序 tombstone 保留到 worker 清除旧内部代；若其后立即 reload，worker 先清除旧代再安装完整新快照。worker 错误保存在 `workerError()`。`close()` 停止接收新命令、排空 pending 并 join。`World::~World` 与 `disableLighting()` 会先关闭 worker。
 
@@ -103,6 +103,6 @@ python validation\vanilla26_1\block_light_differential_test.py `
   --golden validation\vanilla26_1\block-light-golden.json
 ```
 
-runner 使用独立世界和 loopback 端口，在 `ThreadedLevelLightEngine.runUpdate()` 完成后继续等到后续真实服务器 tick，确认 `hasLightWork()==false` 才读取 `LightLayer.BLOCK`；它不使用固定睡眠或伪造亮度。原始 server log、候选、命令和 manifest 保存在唯一运行目录。
+runner 使用独立世界和 loopback 端口。每个阶段对四个受影响 chunk 调用 `ThreadedLevelLightEngine.waitForPendingTasks` 发出 POST_UPDATE fence；所有 future 完成后，agent 把取样任务排回服务端主线程读取 `LightLayer.BLOCK`，tick 本身不等待。它不使用固定睡眠或伪造亮度。原始 server log、fence 记录、候选、命令和 manifest 保存在唯一运行目录。
 
-`light` 覆盖双层 nibble、世界高度 padding、均匀 section、可恢复 pending、卸载 tombstone、有界发布、方块光增减/重叠/遮挡/跨边界/epoch-revision 和线程生命周期；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方服务端与本仓库探针的三阶段 117 个逐格观测。
+`light` 覆盖双层 nibble、均匀 section、可恢复 pending、卸载 tombstone、有界发布、方块光增减/重叠/遮挡/跨边界/epoch-revision、旧增光任务失效、权威快照移除/新增、底顶 padding 正负例、跨批发布排序和线程生命周期；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方服务端与本仓库探针的五阶段 225 个逐格观测。
