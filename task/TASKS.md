@@ -8,6 +8,16 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## L-3 协议光照（coder）
+
+**范围**：只实现 `PLAN.md` 的 L-3。依据上一级只读 `ClientboundLevelChunkWithLightPacket.java`、`ClientboundLightUpdatePacket.java`、`ClientboundLightUpdatePacketData.java`、`ChunkHolder.java` 的 `broadcastChanges` 路径与客户端 light data 读取契约，用 L-2a/L-2b 已发布且属于同一生命周期的不可变光照快照替换初始区块占位并发送后续更新。协议 ID 只取仓库内 26.1 导出；初始包、增量、清除、卸载/重载和积压路径均以严格 775 解帧验证。保持普通方块变化批量读取与成功事件立即发送的既有顺序；主线程不等待 worker，不逐 tick/逐 session 扫描区块或复制全量 nibble。
+
+**先决清理**：把 worker 的逐区块发布改为整批原子交接，覆盖 drain 在跨两块 revision 中只看到完整一批、或完整旧批的确定性反例。修正传播内的 `storedEligible`：本批未重算但已发布的已存层仍可作为跨边缘写目标，资格和值都由本批新状态同步覆盖，已删除层不得复活；用真实的已存但本批未重算目标做 worker 回归。区段掩码只从 immutable 快照的真实 raw 存储得到，缺层、显式 0、显式 15/mixed 分开表达。
+
+**验收**：严格 775 帧解码覆盖初始区块光照、动态天空/方块更新、已知旧层清除、卸载/重载后旧代结果拒发、无天空光世界和慢连接积压；未发布或未知光学状态明确延后/保守处理，不伪造完成。上下额外区段及天空/方块四个 bitset、每层 2048 字节都逐项核对。保留既有 C++ 回归、官方 243 个天空值 + 72 个 raw 状态 + 225 个方块光值证据。最终候选干净 MSVC Release + jemalloc 构建后仅跑一轮完整 CTest，记录日志与 hash；reviewer 不重复运行。未启动客户端，不做 Anvil 光照写回、L-4 性能验收或真实传播世吞测量。
+
+**计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`include/redstone/net/*.hpp`、`src/net/*.cpp`、`tests/*light*`、`tests/protocol.cpp`、`validation/protocol775/*`、`docs/light-engine.md`（及协议文档中确需校正的当前边界）、`task/TASKS.md`。若实现需要，只做最小协议编码/发布接入，不修改 `PLAN.md`、流体语义或无关文件。
+
 ## L-2b 天空光传播（coder）
 
 **范围**：只实现 26.1 `ChunkSkyLightSources`、`SkyLightEngine`、`SkyLightSectionStorage` 与共享 `LightEngine` 对应的天空光入口、满光向下、非满光侧向衰减、共享面遮挡、跨 section/chunk、负 y、上下 padding 和空 section 处理；复用 L-1/L-2a 的单写者 worker、owned/immutable 输入、生命周期 epoch 与单调发布，不在主线程传播或等待。天空光与方块光独立队列/层写入，不得把四张 heightmap 直接当入口，不得默认给无天空光维度满光。
@@ -1186,4 +1196,16 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 **结论：只退回这一条边缘传播与夹具。** 先登记返工范围、将唯一末行改为 `任务进行中`，再修改代码。最终候选一轮 CTest，reviewer 不重跑。待通过再进入 L-3。
 
-任务已完成
+### L-2b 第三次返工复审（`d3b849e`）
+
+**通过，释放 L-3。** 核对 `src/light.cpp:1650–1783`：写入失败时不再传播未写入的结果，区段底面跨水平边缘时按源侧缺层数向目标已存层复制水平衰减值，撤光也发 decrease。真实 26.1 的 A/B/C 夹具分别验证了开孔后目标三高度为 13、盖回回落到 7，以及源侧缺层/目标侧有层；既有缺层继承、顶部透光、最后一块、同代刷新和两层隔离继续保留。采用 coder 最终 **28/28 CTest**（23.24 s），核对日志与独立原版候选哈希，不复跑。最终对照 **243 个天空光值 + 72 个 raw 层状态 + 225 个方块光值**匹配。结论限定夹具；未验收协议、Anvil 和启用双层的世吞 <10%。
+
+### L-3 领取约束（reviewer）
+
+只领取 `PLAN.md` 的协议光照，以上级只读 `ClientboundLevelChunkWithLightPacket`、`ClientboundLightUpdatePacket`、`ClientboundLightUpdatePacketData`、`ChunkHolder.broadcastChanges` 与客户端 light data 读取契约为准，ID 只从 26.1 导出的协议表取。真实的首包和后续 light update 用已经完成的、同一生命周期的不可变快照，分开天空/方块、四个 bitset 和每层 2048 字节，包含上下额外区段。Missing、存储的 0、存储的 15/mixed、以及增量已知旧层需要清除时，不能混用。未发布/未知光学状态要有明确处理，不能假装光已完成或阻塞主线程；无天空光不发送虚构亮度。补严格 775 帧解码和初始、动态、清除、卸载/重载、网络积压反例；不启动客户端。保持现有普通方块变化批量读取和成功事件立即发送的顺序。异步只读不可变数据；主线程不等待光照，不在每 tick 每 session 全扫区块或复制 nibble 数据。
+
+此阶段先清理两条发布依赖：一是 `src/light.cpp:2186` 当前每个区块分别写共享发布表，drain 可能观察到同一 worker revision 的一半；按批次交接，并用确定性跨两块测试。二是 `src/light.cpp:1443–1445,1729,1760` 的 `storedEligible` 只枚举本批重算区块，却被当作全局资格；保留已发布且本批不重算的层的可写性及跨边缘计数，显式覆盖已存但本批未重算的目标。同步资格必须以本批新状态覆盖旧值，不能让被删除层复活。若掩码依赖方块光 raw 存储，核对 `LayerLightSectionStorage.java:220–245`，按实际证据处理，勿从派生查询值猜缺层。
+
+性能债列入 L-4：整图 unsupported 扫描和按影响域判断、天空列整列重扫/每区块临时表扫描、生命周期/Anvil、启用真实传播和发布的世吞测量。该机拓扑实际读取：CPU 2（0x4）和 CPU 4（0x10）为两个独立性能核，无 SMT sibling；后续主线程/worker 分别绑核，进程允许两核，记录两线程 CPU 和积压。L-3 不提前领 L-4。最终候选干净构建由 coder 一轮 CTest，reviewer 不重跑。先登记范围并修改唯一状态末行，再改代码。
+
+任务进行中
