@@ -8,6 +8,52 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## L-2b 天空光传播（coder）
+
+**范围**：只实现 26.1 `ChunkSkyLightSources`、`SkyLightEngine`、`SkyLightSectionStorage` 与共享 `LightEngine` 对应的天空光入口、满光向下、非满光侧向衰减、共享面遮挡、跨 section/chunk、负 y、上下 padding 和空 section 处理；复用 L-1/L-2a 的单写者 worker、owned/immutable 输入、生命周期 epoch 与单调发布，不在主线程传播或等待。天空光与方块光独立队列/层写入，不得把四张 heightmap 直接当入口，不得默认给无天空光维度满光。
+
+**源码依据**：上一级只读 `SkyLightEngine.java`、`SkyLightSectionStorage.java`、`ChunkSkyLightSources.java`、`LightEngine.java`、`LayerLightSectionStorage.java`、`ThreadedLevelLightEngine.java`。天空入口由方块透光高度/来源列决定；入口节点先降为 15 并按方向 seed，非入口节点沿用共享 decrease/increase 传播。
+
+**验收**：真实 worker 覆盖露天满光、遮挡与复亮、透光衰减/侧漏、加载顺序与跨 chunk、负 y、底/顶 padding、空/非空 section、源高度变化、撤除屋顶，以及无天空光配置不产生默认满光；方块光既有回归全部保留并证明双层互不串扰。真实 26.1 localhost 服务端在相关区块 POST_UPDATE futures 完成后读取精确 SkyLight 采样，至少覆盖上述夹具；发布 snapshot 仍区分方块层完成、天空层完成、完整传播和协议 ready。最终候选干净 MSVC Release + jemalloc 构建并只运行一轮完整 CTest；记录日志/hash，reviewer 不复跑。启用两层并绑定主/工作线程的世吞性能门槛留给 L-4。
+
+**计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`include/redstone/engine.hpp`、`src/engine.cpp`、`tests/light_tests.cpp`、`tests/block_light_probe.cpp`（如共享探针需要）、L-2b 天空光探针/黄金/runner、`docs/light-engine.md`、`task/TASKS.md`。不接协议、Anvil 光照写回或 L-4。
+
+### L-2b 实际与证据（实现提交 `0af2805`）
+
+**天空入口与传播**
+
+- `src/light.cpp` 在同一单写者 worker 内新增独立 `SkyLightPropagator`。每个 chunk 的 256 列入口按 `ChunkSkyLightSources.isEdgeOccluded` 判定：下方 dampening 非零，或上下方块在该垂直方向的官方 occlusion face 并集覆盖，即形成入口；无遮挡列使用 world minY-1 sentinel。raw state、光源和入口表全部由 worker 的 owned working chunk/section 计算，主线程仍只提交合批输入。
+- 初始/重载 chunk 先清空天空层，再把入口以上直接填 15；只有入口边界和相邻列入口更低处的水平边进入 increase 队列。侧向传播沿用共享方向 mask、`max(1,dampening)`、双侧面遮挡和 decrease-before-increase 顺序，跨 section/chunk、负 y、上部 padding 和未加载邻区块屏障均经过真实 worker 回归。底部世界外 padding 保持读取屏障/0，与原版夹具一致。
+- 动态方块变更按受影响列重算入口，旧入口降低时清除 stale 15 并发 decrease，入口上移时补 15 并发 source increase；随后检查原格，因此开顶、复盖和屋顶变更会分别向两侧收敛。同代权威刷新会重建该 chunk 的入口和天空层；卸载/重载继续沿用 lifecycle epoch，旧代结果不会复生。
+- `LightWorkerOptions::hasSkyLight=false` 明确关闭天空求解并清除非空输入天空层；无天空光世界不会因空 section 得到默认满光。`LightChunkSnapshot` 新增 `skyLightComplete`，与 `blockLightComplete`、完整 `propagationComplete` 分开；`protocolReady` 仍固定 false。方块光实现、队列顺序和回调位置未改。
+
+**C++ 行为反例**
+
+`tests/light_tests.cpp` 新增真实 worker 覆盖：全开放天空（块范围与上部 padding）、16×16 屋顶、中心直接天空归零、跨 chunk 边缘 14/7 级侧漏、开顶恢复 15、复盖移除 stale 光、屋顶下 block light 仍为 15/14 而天空值不变、负 y(-16/-17/-15)、后加载开放邻区块使阴影边界从 0 收敛到 14，以及 `hasSkyLight=false` 全 0。旧方块光 225 格差分继续通过。
+
+**真实 26.1 差分**
+
+- 新增 `SkyDiffAgent.java`、`run_sky_light_validation.py`、`sky_light_differential_test.py`、`tests/sky_light_probe.cpp`。官方 runner 使用与方块光相同的 `ThreadedLevelLightEngine.waitForPendingTasks` 四区块 POST_UPDATE fence；futures 完成后才通过 `MinecraftServer.execute` 回主线程读 `LightLayer.SKY`，不在 tick 阻塞。
+- 官方 JAR SHA-1 仍为 `3872a7f07a1a595e651aef8b058dfc2bb3772f46`。六阶段 15 个固定采样覆盖开放列、整 chunk 屋顶+开放水平邻块、屋顶开孔、复盖、负 y 屋顶和撤除；C++ 与官方为 **6×15=90/90**。方块光既有 **5×45=225/225** 同步通过，双层测试另证独立。
+- 提升黄金运行 `build-light-validation/sky-light-runs/20261109-190530-35720-d9886137/`：候选与 `validation/vanilla26_1/sky-light-golden.json` SHA-256 同为 `34ef908cf214c336ecb0cd7d8f5a6b0bed8e76cd03745ca0ebf24d87a8ec453a`，server log `158bb0666114cab85ef90672a7bfab6629a9b7b598467bc821930ad3947af693`，manifest `0ae113a4bef541a6a332fd92f322dfd2c797c3a1910ab879e2634fe0501996a5`。
+- 独立重跑 `build-light-validation/sky-light-runs/20261109-190559-35188-4570bc1f/`：候选哈希相同，server log `149fa91705a9ce401485ed5edb920dddd471de1ce674f2bb5c68329c77d92309`，manifest `7b8a0fd550355aa48f68336834cb2b47543c8b50bfe61320d10a5d860e3fd6fa`。未启动客户端。
+
+**构建与唯一一次完整 CTest**
+
+最终代码执行 NMake `clean` 后以 MSVC 19.51 Release + jemalloc 全量重建成功；构建日志 `build-f7-nmake/build-l2b-acceptance-final.log` SHA-256 `4d3759721179d4e094e3d792d7a3d10ccdc9a9d5db1b4a9e1c2b8aa500ad7e64`。重新生成构建目录后最终 CTest 包含 28 项并 **28/28 通过，18.35 s**；日志 `build-f7-nmake/ctest-l2b-acceptance-final.log` SHA-256 `69b21a254673732b363fff484febf08657665009fb563d28cd26bce2fc6c1a0d`，reviewer 不重复执行。
+
+- 聚焦 `light tests passed`：`build-f7-nmake/light-l2b-acceptance-final.log` SHA-256 `b3d70361e83a410080b7d6d547ec5177ce3c3624cc31b6fa0047c7eb81e9521c`。
+- 方块光 `225 observations`：`build-f7-nmake/block-light-differential-l2b-acceptance-final.log` SHA-256 `8a0aa44e1e1282d66df96b87cc5023e02eb9fe6fa475d48fad4c8dd0a834b83c`。
+- 天空光 `90 observations`：`build-f7-nmake/sky-light-differential-l2b-acceptance-final.log` SHA-256 `1addaaec2c3835471f11cd9ec0aaa048c5b2ffef1c8759b82466775738f7629a`。
+
+**明确没有做**
+
+没有接协议光照或 Anvil `SkyLight`/`BlockLight`，因此完整快照仍 `protocolReady=false`；没有实现 L-3/L-4、启动客户端、改协议数值或修改流体/方块更新顺序。尚无真实原版同存档重启和天空光 Anvil 读入差分，也没有启用双层后的世吞 `<10%` 性能结论。`PLAN.md` 未改。
+
+- 本轮实现提交为 `0af2805`（13 files，+1338/−37），交接记录随后单独提交；implementation 不包含 `task/TASKS.md` 或既有无关文件。
+
+---
+
 ## L-2H 高度图按区段回扫（coder）
 
 **范围**：只优化 `World::setBlock` 之后的四张 live heightmap 下降回扫。直接复用已定位的 `changedChunk`；16 对齐高度布局从 `y-1` 起按 section 从高到低各取一次 `const Section&`，`hasOnlyAir()` 整段跳过，非空 section 只沿固定的目标列用 `Section::get` 按 256 步进直接读取并 `BlockState::fromId`，不调用 `World::getBlock`。四张表的独立谓词仍由高度图实现，一次列扫描同时记录各表首个匹配；非 16 对齐 `minY` 保留既有逐格路径和结果。保留四张实时高度图、现有回调/光照顺序、流体/海床和高度图打包。
@@ -1012,5 +1058,21 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 **通过，释放 L-2H。** `src/light.cpp:954–985` 与 26.1 `LightEngine.java:157–171` 的入队目标值/当前值一致判定对齐；`src/light.cpp:1235–1260` 权威刷新把变化的光学状态纳入重查，保留同代上一结果至发布；光区段上下 padding 能传播、清除且按边界空气取属性。 `src/light.cpp:1355–1368` 的 worker 发布号独立于请求号，`tests/light_tests.cpp:674–811` 覆盖同批邻区残光、权威刷新跨界、padding 及反序输入出版。未加载邻区块屏障和旧 epoch 拒收保留。与协议接入前，L-3/L-4 仍要核对跨区段通知与批次发布边界；L-4 保留按域或增量消除整图 unsupported 扫描的验收。
 
 采用 coder 的干净 MSVC Release + jemalloc 构建与 **27/27 CTest**（23.20 s），未重复执行。核对正式 CTest、原版候选/黄金的哈希；`LightDiffAgent.java:105–114` 的四区块 POST_UPDATE futures 完成后才回主线程取样。官方 26.1 与 C++ 的五阶段 **225/225** 值一致，原来 117 个值不变，上下 padding 点亮时均 `15,14,13`、撤源后清零。方块光的差分结论只覆盖该夹具；天空光、协议与 L-4 世吞 <10% 未验收。
+
+### L-2H 审查结论（`7b9910e`）
+
+**通过，释放 L-2b。** `src/engine.cpp:1197–1276` 复用本次写入定位的区块，回扫时每段仅取一次 Section 引用，空段整段跳过，非空段只读目标列。四张表仍独立取首次命中，从 y−1 开始，未命中回到 minY−1；`src/heightmap.cpp:283–329` 继续用四表最小 firstAvailable 快速排除，非对齐世界保留旧路径。没有改写回调或光照提交顺序。实际 World 回归中，跨 23 个区段跳过 21 段、只读 27 格；海床反例、负坐标和底界均覆盖。
+
+采用 coder 最终干净构建和 **27/27 CTest**（23.57 s）；核对日志与最终候选哈希，不重跑。关闭光照的五组世吞对照，主线程 CPU 中位数 3312.500 → 3109.375 ms（−6.13%），平均刻 3.466 → 3.241 ms（−6.49%），P95 7.411 → 6.752 ms（−8.89%），四个检查点和终态指纹相同。未新增原版高度图运行差分；不将此结果计为启用光照的 L-4 验收。
+
+### L-2b 领取约束（reviewer）
+
+只领取 `PLAN.md` 的天空光传播。以同目录上级的 26.1 `ChunkSkyLightSources`、`SkyLightEngine`、`SkyLightSectionStorage` 和 `LightEngine` 为依据，覆盖天空入口、边界面遮挡、非满光衰减、开合屋顶与跨区块、负高度及空区段/上下 padding；无天空光维度不能获得默认满光。勿把四张高度图当天空光入口。天空与方块光各自求解，复用既有后台线程、输入代际和发布机制，主线程只交接，不能做传播或等待 worker；不要在此任务接协议、Anvil 或领 L-4。加载/刷新/卸载要保留既有失效约束。
+
+用真实 26.1 localhost 原版服务端在相关区块 POST_UPDATE futures 完成后对比天空光夹具（至少露天、遮蔽和复亮、衰减/侧漏、跨界、负 y），并保留 L-2a 方块光差分及双层互不串扰证据。保留精确采样位置和边界，并把原版与 C++ 行为、暂未实现项分开。最终代码干净构建后一轮完整 CTest，记录日志和提交；reviewer 不复跑。启用两层并按线程绑核的世吞 <10% 在 L-4 验收。
+
+#### L-2b 原版空区段审查用例（验收澄清，状态不变）
+
+请在最终差分前特意覆盖空区段「没分配光层」的行为：`SkyLightSectionStorage.java:24–46,86–117` 在上方有存储时，缺失层查询取最近上方已存层的底平面，不能一律读 0/15，亦不能把每个缺失区段当普通节点逐格向下衰减；`SkyLightEngine.java:199–259` 还对区块边缘的空区段做传播补偿。可用高处部分屋顶 + 低处少量方块，中间留多个真正无存储的空区段，确保探针记录「原版 raw layer 缺席、查询值与上方首层一致」，同时有至少一个底平面值介于 0 和 15，查相同 x/z 的多个 y 及邻区边界。若初始夹具因邻区非空导致存了层，调整相邻区段并在原版探针断言缺席。另核对完整区块最上/最下边缘的语义，无须接协议。
 
 任务已完成
