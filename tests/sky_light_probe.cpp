@@ -14,9 +14,11 @@ namespace {
 const std::vector<Pos> kCells = {
     {8, 200, 8},   {0, 200, 8},   {15, 200, 8}, {16, 200, 8},
     {8, 200, 0},   {8, 200, 15},  {8, 200, 16}, {8, 202, 8},
-    {8, 203, 8},   {8, 320, 8},   {0, -62, 0},  {0, -61, 0},
-    {0, -65, 0},   {0, -60, 0},   {0, 100, 0},
+    {8, 203, 8},   {8, 320, 8},   {8, 150, 8},  {15, 150, 8},
+    {16, 150, 8},  {0, -62, 0},   {0, -61, 0},  {0, -65, 0},
+    {0, -60, 0},   {0, 100, 0},
 };
+constexpr std::array<int, 6> kRawSamples{0, 9, 10, 11, 12, 15};
 
 void rawPlace(World &world, Pos position, const BlockState &state) {
   world.rawSetBlock(position, state);
@@ -43,32 +45,49 @@ void fill(World &world, Pos first, Pos last, const BlockState &state) {
         place(world, {x, y, z}, state);
 }
 
-std::vector<int> sample(World &world) {
+std::pair<std::vector<int>, std::vector<int>> sample(World &world) {
   auto *service = world.lightService();
   if (!service || !service->waitIdleForTesting())
     throw std::runtime_error("sky-light worker did not become idle");
   service->drainPublished();
-  std::vector<int> values;
+  std::vector<int> values, rawMissing;
   values.reserve(kCells.size());
+  rawMissing.reserve(kCells.size());
   for (const Pos &cell : kCells) {
     auto snapshot = service->latestChunk(cell.x >> 4, cell.z >> 4);
     if (!snapshot)
       throw std::runtime_error("sky-light chunk was not published");
-    const auto *section = snapshot->section(cell.y >> 4);
-    values.push_back(section ? section->light(LightLayer::Sky, cell.x & 15,
-                                               cell.y & 15, cell.z & 15)
-                             : -1);
+    values.push_back(snapshot->lightValue(LightLayer::Sky, cell.x, cell.y,
+                                          cell.z));
   }
-  return values;
+  for (int cellIndex : kRawSamples) {
+    const Pos &cell = kCells[static_cast<std::size_t>(cellIndex)];
+    auto snapshot = service->latestChunk(cell.x >> 4, cell.z >> 4);
+    const auto *section = snapshot->section(cell.y >> 4);
+    rawMissing.push_back(
+        !section || section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                        .isMissing()
+            ? 1
+            : 0);
+  }
+  return {std::move(values), std::move(rawMissing)};
 }
 
-void printStage(int stage, const std::vector<int> &values) {
+void printStage(int stage,
+                const std::pair<std::vector<int>, std::vector<int>> &sample) {
+  const auto &values = sample.first;
   std::ostringstream output;
   output << "SKYLIGHT_JSON {\"stage\":" << stage << ",\"sky_light\":[";
   for (std::size_t i = 0; i < values.size(); ++i) {
     if (i)
       output << ',';
     output << values[i];
+  }
+  output << "],\"raw_missing\":[";
+  for (std::size_t i = 0; i < sample.second.size(); ++i) {
+    if (i)
+      output << ',';
+    output << sample.second[i];
   }
   output << "]}\n";
   std::cout << output.str();
@@ -86,7 +105,9 @@ int main() {
     const auto air = airState();
     const auto stone = Blocks::STONE.defaultState();
     fillRaw(world, {-16, 198, -2}, {16, 203, 16}, air);
-    fillRaw(world, {-2, -62, -2}, {2, 100, 2}, air);
+    fillRaw(world, {-2, -62, -2}, {2, 100, 2}, stone);
+    fillRaw(world, {-1, -62, -1}, {1, 100, 1}, air);
+    fillRaw(world, {-32, -64, -32}, {31, -63, 31}, stone);
     world.enableLighting();
     printStage(1, sample(world));
 

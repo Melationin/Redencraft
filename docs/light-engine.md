@@ -50,7 +50,7 @@ python validation/light_metadata/generate_light_occlusion.py `
 
 1. 主线程构造完全拥有的 `LightChunkInput`：区块坐标、连续光 section、per-section palette/cell 索引、双层光值和 `BlockLightProperties`。不传 `World`、内部 palette 或可变注册表指针。全空 section 和上下 padding 复用世界内同一组不可变输入；均匀非空 section 只保存一个 palette 值。
 2. 主线程按区块合并 load、section-empty、cell 和 unload，维护每区块最新的可重试状态，不为每个格子创建线程任务。有效光照更新不会因 worker 容量而丢弃；暂停或积压时状态留在 pending map，直到 worker 真正接收。`Stats::rejected` 只记录关闭后的提交或非法 section/cell 输入。
-3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作。方块光和天空光各自拥有 check/decrease/increase 队列并依次完全排空。天空光先按 `ChunkSkyLightSources` 的垂直相邻面判据维护每列入口，再直接填充入口以上为 15，只从入口边界和相邻低入口的侧向边入队。未加载邻区块不进入光存储，按 Java 读取屏障阻止传播。
+3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作。方块光和天空光各自拥有 check/decrease/increase 队列并依次完全排空。天空光先按 `ChunkSkyLightSources` 的垂直相邻面判据维护每列入口，再直接填充入口以上为 15，只从入口边界和相邻低入口的侧向边入队。天空数据保持稀疏：未存储 section 不是普通 0 层，查询取最近上方已存层的底平面；只有偏离该派生值或相邻非空区段需要时才分配。顶部 padding 可由入口向下传光，底部 padding 可由相邻非空区段实际存储，超出光照 section 范围才读取为 0。未加载水平邻区块按 Java 读取屏障阻止传播。
 4. 加载区块时扫描真实方块光源和天空入口；加载/卸载后从相邻已加载区块的边界格重新发起两层 increase/decrease，使跨 chunk 两侧收敛。普通方块变更只更新受影响天空列并检查对应格，不扫描整块或全区块。
 5. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。
 6. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。待发布结果按区块只保留最新 snapshot。生命周期 epoch 标识加载代；revision 是单写者按完成批次递增的发布序号，独立于无序 pending 批次携带的输入请求号。同代结果在完整批次后可见，卸载/重载后的旧代一律拒绝。
@@ -102,6 +102,6 @@ python validation\vanilla26_1\block_light_differential_test.py `
   --golden validation\vanilla26_1\block-light-golden.json
 ```
 
-runner 使用独立世界和 loopback 端口。每个阶段对四个受影响 chunk 调用 `ThreadedLevelLightEngine.waitForPendingTasks` 发出 POST_UPDATE fence；所有 future 完成后，agent 把取样任务排回服务端主线程读取 `LightLayer.BLOCK`，tick 本身不等待。它不使用固定睡眠或伪造亮度。原始 server log、fence 记录、候选、命令和 manifest 保存在唯一运行目录。
+runner 使用独立世界和 loopback 端口。每个阶段对四个受影响 chunk 调用 `ThreadedLevelLightEngine.waitForPendingTasks` 发出 POST_UPDATE fence；所有 future 完成后，agent 把取样任务排回服务端主线程读取 `LightLayer.BLOCK` 或 `LightLayer.SKY`，tick 本身不等待。天空夹具还同时记录指定 section 的 raw layer 是否缺席。它不使用固定睡眠或伪造亮度。原始 server log、fence 记录、候选、命令和 manifest 保存在唯一运行目录。
 
-`light` 还覆盖天空入口、露天满光、整块屋顶、侧漏衰减、开顶/复盖、加载顺序、负 y、顶部 padding、底部读取屏障、无天空光配置和双层互不串扰；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方五阶段 225 个方块光观察，`sky_light_differential` 比较官方六阶段 90 个天空光观察。
+`light` 还覆盖天空入口、露天满光、整块屋顶、侧漏衰减、开顶/复盖、同代权威刷新、加载顺序、负 y、顶部水层衰减、底部已分配光、稀疏缺层派生、无天空光配置和双层互不串扰；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方五阶段 225 个方块光观察，`sky_light_differential` 比较官方六阶段 108 个天空光值及 36 个 raw-layer 缺席标记。

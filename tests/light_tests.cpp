@@ -109,6 +109,21 @@ LightChunkInput emptyChunkFixture(int chunkX, int chunkZ,
   return input;
 }
 
+LightChunkInput skyRoofChunk(int chunkX, int chunkZ) {
+  auto input = emptyChunkFixture(chunkX, chunkZ, 0, 1);
+  std::vector<std::uint16_t> cells(kLightVolume, 0);
+  for (int z = 0; z < 16; ++z)
+    for (int x = 0; x < 16; ++x)
+      cells[lightIndex(x, 8, z)] = 1;
+  input.sections[1] = std::make_shared<const LightSectionSnapshot>(
+      0, false,
+      std::vector<BlockLightProperties>{
+          lightPropertiesOf(airState()),
+          lightPropertiesOf(Blocks::STONE.defaultState())},
+      std::move(cells));
+  return input;
+}
+
 bool reportBlock(LightService &service, int chunkX, int chunkZ, Pos position,
                  const BlockState &oldState, const BlockState &newState) {
   LightBlockChange change;
@@ -135,11 +150,7 @@ int blockLightAt(const std::shared_ptr<const LightChunkSnapshot> &snapshot,
 
 int skyLightAt(const std::shared_ptr<const LightChunkSnapshot> &snapshot,
                int x, int y, int z) {
-  if (!snapshot)
-    return -1;
-  const LightSectionSnapshot *section = snapshot->section(y >> 4);
-  return section ? section->light(LightLayer::Sky, x & 15, y & 15, z & 15)
-                 : -1;
+  return snapshot ? snapshot->lightValue(LightLayer::Sky, x, y, z) : -1;
 }
 
 void dataLayerLayout() {
@@ -696,9 +707,9 @@ void skyLightPropagation() {
   require(skyLightAt(open, 0, 0, 0) == 15 &&
               skyLightAt(open, 8, 8, 8) == 15 &&
               skyLightAt(open, 15, 15, 15) == 15 &&
-              skyLightAt(open, 4, -1, 4) == 0 &&
+              skyLightAt(open, 4, -1, 4) == 15 &&
               skyLightAt(open, 4, 16, 4) == 15,
-          "open sky fills block and upper padding while bottom padding is a barrier");
+          "an all-air chunk inherits full sky into both padding directions");
 
   require(service.submitChunk(emptyChunkFixture(1, 0, 0, 1)) != 0,
           "east open chunk loads for cross-boundary sky");
@@ -720,7 +731,7 @@ void skyLightPropagation() {
               skyLightAt(roofed, 8, 7, 8) == 7 &&
               skyLightAt(roofed, 8, 9, 8) == 15 &&
               skyLightAt(roofed, 15, 7, 8) == 14 &&
-              skyLightAt(roofed, 8, -1, 8) == 0 &&
+              skyLightAt(roofed, 8, -1, 8) == 7 &&
               skyLightAt(roofed, 8, 16, 8) == 15,
           "roof blocks direct sky and side light attenuates across the chunk edge: " +
               skyRoof);
@@ -730,14 +741,14 @@ void skyLightPropagation() {
   auto opened = settledChunk(service, 0, 0);
   require(skyLightAt(opened, 8, 8, 8) == 15 &&
               skyLightAt(opened, 8, 7, 8) == 15 &&
-              skyLightAt(opened, 8, -1, 8) == 0,
+              skyLightAt(opened, 8, -1, 8) == 15,
           "removing roof restores full sky down the source column");
   require(reportBlock(service, 0, 0, {8, 8, 8}, air, stone),
           "closing the roof again enters the worker");
   auto reclosed = settledChunk(service, 0, 0);
   require(skyLightAt(reclosed, 8, 7, 8) == 7 &&
-              skyLightAt(reclosed, 8, -1, 8) == 0,
-          "closing roof keeps side attenuation and the lower padding barrier");
+              skyLightAt(reclosed, 8, -1, 8) == 7,
+          "closing roof keeps side attenuation through the inherited bottom plane");
 
   const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
   require(reportBlock(service, 0, 0, {4, 7, 4}, air, lamp),
@@ -763,9 +774,9 @@ void skyLightPropagation() {
           "negative-height sky fixture loads");
   auto negativeOpen = settledChunk(negative, 0, 0);
   require(skyLightAt(negativeOpen, 3, -16, 3) == 15 &&
-              skyLightAt(negativeOpen, 3, -17, 3) == 0 &&
+              skyLightAt(negativeOpen, 3, -17, 3) == 15 &&
               skyLightAt(negativeOpen, 3, 0, 3) == 15,
-          "open negative-height column keeps lower padding as a barrier");
+          "open negative-height column inherits full sky through padding");
   for (int x = 0; x < 16; ++x)
     for (int z = 0; z < 16; ++z)
       require(reportBlock(negative, 0, 0, {x, -16, z}, air, stone),
@@ -775,6 +786,11 @@ void skyLightPropagation() {
               skyLightAt(negativeRoof, 3, -17, 3) == 0 &&
               skyLightAt(negativeRoof, 3, -15, 3) == 15,
           "negative-y roof blocks block and bottom-padding sky");
+  require(!negativeRoof->section(-2)->layers[static_cast<std::size_t>(
+               LightLayer::Sky)]
+               .isMissing() &&
+              skyLightAt(negativeRoof, 3, -17, 3) == 0,
+          "nonempty bottom section may allocate a stored lower-padding plane");
 
   LightService loadOrder(0, 1);
   require(loadOrder.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
@@ -792,6 +808,48 @@ void skyLightPropagation() {
   auto afterWest = settledChunk(loadOrder, 0, 0);
   require(skyLightAt(afterWest, 0, 7, 8) == 14,
           "later west load admits attenuated sky across the boundary");
+
+  LightService refresh(0, 1);
+  require(refresh.submitChunk(skyRoofChunk(-1, 0)) != 0 &&
+              refresh.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "same-epoch sky refresh loader accepts adjacent roof/open chunks");
+  auto roofedWest = settledChunk(refresh, -1, 0);
+  require(skyLightAt(roofedWest, -1, 7, 8) == 14,
+          "open east chunk lights the roofed west boundary before refresh");
+  const auto epoch = roofedWest->lifecycleEpoch;
+  require(refresh.submitChunk(skyRoofChunk(0, 0)) != 0,
+          "same-epoch authoritative east snapshot adds a roof");
+  auto refreshedEast = settledChunk(refresh, 0, 0);
+  refresh.drainPublished();
+  auto refreshedWest = refresh.latestChunk(-1, 0);
+  require(refreshedEast->lifecycleEpoch == epoch && refreshedWest &&
+              refreshedWest->lifecycleEpoch == epoch,
+          "authoritative sky refresh keeps the loading epoch");
+  require(skyLightAt(refreshedWest, -1, 7, 8) == 0,
+          "same-epoch roof refresh removes stale cross-boundary sky light");
+  require(refresh.submitChunk(emptyChunkFixture(0, 0, 0, 1)) != 0,
+          "same-epoch authoritative east snapshot restores open sky");
+  (void)settledChunk(refresh, 0, 0);
+  refresh.drainPublished();
+  auto reopenedWest = refresh.latestChunk(-1, 0);
+  require(skyLightAt(reopenedWest, -1, 7, 8) == 14,
+          "same-epoch open refresh relights the neighboring roofed boundary");
+
+  LightService topWater(0, 1);
+  auto waterColumn = emptyChunkFixture(0, 0, 0, 1);
+  waterColumn.sections[1] = std::make_shared<const LightSectionSnapshot>(
+      0, false,
+      std::vector<BlockLightProperties>{
+          lightPropertiesOf(Blocks::WATER.defaultState())},
+      std::vector<std::uint16_t>{});
+  require(topWater.submitChunk(std::move(waterColumn)) != 0,
+          "top water column loads");
+  auto topWaterSnapshot = settledChunk(topWater, 0, 0);
+  require(skyLightAt(topWaterSnapshot, 8, 15, 8) == 14 &&
+              skyLightAt(topWaterSnapshot, 8, 14, 8) == 13 &&
+              skyLightAt(topWaterSnapshot, 8, 16, 8) == 15,
+          "top padding seeds attenuated sky through a dampening-one water layer");
+
 }
 
 void blockLightStaleAndAuthoritativeRefresh() {

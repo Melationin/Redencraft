@@ -22,7 +22,9 @@ JAR_SHA1 = "3872a7f07a1a595e651aef8b058dfc2bb3772f46"
 STAGES = {
     1: [
         "fill -16 198 -2 16 203 16 minecraft:air",
-        "fill -2 -62 -2 2 100 2 minecraft:air",
+        "fill -1 -62 -1 1 319 1 minecraft:air",
+        "fill 8 150 8 8 319 8 minecraft:air",
+        "fill 15 150 8 16 319 8 minecraft:air",
         "setblock -8 250 -8 minecraft:note_block[note=1]",
     ],
     2: [
@@ -145,7 +147,10 @@ def main():
             payload = json.loads(match.group(1))
             if payload["stage"] != stage:
                 raise RuntimeError("unexpected light stage " + str(payload))
-            result["stages"][str(stage)] = payload["sky_light"]
+            result["stages"][str(stage)] = {
+                "sky_light": payload["sky_light"],
+                "raw_missing": payload["raw_missing"],
+            }
         result["commands"] = {str(stage): commands
                               for stage, commands in STAGES.items()}
     finally:
@@ -166,7 +171,7 @@ def main():
         "candidate_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
         "server_log_sha256": hashlib.sha256(log_path.read_bytes()).hexdigest(),
         "stages": len(result["stages"]),
-        "cells": len(result["stages"]["1"]),
+        "cells": len(result["stages"]["1"]["sky_light"]),
     }
     (run_dir / "run-manifest.json").write_text(
         json.dumps(run_manifest, indent=1) + "\n", encoding="utf-8")

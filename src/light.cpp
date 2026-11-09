@@ -391,6 +391,27 @@ const LightSectionSnapshot *LightChunkSnapshot::section(int sectionY) const {
   return index < sections.size() ? sections[index].get() : nullptr;
 }
 
+int LightChunkSnapshot::lightValue(LightLayer layer, int x, int y, int z) const {
+  const int sectionY = y >> 4;
+  const LightSectionSnapshot *current = section(sectionY);
+  if (!current)
+    return 0;
+  const auto layerIndex = static_cast<std::size_t>(layer);
+  if (!current->layers[layerIndex].isMissing())
+    return current->light(layer, x & 15, y & 15, z & 15);
+  if (layer == LightLayer::Block)
+    return 0;
+  if (!skyLightEnabled)
+    return 0;
+  for (int aboveY = sectionY + 1;
+       aboveY < minBlockSectionY + blockSectionCount + 1; ++aboveY) {
+    const LightSectionSnapshot *above = section(aboveY);
+    if (above && !above->layers[layerIndex].isMissing())
+      return above->light(LightLayer::Sky, x & 15, 0, z & 15);
+  }
+  return 15;
+}
+
 class LightService::Impl {
 public:
   Impl(int minSection, int sectionCount, LightWorkerOptions workerOptions)
@@ -1105,6 +1126,10 @@ private:
           for (int y = lightTop - 1; y >= first; --y)
             setStoredLevel({chunk->chunkX * 16 + x, y,
                             chunk->chunkZ * 16 + z}, 15);
+          if (source != minY - 1)
+            for (int y = source - 1; y >= lightBottom; --y)
+              setStoredLevel({chunk->chunkX * 16 + x, y,
+                              chunk->chunkZ * 16 + z}, 0);
           seedColumn(key, chunk, x, z, source);
         }
       }
@@ -1147,6 +1172,27 @@ private:
       }
     }
 
+    void ensureStoredSections() {
+      for (auto &[key, chunk] : working) {
+        if (removed.contains(key))
+          continue;
+        const int minBlock = chunk.snapshot->minBlockSectionY;
+        const int count = chunk.snapshot->blockSectionCount;
+        for (int y = minBlock; y < minBlock + count; ++y) {
+          const LightSectionSnapshot *section = chunk.snapshot->section(y);
+          if (section && !section->empty)
+            allocateSection(key, y);
+        }
+        const LightSectionSnapshot *bottom = chunk.snapshot->section(minBlock);
+        if (bottom && !bottom->empty)
+          allocateSection(key, minBlock - 1);
+        const LightSectionSnapshot *top =
+            chunk.snapshot->section(minBlock + count - 1);
+        if (top && !top->empty)
+          allocateSection(key, minBlock + count);
+      }
+    }
+
     int updateColumn(std::uint64_t key, int localX, int localZ) {
       WorkingChunk *chunk = workingChunk(key);
       if (!chunk)
@@ -1177,7 +1223,7 @@ private:
           const LightPos position{chunk->chunkX * 16 + localX, y,
                                   chunk->chunkZ * 16 + localZ};
           setStoredLevel(position, 15);
-          enqueueIncrease(position, 15, 63, true, true);
+          enqueueIncrease(position, 15, 63, false, true);
         }
       }
       sources[column] = newSource;
@@ -1207,7 +1253,16 @@ private:
     }
 
     void commitLayers() {
-      for (const SectionPos3 &position : dirtySections) {
+      std::vector<SectionPos3> ordered(dirtySections.begin(), dirtySections.end());
+      std::sort(ordered.begin(), ordered.end(), [](const auto &left,
+                                                   const auto &right) {
+        if (left.x != right.x)
+          return left.x < right.x;
+        if (left.z != right.z)
+          return left.z < right.z;
+        return left.y > right.y;
+      });
+      for (const SectionPos3 &position : ordered) {
         WorkingChunk *chunk = ensureWorking(chunkKey(position.x, position.z));
         if (!chunk)
           continue;
@@ -1218,6 +1273,43 @@ private:
         if (found == values.end())
           continue;
         const LightValues &layer = found->second;
+        const bool blockSection =
+            position.y >= chunk->snapshot->minBlockSectionY &&
+            position.y < chunk->snapshot->minBlockSectionY +
+                             chunk->snapshot->blockSectionCount;
+        bool needsStorage = false;
+        if (blockSection) {
+          const auto *block = chunk->snapshot->section(position.y);
+          needsStorage = block && !block->empty;
+        } else if (position.y == chunk->snapshot->minBlockSectionY - 1) {
+          const auto *block =
+              chunk->snapshot->section(chunk->snapshot->minBlockSectionY);
+          needsStorage = block && !block->empty;
+        } else if (position.y == chunk->snapshot->minBlockSectionY +
+                                   chunk->snapshot->blockSectionCount) {
+          const auto *block = chunk->snapshot->section(
+              chunk->snapshot->minBlockSectionY +
+              chunk->snapshot->blockSectionCount - 1);
+          needsStorage = block && !block->empty;
+        }
+        if (!needsStorage) {
+          bool inherited = true;
+          for (int z = 0; z < 16 && inherited; ++z) {
+            for (int x = 0; x < 16 && inherited; ++x) {
+              const int plane = inheritedPlane(position, x, z);
+              for (int y = 0; y < 16; ++y)
+                if (layer[lightIndex(x, y, z)] != plane) {
+                  inherited = false;
+                  break;
+                }
+            }
+          }
+          if (inherited) {
+            values.erase(position);
+            dirtySections.erase(position);
+            continue;
+          }
+        }
         if (std::all_of(layer.begin(), layer.end(), [&](std::uint8_t value) {
               return value == layer.front();
             }))
@@ -1234,6 +1326,27 @@ private:
 
   private:
     static int HeightmapColumnKey(int x, int z) { return x + z * 16; }
+
+    int inheritedPlane(const SectionPos3 &key, int x, int z) const {
+      const LightChunkSnapshot *chunk =
+          stateFor(chunkKey(key.x, key.z));
+      if (!chunk)
+        return 15;
+      for (int aboveY = key.y + 1;
+           aboveY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
+           ++aboveY) {
+        const SectionPos3 aboveKey{key.x, aboveY, key.z};
+        const auto edited = values.find(aboveKey);
+        if (edited != values.end())
+          return edited->second[lightIndex(x, aboveY * 16, z)];
+        const LightSectionSnapshot *above = chunk->section(aboveY);
+        if (above &&
+            !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                 .isMissing())
+          return above->light(LightLayer::Sky, x, 0, z);
+      }
+      return 15;
+    }
 
     WorkingChunk *workingChunk(std::uint64_t key) {
       const auto found = working.find(key);
@@ -1271,9 +1384,7 @@ private:
     }
 
     const LightSectionSnapshot *sectionAt(LightPos position) const {
-      // Sky storage has no meaningful data below the playable world; the
-      // bottom padding is a read barrier. The upper padding remains sky data.
-      if (position.y < owner.minBlockSectionY * 16 ||
+      if (position.y < (owner.minBlockSectionY - 1) * 16 ||
           position.y >=
               (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16)
         return nullptr;
@@ -1298,39 +1409,132 @@ private:
     }
 
     int storedLevel(LightPos position) const {
-      const LightSectionSnapshot *section = sectionAt(position);
-      if (!section)
+      const LightChunkSnapshot *chunk =
+          stateFor(chunkKey(position.x >> 4, position.z >> 4));
+      if (!chunk)
         return 0;
       const SectionPos3 key{position.x >> 4, position.y >> 4,
                             position.z >> 4};
       const auto found = values.find(key);
       if (found != values.end())
         return found->second[lightIndex(position.x, position.y, position.z)];
-      return section->light(LightLayer::Sky, position.x & 15,
-                            position.y & 15, position.z & 15);
+      const LightSectionSnapshot *section = chunk->section(position.y >> 4);
+      if (section && !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                           .isMissing())
+        return section->light(LightLayer::Sky, position.x & 15,
+                              position.y & 15, position.z & 15);
+      for (int aboveY = (position.y >> 4) + 1;
+           aboveY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
+           ++aboveY) {
+        const SectionPos3 aboveKey{position.x >> 4, aboveY, position.z >> 4};
+        const auto edited = values.find(aboveKey);
+        if (edited != values.end())
+          return edited->second[lightIndex(position.x, aboveY * 16,
+                                           position.z)];
+        const LightSectionSnapshot *above = chunk->section(aboveY);
+        if (above &&
+            !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                 .isMissing())
+          return above->light(LightLayer::Sky, position.x & 15, 0,
+                              position.z & 15);
+      }
+      return 15;
     }
 
     bool setStoredLevel(LightPos position, int level) {
       const LightSectionSnapshot *section = sectionAt(position);
       if (!section)
         return false;
+      const int current = storedLevel(position);
+      if (current == level)
+        return false;
       const SectionPos3 key{position.x >> 4, position.y >> 4,
                             position.z >> 4};
       auto inserted = values.try_emplace(key);
       LightValues &layer = inserted.first->second;
       if (inserted.second) {
-        for (int y = 0; y < 16; ++y)
-          for (int z = 0; z < 16; ++z)
-            for (int x = 0; x < 16; ++x)
-              layer[lightIndex(x, y, z)] =
-                  section->light(LightLayer::Sky, x, y, z);
+        if (!section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                 .isMissing()) {
+          for (int y = 0; y < 16; ++y)
+            for (int z = 0; z < 16; ++z)
+              for (int x = 0; x < 16; ++x)
+                layer[lightIndex(x, y, z)] =
+                    section->light(LightLayer::Sky, x, y, z);
+        } else {
+          const LightChunkSnapshot *chunk =
+              stateFor(chunkKey(position.x >> 4, position.z >> 4));
+          for (int z = 0; z < 16; ++z) {
+            for (int x = 0; x < 16; ++x) {
+              int inherited = 15;
+              for (int aboveY = key.y + 1;
+                   aboveY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
+                   ++aboveY) {
+                const SectionPos3 aboveKey{key.x, aboveY, key.z};
+                const auto edited = values.find(aboveKey);
+                if (edited != values.end()) {
+                  inherited = edited->second[lightIndex(x, aboveY * 16, z)];
+                  break;
+                }
+                const LightSectionSnapshot *above = chunk->section(aboveY);
+                if (above &&
+                    !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                         .isMissing()) {
+                  inherited = above->light(LightLayer::Sky, x, 0, z);
+                  break;
+                }
+              }
+              for (int y = 0; y < 16; ++y)
+                layer[lightIndex(x, y, z)] = static_cast<std::uint8_t>(inherited);
+            }
+          }
+        }
       }
       const auto index = lightIndex(position.x, position.y, position.z);
-      if (layer[index] == level)
-        return false;
       layer[index] = static_cast<std::uint8_t>(level);
       dirtySections.insert(key);
       return true;
+    }
+
+    void allocateSection(std::uint64_t chunkKeyValue, int sectionY) {
+      const SectionPos3 key{static_cast<int>(chunkKeyValue >> 32), sectionY,
+                            static_cast<int>(
+                                static_cast<std::uint32_t>(chunkKeyValue))};
+      if (values.contains(key))
+        return;
+      const LightChunkSnapshot *chunk = stateFor(chunkKeyValue);
+      if (!chunk)
+        return;
+      const LightSectionSnapshot *section = chunk->section(sectionY);
+      if (!section || !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                          .isMissing())
+        return;
+      LightValues layer{};
+      for (int z = 0; z < 16; ++z) {
+        for (int x = 0; x < 16; ++x) {
+          int inherited = 15;
+          for (int aboveY = sectionY + 1;
+               aboveY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
+               ++aboveY) {
+            const SectionPos3 aboveKey{key.x, aboveY, key.z};
+            const auto edited = values.find(aboveKey);
+            if (edited != values.end()) {
+              inherited = edited->second[lightIndex(x, aboveY * 16, z)];
+              break;
+            }
+            const LightSectionSnapshot *above = chunk->section(aboveY);
+            if (above &&
+                !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                     .isMissing()) {
+              inherited = above->light(LightLayer::Sky, x, 0, z);
+              break;
+            }
+          }
+          for (int y = 0; y < 16; ++y)
+            layer[lightIndex(x, y, z)] = static_cast<std::uint8_t>(inherited);
+        }
+      }
+      values.emplace(key, layer);
+      dirtySections.insert(key);
     }
 
     int computeSource(WorkingChunk &chunk, int x, int z) const {
@@ -1362,7 +1566,7 @@ private:
       for (auto &section : chunk.snapshot->sections) {
         auto copy = std::make_shared<LightSectionSnapshot>(*section);
         copy->layers[static_cast<std::size_t>(LightLayer::Sky)] =
-            LightLayerSnapshot::uniform(0);
+            LightLayerSnapshot::missing();
         section = copy;
       }
       chunk.mutableSections.clear();
@@ -1396,8 +1600,8 @@ private:
     void seedColumn(std::uint64_t, WorkingChunk *chunk, int x, int z,
                     int source) {
       const int minY = owner.minBlockSectionY * 16;
-      const int maxY =
-          (owner.minBlockSectionY + owner.blockSectionCount) * 16;
+      const int lightTop =
+          (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16;
       const int sentinel = minY - 1;
       const int bx = chunk->chunkX * 16 + x;
       const int bz = chunk->chunkZ * 16 + z;
@@ -1407,7 +1611,7 @@ private:
       const int east = sourceFor(bx + 1, bz);
       const int neighborHighest = std::max({north, south, west, east});
       const int first = source == sentinel ? minY : source;
-      for (int y = maxY - 1; y >= first; --y) {
+      for (int y = lightTop - 1; y >= first; --y) {
         if (y != source && y >= neighborHighest)
           continue;
         std::uint8_t directions = 0;
@@ -1422,8 +1626,7 @@ private:
         if (y < east)
           directions |= 1u << 5;
         if (directions)
-          enqueueIncrease({bx, y, bz}, 15, directions,
-                          emptyShape(stateAt({bx, y, bz})), true);
+          enqueueIncrease({bx, y, bz}, 15, directions, false, true);
       }
     }
 
@@ -1436,7 +1639,7 @@ private:
         return;
       if (isSource(position)) {
         enqueueDecrease(position, 15, 63u & ~(1u << 1));
-        enqueueIncrease(position, 15, 63u & ~(1u << 1), true, true);
+        enqueueIncrease(position, 15, 63u & ~(1u << 1), false, true);
       } else {
         const int oldLevel = storedLevel(position);
         if (oldLevel > 0) {
@@ -1489,7 +1692,7 @@ private:
         if (!sectionAt(to))
           continue;
         if (isSource(to)) {
-          enqueueIncrease(to, 15, 63, true, true);
+          enqueueIncrease(to, 15, 63, false, true);
           continue;
         }
         const int toLevel = storedLevel(to);
@@ -1690,6 +1893,7 @@ private:
         snapshot->chunkZ = command.load->chunkZ;
         snapshot->minBlockSectionY = command.load->minBlockSectionY;
         snapshot->blockSectionCount = command.load->blockSectionCount;
+        snapshot->skyLightEnabled = options.hasSkyLight;
         snapshot->generation = command.generation;
         snapshot->lifecycleEpoch = command.lifecycleEpoch;
         snapshot->revision = 0;
@@ -1701,6 +1905,10 @@ private:
           replaced.insert(key);
         if (old != internal.end() &&
             old->second->lifecycleEpoch == command.lifecycleEpoch) {
+          // A full same-epoch input can change source columns without a per-cell
+          // command. Invalidate the old cross-boundary sky dependencies before
+          // rebuilding the chunk from the authoritative snapshot.
+          replaced.insert(key);
           for (std::size_t i = 0;
                i < snapshot->sections.size() &&
                i < old->second->sections.size();
@@ -1834,8 +2042,8 @@ private:
     propagation.run();
     propagation.commitLayers();
 
-    bool metadataComplete = propagation.isComplete();
-    bool skyComplete = true;
+    bool blockComplete = propagation.isComplete();
+    bool skyComplete = !options.hasSkyLight;
     if (options.hasSkyLight) {
       SkyLightPropagator sky(*this, working, removed, skyColumnSources);
       for (std::uint64_t key : loaded) {
@@ -1861,10 +2069,10 @@ private:
       }
       for (const LightPos &position : changedPositions)
         sky.enqueueCheck(position);
+      sky.ensureStoredSections();
       sky.run();
       sky.commitLayers();
       skyComplete = sky.isComplete();
-      metadataComplete = metadataComplete && skyComplete;
     }
     for (const auto &[key, chunk] : working) {
       if (removed.contains(key))
@@ -1872,13 +2080,19 @@ private:
       chunk.snapshot->unsupportedCells = 0;
       for (const auto &section : chunk.snapshot->sections)
         chunk.snapshot->unsupportedCells += section->unsupportedCells;
-      if (chunk.snapshot->unsupportedCells != 0)
-        metadataComplete = false;
+      if (chunk.snapshot->unsupportedCells != 0) {
+        blockComplete = false;
+        if (options.hasSkyLight)
+          skyComplete = false;
+      }
     }
     for (const auto &[key, chunk] : internal) {
       if (!removed.contains(key) && !working.contains(key) &&
-          chunk->unsupportedCells != 0)
-        metadataComplete = false;
+          chunk->unsupportedCells != 0) {
+        blockComplete = false;
+        if (options.hasSkyLight)
+          skyComplete = false;
+      }
     }
 
     const std::uint64_t publicationRevision = ++nextPublicationRevision;
@@ -1888,9 +2102,9 @@ private:
       chunk.snapshot->generation = maxGeneration;
       chunk.snapshot->revision = publicationRevision;
       chunk.snapshot->lifecycleEpoch = chunk.lifecycleEpoch;
-      chunk.snapshot->blockLightComplete = metadataComplete;
+      chunk.snapshot->blockLightComplete = blockComplete;
       chunk.snapshot->skyLightComplete = skyComplete;
-      chunk.snapshot->propagationComplete = metadataComplete && skyComplete;
+      chunk.snapshot->propagationComplete = blockComplete && skyComplete;
       chunk.snapshot->protocolReady = false;
       std::shared_ptr<const LightChunkSnapshot> immutable = chunk.snapshot;
       internal[key] = immutable;

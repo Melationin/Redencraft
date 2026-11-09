@@ -16,15 +16,21 @@ def main():
     for line in output.splitlines():
         if line.startswith("SKYLIGHT_JSON "):
             payload = json.loads(line[len("SKYLIGHT_JSON "):])
-            candidate[str(payload["stage"])] = payload["sky_light"]
+            candidate[str(payload["stage"])] = {
+                "sky_light": payload["sky_light"],
+                "raw_missing": payload["raw_missing"],
+            }
     golden = json.loads(pathlib.Path(args.golden).read_text(encoding="utf-8"))
     if candidate != golden["stages"]:
         raise SystemExit("C++ sky-light stages differ from official golden")
-    cells = len(candidate["1"])
-    if any(len(stage) != cells for stage in candidate.values()):
+    cells = len(candidate["1"]["sky_light"])
+    if any(len(stage["sky_light"]) != cells for stage in candidate.values()):
         raise SystemExit("C++ sky-light stages have inconsistent cell counts")
+    raw_flags = sum(len(stage["raw_missing"])
+                    for stage in candidate.values())
     print("sky-light differential matched: %d stages, %d cells each, "
-          "%d observations" % (len(candidate), cells, len(candidate) * cells))
+          "%d sky observations + %d raw-layer flags" %
+          (len(candidate), cells, len(candidate) * cells, raw_flags))
 
 
 if __name__ == "__main__":

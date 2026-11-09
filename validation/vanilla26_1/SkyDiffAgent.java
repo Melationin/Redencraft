@@ -12,6 +12,7 @@ import java.security.ProtectionDomain;
 import java.util.concurrent.CompletableFuture;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ThreadedLevelLightEngine;
@@ -22,6 +23,7 @@ import net.minecraft.world.level.block.state.BlockState;
 
 public final class SkyDiffAgent {
   private static final int[][] CELLS = cells();
+  private static final int[] RAW_SAMPLES = {0, 9, 10, 11, 12, 15};
   private static volatile MinecraftServer server;
   private static int emittedStage = -1;
   private static int observedStage = -1;
@@ -141,6 +143,15 @@ public final class SkyDiffAgent {
         output.append(listener.getLightValue(
             new BlockPos(CELLS[i][0], CELLS[i][1], CELLS[i][2])));
       }
+      output.append("],\"raw_missing\":[");
+      for (int i = 0; i < RAW_SAMPLES.length; ++i) {
+        if (i != 0)
+          output.append(',');
+        int cell = RAW_SAMPLES[i];
+        output.append(listener.getDataLayerData(
+            SectionPos.of(CELLS[cell][0] >> 4, CELLS[cell][1] >> 4,
+                          CELLS[cell][2] >> 4)) == null ? 1 : 0);
+      }
       output.append("]}");
       System.out.println(output);
       System.out.flush();
@@ -164,6 +175,9 @@ public final class SkyDiffAgent {
     values.add(new int[]{8, 202, 8});
     values.add(new int[]{8, 203, 8});
     values.add(new int[]{8, 320, 8});
+    values.add(new int[]{8, 150, 8});
+    values.add(new int[]{15, 150, 8});
+    values.add(new int[]{16, 150, 8});
     values.add(new int[]{0, -62, 0});
     values.add(new int[]{0, -61, 0});
     values.add(new int[]{0, -65, 0});

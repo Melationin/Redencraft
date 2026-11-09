@@ -117,6 +117,7 @@ struct LightChunkSnapshot {
   // independently of the unordered batch's input generation.
   std::uint64_t lifecycleEpoch = 0;
   std::uint64_t revision = 0;
+  bool skyLightEnabled = true;
   // L-2a may complete the block layer while sky propagation and protocol
   // publication remain unfinished.
   bool blockLightComplete = false;
@@ -130,6 +131,11 @@ struct LightChunkSnapshot {
   int minLightSectionY() const { return minBlockSectionY - 1; }
   int lightSectionCount() const { return blockSectionCount + 2; }
   const LightSectionSnapshot *section(int sectionY) const;
+  // Sky queries follow SkyLightSectionStorage: a missing section takes the
+  // bottom plane of the nearest stored section above it. Raw layer access stays
+  // available through section().Missing sky data therefore differs from a
+  // deliberately stored zero layer.
+  int lightValue(LightLayer layer, int x, int y, int z) const;
 };
 
 struct LightBlockChange {
