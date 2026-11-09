@@ -18,6 +18,48 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 **计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`include/redstone/net/*.hpp`、`src/net/*.cpp`、`tests/*light*`、`tests/protocol.cpp`、`validation/protocol775/*`、`docs/light-engine.md`（及协议文档中确需校正的当前边界）、`task/TASKS.md`。若实现需要，只做最小协议编码/发布接入，不修改 `PLAN.md`、流体语义或无关文件。
 
+### L-3 实际与证据（实现提交 `908aa09`）
+
+**领取与实现**
+
+- 领取记录提交 `b06f0c1`；实现先在本地提交 `25d0d7e`，读取本条末尾追加的两项验收反例后用 `908aa09` 替换，未另拆实现提交。本文单独提交交接记录。`PLAN.md`、协议导出资产、客户端、Anvil/World Clock 与无关文件均未改。
+- `LightService` 将同一 worker revision 的脏区块合成一个有序发布批次，一次交接给 drain；跨批次尚未 drain 的同区块快照只保留最新副本，并合并各区段增量，避免读者看到半个 revision。跨两块测试断言两个结果同一 revision、一次 drain 全可见。
+- 天空存储资格以本批 3×3×3 权威状态更新；本批未重算但此前已发布的 raw 层继续可写，已删除或新不满足资格的层以本批状态清除，不从旧快照复活。worker 用共享 section 指针同一性跳过未改层，累积 `changedSections` 供协议增量使用；Session 热路径不再逐区段比较或复制 nibble。
+- 初包的 `ProtocolChunkSnapshot` 直接持有同坐标、同高度、`protocolReady=true` 的不可变光照快照。Writer 编码四个 bitset 与两个 2048-byte 数据列表：uniform 非零、mixed 进 data mask；显式 uniform 0 进 empty mask；raw `Missing` 在首包与增量均不设位，按 `ClientboundLightUpdatePacketData` 的 `data == null` 分支处理，不伪装成 0。上下额外 section 全部按相对 `minLightSectionY` 的索引参与。
+- 增量由 worker 的累积区段清单生成。Session 在普通方块广播阶段前接收完整批次；首包未发布时只记录待发区块并延后玩家位置，不等待 worker。未知光学/未完成传播保持 `protocolReady=false`，区块和位置继续待发。
+- 已入 FIFO 的首包不再单独取消，`chunk_batch_start`、有效区块和 `chunk_batch_finished(count)` 保持一致；晚到的 `forget_level_chunk` 排在其后。加载代 token 只取消尚未编码的旧动态 `light_update`，跨坐标/生命周期比较会拒绝编码。
+- native 服务端在导入完成后启用 World 光照；`World::tick` 在普通方块广播回调前非阻塞 drain，`light_update` 先于该阶段方块包，既有成功事件立即发送顺序未变。
+
+**行为反例**
+
+- `light` 新增两区块整批可见性、无重复 revision、一次 drain 全部最新，以及两次未 drain revision 的累积 `changedSections`（不同 section 都保留）。既有缺层跨边缘、删除最后锚块、同代刷新、负 y、上下 padding、无天空光和双层隔离继续通过。
+- `light_protocol` 独立严格解帧：初包、动态更新、显式零/raw Missing、未发布延后、未知光学延后、动态旧包取消、首包批次计数一致、离开视野/重载、无天空光不伪造亮度，以及仅由 512 次光照快照触发 16 MiB 有界积压断开。解帧按官方四个 bitset/data-list 分支计算期望，不引用 encoder 结果自证。
+- 9 区块 native fixture 断言每块都发布 `protocolReady`。headless TCP 服务端实跑覆盖登录、配置、区块、放置和破坏；既有流体慢端积压仍只关闭该连接，健康端继续 ping/放/破并完成 320 tick。
+
+**官方 26.1 依据**
+
+- 只读依据为 `ClientboundLevelChunkWithLightPacket.java`、`ClientboundLightUpdatePacket.java`、`ClientboundLightUpdatePacketData.java:68–85`、`ChunkHolder.java:175–189`、`ClientPacketListener.java:2393–2406,2540–2563`。官方 JAR SHA-1 复核为 `3872a7f07a1a595e651aef8b058dfc2bb3772f46`，内部 `server-26.1.jar` SHA-256 为 `a7fed6f7d88379349e35ae0c6e9881d4484605132f6f620376a3868eea6cce52`。
+- 未启动客户端、未启动新的官方世界。离线官方 26.1 PLAY codec 解码 L-3 光照夹具 **86/86**（`light_update` 的 2048-byte 数据层也由官方 codec 解析）；既有完整交互/实体夹具 **490/490**。光照夹具 SHA-256 `ee0ba54a9a762e99fcabf575af56e14013289bcb32a5b86ac1a38488a48b590e`，日志 SHA-256 `8c7a7c96f0ada3a8b0f9ac0239c64c49762a7458c63021d3b1022c4b73c25d68`；完整夹具 SHA-256 `05a884a7f2ee08b7d4ad18e39339f7190c693434f83bcf1f0d922e89ab67603d`，日志 SHA-256 `315f3c74241d5410601885be276de59c6ebf2a23233dadeadb7a7bf57a8d7662`。
+- 这些是官方编码器/解码器验证与 C++ 行为证据，不等于真实客户端渲染或原版服务端逐 tick 差分；不能声称原版等价。
+
+**聚焦实跑与日志**
+
+- `light_tests`：`light tests passed`；`build-f7-nmake/light-l3-acceptance.log`，SHA-256 `b3d70361e83a410080b7d6d547ec5177ce3c3624cc31b6fa0047c7eb81e9521c`。
+- `light_protocol_tests`：`light protocol tests passed: 86 packets`；`build-f7-nmake/light-protocol-l3-acceptance.log`，SHA-256 `52da5964f3106e815f08d0e1c7b4d27c0352cc17f9699ac2b1da1b985b716874`。
+- `wire_tests` 与 `protocol_tests` 分别 `wire tests passed`、`protocol state, interaction, events and entity tests passed`；日志 SHA-256 `d75012844e9f9eb89cde33319f1ed07268072e0d54072fe6be511b8af80f167c`、`502b009f5f437909d7d83079ab2dda267c2cd09b0a15cc8bd19e0c083b8a27d6`。
+- headless `socket_test.py`：`TCP status/login/configuration/chunks/place/break passed`，SHA-256 `3ca79d368b02b5a8b0ed6bf7125de422ee660f6fa8903e41d68d0860ac2dcc26`。`backpressure_test.py`：`output_backpressure_disconnects=1`、健康端 `healthy_ping_place_break=true`、`server_ticks=320`、exit 0，SHA-256 `e4ef83c8623de3f9b7ee0413d0c31fa2954617796df9f19d99e80f12ab5e3bb9`。
+- 原 `light`、`wire`、`protocol`、官方夹具命令均为直接运行；最终候选完成后未再单独运行任何测试。
+
+**最终构建与唯一一次完整 CTest**
+
+- NMake 目标 `clean` 后 MSVC 19.51 Release + jemalloc 全量构建成功，generator `NMake Makefiles`、`BUILD_TESTING=ON`、`REDSTONE_BUILD_VANILLA_SERVER=ON`。构建日志 `build-f7-nmake/build-l3-acceptance-final.log`，SHA-256 `97234aead2571b5eec3e51f3f41f544675897933ea5d437b36baed508ef26599`。
+- 唯一最终 CTest：**29/29 通过，25.54 s**。日志 `build-f7-nmake/ctest-l3-acceptance-final.log`，SHA-256 `26f52826c1a5af347b1853a510dd20e07dd477c17c62d9fb1948d9b1217faf45`。reviewer 不重复执行。
+
+**明确没有做**
+
+- 没有 Anvil `SkyLight`/`BlockLight`/`isLightOn` 导入或写回、真实客户端渲染、完整 chunk 生命周期/加载票、L-4 世吞性能门槛或 `<10%` 结论。`protocolReady` 按当前加载域保守合取，未知光学会使相关初包与位置持续待发而不是伪造完成。
+- 没有做本轮真实 26.1 服务端逐 tick 光照包差分；L-3 证据边界是 Java 源码、官方 codec、C++ 行为测试和本机 headless loopback。没有改 `PLAN.md`。
+
 ## L-2b 天空光传播（coder）
 
 **范围**：只实现 26.1 `ChunkSkyLightSources`、`SkyLightEngine`、`SkyLightSectionStorage` 与共享 `LightEngine` 对应的天空光入口、满光向下、非满光侧向衰减、共享面遮挡、跨 section/chunk、负 y、上下 padding 和空 section 处理；复用 L-1/L-2a 的单写者 worker、owned/immutable 输入、生命周期 epoch 与单调发布，不在主线程传播或等待。天空光与方块光独立队列/层写入，不得把四张 heightmap 直接当入口，不得默认给无天空光维度满光。
@@ -1208,4 +1250,10 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 性能债列入 L-4：整图 unsupported 扫描和按影响域判断、天空列整列重扫/每区块临时表扫描、生命周期/Anvil、启用真实传播和发布的世吞测量。该机拓扑实际读取：CPU 2（0x4）和 CPU 4（0x10）为两个独立性能核，无 SMT sibling；后续主线程/worker 分别绑核，进程允许两核，记录两线程 CPU 和积压。L-3 不提前领 L-4。最终候选干净构建由 coder 一轮 CTest，reviewer 不重跑。先登记范围并修改唯一状态末行，再改代码。
 
-任务进行中
+#### L-3 最终 CTest 前的协议反例（验收澄清，状态不变）
+
+请核对首包的 writer 延迟取消与批次数量一致性：当前工作树 `src/net/session.cpp:1279–1304` 在 world 线程为 deferred chunk 增加 count 并写 `chunk_batch_finished(count)`，但 `expireChunk` 可在 writer 编码前失效 token；`src/net/server_main.cpp:304–308` 随后只跳过该 chunk。反例：先把首包批次放到积压 writer，不消费；接着卸载或移出视野；再解帧，start/finished 仍在但实际 chunk 数少于 count。把 start/有效 chunk/finished 作为一致的发送单元，或按 FIFO 保留已提交首包完整性，随后发送 forget 并禁止旧 worker 发布进入新生命周期；不要只删批内某一帧。加入确定性积压反例（不启客户端），在最终 CTest 前一并覆盖。
+
+同一验收的两处初始/缺层边界：工作树 `src/net/wire.cpp:716–722` 对 `before == nullptr` 仍无条件绑定 `before->layers[layer]`，首包调用未传 previous，须先判空再访问，且可用共享 section 指针同一性跳过未改层。 `ClientboundLightUpdatePacketData.java:68–85` 对 `data == null` 在两掩码均不设位；`ClientPacketListener.java:2540–2563` 只对有位的层 queue 数据，稀疏层失去邻段支撑后依赖客户端区段状态移除。请区分存储层归零（设 empty mask）与 raw 变 Missing（原版不设位，结合普通方块/区段生命周期验证）；不能把 Missing 直接当作 0，否则会为缺层排队伪造的暗层，而该列可能继承 7/14/15。验收用例不要以当前 encoder 的期望做自证，按原版 prepareSectionData 分支断言。
+
+任务已完成
