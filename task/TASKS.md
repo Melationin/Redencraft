@@ -18,6 +18,18 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 **计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`include/redstone/net/*.hpp`、`src/net/*.cpp`、`tests/*light*`、`tests/protocol.cpp`、`validation/protocol775/*`、`docs/light-engine.md`（及协议文档中确需校正的当前边界）、`task/TASKS.md`。若实现需要，只做最小协议编码/发布接入，不修改 `PLAN.md`、流体语义或无关文件。
 
+### L-3 返工领取（coder）
+
+**范围**：只处理最新审查中的两条阻塞，不领取 L-4、不做 Anvil/加载票、不改 `PLAN.md`、协议 ID 或既有方块广播/事件顺序。保留首包 FIFO 完整计数、raw Missing 不设位、已存零层 empty mask、整批非阻塞发布及现有官方 codec/严格解帧证据。
+
+**增量基准**：每次发布快照记录其 `changedSections` 所对应的 ready-to-ready 基准 revision。连贯发布继续走不可变区段清单；若 Session 上次发送版本与当前基准之间跨过已 drain 但 `protocolReady=false` 的快照，不能直接应用新快照的局部增量。用确定性的 `ready(A) → drained incomplete(B) → ready(C)` 夹具，让 S 在 B、T 在 C 变化，证明最终 S/T 都在客户端快照收敛；修复须在 worker/写线程从 immutable 快照补差，或等价保留 ready-to-ready delta，不能在每 tick 每 session 全扫区块。
+
+**显式生命周期**：`World::unloadChunk/loadChunk` 要显式通知协议层，不能只依赖玩家移出视野。实卸载应取消尚未编码的旧动态光，已提交首包仍按 FIFO 保持 start/chunk/finished 计数一致，并在其后发送 forget；同视野 reload 后接收新 epoch 首包。旧 epoch 发布或编码错误只能影响对应连接，不得从 callback 抛穿 `World::tick` 或其他连接。补坐标不动、writer 留有旧增量积压的真实 World unload/reload 严格帧测试。只接已有显式生命周期；加载票/Anvil 继续 L-4/所属系统。
+
+**验收与提交**：聚焦运行 `light`、`light_protocol`、wire/protocol 与官方 26.1 PLAY codec，保留原 86 包及既有黄金回归；最终候选干净 MSVC Release + jemalloc 完整构建后仅由 coder 跑一轮完整 CTest，reviewer 不重复。实现与文档一个提交，`TASKS.md` 交接另一个提交；将命令、日志/hash、反例和明确未完成项写回本文件，末行按流程更新。
+
+**计划文件**：`include/redstone/light.hpp`、`src/light.cpp`、`include/redstone/engine.hpp`、`src/engine.cpp`、`include/redstone/net/session.hpp`、`src/net/session.cpp`、`src/net/server_main.cpp`、`src/net/wire.cpp`、`tests/light_tests.cpp`、`tests/light_protocol_tests.cpp`、`docs/light-engine.md`、`docs/protocol775.md`、`task/TASKS.md`。
+
 ### L-3 实际与证据（实现提交 `908aa09`）
 
 **领取与实现**
@@ -1256,4 +1268,14 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 同一验收的两处初始/缺层边界：工作树 `src/net/wire.cpp:716–722` 对 `before == nullptr` 仍无条件绑定 `before->layers[layer]`，首包调用未传 previous，须先判空再访问，且可用共享 section 指针同一性跳过未改层。 `ClientboundLightUpdatePacketData.java:68–85` 对 `data == null` 在两掩码均不设位；`ClientPacketListener.java:2540–2563` 只对有位的层 queue 数据，稀疏层失去邻段支撑后依赖客户端区段状态移除。请区分存储层归零（设 empty mask）与 raw 变 Missing（原版不设位，结合普通方块/区段生命周期验证）；不能把 Missing 直接当作 0，否则会为缺层排队伪造的暗层，而该列可能继承 7/14/15。验收用例不要以当前 encoder 的期望做自证，按原版 prepareSectionData 分支断言。
 
-任务已完成
+### L-3 审查记录（`908aa09`）
+
+采用 coder 的 **29/29 CTest**（25.54 s），日志哈希已核；官方 26.1 codec 解码 86 个光照夹具包（以及 490 个既有包），独立严格解帧、FIFO 批尾计数、缺层不设位、已存零层清除、整批发布和 socket 积压证据有效。两个协议交接漏洞需先补：
+
+- **阻塞｜漏发跨过 incomplete revision 的区段。** `src/light.cpp:2223–2246` 的 `changedSections` 以 worker 紧邻 internal 快照为基准；`:2248–2286` 只合并仍未 drain 的快照。 `src/net/session.cpp:1305–1322` 会忽略已 drain 的 `protocolReady=false` 快照，`src/net/wire.cpp:733–739` 却直接用下一完整快照的增量，不检查其基准是否等于 session 上一次发送版本。反例：客户端已收到 A；加入一个未知光学状态，让 worker 同批更新可见块的光层 S，生成不就绪 B；执行 drain（会话正确不发）；移除未知状态，再让同一可见块只改另一光层 T，生成就绪 C；发了 T，S 仍停留 A。保留增量基准版本，正常连贯走区段清单，存在跳跃则以会话最后发送的 immutable 快照在 writer/worker 补差，或等价地保留 ready-to-ready 的变化；不能靠对所有 session 每 tick 扫区块。测确定性 ready→drained incomplete→ready，并解帧证明 S/T 都收敛。
+- **阻塞｜实卸载/重载与玩家移出视野不是同一个路径。** `src/engine.cpp:937–963` 世界显式卸载仅失效 worker；`src/net/session.cpp:1175–1214` 的旧动态包 token、sent/待发状态仅由玩家移出视野清理。测试 `tests/light_protocol_tests.cpp:299–360` 只移动玩家，未调用 World unload/load。若坐标仍可见，实卸载后排队旧光仍可能编码；新 epoch 发布进入 `lightPublished`，会拿旧 epoch 调 `prepareLightUpdate` 抛 `ProtocolError`（`src/net/wire.cpp:694–703`），异常可经 callback 退出世界 tick。为显式生命周期接入有序失效：立即取消未编码的旧动态光，保留已提交首批次的 FIFO 计数，送 forget，随后同视野收到新 epoch 的首包；发布/编码错误限于对应连接，不能打断世界 tick 或其他连接。补真实 World unload/reload、玩家位置不动、writer 有旧增量积压的测试。只接已有显式生命周期，加载票/Anvil 留 L-4 及其所属系统。
+- **L-4 性能债**：`src/light.cpp:1197–1215,2248–2286` 每批全 loaded 光层资格扫描和发布共享锁内旧批次×新批次配对、分配合并；`drainPublished` 也在同锁更新所有 latest。加入 L-4 计量，按受影响区段或稀疏查询使用持久资格，按 key 合并并缩小临界区，使用真正的世吞有光数据判断。这条不要求本轮做全局性能优化。
+
+**结论：退回 L-3，仅处理前两条。** 保留 FIFO 首包计数和原版 null 分支、既有方块广播与成功事件顺序、非阻塞发布。最终新候选只由 coder 完整构建并执行一轮 CTest。先按流程在唯一末行登记 `任务进行中`。
+
+任务进行中
