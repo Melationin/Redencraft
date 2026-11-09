@@ -101,6 +101,37 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 **验收**：真实 worker 覆盖源侧缺层/目标侧同高存层、增加与清除、raw 状态；既有 26.1 147 天空值+42 raw 标记及 225 方块光保留，并在实际 26.1 增加该边缘夹具。最终候选干净 MSVC Release+jemalloc 构建后只跑一轮完整 CTest；reviewer 不复跑。不接协议、Anvil 或 L-4。
 
 **计划文件**：`src/light.cpp`、`tests/light_tests.cpp`、`tests/sky_light_probe.cpp`、`validation/vanilla26_1/SkyDiffAgent.java`、`run_sky_light_validation.py`、`sky_light_differential_test.py`、`sky-light-golden.json`、`docs/light-engine.md`、`task/TASKS.md`。
+
+### L-2b 第三次返工实际（实现提交 `d3b849e`）
+
+**跨缺层边缘补光/撤光**
+
+- `SkyLightPropagator` 现在区分 raw 可写存储、缺失层派生查询和 source 起点。`setStoredLevel` 被真实存储资格拒绝时，increase/decrease 队列不再继续断言该格已经更新，也不把其当成普通节点向下衰减。
+- 新增 `countEmptySectionsBelowIfAtBorder` 与 `propagateFromEmptySections`，对应 `SkyLightEngine.java:141–197,199–259`：当传播节点位于存层 section 的 y=0 底边并跨 chunk x/z 边缘时，统计源侧下方连续缺层 section；在目标侧从该 section 下方开始，仅对已有 raw 资格的 section，把当前水平衰减值复制到目标列全部 16 层并继续入队。撤光执行同样的逐层清除/decrease。已存在但本批未重算资格的 section 仍作为有效目的地；未加载水平邻区继续为屏障。
+
+**真实 worker 反例**
+
+`tests/light_tests.cpp` 新增 A/B/C 三 chunk：A/B 顶部屋顶，仅 A 开孔，C 低 section 放置存储锚。断言 A 源侧 section 9 为 `Missing`、B 目标侧 section 9 已存；A 边缘 y=160 值为 14 时，B 同一底面跨入值为 13，并被复制到 B section 9 的 y=159 与 y=145，均为 13。盖回 A 孔后，B 两个下方样本回落到环境值 7。上一轮的删最后锚块、3×3×3 存储资格、同代刷新、顶部水、双层完成标志和无天空光回归继续通过。
+
+**真实 26.1 差分**
+
+- `SkyDiffAgent` fence 扩为 `{0,0},{-1,0},{0,-1},{-1,-1},{1,0},{2,0}`，覆盖 A/B/C。新增 stage 8/9：清理 y=249..251，A/B 在 y=250 建屋顶，仅 A(14,250,8) 开孔，C(40,210,8) 提供低 section 存储锚；分别采样开孔和盖回，并记录 A/B 边缘 raw 状态。
+- 官方 JAR SHA-1 仍为 `3872a7f07a1a595e651aef8b058dfc2bb3772f46`。提升运行 `build-light-validation/sky-light-runs/20261109-230555-20816-b73eda1b/`：候选/黄金 SHA-256 `94ce139615d9c664256cf6239e514b6220e955c55a6a918b3a25be6ec2261718`，server log `4906f76bfb0cfa1d9554e4461f8f53ca5d5622fc035910c2d0e7756dbe6161b7`，manifest `45c96af734256ff086cf7f867e45b15f05bc143e20e7a85e940aa4a9438f19f0`。
+- 独立重跑 `build-light-validation/sky-light-runs/20261109-230635-37524-8ba1630e/`：候选相同，server log `a4776669d81ba05f462b0065ead289ea03387f6fd7eb61b02e124bff8db0456d`，manifest `0094e1d08118f5c32a06044906706c46d2a3553f2961f559cefcde20276817b6`。最终 C++/官方为 **9×27=243 个天空查询值 + 72 个 raw-layer 状态**全部一致；原方块光 225 格继续一致。
+
+**最终构建与唯一一次完整 CTest**
+
+最终代码执行 NMake clean 后以 MSVC 19.51 Release + jemalloc 全量重建成功；构建日志 `build-f7-nmake/build-l2b-edge-acceptance-final.log` SHA-256 `2513210186fefd6e78429af9b1056c083fad2cb06e3c36967fb9f03f85fe561e`。最终 CTest **28/28 通过，23.24 s**；日志 `build-f7-nmake/ctest-l2b-edge-acceptance-final.log` SHA-256 `0af52a92149c9df8f807e2cdb66a98931eb06ac179ee907f483d2ca0318c908a`，reviewer 不重复。
+
+- `light tests passed`：`build-f7-nmake/light-l2b-edge-acceptance-final.log` SHA-256 `b3d70361e83a410080b7d6d547ec5177ce3c3624cc31b6fa0047c7eb81e9521c`。
+- 方块光 225：`build-f7-nmake/block-light-differential-l2b-edge-acceptance-final.log` SHA-256 `8a0aa44e1e1282d66df96b87cc5023e02eb9fe6fa475d48fad4c8dd0a834b83c`。
+- 天空光 243+72：`build-f7-nmake/sky-light-differential-l2b-edge-acceptance-final.log` SHA-256 `9e0a35d376df618a2696bd75506f1556ec5dd164c1a31014263b7bec16a1c57d`。
+
+**未完成边界**
+
+未接协议或 Anvil 光照，未领取 L-3/L-4；启用双层后的世吞 CPU/墙钟 <10% 仍未验收，未知状态域隔离与性能优化继续留 L-4。
+
+- 本轮实现提交为 `d3b849e`（8 files，+317/−12），交接记录随后单独提交。
 ---
 
 ## L-2H 高度图按区段回扫（coder）
@@ -1155,4 +1186,4 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 **结论：只退回这一条边缘传播与夹具。** 先登记返工范围、将唯一末行改为 `任务进行中`，再修改代码。最终候选一轮 CTest，reviewer 不重跑。待通过再进入 L-3。
 
-任务进行中
+任务已完成
