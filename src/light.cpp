@@ -1,6 +1,7 @@
 #include "redstone/light.hpp"
 
 #include <algorithm>
+#include <array>
 #include <condition_variable>
 #include <deque>
 #include <iterator>
@@ -1198,27 +1199,60 @@ private:
       WorkingChunk *chunk = workingChunk(key);
       if (!chunk)
         return;
-      SkyColumnSources sources = computeSources(*chunk);
+      const SkyColumnSources sources = computeSources(*chunk);
       sourceHeights[key] = sources;
       clearLines(*chunk);
       const int minY = owner.minBlockSectionY * 16;
       const int lightBottom = (owner.minBlockSectionY - 1) * 16;
-      const int lightTop =
-          (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16;
-      for (int z = 0; z < 16; ++z) {
+      const int sentinel = minY - 1;
+      // Lowest y that still receives full sky light for each column. A column
+      // without any obstruction is lit through the bottom padding as well.
+      std::array<int, 256> litFrom{};
+      for (int z = 0; z < 16; ++z)
         for (int x = 0; x < 16; ++x) {
           const int source = sources[HeightmapColumnKey(x, z)];
-          const int first = source == minY - 1 ? lightBottom : source;
-          for (int y = lightTop - 1; y >= first; --y)
-            setStoredLevel({chunk->chunkX * 16 + x, y,
-                            chunk->chunkZ * 16 + z}, 15);
-          if (source != minY - 1)
-            for (int y = source - 1; y >= lightBottom; --y)
-              setStoredLevel({chunk->chunkX * 16 + x, y,
-                              chunk->chunkZ * 16 + z}, 0);
-          seedColumn(key, chunk, x, z, source);
+          litFrom[HeightmapColumnKey(x, z)] =
+              source == sentinel ? lightBottom : source;
         }
+      // One scalar lookup per section instead of a chunk/section/value lookup
+      // for every one of the 4096 cells. Every cell of every light section is
+      // covered by its column's lit or dark range, so the working layer can be
+      // filled directly; the per-cell stored-level comparison of the old path
+      // correctly skipped the writes that already equalled the inherited value.
+      for (int sectionY = owner.minBlockSectionY - 1;
+           sectionY <= owner.minBlockSectionY + owner.blockSectionCount;
+           ++sectionY) {
+        LightValues *layer = bulkValues(key, sectionY);
+        if (!layer)
+          continue;
+        const int baseY = sectionY * 16;
+        int minFirst = std::numeric_limits<int>::max();
+        int maxFirst = std::numeric_limits<int>::min();
+        for (int column = 0; column < 256; ++column) {
+          const int first = litFrom[column] - baseY;
+          minFirst = std::min(minFirst, first);
+          maxFirst = std::max(maxFirst, first);
+        }
+        if (maxFirst <= 0) {
+          std::fill(layer->begin(), layer->end(), std::uint8_t{15});
+        } else if (minFirst >= 16) {
+          std::fill(layer->begin(), layer->end(), std::uint8_t{0});
+        } else {
+          for (int index = 0; index < kLightVolume; ++index) {
+            const int x = index & 15;
+            const int z = (index >> 4) & 15;
+            const int y = (index >> 8) & 15;
+            (*layer)[static_cast<std::size_t>(index)] =
+                baseY + y >= litFrom[HeightmapColumnKey(x, z)] ? 15 : 0;
+          }
+        }
+        dirtySections.insert(
+            {static_cast<int>(key >> 32), sectionY,
+             static_cast<int>(static_cast<std::uint32_t>(key))});
       }
+      for (int z = 0; z < 16; ++z)
+        for (int x = 0; x < 16; ++x)
+          seedColumn(key, chunk, x, z, sources[HeightmapColumnKey(x, z)]);
     }
 
     void seedIncoming(std::uint64_t key) {
@@ -1552,6 +1586,73 @@ private:
       return 15;
     }
 
+    // Bulk seeding needs the working layer of a whole section without the
+    // per-cell value lookup. The eligibility rule of setStoredLevel still
+    // applies: before this batch's storage eligibility is known every section
+    // is writable, afterwards only eligible sections (or sections that already
+    // hold a working value) are.
+    LightValues *bulkValues(std::uint64_t chunkKeyValue, int sectionY) {
+      if (sectionY < owner.minBlockSectionY - 1 ||
+          sectionY > owner.minBlockSectionY + owner.blockSectionCount)
+        return nullptr;
+      const SectionPos3 key{static_cast<int>(chunkKeyValue >> 32), sectionY,
+                            static_cast<int>(
+                                static_cast<std::uint32_t>(chunkKeyValue))};
+      const auto found = values.find(key);
+      if (found != values.end())
+        return &found->second;
+      if (storageReady && !eligibleHere(key.x, key.y, key.z))
+        return nullptr;
+      const LightChunkSnapshot *chunk = stateFor(chunkKeyValue);
+      const LightSectionSnapshot *section =
+          chunk ? chunk->section(sectionY) : nullptr;
+      if (!section)
+        return nullptr;
+      LightValues layer{};
+      if (!section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+               .isMissing()) {
+        for (int y = 0; y < 16; ++y)
+          for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x)
+              layer[lightIndex(x, y, z)] =
+                  section->light(LightLayer::Sky, x, y, z);
+      } else {
+        for (int z = 0; z < 16; ++z) {
+          for (int x = 0; x < 16; ++x) {
+            int inherited = 15;
+            for (int aboveY = sectionY + 1;
+                 aboveY <
+                 chunk->minBlockSectionY + chunk->blockSectionCount + 1;
+                 ++aboveY) {
+              const SectionPos3 aboveKey{key.x, aboveY, key.z};
+              const auto edited = values.find(aboveKey);
+              if (edited != values.end()) {
+                inherited = edited->second[lightIndex(x, aboveY * 16, z)];
+                break;
+              }
+              const LightSectionSnapshot *above = chunk->section(aboveY);
+              if (above &&
+                  !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                       .isMissing()) {
+                inherited = above->light(LightLayer::Sky, x, 0, z);
+                break;
+              }
+            }
+            for (int y = 0; y < 16; ++y)
+              layer[lightIndex(x, y, z)] = static_cast<std::uint8_t>(inherited);
+          }
+        }
+      }
+      return &values.emplace(key, layer).first->second;
+    }
+
+    // Flat probe of the current batch's storedEligible set. A seeding pass
+    // probes once per light section (26 times per chunk), so a single set
+    // lookup is already cheap; the helper only keeps bulkValues readable.
+    bool eligibleHere(int sectionX, int sectionY, int sectionZ) {
+      return storedEligible.contains({sectionX, sectionY, sectionZ});
+    }
+
     bool setStoredLevel(LightPos position, int level) {
       const LightSectionSnapshot *section = sectionAt(position);
       if (!section)
@@ -1657,8 +1758,8 @@ private:
           (owner.minBlockSectionY + owner.blockSectionCount) * 16;
       const BlockLightProperties *top = &emptyLightProperties();
       for (int y = maxY - 1; y >= minY; --y) {
-        const auto &bottom = stateAt({chunk.chunkX * 16 + x, y,
-                                      chunk.chunkZ * 16 + z});
+        const auto &bottom =
+            chunk.snapshot->section(y >> 4)->at(x, y & 15, z);
         if (bottom.supported && bottom.dampening != 0)
           return y + 1;
         if (faceShapesOcclude(*top, bottom, 0))
