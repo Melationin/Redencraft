@@ -206,6 +206,12 @@ public:
   std::uint64_t submitChunk(LightChunkInput input);
   bool reportSectionStatus(int chunkX, int chunkZ, int sectionY, bool empty);
   bool reportBlockChange(LightBlockChange change);
+  // Bulk form for callers that coalesce one tick's writes with their own bitmap.
+  // The caller already decided which cells need a re-check, so the per-cell
+  // property comparison is skipped and the service mutex is taken once for the
+  // whole batch. The worker never reads `oldProperties`; it is stored only to
+  // keep the merged struct consistent.
+  void reportBlockChanges(const std::vector<LightBlockChange> &changes);
   bool unloadChunk(int chunkX, int chunkZ);
 
   // Main-thread publication handoff. A worker batch becomes visible in full;

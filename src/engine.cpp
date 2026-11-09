@@ -957,6 +957,70 @@ void World::loadChunk(int x, int z) {
       lightChunkLifecycleObserver(x, z, true);
   }
 }
+void World::markLightDirty(int chunkX, int chunkZ, int sectionY,
+                           int localIndex, bool wasEmpty, bool isEmpty) {
+  const auto key = chunkKey(chunkX, chunkZ);
+  auto &sections = dirtyLightSections_[key];
+  LightDirtySection *section = nullptr;
+  for (auto &candidate : sections) {
+    if (candidate.sectionY == sectionY) {
+      section = &candidate;
+      break;
+    }
+  }
+  if (!section) {
+    sections.emplace_back();
+    section = &sections.back();
+    section->sectionY = sectionY;
+    section->wasEmpty = wasEmpty;
+  }
+  section->isEmpty = isEmpty;
+  section->bits[static_cast<std::size_t>(localIndex) >> 6] |=
+      std::uint64_t{1} << (localIndex & 63);
+}
+
+void World::flushLightChanges() {
+  if (!lightService_ || dirtyLightSections_.empty())
+    return;
+  std::vector<LightBlockChange> changes;
+  changes.reserve(dirtyLightSections_.size() * 8);
+  for (auto &[key, sections] : dirtyLightSections_) {
+    const int chunkX = static_cast<int>(key >> 32);
+    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+    Chunk *chunk = chunkAt(chunkX, chunkZ);
+    if (!chunk)
+      continue;
+    for (const auto &dirty : sections) {
+      const Section &data = chunk->sections[sectionIndex(dirty.sectionY * 16)];
+      const bool isEmpty = data.hasOnlyAir();
+      for (std::size_t word = 0; word < dirty.bits.size(); ++word) {
+        std::uint64_t bits = dirty.bits[word];
+        while (bits) {
+          const int bit = std::countr_zero(bits);
+          bits &= bits - 1;
+          const auto index = static_cast<int>(word * 64) + bit;
+          LightBlockChange change;
+          change.chunkX = chunkX;
+          change.chunkZ = chunkZ;
+          change.sectionY = dirty.sectionY;
+          change.localIndex = static_cast<std::uint16_t>(index);
+          // The bit means "this cell's optical state changed this tick"; the
+          // final state is read here, so repeated writes coalesce. The worker
+          // never consults oldProperties, so the current value fills both.
+          change.oldProperties =
+              lightPropertiesOf(BlockState::fromId(data.get(index)));
+          change.newProperties = change.oldProperties;
+          change.wasEmpty = dirty.wasEmpty;
+          change.isEmpty = isEmpty;
+          changes.push_back(change);
+        }
+      }
+    }
+  }
+  dirtyLightSections_.clear();
+  if (!changes.empty())
+    lightService_->reportBlockChanges(changes);
+}
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
   auto it = chunks_.find(chunkKey(x, z));
@@ -964,6 +1028,9 @@ void World::unloadChunk(int x, int z) {
   if (wasLoaded)
     it->second.loaded = false;
   if (lightService_) {
+    // A chunk that leaves the loaded set must not keep a pending bitmap: the
+    // cells would be re-read from a chunk the service no longer knows.
+    dirtyLightSections_.erase(chunkKey(x, z));
     lightService_->unloadChunk(x, z);
     if (wasLoaded && lightChunkLifecycleObserver)
       lightChunkLifecycleObserver(x, z, false);
@@ -1068,6 +1135,7 @@ void World::refreshLightSnapshots() {
 }
 
 void World::disableLighting() {
+  dirtyLightSections_.clear();
   lightService_.reset();
   emptyLightSections_.clear();
 }
@@ -1291,16 +1359,11 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
     const bool isEmpty = targetSection.hasOnlyAir();
     if (hasDifferentLightProperties(old, state) ||
         hasDifferentSectionLightProperties(wasSectionEmpty, isEmpty)) {
-      LightBlockChange change;
-      change.chunkX = chunkIndex(p.x);
-      change.chunkZ = chunkIndex(p.z);
-      change.sectionY = p.y >> 4;
-      change.localIndex = static_cast<std::uint16_t>(lightIndex(p.x, p.y, p.z));
-      change.oldProperties = lightPropertiesOf(old);
-      change.newProperties = lightPropertiesOf(state);
-      change.wasEmpty = wasSectionEmpty;
-      change.isEmpty = isEmpty;
-      lightService_->reportBlockChange(change);
+      // Only mark the cell; the tick's flush turns the bitmaps into one batch.
+      markLightDirty(chunkIndex(p.x), chunkIndex(p.z), p.y >> 4, localIndex,
+                     wasSectionEmpty, isEmpty);
+      if (!inTick_)
+        flushLightChanges();
     }
   }
   // TODO: reproduce dirty/client notifications, POI, and generic block-entity
@@ -1965,6 +2028,7 @@ void World::runEvents() {
 void World::tick() {
   ++time_;
   handlingTick_ = true;
+  inTick_ = true;
   // ServerLevel.tick: blockTicks.tick(gameTime, 65536, this::tickBlock).
   // LevelTicks collects the due ticks first, then runs them; ticks scheduled
   // during execution stay pending for the next tick.
@@ -1981,8 +2045,12 @@ void World::tick() {
   // ServerChunkCache.tick broadcasts ChunkHolder's dirty block positions
   // after scheduled ticks and before block events. Event-induced piston
   // source changes stay pending until the following chunk broadcast phase.
-  if (lightService_)
+  if (lightService_) {
+    // Hand the tick's coalesced block changes over once, then take the
+    // publications that are ready before the broadcast.
+    flushLightChanges();
     lightService_->drainPublished();
+  }
   if (blockUpdatesBroadcastObserver)
     blockUpdatesBroadcastObserver();
   // ServerChunkCache.tick: ChunkMap.tick/ServerEntity.sendChanges follows
@@ -1998,6 +2066,10 @@ void World::tick() {
   pistonTickBlockEntities(*this);
   if (blockEntityTicker)
     blockEntityTicker(*this);
+  // Block entities run after the drain point, so their writes are handed over
+  // at the end of the tick and become visible to the worker for the next one.
+  flushLightChanges();
+  inTick_ = false;
   // Observe removals caused by block entities without altering the core's
   // existing cleanup timing. Network trackers must not wait one more tick.
   broadcastEntityRemovals();

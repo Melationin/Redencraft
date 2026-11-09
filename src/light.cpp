@@ -555,8 +555,84 @@ public:
     if (!hasDifferentLightProperties(change.oldProperties, change.newProperties) &&
         !hasDifferentSectionLightProperties(change.wasEmpty, change.isEmpty))
       return true;
-    const auto key = chunkKey(change.chunkX, change.chunkZ);
+    return applyBlockChange(change);
+  }
+
+  // Bulk form: the caller coalesced a tick's writes into one batch grouped by
+  // chunk, so the per-cell version/pending/section lookups collapse into one set
+  // of lookups per chunk-section and the mutex is taken once for the whole tick.
+  void reportBlockChanges(const std::vector<LightBlockChange> &changes) {
+    if (changes.empty())
+      return;
     std::lock_guard lock(mutex);
+    std::uint64_t currentKey = ~std::uint64_t{0};
+    ChunkVersion *active = nullptr;
+    PendingChunk *state = nullptr;
+    int currentSection = std::numeric_limits<int>::min();
+    std::uint64_t applied = 0;
+    for (const auto &source : changes) {
+      if (!validSection(source.sectionY) ||
+          source.localIndex >= kLightVolume) {
+        ++statsRejected;
+        continue;
+      }
+      const auto key = chunkKey(source.chunkX, source.chunkZ);
+      if (key != currentKey) {
+        currentKey = key;
+        currentSection = std::numeric_limits<int>::min();
+        active = nullptr;
+        state = nullptr;
+        auto found = versions.find(key);
+        if (accepting && found != versions.end() && !found->second.inactive) {
+          active = &found->second;
+          auto stateIt = pending.find(key);
+          if (stateIt == pending.end())
+            stateIt = pending.emplace(key, PendingChunk{}).first;
+          state = &stateIt->second;
+          state->key = key;
+          state->lifecycleEpoch = active->epoch;
+        }
+      }
+      if (!state) {
+        ++statsRejected;
+        continue;
+      }
+      if (source.sectionY != currentSection) {
+        currentSection = source.sectionY;
+        state->sectionStatus[currentSection] = source.isEmpty;
+      }
+      const auto generation = ++nextGeneration;
+      ++active->requestRevision;
+      state->generation = generation;
+      state->revision = active->requestRevision;
+      const auto slot = changeSlot(source.sectionY, source.localIndex);
+      const auto found = state->changes.find(slot);
+      if (found == state->changes.end()) {
+        LightBlockChange stored = source;
+        stored.generation = generation;
+        state->changes.emplace(slot, std::move(stored));
+      } else {
+        found->second.newProperties = source.newProperties;
+        found->second.isEmpty = source.isEmpty;
+        found->second.generation = generation;
+      }
+      ++applied;
+    }
+    if (applied != 0) {
+      ++statsSubmitted;
+      noteHighWaterLocked();
+    }
+    // Only the idle -> queued transition needs a wake-up. Reporting every block
+    // change re-entered the kernel for a notification that no worker was
+    // waiting for once a batch was already running.
+    if (wakePending.exchange(false, std::memory_order_acq_rel))
+      wake.notify_one();
+  }
+
+  // Shared merge step of the single and the bulk report path. Must be called
+  // with `mutex` held and a validated section/local index.
+  bool applyBlockChangeLocked(LightBlockChange &change) {
+    const auto key = chunkKey(change.chunkX, change.chunkZ);
     auto active = versions.find(key);
     if (!accepting || active == versions.end() || active->second.inactive) {
       ++statsRejected;
@@ -585,12 +661,15 @@ public:
       found->second.generation = change.generation;
     }
     notePendingLocked();
-    // Only the idle -> queued transition needs a wake-up. Reporting every block
-    // change re-entered the kernel for a notification that no worker was
-    // waiting for once a batch was already running.
-    if (wakePending.exchange(false, std::memory_order_acq_rel))
-      wake.notify_one();
     return true;
+  }
+
+  bool applyBlockChange(LightBlockChange change) {
+    std::lock_guard lock(mutex);
+    const bool applied = applyBlockChangeLocked(change);
+    if (applied && wakePending.exchange(false, std::memory_order_acq_rel))
+      wake.notify_one();
+    return applied;
   }
 
   bool unloadChunk(int chunkX, int chunkZ) {
@@ -2159,11 +2238,20 @@ private:
 
   void notePendingLocked() {
     ++statsSubmitted;
+    noteHighWaterLocked();
+  }
+
+  // The queue length only grows when a chunk first becomes pending, so the CAS
+  // is skipped whenever the current length is already at or below the mark.
+  void noteHighWaterLocked() {
     const auto current = pending.size() + busyChunks;
     auto previous = statsHighWater.load(std::memory_order_relaxed);
-    while (current > previous &&
-           !statsHighWater.compare_exchange_weak(previous, current,
+    if (current <= previous)
+      return;
+    while (!statsHighWater.compare_exchange_weak(previous, current,
                                                  std::memory_order_relaxed)) {
+      if (current <= previous)
+        return;
     }
   }
 
@@ -2670,6 +2758,11 @@ bool LightService::reportSectionStatus(int chunkX, int chunkZ, int sectionY,
 
 bool LightService::reportBlockChange(LightBlockChange change) {
   return impl_->reportBlockChange(change);
+}
+
+void LightService::reportBlockChanges(
+    const std::vector<LightBlockChange> &changes) {
+  impl_->reportBlockChanges(changes);
 }
 
 bool LightService::unloadChunk(int chunkX, int chunkZ) {
