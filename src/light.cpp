@@ -1524,13 +1524,24 @@ private:
     }
 
     const LightChunkSnapshot *stateFor(std::uint64_t key) const {
+      if (cachedStateValid && cachedStateKey == key)
+        return cachedStatePtr;
+      cachedStateValid = false;
       if (removed.contains(key))
         return nullptr;
+      const LightChunkSnapshot *result = nullptr;
       const auto current = working.find(key);
       if (current != working.end())
-        return current->second.snapshot.get();
-      const auto stored = owner.internal.find(key);
-      return stored == owner.internal.end() ? nullptr : stored->second.get();
+        result = current->second.snapshot.get();
+      else {
+        const auto stored = owner.internal.find(key);
+        if (stored != owner.internal.end())
+          result = stored->second.get();
+      }
+      cachedStateKey = key;
+      cachedStatePtr = result;
+      cachedStateValid = true;
+      return result;
     }
 
     WorkingChunk *ensureWorking(std::uint64_t key) {
@@ -1548,6 +1559,7 @@ private:
       next.chunkX = stored->second->chunkX;
       next.chunkZ = stored->second->chunkZ;
       next.snapshot = std::make_shared<LightChunkSnapshot>(*stored->second);
+      cachedStateValid = false;
       return &working.emplace(key, std::move(next)).first->second;
     }
 
@@ -1829,6 +1841,7 @@ private:
         section = copy;
       }
       chunk.mutableSections.clear();
+      cachedStateValid = false;
       // Seeding always rebuilds one chunk's layers at a time; erase only that
       // chunk's sections instead of scanning every working value of the batch.
       for (int sectionY = owner.minBlockSectionY - 1;
@@ -2098,6 +2111,11 @@ private:
     mutable std::uint64_t cachedChunkKey = 0;
     mutable int cachedSectionY = 0;
     mutable const LightValues *cachedLayerPtr = nullptr;
+    // stateFor is called for every cell too; cache its chunk lookup and drop
+    // the cache whenever the working set or a section is replaced.
+    mutable bool cachedStateValid = false;
+    mutable std::uint64_t cachedStateKey = 0;
+    mutable const LightChunkSnapshot *cachedStatePtr = nullptr;
     // Same idea for the per-batch storage eligibility: setStoredLevel probes it
     // for every cell it writes, but the answer only changes per section.
     mutable bool eligibleValid = false;
