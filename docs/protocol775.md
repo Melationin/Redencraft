@@ -29,7 +29,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 - 实现 handshake/status ping、离线 UUID v3 登录、login acknowledgement、空 known-packs 协商、完整 registry/tags 配置及 finish acknowledgement。
 - Play 发送创造玩家登录、玩家信息、能力、出生点、区块中心、chunk batch、时间、初始九格、传送确认和 keepalive。
-- 区块采用 26.1 的 section 双计数（non-empty、fluid）、palette 固定 long 存储、原版状态标志计算的高度图及移动活塞 NBT（ByteTag facing、progressO）。流体状态、流体刻传播和自然方块状态更新已经参与核心模拟和区块/单格广播。L-1 已准备独立的双层光数据与后台交接，但尚未传播且没有接入本协议；协议光照段仍由占位值填充，边界见[光照底座](light-engine.md)。块/物品/实体等 ID 使用完整原版导出表，而非 C++ 子集的注册顺序。
+- 区块采用 26.1 的 section 双计数（non-empty、fluid）、palette 固定 long 存储、原版状态标志计算的高度图及移动活塞 NBT（ByteTag facing、progressO）。流体状态、流体刻传播和自然方块状态更新已经参与核心模拟和区块/单格广播。L-1/L-2a/L-2b 的双层光数据、方块光与天空光传播已接入 L-3：`level_chunk_with_light` 与后续 `light_update` 使用同一加载代的完整已发布不可变快照，分别编码天空/方块 four-mask 和每层 2048 bytes；未发布或未知光学状态不会用占位亮度冒充完成。协议边界见[光照](light-engine.md)。块/物品/实体等 ID 使用完整原版导出表，而非 C++ 子集的注册顺序。
 - 创造放置与破坏经过距离、范围、已加载区块、物品、支撑及当前玩家/简单实体碰撞检查；处理珊瑚地面/挂墙候选、活塞和侦测器方向、铁轨方向、草/墙/音符盒初始属性、音符盒右键调音、创造破坏活塞头关联基座、矿车坡道放置。侦测器放置不得调用会调度计划刻的通用 updateShape 查询。
 - 输入预测 sequence 在修改世界之前校验，修正包和 block_changed_ack 回传；负序列不会先编辑再断开。创造丢弃限制堆叠/频率，不向未加载区块生成暂停实体。
 - 物品、TNT、下落方块、矿车生成时用包组发送实体和非默认元数据。跟踪采用原版 `VecDeltaCodec` 的 1/4096 位移及 `Mth.packDegrees` 的 1/256 圈旋转。位移超出 short、着地变化或超过重同步阈值时发送 `entity_position_sync`。同一轮更新先发变化的速度，再发位置或旋转，最后发变化的 TNT 元数据。TNT 引信每刻变化，因此也会每刻进入跟踪更新。实体受推力时可以提前进入更新。矿车轨迹插值、物品后续元数据更新与原版受击专用速度同步仍待实现。
@@ -42,7 +42,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 实体跟踪广播位于区块变化广播之后、方块事件和本刻实体运动之前，对应 `ServerChunkCache.tick` 中的 `ChunkMap.tick`。实体区段查询使用包含式上界，以覆盖区块 X 为 -1 时的最大打包键。实体注册后立即发包，下落方块落地修正先于移除。引信耗尽时先发旧 TNT 的移除，再发连锁点燃的 TNT，最后向距离小于 64 格的客户端发送爆炸效果。爆炸粒子和声音 ID 来自 26.1 导出。协议玩家的爆炸击退及其他实体在每次 `discard` 调用点立即通知仍待实现，普通清理在当前实体阶段或方块实体阶段提交移除。
 
-世界状态和普通包 payload 仍在主线程采集/构造；独立的 `NetworkWriter` 负责 VarInt 成帧、区块高度图/palette/位打包、发送缓冲合并、写侧 `select` 和 `send`。区块先复制子区块 palette + 索引，再在主线程把本地状态 ID 映射成协议 ID、冻结移动活塞 NBT；后台编码只读该快照与不可变协议状态标志，不访问 `World` 或可能扩容的全局状态注册表。实体同步只扫描玩家视野内的 entity section；块变化缓冲复用容量，热路径 payload 移交时不再复制。
+世界状态和普通包 payload 仍在主线程采集/构造；独立的 `NetworkWriter` 负责 VarInt 成帧、区块高度图/palette/位打包、发送缓冲合并、写侧 `select` 和 `send`。区块先复制子区块 palette + 索引，再在主线程把本地状态 ID 映射成协议 ID、冻结移动活塞 NBT；后台编码只读该快照、不可变协议状态标志和已发布的 `LightChunkSnapshot`，不访问 `World` 或可能扩容的全局状态注册表。初始光照未发布时 Session 只记录待发送区块并延后位置包，不等待 worker；光照 worker 已提供累积 `changedSections`，nibble 打包在 writer 中完成。实体同步只扫描玩家视野内的 entity section；块变化缓冲复用容量，热路径 payload 移交时不再复制。
 
 每连接有界 SPSC 队列保留 FIFO；tick 内提交不获取写线程互斥锁，也不等待 socket。队列最多 4096 批、65536 包、16 MiB 计费存储，计费包含正在编码的批次及 deferred 区块持有的容量；Session 暂存另限 16 MiB，已编码未发送数据另限 16 MiB。这些是分别实施的积压预算，不是连接总内存上限，容器保留容量和编码临时缓冲另计。达到上限只关闭该连接。写线程每轮每连接最多编码 64 包或约 2 ms，未发送数据达 1 MiB 时暂停继续编码；单个区块编码不可中途抢占。这些阈值是本项目的背压策略，不声称与原版 Netty 参数一致。诊断输出也通过有界槽交给写线程。网络映射失败不会向核心更新链抛出协议异常，各模拟更新阶段保持独立。
 
@@ -52,9 +52,9 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 `validation/protocol775/export.ps1` 从官方 jar 重建资产并检查版本与哈希。其 `-VerifyPlayPackets` 使用官方 GameProtocols codec 解码 C++ 测试生成的所有记录，区块继续用真实 LevelChunkSection.read 解码 24 个子区块，检查无剩余字节。来源、格式和结果见 `validation/protocol775/README.md`、`verification-result.json`。这验证编码和源码约定，不能代替真实客户端实际连接、资源加载和动画验证。
 
-本轮将 wire/protocol 测试产生的记录合并，使用同一官方 codec 验证 **294 包通过**；导出写入构建目录，未覆盖固定协议资产。没有启动真实 Minecraft 客户端，也没有运行本轮真实 26.1 服务端逐 tick 差分，不能声称原版等价。
+L-3 将光照协议夹具交给同一官方 codec 验证 **86 包通过**，其中包含初始 `level_chunk_with_light`、动态 `light_update`、缺层和重载；既有交互/实体协议夹具另有 **490 包通过**。验证脚本会临时重导出资产，完成后恢复仓库版本。没有启动真实 Minecraft 客户端，也没有运行本轮真实 26.1 服务端逐 tick 差分，不能声称原版等价。
 
-仍有明确 TODO：真实 ServerPlayer 服务端物理与推挤、其他玩家模型/放置碰撞、动态区块跟踪、玩家拾取/容器与生存、任意物品组件/工具与完整 BlockPlaceContext、聊天与配方、原版光照引擎、其他生物群系、音效粒子和完整元数据优化。当前 sky light 统一全亮、`biome` 统一为 plains，仅用于查看；流体状态和流体刻已经运行并完成 F-7 当前核心验收，剩余差分与性能补证见 [F-9a/F-9b](../PLAN.md#阶段-25--流体补充验收)及[流体验收证据](fluid-acceptance.md)。网络支持是创造编辑入口，不代表完整原版多人服务端等价。
+仍有明确 TODO：真实 ServerPlayer 服务端物理与推挤、其他玩家模型/放置碰撞、动态区块跟踪、玩家拾取/容器与生存、任意物品组件/工具与完整 BlockPlaceContext、聊天与配方、其他生物群系、音效粒子和完整元数据优化。天空光/方块光传播和协议光照包已接入，但 Anvil 光照导入/写回、未支持光学的完整定义、真实客户端渲染与 L-4 生命周期/性能门槛仍未验收；`biome` 统一为 plains。流体状态和流体刻已经运行并完成 F-7 当前核心验收，剩余差分与性能补证见 [F-9a/F-9b](../PLAN.md#阶段-25--流体补充验收)及[流体验收证据](fluid-acceptance.md)。网络支持是创造编辑入口，不代表完整原版多人服务端等价。
 
 ## 命令系统与 `/tick`
 

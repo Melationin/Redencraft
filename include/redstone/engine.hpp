@@ -308,6 +308,10 @@ public:
   // after successful landing, before discarding the entity.
   std::function<void(int, Pos, const BlockState &)> fallingBlockLandObserver;
   std::function<void(const BlockEvent &)> blockEventObserver;
+  // Runs on the main thread after a complete light-worker batch is published
+  // and before ChunkHolder.broadcastChanges drains ordinary block updates.
+  std::function<void(std::shared_ptr<const LightChunkSnapshot>)>
+      lightPublicationObserver;
   std::function<void()> blockUpdatesBroadcastObserver;
   std::function<void()> entityTrackingBroadcastObserver;
   std::function<void(const Entity &)> entityAddedObserver;

@@ -103,11 +103,37 @@ struct ProtocolChunkSnapshot {
   int airId = 0, stateBits = 0, biomeId = 0, pistonTypeId = 0;
   std::vector<SectionSnapshot> sections;
   std::vector<BlockEntity> blockEntities;
+  // Published immutable light for the same lifecycle. Null keeps the legacy
+  // visualization path for worlds that have not enabled lighting.
+  std::shared_ptr<const LightChunkSnapshot> light;
   std::size_t retainedBytes() const noexcept;
 };
-ProtocolChunkSnapshot prepareChunkSnapshot(ChunkSnapshot, const Registry &);
+ProtocolChunkSnapshot prepareChunkSnapshot(
+    ChunkSnapshot, const Registry &,
+    std::shared_ptr<const LightChunkSnapshot> light = {});
 Bytes encodeChunk(const ProtocolChunkSnapshot &, int chunkX, int chunkZ,
                   const Registry &);
+
+// The main thread selects changed sections from immutable published layers;
+// the writer thread packs the referenced 2048-byte layers. Missing, stored zero,
+// stored full/mixed and a known old layer that must be cleared remain distinct.
+struct ProtocolLightSections {
+  std::vector<int> dataSections;
+  std::vector<int> emptySections;
+};
+struct ProtocolLightUpdate {
+  int chunkX = 0;
+  int chunkZ = 0;
+  std::shared_ptr<const LightChunkSnapshot> snapshot;
+  ProtocolLightSections sky;
+  ProtocolLightSections block;
+  std::size_t retainedBytes() const noexcept;
+};
+ProtocolLightUpdate prepareLightUpdate(
+    std::shared_ptr<const LightChunkSnapshot> current,
+    std::shared_ptr<const LightChunkSnapshot> previous = {});
+// Full packet body for ClientboundLightUpdatePacket: VarInt x/z then light data.
+Bytes encodeLightUpdate(const ProtocolLightUpdate &);
 // One queued clientbound packet: already framed bytes, or a producer that
 // frames them on the writer thread.
 struct OutPacket {
@@ -115,6 +141,9 @@ struct OutPacket {
   int packetId = -1;               // >= 0: frame(id, bytes) on the writer
   std::function<Bytes()> deferred; // produced entirely off-thread (chunks)
   std::size_t retainedBytes = 0;   // captured snapshot/storage owned by deferred
+  // Main-thread cancellation for unloaded/reloaded chunk generations. A
+  // cancelled item produces no bytes and never observes live World state.
+  std::function<bool()> stillValid;
 };
 inline constexpr std::size_t maxQueuedOutputBytes = 16 * 1024 * 1024;
 inline constexpr std::size_t maxQueuedOutputPackets = 65536;

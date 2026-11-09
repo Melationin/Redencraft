@@ -106,6 +106,11 @@ struct LightChunkInput {
 };
 
 struct LightChunkSnapshot {
+  struct LayerChange {
+    int sectionY = 0;
+    bool sky = false;
+    bool block = false;
+  };
   int chunkX = 0;
   int chunkZ = 0;
   int minBlockSectionY = 0;
@@ -123,10 +128,16 @@ struct LightChunkSnapshot {
   bool blockLightComplete = false;
   bool skyLightComplete = false;
   bool propagationComplete = false;
-  // TODO(L-3): protocol encoding consumes only complete published snapshots.
+  // Set only when every loaded chunk has complete optical metadata and both
+  // enabled light layers converged. Protocol encoding never exposes an
+  // unpublished or incomplete result.
   bool protocolReady = false;
   std::uint32_t unsupportedCells = 0;
   std::vector<std::shared_ptr<const LightSectionSnapshot>> sections;
+  // Computed by the worker against the immediately preceding published
+  // revision. Protocol paths use this immutable delta instead of comparing or
+  // copying every section on the main thread.
+  std::vector<LayerChange> changedSections;
 
   int minLightSectionY() const { return minBlockSectionY - 1; }
   int lightSectionCount() const { return blockSectionCount + 2; }
@@ -188,8 +199,9 @@ public:
   bool reportBlockChange(LightBlockChange change);
   bool unloadChunk(int chunkX, int chunkZ);
 
-  // Main-thread publication handoff. Reading a snapshot never waits for the
-  // worker and the shared object is immutable.
+  // Main-thread publication handoff. A worker batch becomes visible in full;
+  // reading a snapshot never waits for the worker and the shared object is
+  // immutable.
   void drainPublished();
   std::shared_ptr<const LightChunkSnapshot> latestChunk(int chunkX,
                                                         int chunkZ) const;

@@ -301,6 +301,11 @@ private:
           }
           auto &packet = connection.encoding.packets[connection.nextPacket];
           try {
+            if (packet.stillValid && !packet.stillValid()) {
+              if (++connection.nextPacket == connection.encoding.packets.size())
+                connection.outbox.complete(connection.encoding);
+              continue;
+            }
             Bytes produced = packet.deferred ? packet.deferred()
                 : packet.packetId >= 0 ? frame(packet.packetId, packet.bytes)
                                        : std::move(packet.bytes);
@@ -309,7 +314,8 @@ private:
               connection.dead.store(true, std::memory_order_release);
               break;
             }
-            connection.pending.insert(connection.pending.end(), produced.begin(), produced.end());
+            if (!produced.empty())
+              connection.pending.insert(connection.pending.end(), produced.begin(), produced.end());
           } catch (...) {
             connection.dead.store(true, std::memory_order_release);
             break;
@@ -629,6 +635,10 @@ int runServer(int argc, char **argv) {
     options.chunks.erase(
         std::unique(options.chunks.begin(), options.chunks.end()),
         options.chunks.end());
+    // The native protocol path uses published light rather than placeholder
+    // brightness. Initial chunk sends wait asynchronously for the first complete
+    // worker snapshot; no connection callback waits on the light worker.
+    world.enableLighting();
     SocketSystem socketSystem;
     Socket listener(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     if (listener.get() == invalidSocket)
@@ -660,6 +670,14 @@ int runServer(int argc, char **argv) {
     // encoding and socket writes happen on the writer thread.
     NetworkWriter writer;
     writer.start();
+    world.lightPublicationObserver =
+        [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+          for (auto &c : connections)
+            if (!c->dead) {
+              c->session.lightPublished(snapshot);
+              writer.submit(c, c->session.takeOutputItems());
+            }
+        };
     world.blockUpdateObserver = [&](Pos p, const BlockState &s, int) {
       for (auto &c : connections)
         if (!c->dead)

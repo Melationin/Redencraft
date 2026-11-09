@@ -1034,6 +1034,11 @@ void World::enableLighting(LightWorkerOptions options) {
   }
   lightService_ = std::make_unique<LightService>(
       minY_ >> 4, sectionCount(), options);
+  lightService_->setPublishCallback(
+      [this](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        if (lightPublicationObserver)
+          lightPublicationObserver(std::move(snapshot));
+      });
   refreshLightSnapshots();
 }
 
@@ -1968,6 +1973,8 @@ void World::tick() {
   // ServerChunkCache.tick broadcasts ChunkHolder's dirty block positions
   // after scheduled ticks and before block events. Event-induced piston
   // source changes stay pending until the following chunk broadcast phase.
+  if (lightService_)
+    lightService_->drainPublished();
   if (blockUpdatesBroadcastObserver)
     blockUpdatesBroadcastObserver();
   // ServerChunkCache.tick: ChunkMap.tick/ServerEntity.sendChanges follows

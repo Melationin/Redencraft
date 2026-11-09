@@ -552,7 +552,8 @@ public:
   }
 
   void drainPublished() {
-    std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+    std::vector<std::vector<std::pair<
+        std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>>>
         ready;
     std::vector<std::shared_ptr<const LightChunkSnapshot>> callbacks;
     std::function<void(std::shared_ptr<const LightChunkSnapshot>)> callback;
@@ -560,20 +561,22 @@ public:
       std::lock_guard lock(mutex);
       ready.swap(published);
       callback = publishCallback;
-      for (auto &[key, snapshot] : ready) {
-        const auto active = versions.find(key);
-        if (active != versions.end() &&
-            active->second.epoch == snapshot->lifecycleEpoch &&
-            !inactive.contains(key)) {
-          const auto current = latest.find(key);
-          if (current == latest.end() ||
-              current->second->revision <= snapshot->revision) {
-            latest[key] = snapshot;
-            if (callback)
-              callbacks.push_back(std::move(snapshot));
+      for (const auto &batch : ready) {
+        for (const auto &[key, snapshot] : batch) {
+          const auto active = versions.find(key);
+          if (active != versions.end() &&
+              active->second.epoch == snapshot->lifecycleEpoch &&
+              !inactive.contains(key)) {
+            const auto current = latest.find(key);
+            if (current == latest.end() ||
+                current->second->revision <= snapshot->revision) {
+              latest[key] = snapshot;
+              if (callback)
+                callbacks.push_back(snapshot);
+            }
+          } else {
+            ++statsStale;
           }
-        } else {
-          ++statsStale;
         }
       }
     }
@@ -607,7 +610,8 @@ public:
         statsLightQueueEntries.load(std::memory_order_relaxed);
     std::lock_guard lock(mutex);
     result.pendingChunks = pending.size() + busyChunks;
-    result.pendingPublications = published.size();
+    for (const auto &batch : published)
+      result.pendingPublications += batch.size();
     return result;
   }
 
@@ -1191,12 +1195,47 @@ private:
             affected.insert(chunkKey(x + dx, z + dz));
       }
       storedEligible.clear();
+      // A section from an already-published chunk outside this batch's
+      // authoritative 3x3 domains is still a writable destination. Its raw
+      // layer proves the old storage rule admitted it; keeping that evidence
+      // avoids treating a cross-edge target as air merely because this batch
+      // did not recompute its block sections.
+      for (const auto &[key, chunk] : owner.internal) {
+        if (affected.contains(key) || removed.contains(key))
+          continue;
+        for (int y = chunk->minLightSectionY();
+             y < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
+             ++y) {
+          const LightSectionSnapshot *section = chunk->section(y);
+          if (section &&
+              !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                   .isMissing())
+            storedEligible.insert(
+                {static_cast<int>(key >> 32), y,
+                 static_cast<int>(static_cast<std::uint32_t>(key))});
+        }
+      }
       for (std::uint64_t key : affected)
         (void)ensureWorking(key);
 
       for (auto &[key, chunk] : working) {
         if (removed.contains(key))
           continue;
+        if (!affected.contains(key)) {
+          // Preserve the same published raw destination if it entered the
+          // working set for a reason other than its own section transition.
+          for (int y = chunk.snapshot->minLightSectionY();
+               y < chunk.snapshot->minBlockSectionY +
+                       chunk.snapshot->blockSectionCount + 1;
+               ++y) {
+            const LightSectionSnapshot *section = chunk.snapshot->section(y);
+            if (section &&
+                !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                     .isMissing())
+              storedEligible.insert({chunk.chunkX, y, chunk.chunkZ});
+          }
+          continue;
+        }
         const int sectionX = static_cast<int>(key >> 32);
         const int sectionZ =
             static_cast<int>(static_cast<std::uint32_t>(key));
@@ -2170,6 +2209,8 @@ private:
     }
 
     const std::uint64_t publicationRevision = ++nextPublicationRevision;
+    std::vector<std::pair<std::uint64_t, std::shared_ptr<LightChunkSnapshot>>>
+        publication;
     for (auto &[key, chunk] : working) {
       if (removed.contains(key) || !chunk.dirty)
         continue;
@@ -2179,12 +2220,81 @@ private:
       chunk.snapshot->blockLightComplete = blockComplete;
       chunk.snapshot->skyLightComplete = skyComplete;
       chunk.snapshot->propagationComplete = blockComplete && skyComplete;
-      chunk.snapshot->protocolReady = false;
-      std::shared_ptr<const LightChunkSnapshot> immutable = chunk.snapshot;
-      internal[key] = immutable;
+      chunk.snapshot->protocolReady = chunk.snapshot->propagationComplete;
+      chunk.snapshot->changedSections.clear();
+      const auto old = internal.find(key);
+      for (const auto &now : chunk.snapshot->sections) {
+        bool skyChanged = true;
+        bool blockChanged = true;
+        if (old != internal.end() &&
+            old->second->lifecycleEpoch == chunk.snapshot->lifecycleEpoch) {
+          const LightSectionSnapshot *before = old->second->section(now->sectionY);
+          if (before == now.get()) {
+            skyChanged = false;
+            blockChanged = false;
+          } else if (before) {
+            skyChanged =
+                before->layers[static_cast<std::size_t>(LightLayer::Sky)] !=
+                now->layers[static_cast<std::size_t>(LightLayer::Sky)];
+            blockChanged =
+                before->layers[static_cast<std::size_t>(LightLayer::Block)] !=
+                now->layers[static_cast<std::size_t>(LightLayer::Block)];
+          }
+        }
+        if (skyChanged || blockChanged)
+          chunk.snapshot->changedSections.push_back(
+              {now->sectionY, skyChanged, blockChanged});
+      }
+      publication.emplace_back(key, chunk.snapshot);
+    }
+    if (!publication.empty()) {
+      std::sort(publication.begin(), publication.end(),
+                [](const auto &left, const auto &right) {
+                  return left.first < right.first;
+                });
       std::lock_guard lock(mutex);
-      published[key] = immutable;
-      ++statsPublished;
+      // Keep the undrained publication state bounded by one latest snapshot per
+      // chunk. Removing an older occurrence preserves every remaining batch's
+      // all-at-once visibility while allowing a newer revision to supersede it.
+      for (auto queuedBatch = published.begin(); queuedBatch != published.end();) {
+        std::erase_if(*queuedBatch, [&](const auto &entry) {
+          for (auto &newEntry : publication) {
+            if (newEntry.first != entry.first)
+              continue;
+            if (entry.second->lifecycleEpoch ==
+                newEntry.second->lifecycleEpoch) {
+              std::map<int, std::pair<bool, bool>> merged;
+              for (const auto &change : entry.second->changedSections)
+                merged[change.sectionY] = {change.sky, change.block};
+              for (const auto &change : newEntry.second->changedSections) {
+                auto &flags = merged[change.sectionY];
+                flags.first |= change.sky;
+                flags.second |= change.block;
+              }
+              newEntry.second->changedSections.clear();
+              for (const auto &[sectionY, flags] : merged)
+                newEntry.second->changedSections.push_back(
+                    {sectionY, flags.first, flags.second});
+            }
+            return true;
+          }
+          return false;
+        });
+        if (queuedBatch->empty())
+          queuedBatch = published.erase(queuedBatch);
+        else
+          ++queuedBatch;
+      }
+      std::vector<std::pair<std::uint64_t,
+                            std::shared_ptr<const LightChunkSnapshot>>>
+          committed;
+      committed.reserve(publication.size());
+      for (auto &[key, snapshot] : publication) {
+        internal[key] = snapshot;
+        committed.emplace_back(key, std::move(snapshot));
+      }
+      statsPublished.fetch_add(committed.size(), std::memory_order_relaxed);
+      published.push_back(std::move(committed));
     }
     for (std::uint64_t key : removed) {
       internal.erase(key);
@@ -2211,7 +2321,8 @@ private:
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       internal;
   std::unordered_map<std::uint64_t, SkyColumnSources> skyColumnSources;
-  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+  std::vector<std::vector<std::pair<
+      std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>>>
       published;
   std::function<void(std::shared_ptr<const LightChunkSnapshot>)> publishCallback;
   std::thread worker;

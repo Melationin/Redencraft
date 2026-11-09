@@ -445,6 +445,90 @@ Bytes encodeMovingPistonNbt(const PistonSnapshot &p) {
   w.u8(0);
   return std::move(w.data);
 }
+namespace {
+void setBit(std::vector<std::uint64_t> &bits, int index) {
+  if (index < 0)
+    throw ProtocolError("negative light section index");
+  const auto word = static_cast<std::size_t>(index) / 64;
+  if (bits.size() <= word)
+    bits.resize(word + 1);
+  bits[word] |= std::uint64_t{1} << (index & 63);
+}
+
+void writeBitSet(Writer &out, const std::vector<std::uint64_t> &bits) {
+  out.varInt(static_cast<int>(bits.size()));
+  for (std::uint64_t word : bits)
+    out.i64(std::bit_cast<std::int64_t>(word));
+}
+
+std::size_t lightSnapshotBytes(const LightChunkSnapshot &snapshot) noexcept {
+  std::size_t bytes = sizeof(snapshot) +
+                      snapshot.sections.capacity() *
+                          sizeof(std::shared_ptr<const LightSectionSnapshot>) +
+                      snapshot.changedSections.capacity() *
+                          sizeof(LightChunkSnapshot::LayerChange);
+  for (const auto &section : snapshot.sections)
+    if (section) {
+      bytes += sizeof(*section) + section->palette.capacity() *
+                                     sizeof(BlockLightProperties) +
+               section->cells.capacity() * sizeof(std::uint16_t);
+      for (const auto &layer : section->layers)
+        bytes += layer.packedByteCount();
+    }
+  return bytes;
+}
+
+void appendLayer(Writer &out, const LightLayerSnapshot &layer) {
+  if (layer.isMixed()) {
+    out.varInt(static_cast<int>(kLightLayerBytes));
+    out.raw(std::span<const std::uint8_t>(layer.packedData(), kLightLayerBytes));
+    return;
+  }
+  if (!layer.isUniform() || layer.uniformValue() == 0)
+    throw ProtocolError("light data layer is not encodable");
+  const std::uint8_t value = layer.uniformValue();
+  const std::uint8_t packed = static_cast<std::uint8_t>((value << 4) | value);
+  Bytes bytes(kLightLayerBytes, packed);
+  out.varInt(static_cast<int>(bytes.size()));
+  out.raw(bytes);
+}
+
+void appendLightSections(Writer &out, const ProtocolLightUpdate &update) {
+  const auto writeLayer = [&](const ProtocolLightSections &sections,
+                              std::vector<std::uint64_t> &mask,
+                              std::vector<std::uint64_t> &empty) {
+    for (int sectionY : sections.dataSections) {
+      const int sectionIndex = sectionY - update.snapshot->minLightSectionY();
+      setBit(mask, sectionIndex);
+    }
+    for (int sectionY : sections.emptySections) {
+      const int sectionIndex = sectionY - update.snapshot->minLightSectionY();
+      setBit(empty, sectionIndex);
+    }
+  };
+  std::vector<std::uint64_t> skyMask, blockMask, skyEmpty, blockEmpty;
+  writeLayer(update.sky, skyMask, skyEmpty);
+  writeLayer(update.block, blockMask, blockEmpty);
+  writeBitSet(out, skyMask);
+  writeBitSet(out, blockMask);
+  writeBitSet(out, skyEmpty);
+  writeBitSet(out, blockEmpty);
+  const auto writeData = [&](LightLayer type,
+                             const std::vector<int> &sections) {
+    out.varInt(static_cast<int>(sections.size()));
+    const auto layer = static_cast<std::size_t>(type);
+    for (int sectionY : sections) {
+      const LightSectionSnapshot *section = update.snapshot->section(sectionY);
+      if (!section)
+        throw ProtocolError("light update references a missing section");
+      appendLayer(out, section->layers[layer]);
+    }
+  };
+  writeData(LightLayer::Sky, update.sky.dataSections);
+  writeData(LightLayer::Block, update.block.dataSections);
+}
+} // namespace
+
 std::size_t ProtocolChunkSnapshot::retainedBytes() const noexcept {
   std::size_t bytes = sizeof(*this) + sections.capacity() * sizeof(SectionSnapshot) +
                       blockEntities.capacity() * sizeof(BlockEntity);
@@ -453,10 +537,13 @@ std::size_t ProtocolChunkSnapshot::retainedBytes() const noexcept {
              section.indices8.capacity() + section.indices16.capacity() * 2;
   for (const auto &entity : blockEntities)
     bytes += entity.nbt.capacity();
+  if (light)
+    bytes += lightSnapshotBytes(*light);
   return bytes;
 }
 ProtocolChunkSnapshot prepareChunkSnapshot(ChunkSnapshot snapshot,
-                                            const Registry &registry) {
+                                            const Registry &registry,
+    std::shared_ptr<const LightChunkSnapshot> light) {
   ProtocolChunkSnapshot result;
   result.minY = snapshot.minY;
   result.maxY = snapshot.maxY;
@@ -475,6 +562,12 @@ ProtocolChunkSnapshot prepareChunkSnapshot(ChunkSnapshot snapshot,
   result.blockEntities.reserve(snapshot.pistons.size());
   for (const auto &piston : snapshot.pistons)
     result.blockEntities.push_back({piston.pos, encodeMovingPistonNbt(piston)});
+  if (light) {
+    if (!light->protocolReady || light->minLightSectionY() != snapshot.minY / 16 - 1 ||
+        light->lightSectionCount() != (snapshot.maxY - snapshot.minY) / 16 + 2)
+      throw ProtocolError("chunk light is unpublished, incomplete or misaligned");
+    result.light = std::move(light);
+  }
   return result;
 }
 Bytes encodeChunk(const ChunkSnapshot &snapshot, int cx, int cz,
@@ -486,6 +579,9 @@ Bytes encodeChunk(const ProtocolChunkSnapshot &snapshot, int cx, int cz,
   if (snapshot.minY % 16 || snapshot.maxY % 16 ||
       snapshot.minY >= snapshot.maxY)
     throw ProtocolError("chunk height must be aligned to sections");
+  if (snapshot.light &&
+      (snapshot.light->chunkX != cx || snapshot.light->chunkZ != cz))
+    throw ProtocolError("chunk light belongs to a different chunk identity");
   Writer out;
   out.i32(cx);
   out.i32(cz);
@@ -559,8 +655,13 @@ Bytes encodeChunk(const ProtocolChunkSnapshot &snapshot, int cx, int cz,
     out.varInt(snapshot.pistonTypeId);
     out.raw(p.nbt);
   }
-  // TODO: replace visualization light with a real light engine. A full sky
-  // layer and empty block layer keep the optional viewer usable meanwhile.
+  if (snapshot.light) {
+    appendLightSections(out, prepareLightUpdate(snapshot.light));
+    return std::move(out.data);
+  }
+  // Explicitly unlit worlds retain the legacy visualization fallback. The
+  // native server enables the light service, so published snapshots never use
+  // this path.
   if (sectionCount > 60)
     throw ProtocolError("unsupported light section count");
   auto mask = (std::uint64_t(1) << (sectionCount + 2)) - 1;
@@ -577,6 +678,78 @@ Bytes encodeChunk(const ProtocolChunkSnapshot &snapshot, int cx, int cz,
     out.raw(sky);
   }
   out.varInt(0);
+  return std::move(out.data);
+}
+
+std::size_t ProtocolLightUpdate::retainedBytes() const noexcept {
+  return sizeof(*this) + (snapshot ? lightSnapshotBytes(*snapshot) : 0) +
+         sky.dataSections.capacity() * sizeof(int) +
+         sky.emptySections.capacity() * sizeof(int) +
+         block.dataSections.capacity() * sizeof(int) +
+         block.emptySections.capacity() * sizeof(int);
+}
+
+ProtocolLightUpdate prepareLightUpdate(
+    std::shared_ptr<const LightChunkSnapshot> current,
+    std::shared_ptr<const LightChunkSnapshot> previous) {
+  if (!current || !current->protocolReady)
+    throw ProtocolError("light update source is not protocol ready");
+  if (previous &&
+      (previous->chunkX != current->chunkX ||
+       previous->chunkZ != current->chunkZ ||
+       previous->lifecycleEpoch != current->lifecycleEpoch ||
+       previous->revision >= current->revision ||
+       previous->minLightSectionY() != current->minLightSectionY() ||
+       previous->lightSectionCount() != current->lightSectionCount()))
+    throw ProtocolError("light update crossed a chunk lifecycle");
+
+  ProtocolLightUpdate result;
+  result.chunkX = current->chunkX;
+  result.chunkZ = current->chunkZ;
+  result.snapshot = std::move(current);
+  const auto append = [&](int sectionY, LightLayer layer, bool changed) {
+    if (!changed)
+      return;
+    const auto *now = result.snapshot->section(sectionY);
+    if (!now)
+      throw ProtocolError("light delta references a missing section");
+    const auto &nowLayer = now->layers[static_cast<std::size_t>(layer)];
+    ProtocolLightSections &sections =
+        layer == LightLayer::Sky ? result.sky : result.block;
+    if (nowLayer.isMissing()) {
+      // ClientboundLightUpdatePacketData leaves both masks clear when the
+      // storage layer is null. The client's chunk state removal, not an empty
+      // light layer, handles that lifecycle; missing is not brightness zero.
+      return;
+    } else if (nowLayer.isUniform() && nowLayer.uniformValue() == 0) {
+      sections.emptySections.push_back(sectionY);
+    } else {
+      sections.dataSections.push_back(sectionY);
+    }
+  };
+  if (!previous) {
+    for (int index = 0; index < result.snapshot->lightSectionCount(); ++index) {
+      const int sectionY = result.snapshot->minLightSectionY() + index;
+      append(sectionY, LightLayer::Sky, true);
+      append(sectionY, LightLayer::Block, true);
+    }
+  } else {
+    for (const auto &change : result.snapshot->changedSections) {
+      append(change.sectionY, LightLayer::Sky, change.sky);
+      append(change.sectionY, LightLayer::Block, change.block);
+    }
+  }
+  return result;
+}
+
+Bytes encodeLightUpdate(const ProtocolLightUpdate &update) {
+  if (!update.snapshot)
+    throw ProtocolError("empty light update");
+  Writer out;
+  // ClientboundLightUpdatePacket writes chunk x/z as VarInts.
+  out.varInt(update.chunkX);
+  out.varInt(update.chunkZ);
+  appendLightSections(out, update);
   return std::move(out.data);
 }
 } // namespace redstone::net

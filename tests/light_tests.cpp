@@ -239,8 +239,8 @@ void sectionRangesAndSnapshots() {
   require(snapshot && snapshot->generation == generation,
           "published chunk keeps its generation");
   require(snapshot->skyLightComplete && snapshot->propagationComplete &&
-              !snapshot->protocolReady,
-          "completed light layers remain distinct from protocol readiness");
+              snapshot->protocolReady,
+          "completed light layers become protocol ready");
   require(snapshot->lightSectionCount() == 5,
           "published snapshot keeps all light padding sections");
   require(snapshot->section(-4)->light(LightLayer::Block, 1, 2, 3) == 15 &&
@@ -394,8 +394,8 @@ void workerPublicationAndInvalidation() {
     callbackThread = std::this_thread::get_id();
     ++callbacks;
     require(snapshot && snapshot->propagationComplete &&
-                !snapshot->protocolReady,
-            "callback receives a complete snapshot before protocol readiness");
+                snapshot->protocolReady,
+            "callback receives a complete protocol-ready snapshot");
   });
   const auto firstGeneration =
       service.submitChunk(chunkFixture(3, -2, -4, 3));
@@ -442,6 +442,61 @@ void workerPublicationAndInvalidation() {
   auto reloaded = staleService.latestChunk(1, 1);
   require(reloaded && reloaded->generation == reloadGeneration,
           "stale worker result cannot replace a reloaded chunk");
+}
+
+void publicationBatchVisibility() {
+  LightService service(-1, 1, LightWorkerOptions{1000, 16, true});
+  std::vector<std::shared_ptr<const LightChunkSnapshot>> delivered;
+  service.setPublishCallback([&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+    delivered.push_back(std::move(snapshot));
+  });
+  require(service.submitChunk(emptyChunkFixture(-1, 0, -1, 1)) != 0 &&
+              service.submitChunk(emptyChunkFixture(0, 0, -1, 1)) != 0,
+          "two-chunk publication batch is queued while paused");
+  require(service.latestChunk(-1, 0) == nullptr &&
+              service.latestChunk(0, 0) == nullptr,
+          "paused batch publishes neither chunk early");
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(), "two-chunk publication batch completes");
+  service.drainPublished();
+  require(delivered.size() == 2 &&
+              delivered[0]->revision == delivered[1]->revision,
+          "both chunks from one worker batch become visible with one revision");
+  require(service.latestChunk(0, 0) == delivered[0] &&
+              service.latestChunk(-1, 0) == delivered[1],
+          "one drain publishes the complete batch in deterministic key order");
+}
+
+void coalescedProtocolDeltaIsCumulative() {
+  const auto air = airState();
+  const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  LightService service(0, 2, LightWorkerOptions{1000, 16, false, false});
+  require(service.submitChunk(emptyChunkFixture(0, 0, 0, 2)) != 0,
+          "cumulative-delta fixture loads");
+  require(service.waitIdleForTesting(), "cumulative-delta baseline completes");
+  service.drainPublished();
+  service.pauseForTesting();
+  require(reportBlock(service, 0, 0, {1, 1, 1}, air, lamp) &&
+              service.processChunkBatchForTesting(0, 0),
+          "first undrained revision completes");
+  require(reportBlock(service, 0, 0, {1, 17, 1}, air, lamp) &&
+              service.processChunkBatchForTesting(0, 0),
+          "second undrained revision completes");
+  service.drainPublished();
+  auto latest = service.latestChunk(0, 0);
+  const auto sectionZero = std::find_if(
+      latest->changedSections.begin(), latest->changedSections.end(),
+      [](const auto &change) {
+        return change.sectionY == 0 && change.block;
+      });
+  const auto sectionOne = std::find_if(
+      latest->changedSections.begin(), latest->changedSections.end(),
+      [](const auto &change) {
+        return change.sectionY == 1 && change.block;
+      });
+  require(sectionZero != latest->changedSections.end() &&
+              sectionOne != latest->changedSections.end(),
+          "coalesced publication preserves both undrained layer deltas");
 }
 
 void workerQueueAndClose() {
@@ -624,8 +679,8 @@ void blockLightPropagation() {
           "block-light fixture loads");
   auto initial = settledChunk(service, 0, 0);
   require(initial->blockLightComplete && initial->skyLightComplete &&
-              initial->propagationComplete &&
-              !initial->protocolReady && blockLightAt(initial, 8, 8, 8) == 0,
+              initial->propagationComplete && initial->protocolReady &&
+              blockLightAt(initial, 8, 8, 8) == 0,
           "empty chunk completes both propagated light layers");
 
   require(reportBlock(service, 0, 0, {7, 8, 8}, air, lamp),
@@ -702,8 +757,8 @@ void skyLightPropagation() {
           "sky-light fixture loads an open chunk");
   auto open = settledChunk(service, 0, 0);
   require(open->blockLightComplete && open->skyLightComplete &&
-              open->propagationComplete && !open->protocolReady,
-          "open sky completes both propagated layers without protocol ready");
+              open->propagationComplete && open->protocolReady,
+          "open sky completes both propagated layers and becomes protocol ready");
   require(skyLightAt(open, 0, 0, 0) == 15 &&
               skyLightAt(open, 8, 8, 8) == 15 &&
               skyLightAt(open, 15, 15, 15) == 15 &&
@@ -1321,6 +1376,8 @@ int main(int argc, char **argv) {
     opticalMetadata();
     opticalAssetCoverage(argv[1]);
     workerPublicationAndInvalidation();
+    publicationBatchVisibility();
+    coalescedProtocolDeltaIsCumulative();
     workerQueueAndClose();
     recoverableChangesAndBoundedPublication();
     blockLightPropagation();

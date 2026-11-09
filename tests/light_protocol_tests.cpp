@@ -1,0 +1,591 @@
+#include "redstone/net/session.hpp"
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string_view>
+#include <vector>
+
+using namespace redstone;
+using namespace redstone::net;
+
+namespace {
+std::vector<Bytes> records;
+
+void require(bool condition, const char *message) {
+  if (!condition)
+    throw std::runtime_error(message);
+}
+void require(bool condition, const std::string &message) {
+  if (!condition)
+    throw std::runtime_error(message);
+}
+
+void hello(Session &session) {
+  Writer out;
+  out.varInt(775);
+  out.string("localhost");
+  out.i16(25565);
+  out.varInt(2);
+  session.receive(frame(0, out.data));
+}
+
+std::vector<Bytes> drain(Session &session) {
+  std::vector<Bytes> packets;
+  for (auto &framed : session.takeOutput()) {
+    auto body = popFrame(framed);
+    require(body && framed.empty(), "clientbound frame has one packet");
+    packets.push_back(std::move(*body));
+  }
+  return packets;
+}
+
+std::vector<Bytes> join(Session &session, const ProtocolData &data) {
+  hello(session);
+  Writer out;
+  out.string("LightTester");
+  out.raw(Uuid{});
+  session.receive(frame(0, out.data));
+  (void)drain(session);
+  session.receive(frame(3, {}));
+  (void)drain(session);
+  out = {};
+  out.varInt(0);
+  session.receive(frame(7, out.data));
+  (void)drain(session);
+  session.receive(frame(3, {}));
+  require(session.phase() == Phase::Play, "session reaches play");
+  std::vector<Bytes> joined;
+  for (auto &body : drain(session)) {
+    records.push_back(std::move(body));
+    joined.push_back(records.back());
+  }
+
+  out = {};
+  out.varInt(1);
+  session.receive(frame(
+      data.packet("play", "serverbound", "accept_teleportation"), out.data));
+  out = {};
+  out.f32(9);
+  session.receive(frame(
+      data.packet("play", "serverbound", "chunk_batch_received"), out.data));
+  (void)drain(session);
+  return joined;
+}
+
+std::vector<Bytes> drainPlay(Session &session) {
+  auto packets = drain(session);
+  for (const auto &body : packets)
+    records.push_back(body);
+  return packets;
+}
+
+std::vector<std::uint64_t> readBitSet(Reader &reader) {
+  const int words = reader.varInt();
+  require(words >= 0 && words <= 8, "light mask word count is bounded");
+  std::vector<std::uint64_t> bits(static_cast<std::size_t>(words));
+  for (auto &word : bits)
+    word = std::bit_cast<std::uint64_t>(reader.i64());
+  return bits;
+}
+
+void setBit(std::vector<std::uint64_t> &bits, int index) {
+  const auto word = static_cast<std::size_t>(index) / 64;
+  if (bits.size() <= word)
+    bits.resize(word + 1);
+  bits[word] |= std::uint64_t{1} << (index & 63);
+}
+
+int bitCount(const std::vector<std::uint64_t> &bits) {
+  int count = 0;
+  for (auto word : bits)
+    count += std::popcount(word);
+  return count;
+}
+
+void expectedLayer(const LightChunkSnapshot &current,
+                   const LightChunkSnapshot *previous, LightLayer layer,
+                   std::vector<std::uint64_t> &data,
+                   std::vector<std::uint64_t> &empty,
+                   std::vector<int> &dataSections) {
+  for (int index = 0; index < current.lightSectionCount(); ++index) {
+    const int sectionY = current.minLightSectionY() + index;
+    const auto &now = current.section(sectionY)
+                          ->layers[static_cast<std::size_t>(layer)];
+    const auto *before =
+        previous ? &previous->section(sectionY)
+                           ->layers[static_cast<std::size_t>(layer)]
+                 : nullptr;
+    if (before && now == *before)
+      continue;
+    if (now.isMissing()) {
+      // The official packet leaves both masks clear for a null DataLayer.
+      continue;
+    } else if (now.isUniform() && now.uniformValue() == 0) {
+      setBit(empty, index);
+    } else {
+      setBit(data, index);
+      dataSections.push_back(sectionY);
+    }
+  }
+}
+
+void verifyLayerPayload(Reader &reader, const LightChunkSnapshot &current,
+                        LightLayer layer,
+                        const std::vector<int> &dataSections) {
+  require(reader.varInt() == static_cast<int>(dataSections.size()),
+          "layer update count matches its data mask");
+  for (int sectionY : dataSections) {
+    const auto &value = current.section(sectionY)
+                            ->layers[static_cast<std::size_t>(layer)];
+    require(reader.varInt() == int(kLightLayerBytes),
+            "each DataLayer is exactly 2048 bytes");
+    const auto payload = reader.raw(kLightLayerBytes);
+    for (std::size_t byte = 0; byte < payload.size(); ++byte) {
+      std::uint8_t expected = 0;
+      if (value.isMixed()) {
+        expected = value.packedData()[byte];
+      } else {
+        require(value.isUniform() && value.uniformValue() != 0,
+                "data mask references nonempty uniform data");
+        expected = static_cast<std::uint8_t>((value.uniformValue() << 4) |
+                                             value.uniformValue());
+      }
+      require(payload[byte] == expected,
+              "wire nibble bytes match the immutable layer");
+    }
+  }
+}
+
+void verifyLightData(Reader &reader, const LightChunkSnapshot &current,
+                     const LightChunkSnapshot *previous,
+                     std::string_view phase) {
+  const auto skyData = readBitSet(reader);
+  const auto blockData = readBitSet(reader);
+  const auto skyEmpty = readBitSet(reader);
+  const auto blockEmpty = readBitSet(reader);
+  std::vector<std::uint64_t> expectedSkyData, expectedBlockData,
+      expectedSkyEmpty, expectedBlockEmpty;
+  std::vector<int> skySections, blockSections;
+  expectedLayer(current, previous, LightLayer::Sky, expectedSkyData,
+                expectedSkyEmpty, skySections);
+  expectedLayer(current, previous, LightLayer::Block, expectedBlockData,
+                expectedBlockEmpty, blockSections);
+  require(skyData == expectedSkyData && blockData == expectedBlockData &&
+              skyEmpty == expectedSkyEmpty && blockEmpty == expectedBlockEmpty,
+          std::string("four light masks distinguish storage in ") +
+              std::string(phase));
+  require(bitCount(skyData) + bitCount(blockData) <=
+              current.lightSectionCount() * 2,
+          "light masks cannot repeat a section");
+  require((skyData.size() == 0 || (skyData.back() >> 63) == 0),
+          "light masks use canonical trimmed long arrays");
+  verifyLayerPayload(reader, current, LightLayer::Sky, skySections);
+  verifyLayerPayload(reader, current, LightLayer::Block, blockSections);
+  require(reader.empty(), "light packet has no trailing bytes");
+}
+
+void verifyChunkLight(Reader &reader, const LightChunkSnapshot &light) {
+  const int heightCount = reader.varInt();
+  require(heightCount == 3, "chunk packet carries three heightmaps");
+  for (int i = 0; i < heightCount; ++i) {
+    (void)reader.varInt();
+    const int words = reader.varInt();
+    require(words >= 0 && words < 100000, "heightmap size is bounded");
+    (void)reader.raw(static_cast<std::size_t>(words) * sizeof(std::int64_t));
+  }
+  (void)reader.raw(static_cast<std::size_t>(reader.varInt()));
+  require(reader.varInt() == 0,
+          "light fixture contains no variable-size block entities");
+  verifyLightData(reader, light, nullptr, "initial chunk");
+}
+
+Bytes packetOf(std::vector<Bytes> &packets, int id) {
+  for (auto it = packets.begin(); it != packets.end(); ++it) {
+    Reader reader(*it);
+    if (reader.varInt() == id) {
+      Bytes result = std::move(*it);
+      packets.erase(it);
+      return result;
+    }
+  }
+  return {};
+}
+
+void moveTo(Session &session, const ProtocolData &data, double x, double z) {
+  Writer out;
+  out.f64(x);
+  out.f64(70);
+  out.f64(z);
+  out.u8(0);
+  session.receive(
+      frame(data.packet("play", "serverbound", "move_player_pos"), out.data));
+  session.tick();
+}
+
+void strictInitialDynamicClearAndReload(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(),
+          "initial light batch completes without waiting on a socket");
+  service->drainPublished();
+  auto initial = service->latestChunk(0, 0);
+  require(initial && initial->protocolReady, "initial chunk light is ready");
+
+  ServerOptions options;
+  options.chunks.push_back({0, 0});
+  options.spawn = {8.5, 70, 8.5};
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  world.lightPublicationObserver =
+      [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        session.lightPublished(std::move(snapshot));
+      };
+  auto packets = join(session, data);
+
+  auto chunkBody = packetOf(packets, data.packet("play", "clientbound",
+                                                  "level_chunk_with_light"));
+  require(!chunkBody.empty(), "initial chunk-with-light packet is sent");
+  Reader chunk(chunkBody);
+  require(chunk.varInt() == data.packet("play", "clientbound",
+                                        "level_chunk_with_light"),
+          "chunk packet id is the exported 775 id");
+  require(chunk.i32() == 0 && chunk.i32() == 0,
+          "chunk packet carries signed chunk coordinates");
+  verifyChunkLight(chunk, *initial);
+
+  require(world.setBlock({1, 8, 8},
+                         Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")),
+          "light source enters the world normally");
+  require(service->waitIdleForTesting(), "dynamic light batch completes");
+  world.tick();
+  auto changed = service->latestChunk(0, 0);
+  require(changed && changed->revision > initial->revision,
+          "world tick publishes the dynamic revision");
+  packets = drainPlay(session);
+  auto updateBody = packetOf(
+      packets, data.packet("play", "clientbound", "light_update"));
+  require(!updateBody.empty(), "dynamic light_update is sent at chunk broadcast");
+  Reader update(updateBody);
+  require(update.varInt() == data.packet("play", "clientbound", "light_update"),
+          "light_update packet id is the exported 775 id");
+  require(update.varInt() == 0 && update.varInt() == 0,
+          "light_update uses VarInt chunk coordinates");
+  verifyLightData(update, *changed, initial.get(), "dynamic update");
+
+  require(world.setBlock({1, 8, 8}, Blocks::AIR.defaultState()),
+          "light source removal enters the world normally");
+  require(service->waitIdleForTesting(), "clear light batch completes");
+  world.tick();
+  auto cleared = service->latestChunk(0, 0);
+  packets = drainPlay(session);
+  auto clearBody = packetOf(
+      packets, data.packet("play", "clientbound", "light_update"));
+  require(!clearBody.empty(), "successful source removal sends light_update");
+  Reader clear(clearBody);
+  require(clear.varInt() == data.packet("play", "clientbound", "light_update") &&
+              clear.varInt() == 0 && clear.varInt() == 0,
+          "clear packet header is exact");
+  verifyLightData(clear, *cleared, changed.get(), "layer clear");
+
+  // Queue a real immutable update, then move the player out of the chunk
+  // before the writer drains it. The generation token must cancel the stale
+  // light packet while the forget packet remains deliverable.
+  auto stale = std::make_shared<LightChunkSnapshot>(*cleared);
+  stale->revision = cleared->revision + 100;
+  auto changedSection = std::make_shared<LightSectionSnapshot>(
+      *stale->sections[1]);
+  changedSection->layers[static_cast<std::size_t>(LightLayer::Block)] =
+      LightLayerSnapshot::uniform(7);
+  stale->sections[1] = std::move(changedSection);
+  stale->changedSections = {{0, false, true}};
+  session.lightPublished(stale);
+  moveTo(session, data, 500.5, 8.5);
+  packets = drainPlay(session);
+  require(packetOf(packets, data.packet("play", "clientbound",
+                                        "light_update")).empty(),
+          "unloaded queued light revision is cancelled before encoding");
+  require(!packetOf(packets, data.packet("play", "clientbound",
+                                         "forget_level_chunk")).empty(),
+          "unload still sends its normal forget packet");
+
+  moveTo(session, data, 8.5, 8.5);
+  packets = drainPlay(session);
+  auto reloadBody = packetOf(packets, data.packet("play", "clientbound",
+                                                   "level_chunk_with_light"));
+  require(!reloadBody.empty(), "reload queues a fresh chunk-with-light packet");
+  Reader reload(reloadBody);
+  require(reload.varInt() == data.packet("play", "clientbound",
+                                         "level_chunk_with_light") &&
+              reload.i32() == 0 && reload.i32() == 0,
+          "reload packet keeps the chunk identity");
+  verifyChunkLight(reload, *service->latestChunk(0, 0));
+
+  Writer ack;
+  ack.f32(9);
+  session.receive(frame(
+      data.packet("play", "serverbound", "chunk_batch_received"), ack.data));
+  moveTo(session, data, 500.5, 8.5);
+  (void)drainPlay(session);
+  moveTo(session, data, 8.5, 8.5);
+  moveTo(session, data, 500.5, 8.5);
+  packets = drainPlay(session);
+  int started = 0, chunks = 0, finished = 0, finishedCount = -1, forgotten = 0;
+  for (int index = 0; index < static_cast<int>(packets.size()); ++index) {
+    Reader packet(packets[index]);
+    const int id = packet.varInt();
+    if (id == data.packet("play", "clientbound", "chunk_batch_start")) {
+      started = index + 1;
+    } else if (id == data.packet("play", "clientbound",
+                                 "level_chunk_with_light")) {
+      ++chunks;
+    } else if (id == data.packet("play", "clientbound",
+                                 "chunk_batch_finished")) {
+      finished = index + 1;
+      finishedCount = packet.varInt();
+    } else if (id == data.packet("play", "clientbound",
+                                 "forget_level_chunk")) {
+      forgotten = index + 1;
+    }
+  }
+  require(started && chunks == 1 && finished && finishedCount == chunks &&
+              started < finished && finished < forgotten,
+          "first-packet backlog keeps start/chunk/finished counts before forget");
+}
+
+std::shared_ptr<LightChunkSnapshot>
+denseSnapshot(const LightChunkSnapshot &base, std::uint64_t revision,
+              std::uint8_t seed) {
+  auto result = std::make_shared<LightChunkSnapshot>(base);
+  result->revision = revision;
+  result->sections.clear();
+  result->changedSections.clear();
+  std::array<std::uint8_t, kLightVolume> values{};
+  for (int index = 0; index < kLightVolume; ++index)
+    values[static_cast<std::size_t>(index)] =
+        static_cast<std::uint8_t>((index + seed) & 15);
+  for (const auto &source : base.sections) {
+    auto section = std::make_shared<LightSectionSnapshot>(*source);
+    section->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+        LightLayerSnapshot::mixed(values);
+    section->layers[static_cast<std::size_t>(LightLayer::Block)] =
+        LightLayerSnapshot::mixed(values);
+    result->sections.push_back(std::move(section));
+    result->changedSections.push_back({source->sectionY, true, true});
+  }
+  return result;
+}
+
+void lightBackpressure(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(), "backpressure light load");
+  service->drainPublished();
+  auto ready = service->latestChunk(0, 0);
+  require(ready && ready->protocolReady, "backpressure light snapshot ready");
+  ServerOptions options;
+  options.chunks.push_back({0, 0});
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  (void)join(session, data);
+  (void)drain(session);
+
+  for (std::uint64_t update = 1; update <= 512 && !session.closed(); ++update) {
+    session.lightPublished(denseSnapshot(*ready, ready->revision + update,
+                                         static_cast<std::uint8_t>(update)));
+  }
+  require(session.closed(),
+          "light updates alone hit the per-connection retained-byte budget");
+  require(session.error() == "Connection output backlog exceeded",
+          "light backpressure reports the bounded output failure");
+}
+
+void noSkyUsesExplicitZero() {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, false});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(), "no-sky batch completes");
+  service->drainPublished();
+  auto missing = service->latestChunk(0, 0);
+  require(missing && missing->protocolReady && !missing->skyLightEnabled,
+          "no-sky snapshot is protocol ready without fabricated brightness");
+  auto missingPlan = prepareLightUpdate(missing);
+  require(missingPlan.sky.dataSections.empty() &&
+              missingPlan.sky.emptySections.empty(),
+          "missing no-sky layers are omitted rather than sent as full light");
+
+  // Java's disabled empty DataLayer is a stored uniform zero, distinct from a
+  // missing layer even though both query as brightness zero.
+  auto zero = std::make_shared<LightChunkSnapshot>(*missing);
+  zero->sections.clear();
+  for (const auto &section : missing->sections) {
+    auto copy = std::make_shared<LightSectionSnapshot>(*section);
+    copy->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+        LightLayerSnapshot::uniform(0);
+    zero->sections.push_back(std::move(copy));
+  }
+  auto zeroPlan = prepareLightUpdate(zero);
+  require(zeroPlan.sky.dataSections.empty() &&
+              zeroPlan.sky.emptySections.size() ==
+                  static_cast<std::size_t>(zero->lightSectionCount()),
+          "stored no-sky zero layers use empty masks and no bytes");
+  auto newerLifetime = std::make_shared<LightChunkSnapshot>(*zero);
+  ++newerLifetime->lifecycleEpoch;
+  bool rejected = false;
+  try {
+    (void)prepareLightUpdate(newerLifetime, zero);
+  } catch (const ProtocolError &) {
+    rejected = true;
+  }
+  require(rejected, "incremental light cannot cross a load/reload lifecycle");
+
+  auto withSky = std::make_shared<LightChunkSnapshot>(*zero);
+  withSky->revision = zero->revision + 1;
+  auto skySection = std::make_shared<LightSectionSnapshot>(*withSky->sections[1]);
+  skySection->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+      LightLayerSnapshot::mixedPacked(std::array<std::uint8_t, kLightLayerBytes>{});
+  withSky->sections[1] = skySection;
+  withSky->changedSections = {{skySection->sectionY, true, false}};
+  auto withoutSky = std::make_shared<LightChunkSnapshot>(*withSky);
+  withoutSky->revision = withSky->revision + 1;
+  auto missingSection = std::make_shared<LightSectionSnapshot>(*skySection);
+  missingSection->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+      LightLayerSnapshot::missing();
+  withoutSky->sections[1] = missingSection;
+  withoutSky->changedSections = {{missingSection->sectionY, true, false}};
+  auto missingDelta = prepareLightUpdate(withoutSky, withSky);
+  require(missingDelta.sky.dataSections.empty() &&
+              missingDelta.sky.emptySections.empty(),
+          "raw Missing sky layer sets neither mask, unlike stored zero");
+}
+
+void nativeServerFixturePublishesEveryChunk() {
+  World world;
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z) {
+      world.loadChunk(x, z);
+      for (int bx = 0; bx < 16; ++bx)
+        for (int bz = 0; bz < 16; ++bz)
+          world.rawSetBlock({x * 16 + bx, 64, z * 16 + bz},
+                            Blocks::SMOOTH_STONE.defaultState());
+    }
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(),
+          "native server fixture light batch completes");
+  service->drainPublished();
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z) {
+      auto snapshot = service->latestChunk(x, z);
+      require(snapshot && snapshot->protocolReady,
+              "every native server fixture chunk is protocol ready");
+    }
+}
+
+void unpublishedLightDefersJoin(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, true, true});
+  auto *service = world.lightService();
+  require(service && service->latestChunk(0, 0) == nullptr,
+          "paused worker has no published initial light");
+  ServerOptions options;
+  options.chunks.push_back({0, 0});
+  options.spawn = {8.5, 70, 8.5};
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  world.lightPublicationObserver =
+      [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        session.lightPublished(std::move(snapshot));
+      };
+  auto before = join(session, data);
+  require(packetOf(before, data.packet("play", "clientbound",
+                                       "level_chunk_with_light")).empty() &&
+              packetOf(before, data.packet("play", "clientbound",
+                                           "player_position")).empty(),
+          "join neither invents light nor sends position before a chunk");
+
+  service->resumeForTesting();
+  require(service->waitIdleForTesting(), "deferred initial light completes");
+  world.tick();
+  session.tick();
+  auto after = drainPlay(session);
+  auto chunkIndex = std::find_if(after.begin(), after.end(), [&](const Bytes &body) {
+    Reader reader(body);
+    return reader.varInt() == data.packet("play", "clientbound",
+                                          "level_chunk_with_light");
+  });
+  auto positionIndex = std::find_if(after.begin(), after.end(), [&](const Bytes &body) {
+    Reader reader(body);
+    return reader.varInt() == data.packet("play", "clientbound",
+                                          "player_position");
+  });
+  require(chunkIndex != after.end() && positionIndex != after.end() &&
+              chunkIndex < positionIndex,
+          "complete chunk light precedes the deferred player position");
+}
+
+void unknownOpticsRemainUnpublished(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.rawSetBlock({1, 8, 1}, BlockState("minecraft:unmapped_light_test"));
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(), "unknown-optics batch completes");
+  service->drainPublished();
+  auto incomplete = service->latestChunk(0, 0);
+  require(incomplete && !incomplete->protocolReady &&
+              !incomplete->propagationComplete,
+          "unknown optical metadata never becomes protocol ready");
+  ServerOptions options;
+  options.chunks.push_back({0, 0});
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  auto packets = join(session, data);
+  require(packetOf(packets, data.packet("play", "clientbound",
+                                        "level_chunk_with_light")).empty() &&
+              packetOf(packets, data.packet("play", "clientbound",
+                                            "player_position")).empty(),
+          "incomplete optics defer both light and player position");
+}
+} // namespace
+
+int main(int argc, char **argv) {
+  try {
+    require(argc == 2, "light_protocol_tests needs assets/protocol775");
+    ProtocolData data(argv[1]);
+    strictInitialDynamicClearAndReload(data);
+    noSkyUsesExplicitZero();
+    nativeServerFixturePublishesEveryChunk();
+    unpublishedLightDefersJoin(data);
+    unknownOpticsRemainUnpublished(data);
+    lightBackpressure(data);
+    if (const char *path = std::getenv("REDSTONE_PLAY_FIXTURE")) {
+      std::ofstream file(path, std::ios::binary);
+      for (const auto &body : records) {
+        Writer record;
+        record.i32(static_cast<int>(body.size()));
+        record.raw(body);
+        file.write(reinterpret_cast<const char *>(record.data.data()),
+                   record.data.size());
+      }
+      require(file.good(), "writes optional official-codec fixture");
+    }
+    std::cout << "light protocol tests passed: " << records.size()
+              << " packets\n";
+    return 0;
+  } catch (const std::exception &error) {
+    std::cerr << "light protocol test failure: " << error.what() << '\n';
+    return 1;
+  }
+}

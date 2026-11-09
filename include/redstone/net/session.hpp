@@ -3,6 +3,7 @@
 #include "redstone/entity.hpp"
 #include "redstone/net/wire.hpp"
 #include <array>
+#include <atomic>
 #include <map>
 #include <set>
 
@@ -47,6 +48,10 @@ public:
   void blockEvent(const BlockEvent &);
   void explosion(Vec3 center, float radius, int blockCount);
   void fallingBlockLanded(int entityId, Pos, const BlockState &);
+  // Main-thread delivery from the light worker. Initial chunk sends wait for a
+  // protocol-ready snapshot; subsequent updates are encoded from immutable
+  // snapshots after this callback returns.
+  void lightPublished(std::shared_ptr<const LightChunkSnapshot> snapshot);
   // Command tree and tick state. Both owners live in the server loop and outlive
   // every session.
   void attachCommands(const command::Dispatcher *, const command::Context *);
@@ -84,6 +89,7 @@ private:
   void handle(Reader &);
   void play(int, Reader &);
   void join();
+  void finishJoin();
   void send(std::string_view name, const Writer &payload = {});
   void send(std::string_view name, Writer &&payload);
   void packet(int id, const Writer &payload = {});
@@ -91,7 +97,8 @@ private:
   void enqueue(OutPacket packet);
   void queue(Bytes bytes);
   void queueDeferred(std::function<Bytes()> producer,
-                     std::size_t retainedBytes);
+                     std::size_t retainedBytes,
+                     std::function<bool()> stillValid = {});
   void disconnect(const std::string &);
   void acknowledge(int sequence);
   void sendBlockUpdate(Pos);
@@ -103,6 +110,9 @@ private:
   void sendTntData(const PrimedTnt &, TrackedEntity &);
   void refreshChunkView();
   void sendChunkBatch();
+  bool chunkVisible(std::pair<int, int>) const;
+  void queuePendingChunk(std::pair<int, int>);
+  void expireChunk(std::pair<int, int>);
   bool hasChunk(Pos) const;
   void positionPacket(Writer &, Vec3 pos, Vec3 motion, float yaw, float pitch);
   bool canInteract(Pos) const;
@@ -138,8 +148,14 @@ private:
   std::vector<ChangedBlock> changedBlocks_;
   std::set<std::pair<int, int>> availableChunks_, sentChunks_;
   std::vector<std::pair<int, int>> pendingChunks_;
+  std::set<std::pair<int, int>> awaitingLightChunks_;
+  std::map<std::pair<int, int>, std::shared_ptr<std::atomic<bool>>>
+      chunkGenerations_;
+  std::map<std::pair<int, int>, std::shared_ptr<const LightChunkSnapshot>>
+      sentChunkLight_;
   std::optional<std::pair<int, int>> chunkCenter_;
   bool awaitingChunkBatch_ = false;
+  bool joinPositionPending_ = false;
   int chunksPerBatch_ = 9;
   int chunkBatchLimit_ = 9;
   int dropSpam_ = 0;

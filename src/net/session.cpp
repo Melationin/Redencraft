@@ -388,8 +388,10 @@ void Session::queue(Bytes bytes) {
   enqueue(OutPacket{std::move(bytes), -1, {}});
 }
 void Session::queueDeferred(std::function<Bytes()> producer,
-                            std::size_t retainedBytes) {
-  enqueue(OutPacket{{}, -1, std::move(producer), retainedBytes});
+                            std::size_t retainedBytes,
+                            std::function<bool()> stillValid) {
+  enqueue(OutPacket{{}, -1, std::move(producer), retainedBytes,
+                    std::move(stillValid)});
 }
 void Session::send(std::string_view name, const Writer &payload) {
   if (closed())
@@ -410,12 +412,13 @@ std::vector<Bytes> Session::takeOutput() {
   std::vector<Bytes> packets;
   packets.reserve(items.size());
   for (auto &item : items) {
-    if (item.deferred)
-      packets.push_back(item.deferred());
-    else if (item.packetId >= 0)
-      packets.push_back(frame(item.packetId, item.bytes));
-    else
-      packets.push_back(std::move(item.bytes));
+    if (item.stillValid && !item.stillValid())
+      continue;
+    Bytes produced = item.deferred ? item.deferred()
+                      : item.packetId >= 0 ? frame(item.packetId, item.bytes)
+                                           : std::move(item.bytes);
+    if (!produced.empty())
+      packets.push_back(std::move(produced));
   }
   return packets;
 }
@@ -611,7 +614,14 @@ void Session::join() {
   out.f32(0);
   send("game_event", out);
   sendChunkBatch();
-  out = {};
+  if (awaitingLightChunks_.empty())
+    finishJoin();
+  else
+    joinPositionPending_ = true;
+}
+void Session::finishJoin() {
+  joinPositionPending_ = false;
+  Writer out;
   out.i64(world_.gameTime());
   out.varInt(0);
   send("set_time", out);
@@ -1147,6 +1157,29 @@ void Session::play(int id, Reader &in) {
 bool Session::hasChunk(Pos p) const {
   return sentChunks_.contains({chunkCoord(p.x), chunkCoord(p.z)});
 }
+bool Session::chunkVisible(std::pair<int, int> chunk) const {
+  if (!chunkCenter_)
+    return false;
+  return std::abs(chunk.first - chunkCenter_->first) <= options_.viewDistance &&
+         std::abs(chunk.second - chunkCenter_->second) <= options_.viewDistance;
+}
+void Session::queuePendingChunk(std::pair<int, int> chunk) {
+  if (sentChunks_.contains(chunk) || !availableChunks_.contains(chunk) ||
+      !chunkVisible(chunk) ||
+      !world_.isChunkLoaded(chunk.first, chunk.second) ||
+      std::find(pendingChunks_.begin(), pendingChunks_.end(), chunk) !=
+          pendingChunks_.end())
+    return;
+  pendingChunks_.push_back(chunk);
+}
+void Session::expireChunk(std::pair<int, int> chunk) {
+  const auto token = chunkGenerations_.find(chunk);
+  if (token != chunkGenerations_.end())
+    token->second->store(false, std::memory_order_release);
+  chunkGenerations_.erase(chunk);
+  sentChunkLight_.erase(chunk);
+  awaitingLightChunks_.erase(chunk);
+}
 void Session::refreshChunkView() {
   const std::pair center{chunkCoord(position_.x), chunkCoord(position_.z)};
   if (chunkCenter_ == center)
@@ -1170,9 +1203,11 @@ void Session::refreshChunkView() {
     out.i32(it->second);
     out.i32(it->first);
     send("forget_level_chunk", out);
+    expireChunk(*it);
     it = sentChunks_.erase(it);
   }
   pendingChunks_.clear();
+  awaitingLightChunks_.clear();
   for (auto p : availableChunks_)
     if (visible(p) && !sentChunks_.contains(p) &&
         world_.isChunkLoaded(p.first, p.second))
@@ -1190,8 +1225,31 @@ void Session::refreshChunkView() {
   // this fixed square is only the visualization view, not simulation loading.
 }
 void Session::sendChunkBatch() {
+  // A chunk can join after the worker completed but before the next world tick
+  // drains publications. This is a nonblocking ownership handoff, never a wait
+  // for propagation, and keeps the join packet order chunk-before-position.
+  if (world_.lightingEnabled() && world_.lightService())
+    world_.lightService()->drainPublished();
   if (awaitingChunkBatch_ || pendingChunks_.empty() || closed())
     return;
+  if (world_.lightingEnabled()) {
+    const auto *service = world_.lightService();
+    bool ready = false;
+    for (const auto chunk : pendingChunks_) {
+      const auto light = service->latestChunk(chunk.first, chunk.second);
+      if (light && light->protocolReady) {
+        ready = true;
+        break;
+      }
+    }
+    if (!ready) {
+      for (const auto chunk : pendingChunks_)
+        if (world_.isChunkLoaded(chunk.first, chunk.second))
+          awaitingLightChunks_.insert(chunk);
+      pendingChunks_.clear();
+      return;
+    }
+  }
   send("chunk_batch_start");
   const int chunkPacket =
       data_.packet(phaseName(phase_), "clientbound", "level_chunk_with_light");
@@ -1203,15 +1261,29 @@ void Session::sendChunkBatch() {
     pendingChunks_.erase(pendingChunks_.begin());
     if (!world_.isChunkLoaded(x, z))
       continue;
+    std::shared_ptr<const LightChunkSnapshot> light;
+    if (world_.lightingEnabled()) {
+      light = world_.lightService()->latestChunk(x, z);
+      if (!light || !light->protocolReady) {
+        awaitingLightChunks_.insert({x, z});
+        continue;
+      }
+    }
     // Snapshot on the tick thread (the world is not thread safe), then let the
     // writer thread run the palette/bit packing. The batch-start ordering is
     // preserved because queue items are drained in order.
-    auto snapshot = prepareChunkSnapshot(world_.snapshotChunk(x, z), data_.registry);
+    auto snapshot =
+        prepareChunkSnapshot(world_.snapshotChunk(x, z), data_.registry, light);
     for (const auto &section : snapshot.sections)
       bytes += section.palette.size() * sizeof(BlockState::Id) +
                section.indices8.size() + section.indices16.size() * 2 + 64;
     const auto &registry = data_.registry;
     const auto retainedBytes = snapshot.retainedBytes();
+    const auto generation = std::make_shared<std::atomic<bool>>(true);
+    // A submitted chunk belongs to the FIFO batch counted by chunk_batch_start
+    // and chunk_batch_finished. It must not be cancelled independently. A later
+    // forget_level_chunk removes it in order; only dynamic light updates use the
+    // lifecycle token for cancellation.
     queueDeferred([snapshot = std::move(snapshot), chunkPacket, x, z,
                    &registry]() {
       return frame(chunkPacket, encodeChunk(snapshot, x, z, registry));
@@ -1219,12 +1291,56 @@ void Session::sendChunkBatch() {
     if (closed())
       return;
     sentChunks_.emplace(x, z);
+    chunkGenerations_[{x, z}] = generation;
+    if (light)
+      sentChunkLight_[{x, z}] = std::move(light);
+    awaitingLightChunks_.erase({x, z});
     ++count;
   }
   Writer out;
   out.varInt(count);
   send("chunk_batch_finished", out);
   awaitingChunkBatch_ = true;
+}
+void Session::lightPublished(
+    std::shared_ptr<const LightChunkSnapshot> snapshot) {
+  if (closed() || phase_ != Phase::Play || !snapshot ||
+      !snapshot->protocolReady)
+    return;
+  const std::pair key{snapshot->chunkX, snapshot->chunkZ};
+  if (awaitingLightChunks_.contains(key)) {
+    awaitingLightChunks_.erase(key);
+    queuePendingChunk(key);
+    return;
+  }
+  const auto sent = sentChunks_.contains(key);
+  if (!sent)
+    return;
+  auto previous = sentChunkLight_.find(key);
+  if (previous == sentChunkLight_.end() ||
+      snapshot->revision <= previous->second->revision)
+    return;
+  auto update = prepareLightUpdate(snapshot, previous->second);
+  previous->second = std::move(snapshot);
+  if (update.sky.dataSections.empty() &&
+      update.sky.emptySections.empty() &&
+      update.block.dataSections.empty() &&
+      update.block.emptySections.empty())
+    return;
+  const auto generation = chunkGenerations_.find(key);
+  if (generation == chunkGenerations_.end())
+    return;
+  const auto token = generation->second;
+  const int packetId =
+      data_.packet(phaseName(phase_), "clientbound", "light_update");
+  const auto retained = update.retainedBytes();
+  queueDeferred([update = std::move(update), packetId, token]() {
+    if (!token->load(std::memory_order_acquire))
+      return Bytes{};
+    return frame(packetId, encodeLightUpdate(update));
+  }, retained, [token] {
+    return token->load(std::memory_order_acquire);
+  });
 }
 void Session::sendTickTime(double milliseconds, std::int64_t tick, std::size_t samples) {
   if (phase_ != Phase::Play || !std::isfinite(milliseconds) || milliseconds < 0)
@@ -1630,6 +1746,8 @@ void Session::tick() {
     }
     refreshChunkView();
     sendChunkBatch();
+    if (joinPositionPending_ && !sentChunks_.empty())
+      finishJoin();
   } catch (const ProtocolError &) {
     disconnect("Unsupported entity state for protocol 775");
   }

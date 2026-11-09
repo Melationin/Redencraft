@@ -1,10 +1,10 @@
-# 26.1 光照底座与天空光/方块光（L-1/L-2a/L-2b）
+# 26.1 光照数据、传播与协议（L-1/L-2a/L-2b/L-3）
 
 ## 当前边界
 
-L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主线程到单写者后台线程的快照交接、代际失效和完整结果发布基础。L-2a 在同一 worker 上实现真实方块光传播；L-2b 根据每列天空入口实现满光向下、侧向衰减、共享面遮挡、跨 section/chunk、负高度和无天空光配置。`blockLightComplete`、`skyLightComplete` 与完整 `propagationComplete` 分开记录；协议 775 的区块光照段仍是占位，`protocolReady` 保持 false，Anvil 光照读写也未接入。
+L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主线程到单写者后台线程的快照交接和代际失效。L-2a 在同一 worker 上实现真实方块光传播；L-2b 根据每列天空入口实现满光向下、侧向衰减、共享面遮挡、跨 section/chunk、负高度和无天空光配置。L-3 已把同一加载代、完整已发布快照接入协议 775 的初始区块包和后续 `light_update`。`blockLightComplete`、`skyLightComplete`、完整 `propagationComplete` 与 `protocolReady` 是不同条件；未知光学状态不会伪装成可发送光照。
 
-生产服务端默认不启用该路径。`World::enableLighting()` 是 opt-in 测试/后续集成入口；核心 tick 不等待 worker，也不在方块写入时扫描区段。
+`World::enableLighting()` 仍是显式的 World 级入口；native `redstone_vanilla_server` 在导入或构造固定世界后启用。核心 tick 不等待 worker，也不在方块写入时扫描区段。Anvil 的 `SkyLight`/`BlockLight`/`isLightOn` 读写仍属于 W-2/W-3。
 
 ## 光层数据
 
@@ -53,11 +53,24 @@ python validation/light_metadata/generate_light_occlusion.py `
 3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作。方块光和天空光各自拥有 check/decrease/increase 队列并依次完全排空。天空光先按 `ChunkSkyLightSources` 的垂直相邻面判据维护每列入口，再直接填充入口以上为 15，只从入口边界和相邻低入口的侧向边入队。天空数据保持稀疏：未存储 section 不是普通 0 层，查询取最近上方已存层的底平面；只有偏离该派生值或相邻非空区段需要时才分配。顶部 padding 可由入口向下传光，底部 padding 可由相邻非空区段实际存储，超出光照 section 范围才读取为 0。未加载水平邻区块按 Java 读取屏障阻止传播。
 4. 加载区块时扫描真实方块光源和天空入口；加载/卸载后从相邻已加载区块的边界格重新发起两层 increase/decrease，使跨 chunk 两侧收敛。普通方块变更只更新受影响天空列并检查对应格，不扫描整块或全区块。
 5. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。
-6. `World` 线程调用 `drainPublished()` 才更新 latest 并触发 callback；callback 不运行在 worker。待发布结果按区块只保留最新 snapshot。生命周期 epoch 标识加载代；revision 是单写者按完成批次递增的发布序号，独立于无序 pending 批次携带的输入请求号。同代结果在完整批次后可见，卸载/重载后的旧代一律拒绝。
+6. 一个 worker revision 的全部脏区块作为一个不可分割批次交给主线程；`World` 线程调用非阻塞 `drainPublished()` 后才更新 latest 并触发 callback，因此读者看不到同一批次的一半。未 drain 的同区块旧结果被新批次替换，内存和 `pendingPublications` 不会随同一区块的写入代数增长。callback 不运行在 worker。生命周期 epoch 标识加载代；revision 是单写者按完成批次递增的发布序号，独立于无序 pending 批次携带的输入请求号。同代结果在完整批次后可见，卸载/重载后的旧代一律拒绝。
 
 默认每次最多取 1000 个区块（另受 pending 容量配置约束）。每区块 pending 状态只保留最新 load、按 section 合并的 cell delta 和每 section 最新空态；已 drain 的发布结果也按区块合并，不随写入代数无限增长。unload 会立即对读者失效，并作为有序 tombstone 保留到 worker 清除旧内部代；若其后立即 reload，worker 先清除旧代再安装完整新快照。worker 错误保存在 `workerError()`。`close()` 停止接收新命令、排空 pending 并 join。`World::~World` 与 `disableLighting()` 会先关闭 worker。
 
 `World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和光学属性/section emptiness 变更。两层传播都只在 worker 内进行；主线程不等待，也不读取活区块进行传播。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生逐格光照任务；`importWorld` 完成 raw block 写入后调用 `refreshLightSnapshots()`，用当前权威区块状态替换导入前排队快照。
+
+天空存储资格按本批权威的 3×3×3 非空状态更新。已发布但本批没有重算资格的目标区块仍保留其真实 raw 层作为跨边缘写目标；本批涉及的区段以新状态覆盖旧资格，被删除的层不会从旧快照复活。
+
+## 协议光照
+
+`ClientboundLevelChunkWithLightPacket` 和后续 `ClientboundLightUpdatePacket` 都只读取 `LightChunkSnapshot`，不读取活 `World`。worker 发布时已算出相对上一次持久发布 revision 的 `changedSections`，并合并尚未 drain 的后续修改；Session 只读取这份不可变增量清单，网络写线程随后读取不可变快照并打包每层 2048 bytes 的 nibble。非均匀值与均匀非零值发送 data mask 和数据，显式存储的均匀零发送 empty mask；raw `Missing` 对应原版 `getDataLayerData == null`，首包和增量都不设 data/empty mask，不能伪造成零层。这样 `Missing`、存储 0、存储 15/mixed 不混用，上下额外 section 也按 `minLightSectionY + index` 编码；缺层的客户端状态由普通 section 生命周期移除，而不是光照层清除。
+
+- 初包在 `level_chunk_with_light` 的区块、高度图、section 和方块实体之后写四个 bitset、天空数据列表、方块数据列表。快照坐标、高度范围、生命周期或 `protocolReady` 不符时拒绝编码。
+- 增量由 worker 计算并累积实际改变的区段索引，主线程不比较整段、不扫描 per-session 全区块；编码仍在 writer 中进行，不复制整区块或全量 nibble。普通方块变化仍在同一 chunk broadcast 阶段批量读取，成功方块事件仍立即发送。
+- `World::tick` 在普通方块广播之前 drain 完整光照批次，因此 `light_update` 保持先于该阶段的方块变化包。初始区块未发布时，Session 只记住待发送区块，不等待 worker；玩家位置延后到区块包已排队之后，避免客户端先进入无区块状态。
+- 每个已发送区块持有一个加载代 validity token。离开视野或重载会使已排队但尚未由 writer 编码的旧动态光照包失效；`light_update` 同时拒绝跨 chunk 坐标或生命周期比较。首包不单独取消，确保 `chunk_batch_start`、有效区块、`chunk_batch_finished(count)` 在 FIFO 中一致；已提交首包之后才按序发送 `forget_level_chunk`。
+- 无天空光世界不生成虚构满光。输入 raw sky layer 若缺席则不发送 sky data；Java 风格的显式均匀零则只发送 empty mask。`protocolReady` 只在该世界两层求解、已发布快照和光学元数据均完成时为 true。
+- 未知光学状态或未完成传播继续保守地保持 `protocolReady=false`。这类区块不会发送伪光照，也不会阻塞主线程；初包和玩家位置保持待发，直到后续完整快照出现。
 
 ## 高度图
 
@@ -74,8 +87,6 @@ python validation/light_metadata/generate_light_occlusion.py `
 当前没有注册 `LeavesBlock`，因此 no-leaves 类型对已注册状态使用同一 motion-blocking 谓词；未知导入方块不伪造 leaves 身份。协议仍沿用既有区块编码高度图，尚未切换到这份 live map。
 
 ## 未实现与后续
-
-// TODO(L-3): encode only a published snapshot into protocol light masks/data and reject unloaded generations.
 
 // TODO(W-2/W-3): read and write Anvil `SkyLight`, `BlockLight` and `isLightOn`.
 
@@ -105,3 +116,5 @@ python validation\vanilla26_1\block_light_differential_test.py `
 runner 使用独立世界和 loopback 端口。每个阶段对四个受影响 chunk 调用 `ThreadedLevelLightEngine.waitForPendingTasks` 发出 POST_UPDATE fence；所有 future 完成后，agent 把取样任务排回服务端主线程读取 `LightLayer.BLOCK` 或 `LightLayer.SKY`，tick 本身不等待。天空夹具还同时记录指定 section 的 raw layer 是否缺席。它不使用固定睡眠或伪造亮度。原始 server log、fence 记录、候选、命令和 manifest 保存在唯一运行目录。
 
 `light` 还覆盖天空入口、露天满光、整块屋顶、侧漏衰减、开顶/复盖、同代权威刷新、加载顺序、负 y、顶部水层衰减、底部已分配光、稀疏缺层派生、删除最后锚块后的 raw 层释放、跨缺层下缘补光/撤光、无天空光配置和双层互不串扰；`heightmap` 覆盖六类元数据、四张 live map、bit storage、最小阈值反例、反向重扫、重复 prime、二次导入和 World/import 接线；`light_metadata_asset` 检查官方 TSV、面掩码、manifest 与两份生成 C++ 表一致；`block_light_differential` 比较官方五阶段 225 个方块光观察，`sky_light_differential` 比较官方九阶段 243 个天空光值及 72 个 raw-layer 缺席标记。
+
+`light_protocol` 严格解帧初包、动态更新、显式零层、raw Missing 留空、未发布延后、动态旧包取消、首包批次计数一致、重载和仅由光照更新触发的有界积压断开；它将 `REDSTONE_PLAY_FIXTURE` 指向的文件交给官方 26.1 PLAY codec 验证。协议数值 ID 只来自 `assets/protocol775`。该验证证明线格式和不可变快照交接，不证明真实客户端渲染，也不替代 L-4 的性能/生命周期验收。
