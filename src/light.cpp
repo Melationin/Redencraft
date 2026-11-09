@@ -1311,6 +1311,7 @@ private:
             affected.insert(chunkKey(x + dx, z + dz));
       }
       storedEligible.clear();
+      eligibleValid = false;
       // A section from an already-published chunk outside this batch's
       // authoritative 3x3 domains is still a writable destination. Its raw
       // layer proves the old storage rule admitted it; keeping that evidence
@@ -1371,6 +1372,7 @@ private:
             allocateSection(key, y);
           } else {
             values.erase(sectionKey);
+            cacheValid = false;
             dirtySections.erase(sectionKey);
             const auto *old = chunk.snapshot->section(y);
             if (old &&
@@ -1500,6 +1502,27 @@ private:
       return ensureWorking(key);
     }
 
+    // Seeding walks one section at a time, so this layer cache turns the two
+    // hash lookups of every storedLevel (working chunk, working section) into a
+    // pointer compare. Any mutation of the value map invalidates it.
+    const LightValues *cachedLayer(std::uint64_t chunkKeyValue, int sectionY) {
+      if (cacheValid && cachedChunkKey == chunkKeyValue &&
+          cachedSectionY == sectionY)
+        return cachedLayerPtr;
+      cacheValid = false;
+      const SectionPos3 key{static_cast<int>(chunkKeyValue >> 32), sectionY,
+                            static_cast<int>(
+                                static_cast<std::uint32_t>(chunkKeyValue))};
+      const auto found = values.find(key);
+      if (found == values.end())
+        return nullptr;
+      cachedChunkKey = chunkKeyValue;
+      cachedSectionY = sectionY;
+      cachedLayerPtr = &found->second;
+      cacheValid = true;
+      return cachedLayerPtr;
+    }
+
     const LightChunkSnapshot *stateFor(std::uint64_t key) const {
       if (removed.contains(key))
         return nullptr;
@@ -1554,16 +1577,25 @@ private:
     }
 
     int storedLevel(LightPos position) const {
-      const LightChunkSnapshot *chunk =
-          stateFor(chunkKey(position.x >> 4, position.z >> 4));
+      const std::uint64_t chunkKeyValue =
+          chunkKey(position.x >> 4, position.z >> 4);
+      const int sectionY = position.y >> 4;
+      if (cacheValid && cachedChunkKey == chunkKeyValue &&
+          cachedSectionY == sectionY)
+        return (*cachedLayerPtr)[lightIndex(position.x, position.y, position.z)];
+      const LightChunkSnapshot *chunk = stateFor(chunkKeyValue);
       if (!chunk)
         return 0;
-      const SectionPos3 key{position.x >> 4, position.y >> 4,
-                            position.z >> 4};
+      const SectionPos3 key{position.x >> 4, sectionY, position.z >> 4};
       const auto found = values.find(key);
-      if (found != values.end())
+      if (found != values.end()) {
+        cacheValid = true;
+        cachedChunkKey = chunkKeyValue;
+        cachedSectionY = sectionY;
+        cachedLayerPtr = &found->second;
         return found->second[lightIndex(position.x, position.y, position.z)];
-      const LightSectionSnapshot *section = chunk->section(position.y >> 4);
+      }
+      const LightSectionSnapshot *section = chunk->section(sectionY);
       if (section && !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
                            .isMissing())
         return section->light(LightLayer::Sky, position.x & 15,
@@ -1643,6 +1675,7 @@ private:
           }
         }
       }
+      cacheValid = false;
       return &values.emplace(key, layer).first->second;
     }
 
@@ -1650,7 +1683,17 @@ private:
     // probes once per light section (26 times per chunk), so a single set
     // lookup is already cheap; the helper only keeps bulkValues readable.
     bool eligibleHere(int sectionX, int sectionY, int sectionZ) {
-      return storedEligible.contains({sectionX, sectionY, sectionZ});
+      const std::uint64_t packed =
+          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(sectionX)) << 32) |
+          static_cast<std::uint32_t>(sectionZ);
+      if (eligibleValid && eligibleChunkKey == packed &&
+          eligibleSectionY == sectionY)
+        return eligibleResult;
+      eligibleChunkKey = packed;
+      eligibleSectionY = sectionY;
+      eligibleResult = storedEligible.contains({sectionX, sectionY, sectionZ});
+      eligibleValid = true;
+      return eligibleResult;
     }
 
     bool setStoredLevel(LightPos position, int level) {
@@ -1662,10 +1705,11 @@ private:
         return false;
       const SectionPos3 key{position.x >> 4, position.y >> 4,
                             position.z >> 4};
-      if (storageReady && !storedEligible.contains(key) &&
+      if (storageReady && !eligibleHere(key.x, key.y, key.z) &&
           !values.contains(key))
         return false;
       auto inserted = values.try_emplace(key);
+      cacheValid = false;
       LightValues &layer = inserted.first->second;
       if (inserted.second) {
         if (!section->layers[static_cast<std::size_t>(LightLayer::Sky)]
@@ -1785,12 +1829,13 @@ private:
         section = copy;
       }
       chunk.mutableSections.clear();
-      for (auto current = values.begin(); current != values.end();) {
-        if (chunkKey(current->first.x, current->first.z) == chunk.key)
-          current = values.erase(current);
-        else
-          ++current;
-      }
+      // Seeding always rebuilds one chunk's layers at a time; erase only that
+      // chunk's sections instead of scanning every working value of the batch.
+      for (int sectionY = owner.minBlockSectionY - 1;
+           sectionY <= owner.minBlockSectionY + owner.blockSectionCount;
+           ++sectionY)
+        values.erase({chunk.chunkX, sectionY, chunk.chunkZ});
+      cacheValid = false;
     }
 
     int sourceFor(int blockX, int blockZ) {
@@ -2048,6 +2093,17 @@ private:
     std::unordered_map<SectionPos3, LightValues, SectionPos3Hash> values;
     std::unordered_set<SectionPos3, SectionPos3Hash> dirtySections;
     std::unordered_set<SectionPos3, SectionPos3Hash> storedEligible;
+    // Layer cache for storedLevel, see cachedLayer.
+    mutable bool cacheValid = false;
+    mutable std::uint64_t cachedChunkKey = 0;
+    mutable int cachedSectionY = 0;
+    mutable const LightValues *cachedLayerPtr = nullptr;
+    // Same idea for the per-batch storage eligibility: setStoredLevel probes it
+    // for every cell it writes, but the answer only changes per section.
+    mutable bool eligibleValid = false;
+    mutable std::uint64_t eligibleChunkKey = 0;
+    mutable int eligibleSectionY = 0;
+    mutable bool eligibleResult = false;
     bool storageReady = false;
     mutable bool incomplete = false;
   };
