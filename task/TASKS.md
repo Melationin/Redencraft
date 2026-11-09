@@ -8,6 +8,64 @@ F-6 已验收（`任务通过`），实现提交 `1c629a2` → `7b862f2` → `57
 
 ---
 
+## L-2H 高度图按区段回扫（coder）
+
+**范围**：只优化 `World::setBlock` 之后的四张 live heightmap 下降回扫。直接复用已定位的 `changedChunk`；16 对齐高度布局从 `y-1` 起按 section 从高到低各取一次 `const Section&`，`hasOnlyAir()` 整段跳过，非空 section 只沿固定的目标列用 `Section::get` 按 256 步进直接读取并 `BlockState::fromId`，不调用 `World::getBlock`。四张表的独立谓词仍由高度图实现，一次列扫描同时记录各表首个匹配；非 16 对齐 `minY` 保留既有逐格路径和结果。保留四张实时高度图、现有回调/光照顺序、流体/海床和高度图打包。
+
+**Java 依据**：上一级只读 `Heightmap.java:16-111`、`LevelChunk.java:287-316`。每次成功方块状态写入仍按 `MOTION_BLOCKING → MOTION_BLOCKING_NO_LEAVES → OCEAN_FLOOR → WORLD_SURFACE` 更新；下降仅在 `localY == firstAvailable-1` 且新状态不匹配时发生，从 `localY-1` 到 `minY` 取最高的独立谓词匹配，找不到铺满到 `minY` sentinel。
+
+**验收**：实际 World 写入覆盖同 section、相邻 section 边界、多段空隙、非空但目标列无匹配、负 x/z、负 y、到底无命中、非对齐范围，以及水面/海床只有 `OCEAN_FLOOR` 下降；长空隙夹具记录 visited/skipped section 与直接读取格数，并断言四表与旧路径相同。先封存紧邻提交 `05156c2` 的 MSVC Release + jemalloc benchmark 二进制和工作负载；候选同配置、CPU 2、High、关闭光照，交错五组 × 1000 tick，比较主线程 CPU、mean/P95、终态与检查点指纹。不并发运行其他 benchmark；结果只说明本轮高度图回扫，不作为 L-4 光照 `<10%` 结论。最终新候选干净构建后只跑一轮完整 CTest，reviewer 不复跑。
+
+**基线封存**：`build-l2h-baseline/redstone_tick_benchmark.baseline.exe` SHA-256 `d82f43be65ffc9648a08376db335c44b6140697ac88777018b0025e27dbabf4e`，来自 `05156c2`；输入 `build-l2h-baseline/workload.litematic` SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。
+
+**计划文件**：`include/redstone/engine.hpp`、`src/engine.cpp`、`include/redstone/heightmap.hpp`、`src/heightmap.cpp`、`tests/heightmap_tests.cpp`、必要的 `docs/light-engine.md`/兼容性说明、既有 `PLAN.md` L-2H 单行、`task/TASKS.md`。不优化导入、状态缓存、光照算法、协议或天空光。
+
+### L-2H 实际与证据（实现提交 `7b9910e`）
+
+**实现**
+
+- `ChunkHeightmaps::applyUpdate` 只负责保持原 `LevelChunk.setBlockState` 顺序更新可立即抬高的四张表，并返回哪些表需要下降重扫；`update` 保留导入/非对齐路径，新 `updateFromColumn` 把四张待扫表交给一次共享列扫描。四张谓词仍由 `matchesFinalMaps` 统一计算，没有复制到 World。
+- `World::setBlock` 直接复用已完成查找的 `changedChunk`。默认 16 对齐世界从 `y-1` 开始按 section 从高到低各取一次 `const Section&`；`hasOnlyAir()` 只更新下一段起点，非空 section 仅以固定 `(z&15)<<4 | (x&15)` 列和 `Section::get(((y&15)<<8)|column)` 直接读取，不调用 `World::getBlock`。最先匹配的各表高度一次写回，待查表全清即结束。
+- `minY & 15 != 0` 继续走原 `HeightmapBlockGetter` 逐格路径，保持非对齐 section 索引与 `y&15` 局部索引的既有组合及结果。诊断计数默认关闭；测试打开后记录扫描次数、访问/跳过 section 和读取格数。
+
+**行为反例**
+
+`tests/heightmap_tests.cpp:194-302` 通过实际 `World::setBlock` 覆盖：同 section 源移除、跨相邻 section 边界、负 x/z 和负 y、长空隙、非空 section 内目标列为空、到底无命中、非对齐 `minY`，以及水面 y=64/海床 y=50/中间 y=60 石头只升降 `OCEAN_FLOOR`。长空隙夹具输出 `HEIGHTMAP_SCAN scans=1 visited=23 skipped=21 reads=27`，四张表均回到 y=-63；移除底部最后匹配后访问 1 个空 section、跳过 1、读取 0，四张表均回 `minY-1=-65`。最终聚焦日志 `build-f7-nmake/heightmap-l2h-acceptance-final.log` SHA-256 `43ef0b0598aee85291696e1a96f7ad63106045b604361f0da189e93236c9ab67`，结果为 `heightmap tests passed`。
+
+**紧邻基线与性能**
+
+基线 `05156c2` 的 `build-l2h-baseline/redstone_tick_benchmark.baseline.exe` SHA-256 `d82f43be65ffc9648a08376db335c44b6140697ac88777018b0025e27dbabf4e`；输入 SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。最终候选 `build-f7-nmake/redstone_tick_benchmark.exe` SHA-256 `d7d2f77c6a35e8dc559339b0439f190ebe2c594f0cd49f1a8697216c8a7dd2f6`。两者均为 MSVC 19.51 Release + jemalloc，关闭光照、CPU affinity `4`（CPU 2）、High；串行交错五组 × 1000 tick，未并发其他 benchmark。
+
+| 组 | mean ms 基线/候选 | 均值变化 | CPU ms 基线/候选 | CPU 变化 | P95 ms 基线/候选 | P95 变化 |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 3.415 / 3.280 | −3.95% | 3265.625 / 3140.625 | −3.83% | 7.285 / 6.862 | −5.81% |
+| 2 | 3.483 / 3.238 | −7.03% | 3343.750 / 3125.000 | −6.54% | 7.448 / 6.729 | −9.65% |
+| 3 | 3.574 / 3.281 | −8.20% | 3453.125 / 3109.375 | −9.95% | 8.182 / 6.792 | −16.99% |
+| 4 | 3.466 / 3.241 | −6.49% | 3312.500 / 3046.875 | −8.02% | 7.411 / 6.752 | −8.89% |
+| 5 | 3.443 / 3.207 | −6.85% | 3312.500 / 3093.750 | −6.60% | 7.289 / 6.628 | −9.07% |
+
+五组中位数：主线程 CPU `3312.500 → 3109.375 ms`（−6.13%），mean `3.466 → 3.241 ms`（−6.49%），P95 `7.411 → 6.752 ms`（−8.89%）。每组终态均为 `entities=1197 scheduled=1197 moving_pistons=2003 events=0`；独立 `--fingerprint` 的 tick 250/500/750/1000 五行及 `FINAL` 逐字一致。原始 A/B 日志在 `build-l2h-ab-final/`，12 个 `.err` 均为 0 bytes；fingerprint 日志 SHA-256 分别为 `245380cbe71e61df10ca09b5ad41eba8a58cb1378c56b178d8d82827bf1846b8`、`4197a760ef7ce03a9c5af41f89193fd75c18ba35808f2a212c804fc2453311fc`。
+
+- `1-base.log` `f4f5c9ca36547d1dad6c460d7f35c486be240c94fbd4f35ed3cf7926e143eecd`；`1-candidate.log` `fc030c4914a7bcd4fa476e135ec3ca2647c3a387e228bcfbe05221799013cd9b`
+- `2-base.log` `13dc9c14272e1a1ef70b2b3b274aa37c44585b345311f60517a8512b23429d27`；`2-candidate.log` `3485bd77890c4178eb65e4173fd1fa997d8bc033477ea37b3732ac219fbac657`
+- `3-base.log` `70c05d619eb4870b2517d061e7262cb427cc8d70977beef682f90f50cbf86e09`；`3-candidate.log` `bc9035815a437145d9fc561835f59eb3c45f9d28ec5911cc15f4fd95faf4bd6e`
+- `4-base.log` `a9a9f3b96e476c6e631a9f4d302b03736b4f273ebd2f131840c4125419544176`；`4-candidate.log` `83f410785767e97f81d3d76c682bde30997696e1eef75680fecf6db07743036c`
+- `5-base.log` `ef0cdff0b737d93396dcbd3b7d721c15b18504cdcc0ef2f5faa8c584f406a670`；`5-candidate.log` `94e94648f6c7be052b14aeb4af67a7cfe47d41804f3bed02024b303a69eb0e6f`
+
+这五组只衡量关闭光照时的世吞主线程结果，不能外推为 L-4 光照开启后的 `<10%` 验收。先前使用预检候选 `891cc1d7...` 的十次运行只用于确认方向，因最终干净构建哈希不同而不作为正式证据。
+
+**最终构建与唯一一次完整 CTest**
+
+最终代码执行 NMake `clean` 后全量构建成功；构建日志 `build-f7-nmake/build-l2h-acceptance-final.log` SHA-256 `166b692d3be74270d5b089020a10b33acc9a018c9afe1da7cd7a92cc602754ae`。随后只运行一轮完整 CTest：**27/27 通过，23.57 s**；日志 `build-f7-nmake/ctest-l2h-acceptance-final.log` SHA-256 `5a645cd3be1382d920592d9ab9a4437dd94d9d8d0fd7a18b9f40e1b8bedf3aa1`，reviewer 不重复执行。
+
+**明确没有做**
+
+没有改变四张实时高度图、导入/prime、回调或光照提交顺序；没有增加状态缓存、每列永久缓存、光照算法、协议、天空光或导入优化；没有领取 L-2b/L-3/L-4。`PLAN.md` 只包含 reviewer 已加的 L-2H 排期单行。
+
+- 本轮实现提交为 `7b9910e`（8 files，+271/−41），交接记录随后单独提交；implementation 不包含 `task/TASKS.md` 或既有无关文件。
+
+---
+
 ## L-2a 方块光传播（coder）
 
 **范围**：只实现 26.1 方块光增减传播与跨已加载区块边界收敛，沿用 L-1 单写者 owned snapshot。主线程仍只合并提交 load/unload/section/cell，不传播、不等待 worker、不接触活 `World`。实现光源放置、撤除、同格状态变化、重叠光源、最大强度、`max(1,dampening)`、方向共享遮蔽面、负坐标/上下 padding、跨 section/chunk、未加载邻区块读取屏障、加载/卸载/重载收敛与传播。区分生命周期 epoch 与同代 revision；同代未完成传播时读者继续看到上一完整发布，卸载/重载拒绝旧代。仅方块光完成，不标记天空光或协议 ready。
@@ -948,5 +1006,11 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 #### L-2a 返工前的额外验收反例：跨批发布号反例（状态不变）
 
 `LightService::Impl::run` 从无序 `pending` 中取有限批，主线程请求号不保证按 worker 批次递增。旧实现 `processBatch` 用批内最大请求号覆盖所有受影响区块的 `snapshot->revision`，`drainPublished` 又拒绝比 latest 小的 revision。例：相邻区块 A、B 都已加载，较新 A 请求先处理且发布了 A；随后较旧 B 请求才处理，它的光可跨界改变 A，worker 内的 A 是正确新结果，但对外 A 可能因低请求号被拒收，直到无关后续写入。区分输入请求/加载 epoch 与 worker 的有序发布号（或等效的单调机制），测试不同批次请求顺序下，已发布的 A 能继续收到 B 导致的正确邻区更新。请在最终 CTest 前核对；不扩大到协议。
+
+### L-2a 返工复审结论（`3534375`）
+
+**通过，释放 L-2H。** `src/light.cpp:954–985` 与 26.1 `LightEngine.java:157–171` 的入队目标值/当前值一致判定对齐；`src/light.cpp:1235–1260` 权威刷新把变化的光学状态纳入重查，保留同代上一结果至发布；光区段上下 padding 能传播、清除且按边界空气取属性。 `src/light.cpp:1355–1368` 的 worker 发布号独立于请求号，`tests/light_tests.cpp:674–811` 覆盖同批邻区残光、权威刷新跨界、padding 及反序输入出版。未加载邻区块屏障和旧 epoch 拒收保留。与协议接入前，L-3/L-4 仍要核对跨区段通知与批次发布边界；L-4 保留按域或增量消除整图 unsupported 扫描的验收。
+
+采用 coder 的干净 MSVC Release + jemalloc 构建与 **27/27 CTest**（23.20 s），未重复执行。核对正式 CTest、原版候选/黄金的哈希；`LightDiffAgent.java:105–114` 的四区块 POST_UPDATE futures 完成后才回主线程取样。官方 26.1 与 C++ 的五阶段 **225/225** 值一致，原来 117 个值不变，上下 padding 点亮时均 `15,14,13`、撤源后清零。方块光的差分结论只覆盖该夹具；天空光、协议与 L-4 世吞 <10% 未验收。
 
 任务已完成
