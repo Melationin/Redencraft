@@ -1344,4 +1344,13 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 请在正式 A/B 前核对工作树 `benchmarks/tick_benchmark.cpp`：结束快照应紧跟最后一个计时 tick/主线程 CPU 取样，早于 sort/printf 和末尾 wait/drain。worker 在排序/输出期间也会跑，不能把那时的处理量算入计时。需要分别记录 worker 已生成/提交与主线程在 tick 内已接收的 publication（同一 snapshot 可能被合并或失效），正式有光轮要能证明确实接收了两光层的动态变化；仅 `--diagnostics` 异步条件下的 sky/block 计数或 `published` 总量不等同于正式窗口已接收。可在 drain 原有遍历用简单计数累计、避免额外锁/遍历；额外探针开销另记。当前 `workerCpuMs` 只在完成批次时刷新，会漏掉边界仍在运行的批次；Windows 可用真实 worker handle 的 GetThreadTimes 在区间边界读两次，或明确把这个数字标成「已结束批次的 CPU 下界」并保留 in-flight 证据。继续只在独立指纹诊断或计时外 wait，不在正式 tick 内等待。
 
+#### L-4a 回归修复（coder）
+
+先修当前候选全量 CTest 的三项失败，再回到 L-4a 测量验收。范围：`src/light.cpp` 修正负区块键分组和暂停 worker 后的单批测试入口，`tests/light_tests.cpp` 补真实发布断言，`tests/storage_tests.cpp` 隔离存档测试的临时夹具。以已复跑的 Fabric 26.1 光照 golden、现有协议差分和存档断言为验收依据；保留原版 golden，最后构建并跑全量 CTest。
+
+- 实现提交 `39b29608bac3d9a1254b5530c8d69bee0949d789`。两条光照合并路径显式区分未见首键与合法的 `(-1,-1)`，避免丢掉竖井屋顶一角；暂停后的单批测试先把环形队列记录归并到 pending，再选择指定区块。新测试覆盖两条路径的首个负坐标区块、实际发布值和旧快照不变。
+- 存档异常是系统临时目录创建夹具时拒绝访问；同一候选在可写目录运行时已有断言通过。夹具改在 CTest 工作目录独占新目录，退出时清理；实际读取、导入和断言保持不变。
+- MSVC Release + jemalloc 完整构建成功，原生服务端目标开启；全量 CTest **29/29 通过**（33.55 s）。日志 `build-light-validation/current-cpp/repair-ctest.log`，SHA-256 `98cfb795da495f67df6d20ff6d26d742146db6588c69ad83b7feeec31f21bc56`。
+- 新 C++ 探针与已实跑的 Fabric 26.1 夹具输出逐项比较：天空光 **243/243**，原始光层缺席标记 **72/72**，方块光 **225/225**；第 5 阶段 `(0,-62,0)`、`(0,-61,0)` 均由 13 修到 0。证据 `build-light-validation/current-cpp/repair-fabric-comparison.json`，SHA-256 `f9420b8c7200e26ad1922ca4407992195592d6406349816e0aca8e8a4c48623d`。golden 未改；本次未重新做世吞性能验收，L-4a 状态不变。
+
 任务进行中
