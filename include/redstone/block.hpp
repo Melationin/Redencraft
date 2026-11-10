@@ -210,15 +210,18 @@ private:
 struct BlockLightProperties {
   std::uint8_t emission = 0;
   std::uint8_t dampening = 0;
-  bool canOcclude = false;
-  bool useShapeForLightOcclusion = false;
-  bool propagatesSkylightDown = true;
-  bool supported = false;
-  // Index into the immutable official directional face-shape table. Zero is
-  // the empty face shape; shape identity is independent from collision.
-  std::uint16_t occlusionShapeId = 0;
+  // Index into the immutable official directional face-shape table (0..63).
+  // Zero is the empty face shape; shape identity is independent from collision.
+  std::uint16_t occlusionShapeId : 6 = 0;
+  std::uint16_t supported : 1 = 0;
+  std::uint16_t canOcclude : 1 = 0;
+  std::uint16_t useShapeForLightOcclusion : 1 = 0;
+  std::uint16_t propagatesSkylightDown : 1 = 1;
+  std::uint16_t : 6; // reserved; keeps the whole struct at four bytes
   bool operator==(const BlockLightProperties &) const = default;
 };
+static_assert(sizeof(BlockLightProperties) == 4,
+              "BlockLightProperties must stay four bytes");
 
 // BlockBehaviour.Properties subset (see docs/compatibility.md).
 struct BlockMetadata {

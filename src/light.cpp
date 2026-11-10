@@ -2419,6 +2419,21 @@ private:
         break;
       if (paused && !closing)
         continue;
+      // Coalesce before taking a batch. A batch clones every section it
+      // touches for copy-on-write publication, so waiting a few milliseconds
+      // for more writes turns many small batches into one larger batch and
+      // clones each hot section far less often. The window closes early as
+      // soon as the batch is full, and closing must never wait.
+      if (!closing && options.batchWindowMs > 0 &&
+          pending.size() < options.batchSize) {
+        const auto deadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(options.batchWindowMs);
+        while (!closing && !paused &&
+               pending.size() < options.batchSize &&
+               std::chrono::steady_clock::now() < deadline)
+          wake.wait_until(lock, deadline);
+      }
       // Coalesce the queued cells into per-section bitmaps before taking a
       // pending batch, so the worker does the deduplication instead of the
       // tick thread. Draining is two orders of magnitude cheaper than

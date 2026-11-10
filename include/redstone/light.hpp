@@ -183,10 +183,17 @@ struct LightSectionDelta {
 struct LightWorkerOptions {
   std::size_t batchSize = 1000;
   std::size_t maxQueuedCommands = 4096;
+
   bool startPausedForTesting = false;
   bool hasSkyLight = true;
   bool collectDiagnostics = false;
   std::uintptr_t workerAffinityMask = 0;
+
+  // Extra time the worker waits for more work before it starts a batch. Every
+  // section a batch touches is cloned for copy-on-write publication, so
+  // coalescing a few milliseconds of writes cuts that clone count; zero
+  // disables the window and takes a batch as soon as anything is pending.
+  int batchWindowMs = 1;
 };
 
 // Main-thread submission and worker-thread owner. No method on the worker
