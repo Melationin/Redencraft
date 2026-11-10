@@ -1,6 +1,7 @@
 #include "redstone/light.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <condition_variable>
 #include <deque>
@@ -629,6 +630,63 @@ public:
       wake.notify_one();
   }
 
+  // Set once by World after construction; the worker calls it for every cell a
+  // delta reports, so it must stay valid for the worker's whole lifetime.
+  ChunkAccess chunkAccess;
+  void installChunkAccess(ChunkAccess access) { chunkAccess = access; }
+
+  // Identity-only bulk report. Deltas arrive grouped by chunk (World walks its
+  // per-chunk dirty map), so the version and pending lookups happen once per
+  // chunk and the whole tick costs one mutex acquisition. No block state, no
+  // per-cell record and no allocation is done per cell; the worker resolves the
+  // bitmap against the live world when it processes the chunk.
+  void reportSectionDeltas(const LightSectionDelta *deltas, std::size_t count) {
+    if (count == 0)
+      return;
+    std::lock_guard lock(mutex);
+    std::uint64_t currentKey = ~std::uint64_t{0};
+    ChunkVersion *active = nullptr;
+    PendingChunk *state = nullptr;
+    std::uint64_t applied = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+      const LightSectionDelta &delta = deltas[i];
+      if (!validSection(delta.sectionY)) {
+        ++statsRejected;
+        continue;
+      }
+      if (delta.chunkKey != currentKey) {
+        currentKey = delta.chunkKey;
+        active = nullptr;
+        state = nullptr;
+        auto found = versions.find(delta.chunkKey);
+        if (accepting && found != versions.end() && !found->second.inactive) {
+          active = &found->second;
+          auto stateIt = pending.find(delta.chunkKey);
+          if (stateIt == pending.end())
+            stateIt = pending.emplace(delta.chunkKey, PendingChunk{}).first;
+          state = &stateIt->second;
+          state->key = delta.chunkKey;
+          state->lifecycleEpoch = active->epoch;
+        }
+      }
+      if (!state) {
+        ++statsRejected;
+        continue;
+      }
+      state->chunk = delta.chunk;
+      state->generation = ++nextGeneration;
+      state->revision = ++active->requestRevision;
+      state->deltas.push_back(delta);
+      ++applied;
+    }
+    if (applied != 0) {
+      ++statsSubmitted;
+      noteHighWaterLocked();
+    }
+    if (wakePending.exchange(false, std::memory_order_acq_rel))
+      wake.notify_one();
+  }
+
   // Shared merge step of the single and the bulk report path. Must be called
   // with `mutex` held and a validated section/local index.
   bool applyBlockChangeLocked(LightBlockChange &change) {
@@ -847,6 +905,10 @@ private:
     std::unique_ptr<LightChunkInput> load;
     bool unload = false;
     std::unordered_map<std::uint32_t, LightBlockChange> changes;
+    // Identity-only hand-off: one entry per dirty section, resolved by the
+    // worker against the live world through ChunkAccess.
+    const void *chunk = nullptr;
+    std::vector<LightSectionDelta> deltas;
     std::unordered_map<int, bool> sectionStatus;
   };
 
@@ -2492,6 +2554,60 @@ private:
              change.sectionY * 16 + ((change.localIndex >> 8) & 15),
              chunk->chunkZ * 16 + ((change.localIndex >> 4) & 15)});
       }
+      for (const LightSectionDelta &delta : command.deltas) {
+        LightSectionSnapshot *section = chunk->sectionForEdit(delta.sectionY);
+        if (!section)
+          throw std::runtime_error("light delta references a missing section");
+        const auto localSection =
+            static_cast<std::uint32_t>(delta.sectionY - minBlockSectionY);
+        for (std::size_t word = 0; word < delta.bits.size(); ++word) {
+          std::uint64_t bits = delta.bits[word];
+          while (bits) {
+            const int bit = std::countr_zero(bits);
+            bits &= bits - 1;
+            const auto localIndex = static_cast<std::uint32_t>(word * 64) +
+                                     static_cast<std::uint32_t>(bit);
+            // The tick thread reported only the cell identity; the worker is
+            // the only place that reads the block's light properties.
+            const BlockLightProperties properties =
+                chunkAccess.read
+                    ? chunkAccess.read(chunkAccess.context, delta.chunk,
+                                       (localSection << 12) | localIndex)
+                    : unsupportedLightProperties();
+            const auto paletteIt = std::find(section->palette.begin(),
+                                             section->palette.end(), properties);
+            std::uint16_t paletteIndex = 0;
+            if (paletteIt == section->palette.end()) {
+              if (section->palette.size() >= 65536)
+                throw std::runtime_error(
+                    "light section palette exceeds uint16");
+              paletteIndex = static_cast<std::uint16_t>(section->palette.size());
+              section->palette.push_back(properties);
+            } else {
+              paletteIndex = static_cast<std::uint16_t>(
+                  paletteIt - section->palette.begin());
+            }
+            if (section->cells.empty()) {
+              section->cells.assign(kLightVolume, 0);
+              if (!section->palette.front().supported)
+                section->unsupportedCells = kLightVolume;
+            }
+            const auto oldIndex = section->cells[localIndex];
+            if (!section->palette[oldIndex].supported)
+              --section->unsupportedCells;
+            section->cells[localIndex] = paletteIndex;
+            if (!properties.supported)
+              ++section->unsupportedCells;
+            ++statsChanges;
+            changedPositions.push_back(
+                {chunk->chunkX * 16 + static_cast<int>(localIndex & 15),
+                 delta.sectionY * 16 + static_cast<int>((localIndex >> 8) & 15),
+                 chunk->chunkZ * 16 +
+                     static_cast<int>((localIndex >> 4) & 15)});
+          }
+        }
+        section->empty = delta.isEmpty;
+      }
       for (const auto &[sectionY, empty] : command.sectionStatus) {
         if (auto *section = chunk->sectionForEdit(sectionY))
           section->empty = empty;
@@ -2763,6 +2879,15 @@ bool LightService::reportBlockChange(LightBlockChange change) {
 void LightService::reportBlockChanges(
     const std::vector<LightBlockChange> &changes) {
   impl_->reportBlockChanges(changes);
+}
+
+void LightService::reportSectionDeltas(const LightSectionDelta *deltas,
+                                       std::size_t count) {
+  impl_->reportSectionDeltas(deltas, count);
+}
+
+void LightService::setChunkAccess(ChunkAccess access) {
+  impl_->installChunkAccess(access);
 }
 
 bool LightService::unloadChunk(int chunkX, int chunkZ) {

@@ -162,6 +162,19 @@ struct LightBlockChange {
   std::uint64_t generation = 0; // assigned by LightService
 };
 
+// One section's coalesced dirty set, handed to the worker exactly as the tick
+// thread built it. The worker resolves every set cell against the live world,
+// so the tick thread never reads a block state, a light property or the block
+// registry for a change.
+struct LightSectionDelta {
+  std::uint64_t chunkKey = 0;
+  const void *chunk = nullptr; // opaque cell source for LightService::ChunkAccess
+  int sectionY = 0;
+  bool wasEmpty = false;
+  bool isEmpty = false;
+  std::array<std::uint64_t, kLightVolume / 64> bits{};
+};
+
 struct LightWorkerOptions {
   std::size_t batchSize = 1000;
   std::size_t maxQueuedCommands = 4096;
@@ -212,6 +225,22 @@ public:
   // whole batch. The worker never reads `oldProperties`; it is stored only to
   // keep the merged struct consistent.
   void reportBlockChanges(const std::vector<LightBlockChange> &changes);
+  // Identity-only hand-off. A delta is one section's 4096-bit "this cell's
+  // optical state changed" set plus the opaque cell source; no block state is
+  // read, copied or hashed on the caller's thread. The worker resolves every
+  // set cell through ChunkAccess against the live world.
+  void reportSectionDeltas(const LightSectionDelta *deltas, std::size_t count);
+  // The worker reads reported cells through this accessor instead of a
+  // serialised copy. `chunk` is the opaque pointer carried by the delta and
+  // `packed` is `localSectionIndex << 12 | localIndex`.
+  struct ChunkAccess {
+    void *context = nullptr;
+    BlockLightProperties (*read)(void *context, const void *chunk,
+                                 std::uint32_t packed) = nullptr;
+    bool (*sectionEmpty)(void *context, const void *chunk,
+                         std::uint32_t packed) = nullptr;
+  };
+  void setChunkAccess(ChunkAccess access);
   bool unloadChunk(int chunkX, int chunkZ);
 
   // Main-thread publication handoff. A worker batch becomes visible in full;

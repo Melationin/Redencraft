@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -455,6 +456,14 @@ private:
   void tickBlockAt(Pos pos, const Block *expected);
   void tickFluidAt(Pos pos, const Fluid *expected);
   std::unique_ptr<LightChunkInput> makeLightChunkInput(int x, int z) const;
+  // LightService::ChunkAccess callbacks. The light worker calls them while it
+  // processes a delta, so they must not mutate the world: they read one cell
+  // through Section::visible and translate its state to light properties.
+  static BlockLightProperties readLightCell(void *context, const void *chunk,
+                                            std::uint32_t packed);
+  static bool lightSectionEmpty(void *context, const void *chunk,
+                                std::uint32_t packed);
+  void installLightChunkAccess();
   void runEvents();
   // LevelChunkSection: a paletted container of block states. An empty section
   // is a single air value (PalettedContainer bits=0) and needs no storage.
@@ -480,11 +489,23 @@ private:
     SectionStorage16() { bits = 16; }
     std::array<std::uint16_t, kLightVolume> indices{};
     std::array<BlockState::Id, kLightVolume> palette{};
+    // The 8-bit block this representation replaced. A reader on another thread
+    // may still be walking it, and widening is the only point where a live
+    // container is swapped out, so the new block owns the old one and frees it
+    // together with itself. Widening is terminal and rare, so this costs
+    // nothing in the steady state.
+    std::shared_ptr<SectionStorage> previous;
   };
   struct Section {
     std::uint16_t nonEmpty = 0;
     BlockState::Id single = 0;
     std::shared_ptr<SectionStorage> storage; // null = single value
+    // Reader-visible alias of `storage`. The light worker loads it with
+    // acquire and walks the arrays; it never touches the owning shared_ptr, so
+    // it never races with the tick thread assigning it. Every value it can
+    // observe stays valid: a replaced block is owned by its successor's
+    // `previous`, and before the first materialisation it is null.
+    std::atomic<SectionStorage *> visible{nullptr};
     Section() = default;
     // Copying would alias the container, so the value is move-only. Nothing
     // copies a Chunk either (it owns a unique_ptr), so no call site needs it.

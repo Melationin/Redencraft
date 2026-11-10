@@ -903,6 +903,7 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
     block->paletteSize = 2;
     block->indices[cell] = 1;
     storage = std::move(block);
+    visible.store(storage.get(), std::memory_order_release);
   } else if (base->bits == 8) {
     auto *block = static_cast<SectionStorage8 *>(base);
     const auto end = block->palette.begin() + block->paletteSize;
@@ -921,7 +922,11 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
         for (std::size_t i = 0; i < kLightVolume; ++i)
           wide->indices[i] = block->indices[i];
         wide->indices[cell] = block->paletteSize;
+        // The worker may still be walking the block this replaces; the wider
+        // block owns it so the reader's view stays valid until it finishes.
+        wide->previous = storage;
         storage = std::move(wide);
+        visible.store(storage.get(), std::memory_order_release);
         if (BlockState::fromId(previous).isAir() &&
             !BlockState::fromId(state).isAir())
           ++nonEmpty;
@@ -1005,8 +1010,11 @@ void World::markLightDirty(int chunkX, int chunkZ, int sectionY,
 void World::flushLightChanges() {
   if (!lightService_ || dirtyLightSections_.empty())
     return;
-  std::vector<LightBlockChange> changes;
-  changes.reserve(dirtyLightSections_.size() * 8);
+  // Identity only: one delta per dirty section. The tick thread never reads a
+  // block state, a light property or the registry here; the worker resolves
+  // every set bit against the live world when it processes the chunk.
+  std::vector<LightSectionDelta> deltas;
+  deltas.reserve(dirtyLightSections_.size());
   for (auto &[key, sections] : dirtyLightSections_) {
     const int chunkX = static_cast<int>(key >> 32);
     const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
@@ -1014,35 +1022,56 @@ void World::flushLightChanges() {
     if (!chunk)
       continue;
     for (const auto &dirty : sections) {
-      const Section &data = chunk->sections[sectionIndex(dirty.sectionY * 16)];
-      const bool isEmpty = data.hasOnlyAir();
-      for (std::size_t word = 0; word < dirty.bits.size(); ++word) {
-        std::uint64_t bits = dirty.bits[word];
-        while (bits) {
-          const int bit = std::countr_zero(bits);
-          bits &= bits - 1;
-          const auto index = static_cast<int>(word * 64) + bit;
-          LightBlockChange change;
-          change.chunkX = chunkX;
-          change.chunkZ = chunkZ;
-          change.sectionY = dirty.sectionY;
-          change.localIndex = static_cast<std::uint16_t>(index);
-          // The bit means "this cell's optical state changed this tick"; the
-          // final state is read here, so repeated writes coalesce. The worker
-          // never consults oldProperties, so the current value fills both.
-          change.oldProperties =
-              lightPropertiesOf(BlockState::fromId(data.get(index)));
-          change.newProperties = change.oldProperties;
-          change.wasEmpty = dirty.wasEmpty;
-          change.isEmpty = isEmpty;
-          changes.push_back(change);
-        }
-      }
+      LightSectionDelta delta;
+      delta.chunkKey = key;
+      delta.chunk = chunk;
+      delta.sectionY = dirty.sectionY;
+      delta.wasEmpty = dirty.wasEmpty;
+      delta.isEmpty = dirty.isEmpty;
+      delta.bits = dirty.bits;
+      deltas.push_back(delta);
     }
   }
   dirtyLightSections_.clear();
-  if (!changes.empty())
-    lightService_->reportBlockChanges(changes);
+  if (!deltas.empty())
+    lightService_->reportSectionDeltas(deltas.data(), deltas.size());
+}
+BlockLightProperties World::readLightCell(void *, const void *chunk,
+                                          std::uint32_t packed) {
+  const auto *c = static_cast<const Chunk *>(chunk);
+  const auto section = static_cast<std::size_t>(packed >> 12);
+  if (!c || section >= c->sections.size())
+    return unsupportedLightProperties();
+  const Section &data = c->sections[section];
+  const SectionStorage *base = data.visible.load(std::memory_order_acquire);
+  if (!base)
+    return lightPropertiesOf(BlockState::fromId(data.single));
+  const auto cell = static_cast<std::size_t>(packed & 0xFFFu);
+  BlockState::Id state;
+  if (base->bits == 8) {
+    const auto *block = static_cast<const SectionStorage8 *>(base);
+    state = block->palette[block->indices[cell]];
+  } else {
+    const auto *block = static_cast<const SectionStorage16 *>(base);
+    state = block->palette[block->indices[cell]];
+  }
+  return lightPropertiesOf(BlockState::fromId(state));
+}
+bool World::lightSectionEmpty(void *, const void *chunk, std::uint32_t packed) {
+  const auto *c = static_cast<const Chunk *>(chunk);
+  const auto section = static_cast<std::size_t>(packed >> 12);
+  if (!c || section >= c->sections.size())
+    return true;
+  return c->sections[section].nonEmpty == 0;
+}
+void World::installLightChunkAccess() {
+  if (!lightService_)
+    return;
+  LightService::ChunkAccess access;
+  access.context = this;
+  access.read = &World::readLightCell;
+  access.sectionEmpty = &World::lightSectionEmpty;
+  lightService_->setChunkAccess(access);
 }
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
@@ -1137,6 +1166,7 @@ void World::enableLighting(LightWorkerOptions options) {
         if (lightPublicationObserver)
           lightPublicationObserver(std::move(snapshot));
       });
+  installLightChunkAccess();
   refreshLightSnapshots();
 }
 
