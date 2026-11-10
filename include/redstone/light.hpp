@@ -217,6 +217,8 @@ public:
     std::uint64_t lightQueueEntries = 0;
     std::uint64_t skySectionChanges = 0;
     std::uint64_t blockSectionChanges = 0;
+    std::uint64_t receivedSkySections = 0;
+    std::uint64_t receivedBlockSections = 0;
     double workerCpuMs = 0;
     std::uint64_t workerAffinityRequested = 0;
     std::uint64_t workerAffinityMask = 0;

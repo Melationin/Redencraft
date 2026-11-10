@@ -832,6 +832,14 @@ public:
             if (current == latest.end() ||
                 current->second->revision <= snapshot->revision) {
               latest[key] = snapshot;
+              for (const auto &change : snapshot->changedSections) {
+                if (change.sky)
+                  statsReceivedSkySections.fetch_add(
+                      1, std::memory_order_relaxed);
+                if (change.block)
+                  statsReceivedBlockSections.fetch_add(
+                      1, std::memory_order_relaxed);
+              }
               if (callback)
                 callbacks.push_back(snapshot);
             }
@@ -873,6 +881,10 @@ public:
         statsSkyChanges.load(std::memory_order_relaxed);
     result.blockSectionChanges =
         statsBlockChanges.load(std::memory_order_relaxed);
+    result.receivedSkySections =
+        statsReceivedSkySections.load(std::memory_order_relaxed);
+    result.receivedBlockSections =
+        statsReceivedBlockSections.load(std::memory_order_relaxed);
     result.workerCpuMs = statsWorkerCpuMs.load(std::memory_order_relaxed);
     result.workerAffinityMask =
         statsWorkerAffinity.load(std::memory_order_relaxed);
@@ -898,6 +910,8 @@ public:
     statsLightQueueEntries.store(0, std::memory_order_relaxed);
     statsSkyChanges.store(0, std::memory_order_relaxed);
     statsBlockChanges.store(0, std::memory_order_relaxed);
+    statsReceivedSkySections.store(0, std::memory_order_relaxed);
+    statsReceivedBlockSections.store(0, std::memory_order_relaxed);
   }
 
   std::string workerError() const {
@@ -3063,6 +3077,8 @@ private:
   mutable std::atomic<std::uint64_t> statsLightQueueEntries{0};
   mutable std::atomic<std::uint64_t> statsSkyChanges{0};
   mutable std::atomic<std::uint64_t> statsBlockChanges{0};
+  mutable std::atomic<std::uint64_t> statsReceivedSkySections{0};
+  mutable std::atomic<std::uint64_t> statsReceivedBlockSections{0};
   mutable std::atomic<double> statsWorkerCpuMs{0};
   mutable std::atomic<std::uint64_t> statsWorkerAffinity{0};
   mutable std::atomic<std::uint32_t> statsWorkerAffinityError{0};

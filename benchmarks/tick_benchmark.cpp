@@ -450,6 +450,7 @@ int main(int argc, char **argv) {
           "published=%llu stale=%llu sky_sections=%llu block_sections=%llu "
           "queue_high=%llu light_queue=%llu pending_chunks=%llu "
           "pending_publications=%llu "
+          "received_sky_sections=%llu received_block_sections=%llu "
           "worker_cpu_ms_completed_lower_bound=%.3f\n",
           (unsigned long long)atTickEnd.submitted,
           (unsigned long long)atTickEnd.rejected,
@@ -463,6 +464,8 @@ int main(int argc, char **argv) {
           (unsigned long long)atTickEnd.lightQueueEntries,
           (unsigned long long)atTickEnd.pendingChunks,
           (unsigned long long)atTickEnd.pendingPublications,
+          (unsigned long long)atTickEnd.receivedSkySections,
+          (unsigned long long)atTickEnd.receivedBlockSections,
           atTickEnd.workerCpuMs - initialAfterDrain.workerCpuMs);
 #ifdef _WIN32
       const double drainCpuStart = threadCpuMs();
