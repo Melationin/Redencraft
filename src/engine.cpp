@@ -985,57 +985,6 @@ void World::loadChunk(int x, int z) {
       lightChunkLifecycleObserver(x, z, true);
   }
 }
-void World::markLightDirty(int chunkX, int chunkZ, int sectionY,
-                           int localIndex, bool wasEmpty, bool isEmpty) {
-  const auto key = chunkKey(chunkX, chunkZ);
-  auto &sections = dirtyLightSections_[key];
-  LightDirtySection *section = nullptr;
-  for (auto &candidate : sections) {
-    if (candidate.sectionY == sectionY) {
-      section = &candidate;
-      break;
-    }
-  }
-  if (!section) {
-    sections.emplace_back();
-    section = &sections.back();
-    section->sectionY = sectionY;
-    section->wasEmpty = wasEmpty;
-  }
-  section->isEmpty = isEmpty;
-  section->bits[static_cast<std::size_t>(localIndex) >> 6] |=
-      std::uint64_t{1} << (localIndex & 63);
-}
-
-void World::flushLightChanges() {
-  if (!lightService_ || dirtyLightSections_.empty())
-    return;
-  // Identity only: one delta per dirty section. The tick thread never reads a
-  // block state, a light property or the registry here; the worker resolves
-  // every set bit against the live world when it processes the chunk.
-  std::vector<LightSectionDelta> deltas;
-  deltas.reserve(dirtyLightSections_.size());
-  for (auto &[key, sections] : dirtyLightSections_) {
-    const int chunkX = static_cast<int>(key >> 32);
-    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
-    Chunk *chunk = chunkAt(chunkX, chunkZ);
-    if (!chunk)
-      continue;
-    for (const auto &dirty : sections) {
-      LightSectionDelta delta;
-      delta.chunkKey = key;
-      delta.chunk = chunk;
-      delta.sectionY = dirty.sectionY;
-      delta.wasEmpty = dirty.wasEmpty;
-      delta.isEmpty = dirty.isEmpty;
-      delta.bits = dirty.bits;
-      deltas.push_back(delta);
-    }
-  }
-  dirtyLightSections_.clear();
-  if (!deltas.empty())
-    lightService_->reportSectionDeltas(deltas.data(), deltas.size());
-}
 BlockLightProperties World::readLightCell(void *, const void *chunk,
                                           std::uint32_t packed) {
   const auto *c = static_cast<const Chunk *>(chunk);
@@ -1082,7 +1031,6 @@ void World::unloadChunk(int x, int z) {
   if (lightService_) {
     // A chunk that leaves the loaded set must not keep a pending bitmap: the
     // cells would be re-read from a chunk the service no longer knows.
-    dirtyLightSections_.erase(chunkKey(x, z));
     lightService_->unloadChunk(x, z);
     if (wasLoaded && lightChunkLifecycleObserver)
       lightChunkLifecycleObserver(x, z, false);
@@ -1096,6 +1044,7 @@ std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const 
   auto input = std::make_unique<LightChunkInput>();
   input->chunkX = x;
   input->chunkZ = z;
+  input->chunk = chunk;
   input->minBlockSectionY = minY_ >> 4;
   input->blockSectionCount = sectionCount();
 
@@ -1188,7 +1137,6 @@ void World::refreshLightSnapshots() {
 }
 
 void World::disableLighting() {
-  dirtyLightSections_.clear();
   lightService_.reset();
   emptyLightSections_.clear();
 }
@@ -1420,11 +1368,11 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
     const bool isEmpty = targetSection.hasOnlyAir();
     if (hasDifferentLightProperties(old, state) ||
         hasDifferentSectionLightProperties(wasSectionEmpty, isEmpty)) {
-      // Only mark the cell; the tick's flush turns the bitmaps into one batch.
-      markLightDirty(chunkIndex(p.x), chunkIndex(p.z), p.y >> 4, localIndex,
-                     wasSectionEmpty, isEmpty);
-      if (!inTick_)
-        flushLightChanges();
+      // Identity only: the worker reads the cell when it reaches the record, so
+      // the tick thread pays for a 16-byte push and nothing else.
+      lightService_->reportBlockCell(
+          changedChunk, static_cast<std::uint32_t>(sectionIndex(p.y) << 12) |
+                            static_cast<std::uint32_t>(localIndex));
     }
   }
   // TODO: reproduce dirty/client notifications, POI, and generic block-entity
@@ -2089,7 +2037,6 @@ void World::runEvents() {
 void World::tick() {
   ++time_;
   handlingTick_ = true;
-  inTick_ = true;
   // ServerLevel.tick: blockTicks.tick(gameTime, 65536, this::tickBlock).
   // LevelTicks collects the due ticks first, then runs them; ticks scheduled
   // during execution stay pending for the next tick.
@@ -2106,12 +2053,8 @@ void World::tick() {
   // ServerChunkCache.tick broadcasts ChunkHolder's dirty block positions
   // after scheduled ticks and before block events. Event-induced piston
   // source changes stay pending until the following chunk broadcast phase.
-  if (lightService_) {
-    // Hand the tick's coalesced block changes over once, then take the
-    // publications that are ready before the broadcast.
-    flushLightChanges();
+  if (lightService_)
     lightService_->drainPublished();
-  }
   if (blockUpdatesBroadcastObserver)
     blockUpdatesBroadcastObserver();
   // ServerChunkCache.tick: ChunkMap.tick/ServerEntity.sendChanges follows
@@ -2127,10 +2070,6 @@ void World::tick() {
   pistonTickBlockEntities(*this);
   if (blockEntityTicker)
     blockEntityTicker(*this);
-  // Block entities run after the drain point, so their writes are handed over
-  // at the end of the tick and become visible to the worker for the next one.
-  flushLightChanges();
-  inTick_ = false;
   // Observe removals caused by block entities without altering the core's
   // existing cleanup timing. Network trackers must not wait one more tick.
   broadcastEntityRemovals();

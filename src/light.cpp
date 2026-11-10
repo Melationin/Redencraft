@@ -466,6 +466,8 @@ int LightChunkSnapshot::lightValue(LightLayer layer, int x, int y, int z) const 
 }
 
 class LightService::Impl {
+  friend class LightService;
+
 public:
   Impl(int minSection, int sectionCount, LightWorkerOptions workerOptions)
       : minBlockSectionY(minSection), blockSectionCount(sectionCount),
@@ -492,6 +494,7 @@ public:
       return 0;
     }
     const auto key = chunkKey(input.chunkX, input.chunkZ);
+    const void *chunkPointer = input.chunk;
     std::lock_guard lock(mutex);
     if (!accepting) {
       ++statsRejected;
@@ -507,6 +510,8 @@ public:
     const auto generation = ++nextGeneration;
     ++active.requestRevision;
     active.inactive = false;
+    if (chunkPointer)
+      chunkIndex[chunkPointer] = key;
     const bool preserveUnload = pending.contains(key) && pending.at(key).unload;
     PendingChunk state;
     state.key = key;
@@ -626,7 +631,10 @@ public:
     // Only the idle -> queued transition needs a wake-up. Reporting every block
     // change re-entered the kernel for a notification that no worker was
     // waiting for once a batch was already running.
-    if (wakePending.exchange(false, std::memory_order_acq_rel))
+    // Skip the read-modify-write unless the worker actually advertised sleep:
+    // once a batch is running the flag stays false and this is one load.
+    if (wakePending.load(std::memory_order_relaxed) &&
+        wakePending.exchange(false, std::memory_order_acq_rel))
       wake.notify_one();
   }
 
@@ -640,10 +648,10 @@ public:
   // chunk and the whole tick costs one mutex acquisition. No block state, no
   // per-cell record and no allocation is done per cell; the worker resolves the
   // bitmap against the live world when it processes the chunk.
-  void reportSectionDeltas(const LightSectionDelta *deltas, std::size_t count) {
+  void enqueueDeltasLocked(const LightSectionDelta *deltas,
+                           std::size_t count) {
     if (count == 0)
       return;
-    std::lock_guard lock(mutex);
     std::uint64_t currentKey = ~std::uint64_t{0};
     ChunkVersion *active = nullptr;
     PendingChunk *state = nullptr;
@@ -683,7 +691,10 @@ public:
       ++statsSubmitted;
       noteHighWaterLocked();
     }
-    if (wakePending.exchange(false, std::memory_order_acq_rel))
+    // Skip the read-modify-write unless the worker actually advertised sleep:
+    // once a batch is running the flag stays false and this is one load.
+    if (wakePending.load(std::memory_order_relaxed) &&
+        wakePending.exchange(false, std::memory_order_acq_rel))
       wake.notify_one();
   }
 
@@ -849,7 +860,11 @@ public:
 
   bool waitIdleForTesting() {
     std::unique_lock lock(mutex);
-    idle.wait(lock, [&] { return !busy && pending.empty(); });
+    // The ring is drained by the worker, so idleness also means no queued cell
+    // is still waiting to be coalesced into pending.
+    idle.wait(lock, [&] {
+      return !busy && pending.empty() && ringEmpty();
+    });
     return error.empty();
   }
 
@@ -2298,6 +2313,78 @@ private:
     return (static_cast<std::uint32_t>(sectionY) << 12) | localIndex;
   }
 
+  void reportBlockCell(const void *chunk, std::uint32_t packed) {
+    const auto head = ringHead.load(std::memory_order_relaxed);
+    const auto tail = ringTail.load(std::memory_order_acquire);
+    if (head - tail >= kRingCapacity) {
+      // Dropping is the documented degradation: the tick never blocks on the
+      // light queue. The next write to the same cell repairs the light.
+      ++statsRejected;
+      return;
+    }
+    ring[head & (kRingCapacity - 1)] = LightCellRef{chunk, packed};
+    ringHead.store(head + 1, std::memory_order_release);
+    if (wakePending.exchange(false, std::memory_order_acq_rel))
+      wake.notify_one();
+  }
+
+  bool ringEmpty() const {
+    return ringHead.load(std::memory_order_acquire) ==
+           ringTail.load(std::memory_order_relaxed);
+  }
+
+  // Bounded consumer step: at most kRingBatch records per wake-up, so one large
+  // burst cannot starve lifecycle work or delay a publication.
+  void drainRing(std::vector<LightCellRef> &out) {
+    const auto head = ringHead.load(std::memory_order_acquire);
+    const auto tail = ringTail.load(std::memory_order_relaxed);
+    std::size_t count = static_cast<std::size_t>(head - tail);
+    if (count > kRingBatch)
+      count = kRingBatch;
+    out.clear();
+    if (count == 0)
+      return;
+    out.reserve(count);
+    for (std::size_t i = 0; i < count; ++i)
+      out.push_back(
+          ring[(tail + static_cast<std::uint32_t>(i)) & (kRingCapacity - 1)]);
+    ringTail.store(tail + static_cast<std::uint32_t>(count),
+                   std::memory_order_release);
+  }
+
+  // Coalesce drained cells into one bitmap per (chunk, section). Caller holds
+  // mutex: chunkIndex is owned by the tick thread.
+  void groupCellsLocked(const std::vector<LightCellRef> &cells,
+                        std::vector<LightSectionDelta> &deltas) {
+    deltas.clear();
+    if (cells.empty())
+      return;
+    sortedCells = cells;
+    std::sort(sortedCells.begin(), sortedCells.end(),
+              [](const LightCellRef &a, const LightCellRef &b) {
+                if (a.chunk != b.chunk)
+                  return a.chunk < b.chunk;
+                return (a.packed >> 12) < (b.packed >> 12);
+              });
+    for (const LightCellRef &cell : sortedCells) {
+      const int sectionY =
+          minBlockSectionY + static_cast<int>(cell.packed >> 12);
+      if (deltas.empty() || deltas.back().chunk != cell.chunk ||
+          deltas.back().sectionY != sectionY) {
+        const auto found = chunkIndex.find(cell.chunk);
+        if (found == chunkIndex.end())
+          continue;
+        LightSectionDelta delta;
+        delta.chunkKey = found->second;
+        delta.chunk = cell.chunk;
+        delta.sectionY = sectionY;
+        deltas.push_back(delta);
+      }
+      const auto index = static_cast<std::size_t>(cell.packed & 0xFFFu);
+      deltas.back().bits[index >> 6] |= std::uint64_t{1} << (index & 63);
+    }
+  }
+
   void notePendingLocked() {
     ++statsSubmitted;
     noteHighWaterLocked();
@@ -2325,12 +2412,21 @@ private:
       // the flag. Producers then notify exactly once per sleep instead of once
       // per submitted block change, and a wake-up cannot be lost in between.
       wakePending.store(true, std::memory_order_release);
-      wake.wait(lock,
-                [&] { return closing || (!paused && !pending.empty()); });
-      if (closing && pending.empty())
+      wake.wait(lock, [&] {
+        return closing || (!paused && (!pending.empty() || !ringEmpty()));
+      });
+      if (closing && pending.empty() && ringEmpty())
         break;
       if (paused && !closing)
         continue;
+      // Coalesce the queued cells into per-section bitmaps before taking a
+      // pending batch, so the worker does the deduplication instead of the
+      // tick thread.
+      drainRing(ringBatch);
+      if (!ringBatch.empty()) {
+        groupCellsLocked(ringBatch, deltaBatch);
+        enqueueDeltasLocked(deltaBatch.data(), deltaBatch.size());
+      }
 
       std::vector<PendingChunk> batch;
       if (forcedChunk) {
@@ -2606,7 +2702,12 @@ private:
                      static_cast<int>((localIndex >> 4) & 15)});
           }
         }
-        section->empty = delta.isEmpty;
+        section->empty =
+            chunkAccess.sectionEmpty
+                ? chunkAccess.sectionEmpty(chunkAccess.context, delta.chunk,
+                                           static_cast<std::uint32_t>(
+                                               localSection << 12))
+                : false;
       }
       for (const auto &[sectionY, empty] : command.sectionStatus) {
         if (auto *section = chunk->sectionForEdit(sectionY))
@@ -2810,6 +2911,21 @@ private:
   std::condition_variable idle;
   std::condition_variable batchDone;
   std::unordered_map<std::uint64_t, PendingChunk> pending;
+  // Lock-free single-producer queue of reported cells. The tick thread writes
+  // one record and publishes it with a release store; the light worker is the
+  // only consumer. A full ring drops the record (and counts it) instead of
+  // blocking the tick: at 1.6M writes per 1000 ticks the 4 MB ring holds about
+  // 160 ticks of untouched backlog, so reaching that point is a failure signal,
+  // not a steady state.
+  static constexpr std::uint32_t kRingCapacity = 1u << 18;
+  static constexpr std::size_t kRingBatch = 1024;
+  std::array<LightCellRef, kRingCapacity> ring{};
+  std::atomic<std::uint32_t> ringHead{0};
+  std::atomic<std::uint32_t> ringTail{0};
+  std::unordered_map<const void *, std::uint64_t> chunkIndex;
+  std::vector<LightCellRef> ringBatch;
+  std::vector<LightCellRef> sortedCells;
+  std::vector<LightSectionDelta> deltaBatch;
   struct ChunkVersion {
     std::uint64_t epoch = 0;
     std::uint64_t requestRevision = 0;
@@ -2881,9 +2997,8 @@ void LightService::reportBlockChanges(
   impl_->reportBlockChanges(changes);
 }
 
-void LightService::reportSectionDeltas(const LightSectionDelta *deltas,
-                                       std::size_t count) {
-  impl_->reportSectionDeltas(deltas, count);
+void LightService::reportBlockCell(const void *chunk, std::uint32_t packed) {
+  impl_->reportBlockCell(chunk, packed);
 }
 
 void LightService::setChunkAccess(ChunkAccess access) {

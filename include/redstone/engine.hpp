@@ -611,26 +611,7 @@ private:
       std::make_unique<FluidTickQueue>();
   std::unique_ptr<LightService> lightService_;
   std::vector<std::shared_ptr<const LightSectionSnapshot>> emptyLightSections_;
-  // Per-section dirty bitmap for one tick. setBlock only sets the bit of the
-  // written cell; flushLightChanges submits the whole tick's cells with one
-  // mutex acquisition and reads the final state of each marked cell, so repeated
-  // writes to the same cell cost one bit test instead of a service round trip.
-  struct LightDirtySection {
-    int sectionY = 0;
-    bool wasEmpty = false;
-    bool isEmpty = false;
-    std::array<std::uint64_t, kLightVolume / 64> bits{};
-  };
-  std::unordered_map<std::uint64_t, std::vector<LightDirtySection>>
-      dirtyLightSections_;
-  void markLightDirty(int chunkX, int chunkZ, int sectionY, int localIndex,
-                      bool wasEmpty, bool isEmpty);
-  void flushLightChanges();
-  // True for the whole World::tick body. Writes inside a tick are coalesced
-  // into the section bitmaps and submitted by flushLightChanges; writes from
-  // outside (imports, tests, direct API use) submit immediately so a caller
-  // that inspects the light service right away still sees them.
-  bool inTick_ = false;
+
   // ServerLevel.blockEvents (ObjectLinkedOpenHashSet) + reschedule list.
   struct BlockEventQueue;
   std::unique_ptr<BlockEventQueue> blockEventQueue_ =
