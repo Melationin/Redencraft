@@ -1353,4 +1353,82 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 - MSVC Release + jemalloc 完整构建成功，原生服务端目标开启；全量 CTest **29/29 通过**（33.55 s）。日志 `build-light-validation/current-cpp/repair-ctest.log`，SHA-256 `98cfb795da495f67df6d20ff6d26d742146db6588c69ad83b7feeec31f21bc56`。
 - 新 C++ 探针与已实跑的 Fabric 26.1 夹具输出逐项比较：天空光 **243/243**，原始光层缺席标记 **72/72**，方块光 **225/225**；第 5 阶段 `(0,-62,0)`、`(0,-61,0)` 均由 13 修到 0。证据 `build-light-validation/current-cpp/repair-fabric-comparison.json`，SHA-256 `f9420b8c7200e26ad1922ca4407992195592d6406349816e0aca8e8a4c48623d`。golden 未改；本次未重新做世吞性能验收，L-4a 状态不变。
 
-任务进行中
+### L-4a 安全返工领取（coder）
+
+**范围**：只处理恢复交接列出的前三条阻塞。`World::setBlock` 提交带 chunk 生命周期、section、格坐标与新光学属性的 owned 记录，worker 不再借活 `World::Chunk`/`Section`/`SectionStorage`；队列满时把有拥有的最新记录合并到 pending，不丢合法更新；worker 等待改为不丢提交序号的唤醒协议。补同格重复更新、16 位区段回读及旧快照、卸载/同坐标重载、小容量环满和单笔入队唤醒反例。宽 palette 历史项只登记为 T-4/W-2 前置约束。完成后恢复 L-4a 的固定世吞测量，先按实测报告是否满足 `<10%`。
+
+### L-4a 恢复交接：外部重构严重问题审查（reviewer，状态不变）
+
+在暂停后，`8c6d6ce` 测量底座之后又进入了区段单分配、光学压缩、身份环、批次合并和天空层/缓存优化（至 `1e7cee0`），另有 `39b2960` 修复负坐标分组与测试夹具。保留这些提交及现有未跟踪日志，不整体回滚。已核 `6bdadc8` 交接记录、29/29 CTest（33.55 s，日志哈希匹配）和既有真实 26.1 光照对照；reviewer 不重跑。以下只列严重问题；不是 L-4a 性能通过或线程安全证据。
+
+- **阻塞｜worker 读取活区段，存在 C++ 数据竞争。** `src/engine.cpp:988–1011,1366–1372` 通过裸 chunk 指针让 worker 读普通 `indices` 和 `nonEmpty`；主线程 `src/engine.cpp:890–961` 同时修改它们。`include/redstone/engine.hpp:508` 的 acquire/release 只保护指针发布与扩容寿命，不保护之后的原地修改，也不能让格值和区段空态来自同一批次。未来真实卸载还会使裸借用更危险。保持单分配/压缩等能安全保留的改动，恢复 owned/immutable 的光照输入：可用携带紧凑光学值和代际的 delta，或主线程合批后的不可变区段/变更快照；worker 不借活 World。覆盖同格反复更新、16 位 palette 扩容、卸载/同坐标重载和旧快照不变，测试不靠时间碰运气。
+- **阻塞｜合法更新在环满时永久丢失。** `src/light.cpp:2322–2335,2961–2964` 的 `reportBlockCell` 满后仅加计数即返回，调用方不感知，没再改该格时可以永久保持旧光。恢复非阻塞可重放提交：满时按区块/区段保留最新已拥有的输入或保留 dirty 请求并调度权威快照，区块换代后旧输入必须失效；计数不能替代恢复。用小容量和暂停 worker，验证唯一一笔被挤出后即使没有第二次写也能恢复，并核对关停。
+- **阻塞｜无锁入队与条件变量之间可丢唤醒。** `src/light.cpp:2322–2335,2428–2435` 在 worker 谓词读到环空、尚未实际睡眠时，producer 可以推入并把 `wakePending` 置 false，notify 发生在 wait 之前；后续 ring 写也不会再通知。用共享同一互斥锁保护状态转换，或采用不丢事件的原子序号 wait/notify、信号量等；需覆盖单笔入队后无人再次写仍可完成、暂停/恢复和关停。不要靠定时扫描掩盖永久失活。
+- **高风险｜宽 palette 固定容量把历史状态数误当成当前格数。** `include/redstone/engine.hpp:470–490` 和 `src/engine.cpp:942–953` 的追加表不会回收旧项；同一区段跨时间累计超过 4096 个注册状态时，即使只有一格反复改，也会抛异常。26.1 全量状态与存盘都将用到这条路径。若当前支持集合能构造则在修复候选直接覆盖；否则请把可扩展或回收未使用项的约束记在 T-4/W-2 验收前，不能把“不可达”当作完整 26.1 契约。
+
+先续领当前 L-4a，只处理前三条安全阻塞和必需测试，然后恢复可比世吞测量。不要从旧 pause 工作树重做，先读取外部提交与已有日志；对已测的原候选不重跑 CTest，新修复候选最后只跑一轮。将测量边界、未达到 <10% 时的差距和现有优化分别交接，不声称外部提交后已达标。本轮不领取新系统；后续 L-4b/L-4c 正常验收。
+
+按用户最新顺序已调整 `PLAN.md`：完成光照 → T-1/T-2/T-3 原版基础票、等级与可刻资格 → W-2/W-3 原版存档骨架/数据 → T-4 实际后台读取、写盘、卸载 → W-4 双向原版读写与重启差分。World Clocks 和未领取的 F-9 补证仍保留在其后；不跳过任何已领取任务。PLAN 此次为 reviewer 排期，可由后续 coder 交接带入。
+
+#### L-4a 安全候选的并发反例（最终验证前，状态不变）
+
+在工作树早期候选里，`nextRequestGeneration` 发生在 `ringHead.store` 前。worker 若在二者之间捕获了新 generation，看到的环仍为空，则之后的 notify 不改变它等待的原子值，仍能睡死；`resumeForTesting`、`close` 也要真正改变 wait token，单 notify 不够。建议将请求排序号与唤醒序号分开，唤醒序号在工作/关闭状态已发布后递增，再 notify。另核对 ring 分组没有丢 `lifecycleEpoch`，不能让默认 0 在合并路径绕过换代检查；同代权威 refresh 也需用该快照的输入序号挡住此前的 ring delta（例如先排 lamp，再用 raw 写 air 后 refresh，旧 lamp 不应复亮）。与前述三条同一范围，在最终构建和测量前用确定性夹具验证。
+
+### L-4a 安全返工实际与证据（实现提交 `20b7e3b`、`2261445`、`4a3b9a0`、`5792fcb`）
+
+**安全交接**
+
+- `World::setBlock` 现在只向 `LightService` 提交完全拥有的 `LightCellUpdate`：chunk key、该 World chunk 的加载代、光线 section/格坐标、新 `BlockLightProperties` 与 section 空态。worker 不再拿到 `World::Chunk`、`Section` 或 palette 指针，也不再从活 World 读取格值或空态；原先的 `ChunkAccess` 与 `Section::visible` 并发借用路径删除，保留区段单分配实现。
+- ring 是单生产者自有记录队列。满时在服务锁内把该记录按提交序号合并到 pending，不再只增加 rejected；正常环记录与满环回退记录用同一序号比较，较新的回退值不会被稍后 drain 的旧 ring 记录覆盖。容量可配置为小值，生产默认仍为 `1<<18`。
+- 请求序号与唤醒序号分开。实际工作/关闭状态发布后推进 `wakeSequence`，而 `workerSleeping` 只控制是否发内核通知；即使 notify 落在 sleep 谓词检查与实际 wait 之间，等待值已经改变，不会永久睡死。`resumeForTesting` 与 `close` 同样推进唤醒序号。
+- ring 分组显式携带并比较 `lifecycleEpoch`。同代 full authoritative refresh 记录 `inputSequence`；序号不高于该快照的旧 ring/block 记录被视为已包含，不再叠加在新快照上。World chunk 首次存在时加载代为 1，同坐标 unload 后 reload 推进代；旧代 cell 与完整快照均不能进入新代。
+- 宽 palette 历史项仍未压缩。已按交接在 `src/engine.cpp` 标 `TODO(T-4/W-2)`，并在 `docs/light-engine.md` 记录：当前 4096 格不会越界，但长期反复改写同一区段可能累积不再引用的历史状态，区块持久化前必须复用空项或压缩。
+
+**确定性反例**
+
+- `tests/light_tests.cpp` 的小容量 ring fixture 暂停 worker，写入超过容量的记录并让同格最后一笔落在满环回退路径；恢复后断言所有格、包含被挤出的末值都发布，`rejected=0`。暂停后直接把 ring 与满环回退一起 `close()`，断言两者均 drain。
+- `waitWorkerSleepingForTesting()` 在 worker 发布 pre-wait 状态后只提交一笔；测试不轮询、不再写第二笔，wait/idle 后收到该记录。覆盖通知早于 wait 的窗口；pause/resume 与 close 路径由现有及新增关停用例覆盖。
+- 同格 lamp→off→lamp 的 paused World 写入在 16 位 block palette 区段合成为最终 lamp，旧宽区段快照保持 emission 0；随后 World unload/load 在新代发布，旧代排队记录不能复活。直接 LightService fixture 另验证旧 epoch cell 被拒、`rejected` 增一。
+- 新增同代权威刷新反例：先排 lamp ring delta，再提交 raw-air 对应的完整同代快照；旧 delta 的序号低于 full input，不进入 new snapshot，最终 section 为空且 emission 为 0。
+- 既有负坐标、天空/方块双层、权威刷新、协议、流体和存储回归全部保留。
+
+**测量底座**
+
+- `benchmarks/tick_benchmark.cpp` 在最后一个计时 tick 与主线程 CPU 取样之后立即冻结 `LightService::Stats`，再排序/输出；末尾 wait/drain 不混入 tick-end gauge。正式轮只读 tick 内 `drainPublished` 已接受的快照，`received_sky_sections`/`received_block_sections` 来自主线程实际接收的 `changedSections`，不是 worker 生成量或诊断指纹。
+- 完成批次 CPU 明确输出为 `worker_cpu_ms_completed_lower_bound`；仍在运行的批次不计入该下界。末尾排空另记 `worker_cpu_delta_ms` 与 wait/drain 时间。
+- `run_l4a_benchmark.ps1` 的模拟指纹正则只匹配 block/scheduled/entity/piston/event 行，不再把 `LIGHT_FINGERPRINT ... sky/block` 误算成模拟指纹；四个光检查点仍单独保留。
+
+**最终输入与候选**
+
+- Baseline `build-l1-baseline/redstone_tick_benchmark.baseline.exe` SHA-256 `260273d92c323e983fe4aa92b03e9066e36f74cfe6fce854462cc039ef17a907`；世吞输入 SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。
+- 最终是 clean 后 MSVC 19.51 Release + jemalloc 全量 NMake 构建，原生服务端 target 也已构建。候选 benchmark SHA-256 `574e713ffd15fa9a69a117eecd76c05df9ef359ca498aa9a9474e06c9f0c09fa`；构建日志 `build-l4a/owned-safety-final3/build-final.log`，SHA-256 `e7d51483c0e1041529a73ea43bb4a1450db49d2acba16ad6bcf4405f11ae78de`。
+- 脚本进程 affinity 与线程实测：baseline/off 进程 `0x4`、main 实际 `0x4`；on 进程 `0x14`、main 实际 `0x4`、worker requested/actual `0x10/0x10`、error 0。优先级 High。
+- 之前 `owned-safety-final`/`final2` 的证据保留：final 的 tick-end 统计晚于排序，final2 缺正式双层接收计数，均不作为最终口径；只以 final3 的 5×1000 tick 结果作 L-4a 交接。
+
+**正式 5 组 × 1000 tick（无诊断）**
+
+| 组 | 基线 mean / CPU ms | 候选关光 mean / CPU ms | 候选双光 mean / CPU ms | 双光 P95 ms | 双光 >50 ms |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 3.006 / 2953.125 | 2.906 / 2875.000 | 3.313 / 3140.625 | 6.887 | 0 |
+| 2 | 2.980 / 2906.250 | 2.893 / 2890.625 | 3.288 / 3109.375 | 6.832 | 0 |
+| 3 | 2.961 / 2937.500 | 2.847 / 2828.125 | 3.302 / 3187.500 | 6.845 | 0 |
+| 4 | 2.957 / 2875.000 | 2.832 / 2781.250 | 3.288 / 3140.625 | 6.816 | 0 |
+| 5 | 2.947 / 2890.625 | 2.852 / 2859.375 | 3.282 / 3156.250 | 6.853 | 0 |
+
+- 配对中位：main CPU **+8.51%**，满足 `<10%`；平均刻墙钟 **+11.19%**，未满足。不能给启用双光的整体性能通过结论。
+- 初照 wall 12.014–12.089 s，main CPU 15.625 ms，worker CPU 11.952–12.016 s；每轮 submitted 2916、published 3038、pending chunks 0，计时前已完成。
+- 正式计时内每轮 changes 463,164–500,803、published 2,005–3,115；主线程接收天空 section 变化 4,318–5,923、方块 section 变化 106–176。四个诊断光检查点 sky/block 指纹均不同；正式、关光与基线的四个模拟检查点和终态完全一致。
+- tick-end `queue_high` 152–202，ring backlog 15.817–16.548M 条，pending chunks 0–202；额外排空 wait 633.382–810.269 ms，drain 0.334–0.543 ms，排空后 pending 0。完成批次 CPU 下界 2.562–3.047 s，排空 worker CPU delta 3.734–3.906 s。双光的主要剩余差距应继续在 L-4b 的 tick 内提交/交接与 ring 合并热点定位，不能把末尾长排空视为达标。
+- 结果目录 `build-l4a/owned-safety-final3/measure/`。`SUMMARY.json` SHA-256 `eaf0c79353ff302ac66fa57dfb02869fce2a3d84d8bc1c4a32a541a9f2b728ee`，`g01-on.log` SHA-256 `0d7512ffa7b19c384854949b888ef216536c416832abe116c38dc4010d36131d`，文件清单 SHA-256 `30694a43f5124b529289a277e6f89f14e6ec9aff4d24c8045949daec99988edc`。
+
+**构建与唯一最终 CTest**
+
+- 最终候选 clean 全量构建 exit 0；随后只运行一轮完整 CTest：**29/29 通过，25.83 s**。日志 `build-l4a/owned-safety-final3/ctest-final.log`，SHA-256 `572ccb851d5b1c9f7df3a9e1f84a1aae61239cf6f774930f7152ce7d70d51b01`。reviewer 不重复执行。
+
+**明确边界**
+
+- 本轮只关闭 L-4a 安全阻塞和测量口径；未实现 L-4b 性能优化，也未开始 L-4c 的 Anvil `SkyLight`/`BlockLight`/`isLightOn`、真实加载票或生命周期写回。
+- 没有启动客户端，没有真实 26.1 服务端逐 tick 差分。正式测量是离线无协议连接的同输入 A/B；动态双层接收由生产 `drainPublished` 计数与四个独立光指纹证明，不等同于原版等价或客户端渲染。
+- 宽 palette 历史累计仍是 T-4/W-2 前置约束；未声称完整 26.1 状态空间已覆盖。
+
+任务已完成
