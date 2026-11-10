@@ -738,11 +738,23 @@ void ownedCellOverflowAndWakeup() {
           "close fixture loads");
   for (int x = 0; x < 3; ++x)
     reportOwnedCell(closing, 3, 0, {x, -15, 1}, Blocks::STONE.defaultState());
+  require(closing.stats().rejected == 0,
+          "accepted close records do not start rejected");
   closing.close();
   closing.drainPublished();
   auto closed = closing.latestChunk(3, 0);
-  require(closed && closed->section(-1)->at(2, 1, 1).dampening == 15,
-          "close drains both the ring and its full-ring fallback");
+  require(closed && closed->section(-1)->at(0, 1, 1).dampening == 15 &&
+              closed->section(-1)->at(1, 1, 1).dampening == 15 &&
+              closed->section(-1)->at(2, 1, 1).dampening == 15,
+          "close drains normal ring records and the full-ring fallback");
+  require(closing.stats().rejected == 0,
+          "draining records accepted before close does not reject them");
+  reportOwnedCell(closing, 3, 0, {3, -15, 1}, Blocks::STONE.defaultState());
+  require(closing.stats().rejected == 1,
+          "a cell submitted after close is rejected explicitly");
+  require(closing.submitChunk(emptyChunkFixture(4, 0, -1, 1)) == 0 &&
+              closing.stats().rejected == 2,
+          "a chunk submitted after close is rejected explicitly");
 }
 
 void ownedCellLifecycleRejectsReloadStaleWork() {

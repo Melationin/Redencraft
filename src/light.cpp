@@ -694,7 +694,7 @@ public:
       return false;
     }
     auto active = versions.find(update.chunkKey);
-    if (!accepting || active == versions.end() || active->second.inactive ||
+    if (active == versions.end() || active->second.inactive ||
         (update.lifecycleEpoch != 0 &&
          update.lifecycleEpoch != active->second.epoch)) {
       ++statsRejected;
@@ -971,6 +971,10 @@ public:
   }
 
   void close() {
+    // Close the hot-path gate before joining the worker. Records already in
+    // the ring remain owned input and are deliberately exempt from the later
+    // `accepting == false` check during draining.
+    acceptingCells.store(false, std::memory_order_release);
     std::thread selected;
     {
       std::lock_guard lock(mutex);
@@ -2394,6 +2398,10 @@ private:
       ++statsRejected;
       return;
     }
+    if (!acceptingCells.load(std::memory_order_acquire)) {
+      ++statsRejected;
+      return;
+    }
     update.sequence = nextRequestGeneration();
     const auto head = ringHead.load(std::memory_order_relaxed);
     const auto tail = ringTail.load(std::memory_order_acquire);
@@ -3062,6 +3070,7 @@ private:
   // Only the worker sets this before waiting. Producers exchange it before an
   // atomic notify, so notify-before-wait cannot strand a generation.
   std::atomic<bool> workerSleeping{false};
+  std::atomic<bool> acceptingCells{true};
   std::uint64_t nextPublicationRevision = 0;
   bool paused = false;
   bool pauseAfterBatch = false;
