@@ -548,6 +548,9 @@ public:
     PendingChunk state;
     state.key = key;
     state.generation = generation;
+    // This full snapshot includes every cell change up to `generation`.
+    // Older ring/block records must not be replayed on top of it.
+    state.inputSequence = generation;
     state.lifecycleEpoch = active.epoch;
     state.revision = active.requestRevision;
     state.load = std::make_unique<LightChunkInput>(std::move(input));
@@ -635,12 +638,13 @@ public:
         ++statsRejected;
         continue;
       }
+      const auto generation = nextRequestGeneration();
+      if (generation <= state->inputSequence)
+        continue;
       if (source.sectionY != currentSection) {
         currentSection = source.sectionY;
-        const auto sequence = nextRequestGeneration();
-        state->sectionStatus[currentSection] = {sequence, source.isEmpty};
+        state->sectionStatus[currentSection] = {generation, source.isEmpty};
       }
-      const auto generation = nextRequestGeneration();
       ++active->requestRevision;
       state->generation = generation;
       state->revision = active->requestRevision;
@@ -701,6 +705,8 @@ public:
       stateIt = pending.emplace(update.chunkKey, PendingChunk{}).first;
     PendingChunk &state = stateIt->second;
     state.key = update.chunkKey;
+    if (update.sequence <= state.inputSequence)
+      return true;
     state.generation = update.sequence;
     state.lifecycleEpoch = active->second.epoch;
     state.revision = ++active->second.requestRevision;
@@ -747,11 +753,13 @@ public:
       return false;
     }
     change.generation = nextRequestGeneration();
-    ++active->second.requestRevision;
     auto stateIt = pending.find(key);
     if (stateIt == pending.end())
       stateIt = pending.emplace(key, PendingChunk{}).first;
     PendingChunk &state = stateIt->second;
+    if (change.generation <= state.inputSequence)
+      return true;
+    ++active->second.requestRevision;
     state.key = key;
     state.generation = change.generation;
     state.lifecycleEpoch = active->second.epoch;
@@ -967,6 +975,9 @@ private:
   struct PendingChunk {
     std::uint64_t key = 0;
     std::uint64_t generation = 0;
+    // Generation of the newest full authoritative snapshot. Every record at or
+    // below this sequence is already represented by that snapshot.
+    std::uint64_t inputSequence = 0;
     std::uint64_t lifecycleEpoch = 0;
     std::uint64_t revision = 0;
     std::unique_ptr<LightChunkInput> load;

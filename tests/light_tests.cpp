@@ -782,6 +782,34 @@ void ownedCellLifecycleRejectsReloadStaleWork() {
           "stale owned lifecycle input is rejected explicitly");
 }
 
+void authoritativeRefreshOutranksQueuedCells() {
+  LightWorkerOptions options;
+  options.batchWindowMs = 0;
+  options.cellQueueCapacity = 8;
+  LightService service(-1, 1, options);
+  auto initial = emptyChunkFixture(4, 0, -1, 1);
+  initial.lifecycleEpoch = 3;
+  require(service.submitChunk(std::move(initial)) != 0,
+          "refresh fixture loads its first generation");
+  (void)settledChunk(service, 4, 0);
+  service.pauseForTesting();
+  reportOwnedCell(service, 4, 0, {1, -15, 1},
+                  Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"),
+                  false, 3);
+  auto refreshed = emptyChunkFixture(4, 0, -1, 1);
+  refreshed.lifecycleEpoch = 3;
+  require(service.submitChunk(std::move(refreshed)) != 0,
+          "same-generation authoritative refresh is accepted");
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(),
+          "refresh and its older queued cell settle");
+  service.drainPublished();
+  auto snapshot = service.latestChunk(4, 0);
+  require(snapshot && snapshot->section(-1)->empty &&
+              snapshot->section(-1)->at(1, 1, 1).emission == 0,
+          "an older ring cell cannot resurrect after authoritative refresh");
+}
+
 void wideWorldInputsRemainOwned() {
   World world;
   world.loadChunk(0, 0);
@@ -1603,6 +1631,7 @@ int main(int argc, char **argv) {
     recoverableChangesAndBoundedPublication();
     ownedCellOverflowAndWakeup();
     ownedCellLifecycleRejectsReloadStaleWork();
+    authoritativeRefreshOutranksQueuedCells();
     wideWorldInputsRemainOwned();
     blockLightPropagation();
     skyLightPropagation();
