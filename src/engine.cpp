@@ -876,38 +876,52 @@ const World::Chunk *World::chunkAt(int x, int z) const {
 BlockState::Id World::Section::get(int index) const {
   // PalettedContainer.get: palette entry of the stored index (bits == 0 means
   // the section holds a single value and needs no storage at all).
-  if (bits == 0)
+  const SectionStorage *base = storage.get();
+  if (!base)
     return single;
-  const auto entry = bits == 8 ? indices8[index] : indices16[index];
-  return palette[entry];
+  const auto cell = static_cast<std::size_t>(index);
+  if (base->bits == 8) {
+    const auto *block = static_cast<const SectionStorage8 *>(base);
+    return block->palette[block->indices[cell]];
+  }
+  const auto *block = static_cast<const SectionStorage16 *>(base);
+  return block->palette[block->indices[cell]];
 }
 BlockState::Id World::Section::set(int index, BlockState::Id state) {
   // PalettedContainer.getAndSet + LevelChunkSection.setBlockState counters.
   const auto previous = get(index);
   if (previous == state)
     return previous;
-  if (bits == 0) {
-    palette.assign(2, 0);
-    palette[0] = single;
-    palette[1] = state;
-    bits = 8;
-    indices8.assign(4096, 0);
-    indices8[index] = 1;
-  } else if (bits == 8) {
-    auto found = std::find(palette.begin(), palette.end(), state);
-    if (found == palette.end()) {
-      if (palette.size() < 256) {
-        palette.push_back(state);
-        found = palette.end() - 1;
+  const auto cell = static_cast<std::size_t>(index);
+  SectionStorage *base = storage.get();
+  if (!base) {
+    // A default block is value-initialised, so every cell already reads
+    // palette[0] == single and only the written cell needs an index.
+    auto block = std::make_shared<SectionStorage8>();
+    block->palette[0] = single;
+    block->palette[1] = state;
+    block->paletteSize = 2;
+    block->indices[cell] = 1;
+    storage = std::move(block);
+  } else if (base->bits == 8) {
+    auto *block = static_cast<SectionStorage8 *>(base);
+    const auto end = block->palette.begin() + block->paletteSize;
+    auto found = std::find(block->palette.begin(), end, state);
+    if (found == end) {
+      if (block->paletteSize < block->palette.size()) {
+        block->palette[block->paletteSize] = state;
+        found = block->palette.begin() + block->paletteSize;
+        ++block->paletteSize;
       } else {
         // HashMapPalette.grow: widen every stored index to 16 bits.
-        indices16.assign(4096, 0);
-        for (int i = 0; i < 4096; ++i)
-          indices16[i] = indices8[i];
-        indices8.clear();
-        palette.push_back(state);
-        bits = 16;
-        indices16[index] = static_cast<std::uint16_t>(palette.size() - 1);
+        auto wide = std::make_shared<SectionStorage16>();
+        std::copy(block->palette.begin(), end, wide->palette.begin());
+        wide->palette[block->paletteSize] = state;
+        wide->paletteSize = static_cast<std::uint16_t>(block->paletteSize + 1);
+        for (std::size_t i = 0; i < kLightVolume; ++i)
+          wide->indices[i] = block->indices[i];
+        wide->indices[cell] = block->paletteSize;
+        storage = std::move(wide);
         if (BlockState::fromId(previous).isAir() &&
             !BlockState::fromId(state).isAir())
           ++nonEmpty;
@@ -917,14 +931,23 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
         return previous;
       }
     }
-    indices8[index] = static_cast<std::uint8_t>(found - palette.begin());
+    block->indices[cell] =
+        static_cast<std::uint8_t>(found - block->palette.begin());
   } else {
-    auto found = std::find(palette.begin(), palette.end(), state);
-    if (found == palette.end()) {
-      palette.push_back(state);
-      found = palette.end() - 1;
+    auto *block = static_cast<SectionStorage16 *>(base);
+    const auto end = block->palette.begin() + block->paletteSize;
+    auto found = std::find(block->palette.begin(), end, state);
+    if (found == end) {
+      // Unreachable: kLightVolume cells cannot hold more than kLightVolume
+      // distinct states. Fail loudly instead of writing past the palette.
+      if (block->paletteSize == block->palette.size())
+        throw std::logic_error("section palette overflow");
+      block->palette[block->paletteSize] = state;
+      found = block->palette.begin() + block->paletteSize;
+      ++block->paletteSize;
     }
-    indices16[index] = static_cast<std::uint16_t>(found - palette.begin());
+    block->indices[cell] =
+        static_cast<std::uint16_t>(found - block->palette.begin());
   }
   const bool previousAir = BlockState::fromId(previous).isAir();
   const bool stateAir = BlockState::fromId(state).isAir();
@@ -1213,11 +1236,19 @@ ChunkSnapshot World::snapshotChunk(int chunkX, int chunkZ) const {
       const Section &section = chunk->sections[i];
       SectionSnapshot &out = snapshot.sections[i];
       out.nonEmpty = section.nonEmpty;
-      out.bits = section.bits;
+      out.bits = section.bits();
       out.single = section.single;
-      out.palette = section.palette;
-      out.indices8 = section.indices8;
-      out.indices16 = section.indices16;
+      // The snapshot stays an owning copy: the network encoder runs off the
+      // tick thread, so it must not read the live container.
+      if (const SectionStorage8 *block = section.as8()) {
+        out.palette.assign(block->palette.begin(),
+                           block->palette.begin() + block->paletteSize);
+        out.indices8.assign(block->indices.begin(), block->indices.end());
+      } else if (const SectionStorage16 *wide = section.as16()) {
+        out.palette.assign(wide->palette.begin(),
+                           wide->palette.begin() + wide->paletteSize);
+        out.indices16.assign(wide->indices.begin(), wide->indices.end());
+      }
     }
   }
   for (const auto &[pos, entity] : pistonEntities)

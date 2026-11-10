@@ -458,13 +458,52 @@ private:
   void runEvents();
   // LevelChunkSection: a paletted container of block states. An empty section
   // is a single air value (PalettedContainer bits=0) and needs no storage.
+  //
+  // Both paletted representations live behind one pointer, so a section owns at
+  // most one heap block and "which representation is live" is carried by that
+  // block instead of by two nullable members that must always disagree. The
+  // capacities are the widest the representation can address: 8-bit indices
+  // reach exactly 256 palette entries, and a 4096-cell section cannot hold more
+  // than 4096 distinct states, so the 16-bit palette can never overflow. Fixed
+  // capacity means an index write and a palette append never reallocate and
+  // never move the arrays, so a block's address is stable for its whole life.
+  struct SectionStorage {
+    std::uint16_t paletteSize = 0;
+    std::uint8_t bits = 0; // 8 or 16; fixed when the block is constructed
+  };
+  struct SectionStorage8 final : SectionStorage {
+    SectionStorage8() { bits = 8; }
+    std::array<std::uint8_t, kLightVolume> indices{}; // value-initialised
+    std::array<BlockState::Id, 256> palette{};
+  };
+  struct SectionStorage16 final : SectionStorage {
+    SectionStorage16() { bits = 16; }
+    std::array<std::uint16_t, kLightVolume> indices{};
+    std::array<BlockState::Id, kLightVolume> palette{};
+  };
   struct Section {
     std::uint16_t nonEmpty = 0;
-    std::uint8_t bits = 0; // 0 = single value, 8 or 16 bits of palette index
     BlockState::Id single = 0;
-    std::vector<BlockState::Id> palette;
-    std::vector<std::uint8_t> indices8;
-    std::vector<std::uint16_t> indices16;
+    std::shared_ptr<SectionStorage> storage; // null = single value
+    Section() = default;
+    // Copying would alias the container, so the value is move-only. Nothing
+    // copies a Chunk either (it owns a unique_ptr), so no call site needs it.
+    Section(const Section &) = delete;
+    Section &operator=(const Section &) = delete;
+    Section(Section &&) noexcept = default;
+    Section &operator=(Section &&) noexcept = default;
+    std::uint8_t bits() const { return storage ? storage->bits : 0; }
+    // Null unless the live representation is the requested one.
+    const SectionStorage8 *as8() const {
+      return storage && storage->bits == 8
+                 ? static_cast<const SectionStorage8 *>(storage.get())
+                 : nullptr;
+    }
+    const SectionStorage16 *as16() const {
+      return storage && storage->bits == 16
+                 ? static_cast<const SectionStorage16 *>(storage.get())
+                 : nullptr;
+    }
     bool hasOnlyAir() const { return nonEmpty == 0; }
     BlockState::Id get(int index) const;
     BlockState::Id set(int index, BlockState::Id state);
