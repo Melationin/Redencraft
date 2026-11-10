@@ -1431,4 +1431,34 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 - 没有启动客户端，没有真实 26.1 服务端逐 tick 差分。正式测量是离线无协议连接的同输入 A/B；动态双层接收由生产 `drainPublished` 计数与四个独立光指纹证明，不等同于原版等价或客户端渲染。
 - 宽 palette 历史累计仍是 T-4/W-2 前置约束；未声称完整 26.1 状态空间已覆盖。
 
+### L-4a 安全修复复审（`5792fcb`）
+
+活区段借用已消除，满环正常运行不再丢合法写，wake token 独立发布，换代与同代权威输入屏障已核对。最终日志 **29/29 CTest（25.83 s）**、A/B 摘要哈希与交接匹配；reviewer 不重跑。确认有光的正式窗口收到了两层更新，五组配对中位主线程 CPU **+8.51%**、平均刻墙钟 **+11.19%**，后者未达标。更正一处交接术语：**15.817–16.548M 是累计执行的光传播队列条目（`light_queue`），不是环积压**；`pending_chunks` 也不统计 ring 当前占用，未测得精确 ring 末占用。后续性能回归按真实环占用及最终排空来验收。
+
+- **阻塞｜关停仍丢已接收的环内更新，回归只断言了满环回退。** `src/light.cpp:973–985` 在 worker 排空前将 `accepting=false`；worker 仍走 `:2560` 的 `drainCellChangesLocked`，最终调用 `:691–703` 的 `applyOwnedCellLocked`，把已入环的正常记录以 `!accepting` 拒绝。 `tests/light_tests.cpp:733–745` 两格容量、提交 x=0/1/2，只断言走满环回退的 x=2，因此现有通过不证明前两格。按现有“关停排空”的约定，关停拒绝新输入，但必须处理已入环的合法记录；保留换代和 full-input 过滤。强化已有夹具，断言 x=0/1/2 都实际发布，旧的 `rejected` 不增加；测试关停后提交的契约，不依赖调度时序。
+
+**结论：仅退回关停这一条。** 不做新的性能优化；上面的五组用于诊断，实际关停修复后按改动范围说明计时证据适用边界，不为无关结果重复 benchmark。新最终代码由 coder 构建并跑一轮完整 CTest。先按流程写唯一状态位；宽 palette 债已登记在 T-4/W-2 前，仍不开始加载票。
+
+#### L-4a 关停返工领取（coder）
+
+**范围**：只修 `LightService::close()` 对已接收 ring 记录的处理。关停后拒绝新提交，但 worker 必须继续处理关停前已入环的合法记录；保留 lifecycle epoch、full-input `inputSequence` 过滤。强化现有两格容量夹具，分别断言正常环 x=0/1 与满环回退 x=2 都在关停排空后发布，合法关停不增加 `rejected`，并覆盖关停后提交被拒。不变更性能算法，不重跑 L-4a benchmark。完成聚焦验证和最终候选唯一一轮完整 CTest 后，在本文件记录并交接。
+
+### L-4a 关停返工实际与证据（实现提交 `4e79725`）
+
+**实现**
+
+- `LightService::close()` 在用互斥锁发布关停状态、移动并 join worker 之前，先关闭热路径入口 `acceptingCells`。关停后的 `reportBlockCell` 和 `submitChunk` 会显式增加 `rejected` 并返回/丢弃输入。
+- `applyOwnedCellLocked` 不再用全局 `accepting` 拒绝已经进入 ring 的记录；它仍检查 chunk 是否处于同一加载代、是否未 inactive，并继续执行 full-input `inputSequence` 门槛。因此关停只拒绝尚未接收的新输入，已接收的正常 ring 和满环回退记录都会进入 pending 并由 worker 排空。
+- `tests/light_tests.cpp` 的容量 2 关停夹具断言正常环 x=0/1 与满环回退 x=2 的 dampening 均为 15；合法 close 后 `rejected=0`。随后一笔 cell 提交和一笔完整 chunk 提交分别被拒，`rejected` 各增一。
+
+**验证**
+
+- 聚焦 `light_tests`：`light tests passed`。
+- 最终候选 target `clean` 后 MSVC 19.51 Release + jemalloc 全量构建成功；唯一一轮完整 CTest 为 **29/29 通过，25.83 s**。日志 `build-l4a/shutdown-final/ctest-final.log`，SHA-256 `6cbefbc6e69f9f5a6ecf450ccdaa12f584bc56e43353fe2be7f90b3ce7eb8f01`；构建日志 `build-l4a/shutdown-final/build-final.log`，SHA-256 `68aca8107e9e96cbaab1b17d7580561f5ecfca2c4a160c3249cf5e1720cb20dc`。
+- 按复审要求没有重跑 L-4a benchmark，也不把此候选宣称为新的性能验收。上一提交 `5792fcb` 的 5×1000 tick 证据仍仅作诊断参考（主线程 CPU 中位 +8.51%，平均刻 +11.19%，后者未达标）；本关停修复在每次 `reportBlockCell` 前增加一个 acquire 入口检查，后续真实环占用与性能回归留 L-4b。
+
+**边界**
+
+- 没有修改传播算法、测量口径、协议、Anvil、加载票或宽 palette 债；未启动客户端或新增真实 26.1 差分。宽 palette 仍需在 T-4/W-2 前处理。
+
 任务已完成
