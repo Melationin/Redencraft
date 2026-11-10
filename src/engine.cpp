@@ -903,7 +903,6 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
     block->paletteSize = 2;
     block->indices[cell] = 1;
     storage = std::move(block);
-    visible.store(storage.get(), std::memory_order_release);
   } else if (base->bits == 8) {
     auto *block = static_cast<SectionStorage8 *>(base);
     const auto end = block->palette.begin() + block->paletteSize;
@@ -922,11 +921,7 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
         for (std::size_t i = 0; i < kLightVolume; ++i)
           wide->indices[i] = block->indices[i];
         wide->indices[cell] = block->paletteSize;
-        // The worker may still be walking the block this replaces; the wider
-        // block owns it so the reader's view stays valid until it finishes.
-        wide->previous = storage;
         storage = std::move(wide);
-        visible.store(storage.get(), std::memory_order_release);
         if (BlockState::fromId(previous).isAir() &&
             !BlockState::fromId(state).isAir())
           ++nonEmpty;
@@ -943,6 +938,10 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
     const auto end = block->palette.begin() + block->paletteSize;
     auto found = std::find(block->palette.begin(), end, state);
     if (found == end) {
+      // TODO(T-4/W-2): the append-only palette records historical states even
+      // after their last cell moved away. Before full chunk persistence, compact
+      // unreferenced slots (or maintain a reusable free list) so a long-lived
+      // section is bounded by its current states, not its update history.
       // Unreachable: kLightVolume cells cannot hold more than kLightVolume
       // distinct states. Fail loudly instead of writing past the palette.
       if (block->paletteSize == block->palette.size())
@@ -968,6 +967,8 @@ void World::loadChunk(int x, int z) {
   auto &c = chunks_[key];
   const bool wasLoaded = c.loaded;
   c.loaded = true;
+  if (!wasLoaded)
+    ++c.lightLifecycleEpoch;
   if (!c.heightmaps)
     c.heightmaps = std::make_unique<ChunkHeightmaps>(minY_, sectionCount() * 16);
   // Publish the fresh node so a cached miss cannot mask the load.
@@ -985,40 +986,6 @@ void World::loadChunk(int x, int z) {
       lightChunkLifecycleObserver(x, z, true);
   }
 }
-BlockState::Id World::readLightCell(void *, const void *chunk,
-                                    std::uint32_t packed) {
-  const auto *c = static_cast<const Chunk *>(chunk);
-  const auto section = static_cast<std::size_t>(packed >> 12);
-  if (!c || section >= c->sections.size())
-    return 0;
-  const Section &data = c->sections[section];
-  const SectionStorage *base = data.visible.load(std::memory_order_acquire);
-  if (!base)
-    return data.single;
-  const auto cell = static_cast<std::size_t>(packed & 0xFFFu);
-  if (base->bits == 8) {
-    const auto *block = static_cast<const SectionStorage8 *>(base);
-    return block->palette[block->indices[cell]];
-  }
-  const auto *block = static_cast<const SectionStorage16 *>(base);
-  return block->palette[block->indices[cell]];
-}
-bool World::lightSectionEmpty(void *, const void *chunk, std::uint32_t packed) {
-  const auto *c = static_cast<const Chunk *>(chunk);
-  const auto section = static_cast<std::size_t>(packed >> 12);
-  if (!c || section >= c->sections.size())
-    return true;
-  return c->sections[section].nonEmpty == 0;
-}
-void World::installLightChunkAccess() {
-  if (!lightService_)
-    return;
-  LightService::ChunkAccess access;
-  access.context = this;
-  access.read = &World::readLightCell;
-  access.sectionEmpty = &World::lightSectionEmpty;
-  lightService_->setChunkAccess(access);
-}
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
   auto it = chunks_.find(chunkKey(x, z));
@@ -1026,8 +993,8 @@ void World::unloadChunk(int x, int z) {
   if (wasLoaded)
     it->second.loaded = false;
   if (lightService_) {
-    // A chunk that leaves the loaded set must not keep a pending bitmap: the
-    // cells would be re-read from a chunk the service no longer knows.
+    // The lifecycle tombstone invalidates both full snapshots and queued owned
+    // cell records from this loaded lifetime.
     lightService_->unloadChunk(x, z);
     if (wasLoaded && lightChunkLifecycleObserver)
       lightChunkLifecycleObserver(x, z, false);
@@ -1041,7 +1008,7 @@ std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const 
   auto input = std::make_unique<LightChunkInput>();
   input->chunkX = x;
   input->chunkZ = z;
-  input->chunk = chunk;
+  input->lifecycleEpoch = chunk->lightLifecycleEpoch;
   input->minBlockSectionY = minY_ >> 4;
   input->blockSectionCount = sectionCount();
 
@@ -1112,7 +1079,6 @@ void World::enableLighting(LightWorkerOptions options) {
         if (lightPublicationObserver)
           lightPublicationObserver(std::move(snapshot));
       });
-  installLightChunkAccess();
   refreshLightSnapshots();
 }
 
@@ -1365,11 +1331,14 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
     const bool isEmpty = targetSection.hasOnlyAir();
     if (hasDifferentLightProperties(old, state) ||
         hasDifferentSectionLightProperties(wasSectionEmpty, isEmpty)) {
-      // Identity only: the worker reads the cell when it reaches the record, so
-      // the tick thread pays for a 16-byte push and nothing else.
-      lightService_->reportBlockCell(
-          changedChunk, static_cast<std::uint32_t>(sectionIndex(p.y) << 12) |
-                            static_cast<std::uint32_t>(localIndex));
+      LightCellUpdate update;
+      update.chunkKey = chunkKey(chunkIndex(p.x), chunkIndex(p.z));
+      update.lifecycleEpoch = changedChunk->lightLifecycleEpoch;
+      update.sectionY = p.y >> 4;
+      update.localIndex = static_cast<std::uint16_t>(localIndex);
+      update.properties = lightPropertiesOf(state);
+      update.sectionEmpty = isEmpty;
+      lightService_->reportBlockCell(update);
     }
   }
   // TODO: reproduce dirty/client notifications, POI, and generic block-entity

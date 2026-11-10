@@ -6,6 +6,8 @@ L-1 已实现天空光/方块光的数据层、官方方块光学元数据、主
 
 `World::enableLighting()` 仍是显式的 World 级入口；native `redstone_vanilla_server` 在导入或构造固定世界后启用。核心 tick 不等待 worker，也不在方块写入时扫描区段。Anvil 的 `SkyLight`/`BlockLight`/`isLightOn` 读写仍属于 W-2/W-3。
 
+区块自身的 16 位 block-state palette 仍是追加式实现：当前 4096 格容量不会越界，但长期反复改写同一区段可能把已经不再被任何格引用的历史状态保留到 palette。T-4/W-2 接入完整区块生命周期和持久化前必须增加空闲项复用或压缩；不能把“当前支持方块集合暂时构造不到 4097 次变更”当作完整 26.1 契约。
+
 ## 光层数据
 
 `include/redstone/light.hpp`：
@@ -49,15 +51,15 @@ python validation/light_metadata/generate_light_occlusion.py `
 `LightService` 是每个启用世界自己的单写者 executor：
 
 1. 主线程构造完全拥有的 `LightChunkInput`：区块坐标、连续光 section、per-section palette/cell 索引、双层光值和 `BlockLightProperties`。不传 `World`、内部 palette 或可变注册表指针。全空 section 和上下 padding 复用世界内同一组不可变输入；均匀非空 section 只保存一个 palette 值。
-2. 主线程按区块合并 load、section-empty、cell 和 unload，维护每区块最新的可重试状态，不为每个格子创建线程任务。有效光照更新不会因 worker 容量而丢弃；暂停或积压时状态留在 pending map，直到 worker 真正接收。`Stats::rejected` 只记录关闭后的提交或非法 section/cell 输入。
+2. 普通方块写入提交一条完全拥有的 `LightCellUpdate`：chunk key、加载代、section/格坐标、新 `BlockLightProperties` 和 section 空态。worker 不借活 `World::Chunk`、`Section` 或 palette 指针，也不在传播线程重读方块。单生产者的固定环只负责低开销交接；环满时当次记录在服务互斥锁下按提交序号合并到 pending，旧环记录随后 drain 也不能覆盖较新的值。因此合法更新不会因容量或通知时序丢失。加载、section-empty、cell 和 unload 继续按区块合并；`Stats::rejected` 只记录关闭后的提交、非法输入或旧加载代。
 3. worker 每次从 pending map 最多取 `min(batchSize, maxQueuedCommands)` 个区块，执行 PRE_UPDATE 类操作。方块光和天空光各自拥有 check/decrease/increase 队列并依次完全排空。天空光先按 `ChunkSkyLightSources` 的垂直相邻面判据维护每列入口，再直接填充入口以上为 15，只从入口边界和相邻低入口的侧向边入队。天空数据保持稀疏：未存储 section 不是普通 0 层，查询取最近上方已存层的底平面；只有偏离该派生值或相邻非空区段需要时才分配。顶部 padding 可由入口向下传光，底部 padding 可由相邻非空区段实际存储，超出光照 section 范围才读取为 0。未加载水平邻区块按 Java 读取屏障阻止传播。
 4. 加载区块时扫描真实方块光源和天空入口；加载/卸载后从相邻已加载区块的边界格重新发起两层 increase/decrease，使跨 chunk 两侧收敛。普通方块变更只更新受影响天空列并检查对应格，不扫描整块或全区块。
-5. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。
+5. worker 对受影响 section 分配真正可变的工作副本，仅在完整处理完成后转换为 `shared_ptr<const LightSectionSnapshot>` 发布。未变化 section 继续复用不可变快照。worker 入睡前发布等待序号；producer 在可见数据之后推进该序号并只在实际休眠时通知，通知早于 wait 或晚于状态检查都不会留下无人唤醒的队列。
 6. 一个 worker revision 的全部脏区块作为一个不可分割批次交给主线程；`World` 线程调用非阻塞 `drainPublished()` 后才更新 latest 并触发 callback，因此读者看不到同一批次的一半。未 drain 的同区块旧结果被新批次替换，内存和 `pendingPublications` 不会随同一区块的写入代数增长。callback 不运行在 worker。生命周期 epoch 标识加载代；revision 是单写者按完成批次递增的发布序号，独立于无序 pending 批次携带的输入请求号。同代结果在完整批次后可见，卸载/重载后的旧代一律拒绝。
 
 默认每次最多取 1000 个区块（另受 pending 容量配置约束）。每区块 pending 状态只保留最新 load、按 section 合并的 cell delta 和每 section 最新空态；已 drain 的发布结果也按区块合并，不随写入代数无限增长。unload 会立即对读者失效，并作为有序 tombstone 保留到 worker 清除旧内部代；若其后立即 reload，worker 先清除旧代再安装完整新快照。worker 错误保存在 `workerError()`。`close()` 停止接收新命令、排空 pending 并 join。`World::~World` 与 `disableLighting()` 会先关闭 worker。
 
-`World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和光学属性/section emptiness 变更。两层传播都只在 worker 内进行；主线程不等待，也不读取活区块进行传播。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生逐格光照任务；`importWorld` 完成 raw block 写入后调用 `refreshLightSnapshots()`，用当前权威区块状态替换导入前排队快照。
+`World::loadChunk`、`unloadChunk` 和成功生效的 `setBlock` 在 opt-in 时分别提交不可变初始快照、代际失效和自有光学 cell 变更。每个 World chunk 的加载代随首次加载和同坐标 reload 推进；旧代 cell 与旧代完整快照都在 worker 安装前被拒绝。两层传播都只在 worker 内进行；主线程不等待，也不读取活区块进行传播。挂钩位于既有方块状态写入之后、原更新回调之前，保持现有更新、tick 和广播顺序。`rawSetBlock` 是导入/测试的原始写入，不产生逐格光照任务；`importWorld` 完成 raw block 写入后调用 `refreshLightSnapshots()`，用当前权威区块状态替换导入前排队快照。
 
 天空存储资格按本批权威的 3×3×3 非空状态更新。已发布但本批没有重算资格的目标区块仍保留其真实 raw 层作为跨边缘写目标；本批涉及的区段以新状态覆盖旧资格，被删除的层不会从旧快照复活。
 

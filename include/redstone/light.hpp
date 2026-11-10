@@ -96,8 +96,10 @@ struct LightSectionSnapshot {
 struct LightChunkInput {
   int chunkX = 0;
   int chunkZ = 0;
-  // Opaque World::Chunk* handed back to ChunkAccess for every reported cell.
-  const void *chunk = nullptr;
+  // Optional world-owned lifecycle token. Leave zero for a standalone service;
+  // World supplies a token that changes on unload/reload so queued cell records
+  // from the old lifetime cannot be applied to the new one.
+  std::uint64_t lifecycleEpoch = 0;
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
   std::vector<std::shared_ptr<const LightSectionSnapshot>> sections;
@@ -164,20 +166,18 @@ struct LightBlockChange {
   std::uint64_t generation = 0; // assigned by LightService
 };
 
-// One reported cell: the opaque chunk pointer plus the packed location. This is
-// the whole record the tick thread produces per changed block; the worker
-// coalesces duplicates into per-section bitmaps before it propagates anything.
-struct LightCellRef {
-  const void *chunk = nullptr; // opaque cell source for LightService::ChunkAccess
-  std::uint32_t packed = 0;    // localSectionIndex << 12 | localIndex
-};
-
-// One section's coalesced dirty set, built by the worker from the queue.
-struct LightSectionDelta {
+// One owned block-light input. World fills this from the authoritative state it
+// just wrote; the worker never reads a live chunk, section or storage container.
+// sequence is assigned by LightService and orders records that take the ring
+// and full-ring fallback paths.
+struct LightCellUpdate {
   std::uint64_t chunkKey = 0;
-  const void *chunk = nullptr;
+  std::uint64_t lifecycleEpoch = 0;
+  std::uint64_t sequence = 0;
   int sectionY = 0;
-  std::array<std::uint64_t, kLightVolume / 64> bits{};
+  std::uint16_t localIndex = 0;
+  BlockLightProperties properties;
+  bool sectionEmpty = false;
 };
 
 struct LightWorkerOptions {
@@ -194,6 +194,9 @@ struct LightWorkerOptions {
   // coalescing a few milliseconds of writes cuts that clone count; zero
   // disables the window and takes a batch as soon as anything is pending.
   int batchWindowMs = 1;
+  // Testing uses a tiny power-of-two ring to exercise the owned overflow path.
+  // Production retains the fixed 1<<18-entry capacity unless explicitly set.
+  std::size_t cellQueueCapacity = std::size_t{1} << 18;
 };
 
 // Main-thread submission and worker-thread owner. No method on the worker
@@ -237,22 +240,10 @@ public:
   // whole batch. The worker never reads `oldProperties`; it is stored only to
   // keep the merged struct consistent.
   void reportBlockChanges(const std::vector<LightBlockChange> &changes);
-  // Identity-only hand-off. A delta is one section's 4096-bit "this cell's
-  // optical state changed" set plus the opaque cell source; no block state is
-  // read, copied or hashed on the caller's thread. The worker resolves every
-  // set cell through ChunkAccess against the live world.
-  void reportBlockCell(const void *chunk, std::uint32_t packed);
-  // The worker reads reported cells through this accessor instead of a
-  // serialised copy. `chunk` is the opaque pointer carried by the delta and
-  // `packed` is `localSectionIndex << 12 | localIndex`.
-  struct ChunkAccess {
-    void *context = nullptr;
-    BlockState::Id (*read)(void *context, const void *chunk,
-                           std::uint32_t packed) = nullptr;
-    bool (*sectionEmpty)(void *context, const void *chunk,
-                         std::uint32_t packed) = nullptr;
-  };
-  void setChunkAccess(ChunkAccess access);
+  // Owned hot-path hand-off. The record contains every optical value the worker
+  // needs. A full ring merges the latest owned record into pending work instead
+  // of dropping it.
+  void reportBlockCell(LightCellUpdate update);
   bool unloadChunk(int chunkX, int chunkZ);
 
   // Main-thread publication handoff. A worker batch becomes visible in full;
@@ -270,6 +261,9 @@ public:
   void resetMeasurementStats();
   std::string workerError() const;
   bool waitIdleForTesting();
+  // Waits until the worker has published its pre-sleep state. The following
+  // report exercises the exact notify-before-wait window without a timing poll.
+  bool waitWorkerSleepingForTesting();
   void pauseForTesting();
   void resumeForTesting();
   // Lets a paused service choose exactly one pending chunk for the worker's

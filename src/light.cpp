@@ -468,6 +468,28 @@ int LightChunkSnapshot::lightValue(LightLayer layer, int x, int y, int z) const 
 class LightService::Impl {
   friend class LightService;
 
+  struct OwnedCell {
+    std::uint64_t sequence = 0;
+    BlockLightProperties properties;
+    bool sectionEmpty = false;
+  };
+  struct SectionStatusValue {
+    std::uint64_t sequence = 0;
+    bool empty = false;
+  };
+  struct CoalescedCell {
+    std::uint16_t localIndex = 0;
+    OwnedCell value;
+  };
+  struct CoalescedSection {
+    std::uint64_t chunkKey = 0;
+    std::uint64_t lifecycleEpoch = 0;
+    int sectionY = 0;
+    std::uint64_t sectionSequence = 0;
+    bool sectionEmpty = false;
+    std::vector<CoalescedCell> cells;
+  };
+
 public:
   Impl(int minSection, int sectionCount, LightWorkerOptions workerOptions)
       : minBlockSectionY(minSection), blockSectionCount(sectionCount),
@@ -476,6 +498,12 @@ public:
       throw std::invalid_argument("light service needs block sections");
     if (options.batchSize == 0 || options.maxQueuedCommands == 0)
       throw std::invalid_argument("light worker limits must be positive");
+    if (options.cellQueueCapacity < 2 ||
+        !std::has_single_bit(options.cellQueueCapacity))
+      throw std::invalid_argument("light cell queue capacity must be a power of two");
+    ring.resize(options.cellQueueCapacity);
+    ringMask = options.cellQueueCapacity - 1;
+    ringBatchLimit = std::min<std::size_t>(1024, ring.size());
     worker = std::thread([this] { run(); });
 #ifdef _WIN32
     const auto affinity =
@@ -494,7 +522,6 @@ public:
       return 0;
     }
     const auto key = chunkKey(input.chunkX, input.chunkZ);
-    const void *chunkPointer = input.chunk;
     std::lock_guard lock(mutex);
     if (!accepting) {
       ++statsRejected;
@@ -503,15 +530,20 @@ public:
     auto &active = versions[key];
     const bool newLifetime = active.inactive || active.requestRevision == 0;
     if (newLifetime) {
-      ++active.epoch;
+      if (input.lifecycleEpoch != 0)
+        active.epoch = input.lifecycleEpoch;
+      else
+        ++active.epoch;
       active.requestRevision = 0;
       latest.erase(key);
+    } else if (input.lifecycleEpoch != 0 &&
+               input.lifecycleEpoch != active.epoch) {
+      ++statsRejected;
+      return 0;
     }
-    const auto generation = ++nextGeneration;
+    const auto generation = nextRequestGeneration();
     ++active.requestRevision;
     active.inactive = false;
-    if (chunkPointer)
-      chunkIndex[chunkPointer] = key;
     const bool preserveUnload = pending.contains(key) && pending.at(key).unload;
     PendingChunk state;
     state.key = key;
@@ -524,7 +556,7 @@ public:
     state.unload = preserveUnload;
     pending[key] = std::move(state);
     notePendingLocked();
-    wake.notify_one();
+    signalWorkerLocked(true);
     return generation;
   }
 
@@ -540,16 +572,16 @@ public:
       ++statsRejected;
       return false;
     }
-    const auto generation = ++nextGeneration;
+    const auto generation = nextRequestGeneration();
     ++active->second.requestRevision;
     PendingChunk &state = pending[key];
     state.key = key;
     state.generation = generation;
     state.lifecycleEpoch = active->second.epoch;
     state.revision = active->second.requestRevision;
-    state.sectionStatus[sectionY] = empty;
+    state.sectionStatus[sectionY] = {generation, empty};
     notePendingLocked();
-    wake.notify_one();
+    signalWorkerLocked(true);
     return true;
   }
 
@@ -605,9 +637,10 @@ public:
       }
       if (source.sectionY != currentSection) {
         currentSection = source.sectionY;
-        state->sectionStatus[currentSection] = source.isEmpty;
+        const auto sequence = nextRequestGeneration();
+        state->sectionStatus[currentSection] = {sequence, source.isEmpty};
       }
-      const auto generation = ++nextGeneration;
+      const auto generation = nextRequestGeneration();
       ++active->requestRevision;
       state->generation = generation;
       state->revision = active->requestRevision;
@@ -628,75 +661,80 @@ public:
       ++statsSubmitted;
       noteHighWaterLocked();
     }
-    // Only the idle -> queued transition needs a wake-up. Reporting every block
-    // change re-entered the kernel for a notification that no worker was
-    // waiting for once a batch was already running.
-    // Skip the read-modify-write unless the worker actually advertised sleep:
-    // once a batch is running the flag stays false and this is one load.
-    if (wakePending.load(std::memory_order_relaxed) &&
-        wakePending.exchange(false, std::memory_order_acq_rel))
-      wake.notify_one();
+    if (applied != 0)
+      signalWorkerLocked();
   }
 
-  // Set once by World after construction; the worker calls it for every cell a
-  // delta reports, so it must stay valid for the worker's whole lifetime.
-  ChunkAccess chunkAccess;
-  void installChunkAccess(ChunkAccess access) { chunkAccess = access; }
+  std::uint64_t nextRequestGeneration() {
+    return nextGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+  }
 
-  // Identity-only bulk report. Deltas arrive grouped by chunk (World walks its
-  // per-chunk dirty map), so the version and pending lookups happen once per
-  // chunk and the whole tick costs one mutex acquisition. No block state, no
-  // per-cell record and no allocation is done per cell; the worker resolves the
-  // bitmap against the live world when it processes the chunk.
-  void enqueueDeltasLocked(const LightSectionDelta *deltas,
-                           std::size_t count) {
-    if (count == 0)
-      return;
-    // All packed coordinates are valid, including all ones for (-1, -1).
-    std::optional<std::uint64_t> currentKey;
-    ChunkVersion *active = nullptr;
-    PendingChunk *state = nullptr;
-    std::uint64_t applied = 0;
+  // Atomic wait is used for the cell ring so the producer does not take the
+  // service mutex per block write. The sequence increment is published after
+  // the ring head; a worker that captured an older sequence cannot miss it.
+  void notifyWorkerSleeping() {
+    wakeSequence.fetch_add(1, std::memory_order_release);
+    if (workerSleeping.exchange(false, std::memory_order_acq_rel))
+      wakeSequence.notify_one();
+  }
+
+  void signalWorkerLocked(bool batchWindow = false) {
+    notifyWorkerSleeping();
+    if (batchWindow)
+      wake.notify_all();
+  }
+
+  bool applyOwnedCellLocked(const LightCellUpdate &update) {
+    if (!validSection(update.sectionY) || update.localIndex >= kLightVolume) {
+      ++statsRejected;
+      return false;
+    }
+    auto active = versions.find(update.chunkKey);
+    if (!accepting || active == versions.end() || active->second.inactive ||
+        (update.lifecycleEpoch != 0 &&
+         update.lifecycleEpoch != active->second.epoch)) {
+      ++statsRejected;
+      return false;
+    }
+    auto stateIt = pending.find(update.chunkKey);
+    if (stateIt == pending.end())
+      stateIt = pending.emplace(update.chunkKey, PendingChunk{}).first;
+    PendingChunk &state = stateIt->second;
+    state.key = update.chunkKey;
+    state.generation = update.sequence;
+    state.lifecycleEpoch = active->second.epoch;
+    state.revision = ++active->second.requestRevision;
+    auto &status = state.sectionStatus[update.sectionY];
+    if (update.sequence > status.sequence)
+      status = {update.sequence, update.sectionEmpty};
+    const auto slot = changeSlot(update.sectionY, update.localIndex);
+    auto &owned = state.ownedCells[slot];
+    if (update.sequence > owned.sequence)
+      owned = {update.sequence, update.properties, update.sectionEmpty};
+    notePendingLocked();
+    return true;
+  }
+
+  void enqueueCoalescedLocked(const CoalescedSection *sections,
+                              std::size_t count) {
     for (std::size_t i = 0; i < count; ++i) {
-      const LightSectionDelta &delta = deltas[i];
-      if (!validSection(delta.sectionY)) {
+      const CoalescedSection &section = sections[i];
+      if (!validSection(section.sectionY)) {
         ++statsRejected;
         continue;
       }
-      if (delta.chunkKey != currentKey) {
-        currentKey = delta.chunkKey;
-        active = nullptr;
-        state = nullptr;
-        auto found = versions.find(delta.chunkKey);
-        if (accepting && found != versions.end() && !found->second.inactive) {
-          active = &found->second;
-          auto stateIt = pending.find(delta.chunkKey);
-          if (stateIt == pending.end())
-            stateIt = pending.emplace(delta.chunkKey, PendingChunk{}).first;
-          state = &stateIt->second;
-          state->key = delta.chunkKey;
-          state->lifecycleEpoch = active->epoch;
-        }
+      for (const CoalescedCell &cell : section.cells) {
+        LightCellUpdate update;
+        update.chunkKey = section.chunkKey;
+        update.lifecycleEpoch = section.lifecycleEpoch;
+        update.sequence = cell.value.sequence;
+        update.sectionY = section.sectionY;
+        update.localIndex = cell.localIndex;
+        update.properties = cell.value.properties;
+        update.sectionEmpty = cell.value.sectionEmpty;
+        applyOwnedCellLocked(update);
       }
-      if (!state) {
-        ++statsRejected;
-        continue;
-      }
-      state->chunk = delta.chunk;
-      state->generation = ++nextGeneration;
-      state->revision = ++active->requestRevision;
-      state->deltas.push_back(delta);
-      ++applied;
     }
-    if (applied != 0) {
-      ++statsSubmitted;
-      noteHighWaterLocked();
-    }
-    // Skip the read-modify-write unless the worker actually advertised sleep:
-    // once a batch is running the flag stays false and this is one load.
-    if (wakePending.load(std::memory_order_relaxed) &&
-        wakePending.exchange(false, std::memory_order_acq_rel))
-      wake.notify_one();
   }
 
   // Shared merge step of the single and the bulk report path. Must be called
@@ -708,7 +746,7 @@ public:
       ++statsRejected;
       return false;
     }
-    change.generation = ++nextGeneration;
+    change.generation = nextRequestGeneration();
     ++active->second.requestRevision;
     auto stateIt = pending.find(key);
     if (stateIt == pending.end())
@@ -718,7 +756,7 @@ public:
     state.generation = change.generation;
     state.lifecycleEpoch = active->second.epoch;
     state.revision = active->second.requestRevision;
-    state.sectionStatus[change.sectionY] = change.isEmpty;
+    state.sectionStatus[change.sectionY] = {change.generation, change.isEmpty};
     const auto slot = changeSlot(change.sectionY, change.localIndex);
     const auto found = state.changes.find(slot);
     if (found == state.changes.end()) {
@@ -737,8 +775,8 @@ public:
   bool applyBlockChange(LightBlockChange change) {
     std::lock_guard lock(mutex);
     const bool applied = applyBlockChangeLocked(change);
-    if (applied && wakePending.exchange(false, std::memory_order_acq_rel))
-      wake.notify_one();
+    if (applied)
+      signalWorkerLocked();
     return applied;
   }
 
@@ -750,7 +788,7 @@ public:
       ++statsRejected;
       return false;
     }
-    const auto generation = ++nextGeneration;
+    const auto generation = nextRequestGeneration();
     ++active->second.epoch;
     active->second.requestRevision = 0;
     latest.erase(key);
@@ -762,7 +800,7 @@ public:
     state.unload = true;
     pending[key] = std::move(state);
     notePendingLocked();
-    wake.notify_one();
+    signalWorkerLocked(true);
     return true;
   }
 
@@ -869,10 +907,18 @@ public:
     return error.empty();
   }
 
+  bool waitWorkerSleepingForTesting() {
+    std::unique_lock lock(mutex);
+    sleepState.wait(lock, [&] {
+      return workerSleeping.load(std::memory_order_acquire) || closing;
+    });
+    return workerSleeping.load(std::memory_order_acquire) && !closing;
+  }
+
   void resumeForTesting() {
     std::lock_guard lock(mutex);
     paused = false;
-    wake.notify_all();
+    signalWorkerLocked(true);
   }
 
   void pauseForTesting() {
@@ -894,7 +940,7 @@ public:
     forcedChunk = key;
     pauseAfterBatch = true;
     paused = false;
-    wake.notify_all();
+    signalWorkerLocked(true);
     batchDone.wait(lock, [&] {
       return statsBatches.load(std::memory_order_relaxed) > before || closing;
     });
@@ -910,7 +956,7 @@ public:
         return;
       accepting = false;
       closing = true;
-      wake.notify_all();
+      signalWorkerLocked(true);
       selected = std::move(worker);
     }
     if (selected.joinable())
@@ -926,11 +972,10 @@ private:
     std::unique_ptr<LightChunkInput> load;
     bool unload = false;
     std::unordered_map<std::uint32_t, LightBlockChange> changes;
-    // Identity-only hand-off: one entry per dirty section, resolved by the
-    // worker against the live world through ChunkAccess.
-    const void *chunk = nullptr;
-    std::vector<LightSectionDelta> deltas;
-    std::unordered_map<int, bool> sectionStatus;
+    // Owned hot-path hand-off: one latest value per dirty cell. A full ring
+    // merges here under the same sequence ordering as the normal worker drain.
+    std::unordered_map<std::uint32_t, OwnedCell> ownedCells;
+    std::unordered_map<int, SectionStatusValue> sectionStatus;
   };
 
   struct WorkingChunk {
@@ -2319,19 +2364,26 @@ private:
     return (static_cast<std::uint32_t>(sectionY) << 12) | localIndex;
   }
 
-  void reportBlockCell(const void *chunk, std::uint32_t packed) {
-    const auto head = ringHead.load(std::memory_order_relaxed);
-    const auto tail = ringTail.load(std::memory_order_acquire);
-    if (head - tail >= kRingCapacity) {
-      // Dropping is the documented degradation: the tick never blocks on the
-      // light queue. The next write to the same cell repairs the light.
+  void reportBlockCell(LightCellUpdate update) {
+    if (!validSection(update.sectionY) || update.localIndex >= kLightVolume) {
       ++statsRejected;
       return;
     }
-    ring[head & (kRingCapacity - 1)] = LightCellRef{chunk, packed};
+    update.sequence = nextRequestGeneration();
+    const auto head = ringHead.load(std::memory_order_relaxed);
+    const auto tail = ringTail.load(std::memory_order_acquire);
+    if (static_cast<std::size_t>(head - tail) >= ring.size()) {
+      // The lock-free path is saturated. Preserve the owned record in the same
+      // pending map the worker consumes; sequence ordering prevents an older
+      // ring entry drained later from overwriting this newer value.
+      std::lock_guard lock(mutex);
+      applyOwnedCellLocked(update);
+      signalWorkerLocked(true);
+      return;
+    }
+    ring[static_cast<std::size_t>(head) & ringMask] = update;
     ringHead.store(head + 1, std::memory_order_release);
-    if (wakePending.exchange(false, std::memory_order_acq_rel))
-      wake.notify_one();
+    notifyWorkerSleeping();
   }
 
   bool ringEmpty() const {
@@ -2339,67 +2391,77 @@ private:
            ringTail.load(std::memory_order_relaxed);
   }
 
-  // Copy at most kRingBatch records into the consumer's scratch buffer.
-  void drainRing(std::vector<LightCellRef> &out) {
+  // Copy at most one bounded ring batch into the consumer's scratch buffer.
+  void drainRing(std::vector<LightCellUpdate> &out) {
     const auto head = ringHead.load(std::memory_order_acquire);
     const auto tail = ringTail.load(std::memory_order_relaxed);
     std::size_t count = static_cast<std::size_t>(head - tail);
-    if (count > kRingBatch)
-      count = kRingBatch;
+    count = std::min(count, ringBatchLimit);
     out.clear();
     if (count == 0)
       return;
     out.reserve(count);
     for (std::size_t i = 0; i < count; ++i)
       out.push_back(
-          ring[(tail + static_cast<std::uint32_t>(i)) & (kRingCapacity - 1)]);
+          ring[(static_cast<std::size_t>(tail) + i) & ringMask]);
     ringTail.store(tail + static_cast<std::uint32_t>(count),
                    std::memory_order_release);
   }
 
-  // Coalesce drained cells into one bitmap per (chunk, section). Caller holds
-  // mutex: chunkIndex is owned by the tick thread.
-  void groupCellsLocked(const std::vector<LightCellRef> &cells,
-                        std::vector<LightSectionDelta> &deltas) {
-    deltas.clear();
+  // Collapse a drained ring batch to the newest owned value for each cell.
+  void groupCellsLocked(const std::vector<LightCellUpdate> &cells,
+                        std::vector<CoalescedSection> &sections) {
+    sections.clear();
     if (cells.empty())
       return;
     sortedCells = cells;
     std::sort(sortedCells.begin(), sortedCells.end(),
-              [](const LightCellRef &a, const LightCellRef &b) {
-                if (a.chunk != b.chunk)
-                  return a.chunk < b.chunk;
-                return (a.packed >> 12) < (b.packed >> 12);
+              [](const LightCellUpdate &a, const LightCellUpdate &b) {
+                if (a.chunkKey != b.chunkKey)
+                  return a.chunkKey < b.chunkKey;
+                if (a.lifecycleEpoch != b.lifecycleEpoch)
+                  return a.lifecycleEpoch < b.lifecycleEpoch;
+                if (a.sectionY != b.sectionY)
+                  return a.sectionY < b.sectionY;
+                if (a.localIndex != b.localIndex)
+                  return a.localIndex < b.localIndex;
+                return a.sequence < b.sequence;
               });
-    for (const LightCellRef &cell : sortedCells) {
-      const int sectionY =
-          minBlockSectionY + static_cast<int>(cell.packed >> 12);
-      if (deltas.empty() || deltas.back().chunk != cell.chunk ||
-          deltas.back().sectionY != sectionY) {
-        const auto found = chunkIndex.find(cell.chunk);
-        if (found == chunkIndex.end())
-          continue;
-        LightSectionDelta delta;
-        delta.chunkKey = found->second;
-        delta.chunk = cell.chunk;
-        delta.sectionY = sectionY;
-        deltas.push_back(delta);
+    for (const LightCellUpdate &cell : sortedCells) {
+      if (sections.empty() || sections.back().chunkKey != cell.chunkKey ||
+          sections.back().lifecycleEpoch != cell.lifecycleEpoch ||
+          sections.back().sectionY != cell.sectionY) {
+        sections.push_back({});
+        sections.back().chunkKey = cell.chunkKey;
+        sections.back().lifecycleEpoch = cell.lifecycleEpoch;
+        sections.back().sectionY = cell.sectionY;
       }
-      const auto index = static_cast<std::size_t>(cell.packed & 0xFFFu);
-      deltas.back().bits[index >> 6] |= std::uint64_t{1} << (index & 63);
+      CoalescedSection &section = sections.back();
+      if (cell.sequence > section.sectionSequence) {
+        section.sectionSequence = cell.sequence;
+        section.sectionEmpty = cell.sectionEmpty;
+      }
+      OwnedCell value{cell.sequence, cell.properties, cell.sectionEmpty};
+      if (!section.cells.empty() &&
+          section.cells.back().localIndex == cell.localIndex) {
+        section.cells.back().value = value;
+      } else {
+        section.cells.push_back({cell.localIndex, value});
+      }
     }
   }
 
   void drainCellChangesLocked() {
     // Bound the drain to one ring's worth of batches so continuous writes
     // cannot keep the worker here indefinitely.
-    for (std::uint32_t round = 0; round < kRingCapacity / kRingBatch &&
-                                  !ringEmpty(); ++round) {
+    const std::size_t maxRounds =
+        (ring.size() + ringBatchLimit - 1) / ringBatchLimit;
+    for (std::size_t round = 0; round < maxRounds && !ringEmpty(); ++round) {
       drainRing(ringBatch);
       if (ringBatch.empty())
         break;
-      groupCellsLocked(ringBatch, deltaBatch);
-      enqueueDeltasLocked(deltaBatch.data(), deltaBatch.size());
+      groupCellsLocked(ringBatch, coalescedSections);
+      enqueueCoalescedLocked(coalescedSections.data(), coalescedSections.size());
     }
   }
 
@@ -2422,17 +2484,33 @@ private:
     }
   }
 
+  void awaitWork(std::unique_lock<std::mutex> &lock) {
+    for (;;) {
+      if (closing || (!paused && (!pending.empty() || !ringEmpty())))
+        return;
+      workerSleeping.store(true, std::memory_order_release);
+      sleepState.notify_all();
+      // Capture after advertising sleep, then re-check. A producer on either
+      // side publishes the ring before advancing nextGeneration. If it runs
+      // before the capture, the re-check sees its work; if it runs after, the
+      // atomic wait is released by the newer sequence.
+      const auto observed = wakeSequence.load(std::memory_order_acquire);
+      if (closing || (!paused && (!pending.empty() || !ringEmpty()))) {
+        workerSleeping.store(false, std::memory_order_release);
+        return;
+      }
+      lock.unlock();
+      wakeSequence.wait(observed, std::memory_order_acquire);
+      lock.lock();
+      workerSleeping.store(false, std::memory_order_release);
+    }
+  }
+
   void run() {
     const double workerCpuStart = currentThreadCpuMs();
     std::unique_lock lock(mutex);
     for (;;) {
-      // Advertise that this thread is about to sleep while only it can clear
-      // the flag. Producers then notify exactly once per sleep instead of once
-      // per submitted block change, and a wake-up cannot be lost in between.
-      wakePending.store(true, std::memory_order_release);
-      wake.wait(lock, [&] {
-        return closing || (!paused && (!pending.empty() || !ringEmpty()));
-      });
+      awaitWork(lock);
       if (closing && pending.empty() && ringEmpty())
         break;
       if (paused && !closing)
@@ -2502,7 +2580,7 @@ private:
       }
       idle.notify_all();
       batchDone.notify_all();
-      if (closing && pending.empty())
+      if (closing && pending.empty() && ringEmpty())
         break;
     }
   }
@@ -2678,85 +2756,47 @@ private:
              change.sectionY * 16 + ((change.localIndex >> 8) & 15),
              chunk->chunkZ * 16 + ((change.localIndex >> 4) & 15)});
       }
-      for (const LightSectionDelta &delta : command.deltas) {
-        LightSectionSnapshot *section = chunk->sectionForEdit(delta.sectionY);
+      for (const auto &[slot, value] : command.ownedCells) {
+        const int sectionY =
+            static_cast<int>(std::bit_cast<std::int32_t>(slot) >> 12);
+        const std::uint16_t localIndex =
+            static_cast<std::uint16_t>(slot & 0xFFFu);
+        LightSectionSnapshot *section = chunk->sectionForEdit(sectionY);
         if (!section)
-          throw std::runtime_error("light delta references a missing section");
-        const auto localSection =
-            static_cast<std::uint32_t>(delta.sectionY - minBlockSectionY);
-        // ~0 can never be a registered state id, so it is a safe empty mark.
-        stateCache.fill(~std::uint32_t{0});
-        for (std::size_t word = 0; word < delta.bits.size(); ++word) {
-          std::uint64_t bits = delta.bits[word];
-          while (bits) {
-            const int bit = std::countr_zero(bits);
-            bits &= bits - 1;
-            const auto localIndex = static_cast<std::uint32_t>(word * 64) +
-                                     static_cast<std::uint32_t>(bit);
-            // The tick thread reported only the cell identity; the worker is
-            // the only place that reads the block state. A 32-entry direct
-            // mapped cache turns "state -> properties -> palette slot" into one
-            // array probe: a section holds a handful of distinct states, so the
-            // expensive resolution runs a few dozen times per delta instead of
-            // once per cell.
-            const BlockState::Id state =
-                chunkAccess.read
-                    ? chunkAccess.read(chunkAccess.context, delta.chunk,
-                                       (localSection << 12) | localIndex)
-                    : 0;
-            const auto cacheSlot = (state * 2654435761u) >> 27;
-            std::uint16_t paletteIndex;
-            if (stateCache[cacheSlot] != state) {
-              const BlockLightProperties properties =
-                  lightPropertiesOf(BlockState::fromId(state));
-              const auto paletteIt = std::find(section->palette.begin(),
-                                               section->palette.end(),
-                                               properties);
-              if (paletteIt == section->palette.end()) {
-                if (section->palette.size() >= 65536)
-                  throw std::runtime_error(
-                      "light section palette exceeds uint16");
-                paletteIndex =
-                    static_cast<std::uint16_t>(section->palette.size());
-                section->palette.push_back(properties);
-              } else {
-                paletteIndex = static_cast<std::uint16_t>(
-                    paletteIt - section->palette.begin());
-              }
-              stateCache[cacheSlot] = state;
-              paletteCache[cacheSlot] = paletteIndex;
-            } else {
-              paletteIndex = paletteCache[cacheSlot];
-            }
-            if (section->cells.empty()) {
-              section->cells.assign(kLightVolume, 0);
-              if (!section->palette.front().supported)
-                section->unsupportedCells = kLightVolume;
-            }
-            const auto oldIndex = section->cells[localIndex];
-            if (!section->palette[oldIndex].supported)
-              --section->unsupportedCells;
-            section->cells[localIndex] = paletteIndex;
-            if (!section->palette[paletteIndex].supported)
-              ++section->unsupportedCells;
-            ++statsChanges;
-            changedPositions.push_back(
-                {chunk->chunkX * 16 + static_cast<int>(localIndex & 15),
-                 delta.sectionY * 16 + static_cast<int>((localIndex >> 8) & 15),
-                 chunk->chunkZ * 16 +
-                     static_cast<int>((localIndex >> 4) & 15)});
-          }
+          throw std::runtime_error("light change references a missing section");
+        const auto paletteIt = std::find(section->palette.begin(),
+                                         section->palette.end(),
+                                         value.properties);
+        std::uint16_t paletteIndex = 0;
+        if (paletteIt == section->palette.end()) {
+          if (section->palette.size() >= 65536)
+            throw std::runtime_error("light section palette exceeds uint16");
+          paletteIndex = static_cast<std::uint16_t>(section->palette.size());
+          section->palette.push_back(value.properties);
+        } else {
+          paletteIndex = static_cast<std::uint16_t>(
+              paletteIt - section->palette.begin());
         }
-        section->empty =
-            chunkAccess.sectionEmpty
-                ? chunkAccess.sectionEmpty(chunkAccess.context, delta.chunk,
-                                           static_cast<std::uint32_t>(
-                                               localSection << 12))
-                : false;
+        if (section->cells.empty()) {
+          section->cells.assign(kLightVolume, 0);
+          if (!section->palette.front().supported)
+            section->unsupportedCells = kLightVolume;
+        }
+        const auto oldIndex = section->cells[localIndex];
+        if (!section->palette[oldIndex].supported)
+          --section->unsupportedCells;
+        section->cells[localIndex] = paletteIndex;
+        if (!section->palette[paletteIndex].supported)
+          ++section->unsupportedCells;
+        ++statsChanges;
+        changedPositions.push_back(
+            {chunk->chunkX * 16 + static_cast<int>(localIndex & 15),
+             sectionY * 16 + static_cast<int>((localIndex >> 8) & 15),
+             chunk->chunkZ * 16 + static_cast<int>((localIndex >> 4) & 15)});
       }
-      for (const auto &[sectionY, empty] : command.sectionStatus) {
+      for (const auto &[sectionY, status] : command.sectionStatus) {
         if (auto *section = chunk->sectionForEdit(sectionY))
-          section->empty = empty;
+          section->empty = status.empty;
       }
       chunk->dirty = true;
     }
@@ -2955,25 +2995,19 @@ private:
   std::condition_variable wake;
   std::condition_variable idle;
   std::condition_variable batchDone;
+  std::condition_variable sleepState;
   std::unordered_map<std::uint64_t, PendingChunk> pending;
-  // Lock-free single-producer queue of reported cells. The tick thread writes
-  // one record and publishes it with a release store; the light worker is the
-  // only consumer. A full ring drops the record (and counts it) instead of
-  // blocking the tick: at 1.6M writes per 1000 ticks the 4 MB ring holds about
-  // 160 ticks of untouched backlog, so reaching that point is a failure signal,
-  // not a steady state.
-  static constexpr std::uint32_t kRingCapacity = 1u << 18;
-  static constexpr std::size_t kRingBatch = 1024;
-  std::array<LightCellRef, kRingCapacity> ring{};
+  // Single-producer owned-cell ring. A full ring hands the newest owned record
+  // to the pending map; the generation sequence prevents a later ring drain
+  // from replacing it with older input.
+  std::vector<LightCellUpdate> ring;
+  std::size_t ringMask = 0;
+  std::size_t ringBatchLimit = 1024;
   std::atomic<std::uint32_t> ringHead{0};
   std::atomic<std::uint32_t> ringTail{0};
-  std::unordered_map<const void *, std::uint64_t> chunkIndex;
-  std::vector<LightCellRef> ringBatch;
-  std::vector<LightCellRef> sortedCells;
-  std::vector<LightSectionDelta> deltaBatch;
-  // Per-delta scratch for the state -> light-palette-slot cache.
-  std::array<BlockState::Id, 32> stateCache{};
-  std::array<std::uint16_t, 32> paletteCache{};
+  std::vector<LightCellUpdate> ringBatch;
+  std::vector<LightCellUpdate> sortedCells;
+  std::vector<CoalescedSection> coalescedSections;
   struct ChunkVersion {
     std::uint64_t epoch = 0;
     std::uint64_t requestRevision = 0;
@@ -2998,9 +3032,11 @@ private:
   bool closing = false;
   bool busy = false;
   std::size_t busyChunks = 0;
-  std::uint64_t nextGeneration = 0;
-  // Set while the worker is parked in wake.wait; see run() and reportBlockChange.
-  std::atomic<bool> wakePending{true};
+  std::atomic<std::uint64_t> nextGeneration{0};
+  std::atomic<std::uint64_t> wakeSequence{0};
+  // Only the worker sets this before waiting. Producers exchange it before an
+  // atomic notify, so notify-before-wait cannot strand a generation.
+  std::atomic<bool> workerSleeping{false};
   std::uint64_t nextPublicationRevision = 0;
   bool paused = false;
   bool pauseAfterBatch = false;
@@ -3045,12 +3081,8 @@ void LightService::reportBlockChanges(
   impl_->reportBlockChanges(changes);
 }
 
-void LightService::reportBlockCell(const void *chunk, std::uint32_t packed) {
-  impl_->reportBlockCell(chunk, packed);
-}
-
-void LightService::setChunkAccess(ChunkAccess access) {
-  impl_->installChunkAccess(access);
+void LightService::reportBlockCell(LightCellUpdate update) {
+  impl_->reportBlockCell(update);
 }
 
 bool LightService::unloadChunk(int chunkX, int chunkZ) {
@@ -3075,6 +3107,9 @@ void LightService::resetMeasurementStats() {
 }
 std::string LightService::workerError() const { return impl_->workerError(); }
 bool LightService::waitIdleForTesting() { return impl_->waitIdleForTesting(); }
+bool LightService::waitWorkerSleepingForTesting() {
+  return impl_->waitWorkerSleepingForTesting();
+}
 void LightService::pauseForTesting() { impl_->pauseForTesting(); }
 void LightService::resumeForTesting() { impl_->resumeForTesting(); }
 bool LightService::processChunkBatchForTesting(int chunkX, int chunkZ) {

@@ -139,6 +139,23 @@ bool reportBlock(LightService &service, int chunkX, int chunkZ, Pos position,
   return service.reportBlockChange(change);
 }
 
+void reportOwnedCell(LightService &service, int chunkX, int chunkZ,
+                     Pos position, const BlockState &state,
+                     bool sectionEmpty = false,
+                     std::uint64_t lifecycleEpoch = 0) {
+  LightCellUpdate update;
+  update.chunkKey =
+      (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunkX)) << 32) |
+      static_cast<std::uint32_t>(chunkZ);
+  update.lifecycleEpoch = lifecycleEpoch;
+  update.sectionY = position.y >> 4;
+  update.localIndex = static_cast<std::uint16_t>(
+      lightIndex(position.x, position.y, position.z));
+  update.properties = lightPropertiesOf(state);
+  update.sectionEmpty = sectionEmpty;
+  service.reportBlockCell(update);
+}
+
 int blockLightAt(const std::shared_ptr<const LightChunkSnapshot> &snapshot,
                  int x, int y, int z) {
   if (!snapshot)
@@ -663,6 +680,170 @@ void recoverableChangesAndBoundedPublication() {
   require(sectionSnapshot->section(-1)->at(1, 1, 1).emission == 0 &&
               sectionSnapshot->section(-1)->at(2, 1, 1).emission == 15,
           "coalesced fill-clear-fill keeps final cell contents");
+}
+
+std::shared_ptr<const LightChunkSnapshot>
+settledChunk(LightService &service, int chunkX, int chunkZ);
+
+void ownedCellOverflowAndWakeup() {
+  LightWorkerOptions small;
+  small.batchSize = 16;
+  small.maxQueuedCommands = 16;
+  small.startPausedForTesting = true;
+  small.hasSkyLight = false;
+  small.batchWindowMs = 0;
+  small.cellQueueCapacity = 4;
+  LightService service(-1, 1, small);
+  require(service.submitChunk(emptyChunkFixture(0, 0, -1, 1)) != 0,
+          "small owned-cell ring fixture loads");
+  for (int x = 0; x < 6; ++x)
+    reportOwnedCell(service, 0, 0, {x, -15, 1}, Blocks::STONE.defaultState());
+  // This newest record targets a cell already in the ring. It must survive the
+  // full-ring fallback and beat the older values when the ring is drained.
+  reportOwnedCell(service, 0, 0, {0, -15, 1},
+                  Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
+  require(service.stats().rejected == 0,
+          "a full ring preserves every valid owned cell record");
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(), "owned overflow records drain");
+  service.drainPublished();
+  auto snapshot = service.latestChunk(0, 0);
+  require(snapshot && snapshot->section(-1)->at(0, 1, 1).emission == 15 &&
+              snapshot->section(-1)->at(5, 1, 1).dampening == 15,
+          "oldest ring values cannot overwrite the full-ring fallback");
+
+  LightWorkerOptions wakeOptions;
+  wakeOptions.batchWindowMs = 0;
+  LightService waking(0, 1, wakeOptions);
+  require(waking.submitChunk(emptyChunkFixture(1, 1, 0, 1)) != 0,
+          "wake fixture loads");
+  (void)settledChunk(waking, 1, 1);
+  require(waking.waitWorkerSleepingForTesting(),
+          "worker advertises its pre-wait state");
+  reportOwnedCell(waking, 1, 1, {1, 1, 1},
+                  Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
+  require(waking.waitIdleForTesting(),
+          "one record after the sleep transition wakes the worker");
+  waking.drainPublished();
+  auto woken = waking.latestChunk(1, 1);
+  require(woken && woken->section(0)->at(1, 1, 1).emission == 15,
+          "the wake race path publishes the single queued record");
+
+  LightWorkerOptions closeOptions;
+  closeOptions.startPausedForTesting = true;
+  closeOptions.batchWindowMs = 0;
+  closeOptions.cellQueueCapacity = 2;
+  LightService closing(-1, 1, closeOptions);
+  require(closing.submitChunk(emptyChunkFixture(3, 0, -1, 1)) != 0,
+          "close fixture loads");
+  for (int x = 0; x < 3; ++x)
+    reportOwnedCell(closing, 3, 0, {x, -15, 1}, Blocks::STONE.defaultState());
+  closing.close();
+  closing.drainPublished();
+  auto closed = closing.latestChunk(3, 0);
+  require(closed && closed->section(-1)->at(2, 1, 1).dampening == 15,
+          "close drains both the ring and its full-ring fallback");
+}
+
+void ownedCellLifecycleRejectsReloadStaleWork() {
+  LightWorkerOptions options;
+  options.batchWindowMs = 0;
+  options.startPausedForTesting = true;
+  options.cellQueueCapacity = 8;
+  LightService service(-1, 1, options);
+  auto first = emptyChunkFixture(2, 0, -1, 1);
+  first.lifecycleEpoch = 7;
+  require(service.submitChunk(std::move(first)) != 0,
+          "first owned lifecycle loads");
+  service.resumeForTesting();
+  (void)settledChunk(service, 2, 0);
+  service.pauseForTesting();
+  reportOwnedCell(service, 2, 0, {1, -15, 1},
+                  Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"),
+                  false, 7);
+  require(service.unloadChunk(2, 0), "owned lifecycle unloads");
+  auto second = emptyChunkFixture(2, 0, -1, 1);
+  second.lifecycleEpoch = 8;
+  require(service.submitChunk(std::move(second)) != 0,
+          "same coordinates load a new owned lifecycle");
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(), "reload and stale records settle");
+  service.drainPublished();
+  auto reloaded = service.latestChunk(2, 0);
+  require(reloaded && reloaded->lifecycleEpoch == 8 &&
+              reloaded->section(-1)->at(1, 1, 1).emission == 0,
+          "an old-lifetime cell cannot enter the reloaded chunk: epoch=" +
+              std::to_string(reloaded ? reloaded->lifecycleEpoch : 0) +
+              " emission=" +
+              std::to_string(reloaded
+                                 ? reloaded->section(-1)->at(1, 1, 1).emission
+                                 : 255));
+  require(service.stats().rejected >= 1,
+          "stale owned lifecycle input is rejected explicitly");
+}
+
+void wideWorldInputsRemainOwned() {
+  World world;
+  world.loadChunk(0, 0);
+  const auto noteStates = findBlockByName("minecraft:note_block")->states();
+  require(noteStates.size() >= 300, "note block supplies a wide palette fixture");
+  for (int n = 0; n < 300; ++n) {
+    const int x = n & 15, z = (n >> 4) & 15, y = 64 + n / 256;
+    world.rawSetBlock({x, y, z}, noteStates[static_cast<std::size_t>(n)]);
+  }
+  const int blockSection = (64 - world.minY()) / 16;
+  require(world.snapshotChunk(0, 0).sections[blockSection].bits == 16,
+          "wide fixture reaches 16-bit block indices");
+  const int lightSection = 64 >> 4;
+  LightWorkerOptions options;
+  options.batchWindowMs = 0;
+  world.enableLighting(options);
+  auto *service = world.lightService();
+  require(service->waitIdleForTesting(), "wide authoritative input completes");
+  service->drainPublished();
+  const auto before = service->latestChunk(0, 0);
+  require(before && before->section(lightSection)->at(0, 0, 0).emission == 0,
+          "wide source input is copied into an owned chunk snapshot");
+
+  service->pauseForTesting();
+  require(world.setBlock({0, 64, 0},
+                         Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")),
+          "wide section accepts an owned emission update");
+  require(world.setBlock({0, 64, 0}, Blocks::REDSTONE_LAMP.defaultState()),
+          "wide section accepts an owned clear update");
+  require(world.setBlock({0, 64, 0},
+                         Blocks::REDSTONE_LAMP.defaultState().with("lit", "true")),
+          "wide section accepts the latest owned update");
+  require(service->processChunkBatchForTesting(0, 0),
+          "wide section processes one owned batch");
+  service->drainPublished();
+  const auto after = service->latestChunk(0, 0);
+  require(after && after->section(lightSection)->at(0, 0, 0).emission == 15,
+          "same-cell updates keep the last owned optical value");
+  require(before->section(lightSection)->at(0, 0, 0).emission == 0,
+          "the pre-update wide snapshot remains immutable");
+
+  service->pauseForTesting();
+  require(world.setBlock({0, 64, 0}, Blocks::STONE.defaultState()),
+          "pre-reload owned write is queued");
+  world.unloadChunk(0, 0);
+  world.loadChunk(0, 0);
+  service->resumeForTesting();
+  require(service->waitIdleForTesting(), "same-address reload settles owned input");
+  service->drainPublished();
+  const auto reloaded = service->latestChunk(0, 0);
+  require(reloaded && reloaded->lifecycleEpoch > after->lifecycleEpoch &&
+              reloaded->section(lightSection)->at(0, 0, 0).emission == 0,
+          "pre-unload cell records cannot resurrect light after reload: " +
+              std::to_string(reloaded ? reloaded->lifecycleEpoch : 0) + "/" +
+              std::to_string(after->lifecycleEpoch) + " emission=" +
+              std::to_string(reloaded
+                                 ? reloaded->section(lightSection)->at(0, 0, 0).emission
+                                 : 255) +
+              " generation=" +
+              std::to_string(reloaded ? reloaded->generation : 0) + " rejected=" +
+              std::to_string(service->stats().rejected));
+  world.disableLighting();
 }
 
 std::shared_ptr<const LightChunkSnapshot>
@@ -1420,6 +1601,9 @@ int main(int argc, char **argv) {
     coalescedProtocolDeltaIsCumulative();
     workerQueueAndClose();
     recoverableChangesAndBoundedPublication();
+    ownedCellOverflowAndWakeup();
+    ownedCellLifecycleRejectsReloadStaleWork();
+    wideWorldInputsRemainOwned();
     blockLightPropagation();
     skyLightPropagation();
     blockLightStaleAndAuthoritativeRefresh();

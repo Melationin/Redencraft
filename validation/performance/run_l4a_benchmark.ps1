@@ -89,8 +89,10 @@ function Parse-Run($Run) {
   $lightTick = [regex]::Match($text, "LIGHT_TICK .*")
   $lightDrain = [regex]::Match($text, "LIGHT_DRAIN .*")
   $lightInitial = [regex]::Match($text, "LIGHT_INITIAL .*")
-  $fingerprints = [regex]::Matches($text, "FINGERPRINT .*") | ForEach-Object { $_.Value }
-  $lightFingerprints = [regex]::Matches($text, "LIGHT_FINGERPRINT .*") | ForEach-Object { $_.Value }
+  # Diagnostic light fingerprints deliberately share the FINGERPRINT suffix.
+  # Only the four simulation checkpoints participate in simulation equality.
+  $fingerprints = [regex]::Matches($text, "(?m)^FINGERPRINT tick=\d+ blocks=.*") | ForEach-Object { $_.Value }
+  $lightFingerprints = [regex]::Matches($text, "(?m)^LIGHT_FINGERPRINT .*") | ForEach-Object { $_.Value }
   return [ordered]@{
     name = $Run.Name
     mean_ms = [double]::Parse($total.Groups[3].Value, [Globalization.CultureInfo]::InvariantCulture)
