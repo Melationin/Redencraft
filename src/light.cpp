@@ -2662,6 +2662,8 @@ private:
           throw std::runtime_error("light delta references a missing section");
         const auto localSection =
             static_cast<std::uint32_t>(delta.sectionY - minBlockSectionY);
+        // ~0 can never be a registered state id, so it is a safe empty mark.
+        stateCache.fill(~std::uint32_t{0});
         for (std::size_t word = 0; word < delta.bits.size(); ++word) {
           std::uint64_t bits = delta.bits[word];
           while (bits) {
@@ -2670,24 +2672,39 @@ private:
             const auto localIndex = static_cast<std::uint32_t>(word * 64) +
                                      static_cast<std::uint32_t>(bit);
             // The tick thread reported only the cell identity; the worker is
-            // the only place that reads the block's light properties.
-            const BlockLightProperties properties =
+            // the only place that reads the block state. A 32-entry direct
+            // mapped cache turns "state -> properties -> palette slot" into one
+            // array probe: a section holds a handful of distinct states, so the
+            // expensive resolution runs a few dozen times per delta instead of
+            // once per cell.
+            const BlockState::Id state =
                 chunkAccess.read
                     ? chunkAccess.read(chunkAccess.context, delta.chunk,
                                        (localSection << 12) | localIndex)
-                    : unsupportedLightProperties();
-            const auto paletteIt = std::find(section->palette.begin(),
-                                             section->palette.end(), properties);
-            std::uint16_t paletteIndex = 0;
-            if (paletteIt == section->palette.end()) {
-              if (section->palette.size() >= 65536)
-                throw std::runtime_error(
-                    "light section palette exceeds uint16");
-              paletteIndex = static_cast<std::uint16_t>(section->palette.size());
-              section->palette.push_back(properties);
+                    : 0;
+            const auto cacheSlot = (state * 2654435761u) >> 27;
+            std::uint16_t paletteIndex;
+            if (stateCache[cacheSlot] != state) {
+              const BlockLightProperties properties =
+                  lightPropertiesOf(BlockState::fromId(state));
+              const auto paletteIt = std::find(section->palette.begin(),
+                                               section->palette.end(),
+                                               properties);
+              if (paletteIt == section->palette.end()) {
+                if (section->palette.size() >= 65536)
+                  throw std::runtime_error(
+                      "light section palette exceeds uint16");
+                paletteIndex =
+                    static_cast<std::uint16_t>(section->palette.size());
+                section->palette.push_back(properties);
+              } else {
+                paletteIndex = static_cast<std::uint16_t>(
+                    paletteIt - section->palette.begin());
+              }
+              stateCache[cacheSlot] = state;
+              paletteCache[cacheSlot] = paletteIndex;
             } else {
-              paletteIndex = static_cast<std::uint16_t>(
-                  paletteIt - section->palette.begin());
+              paletteIndex = paletteCache[cacheSlot];
             }
             if (section->cells.empty()) {
               section->cells.assign(kLightVolume, 0);
@@ -2698,7 +2715,7 @@ private:
             if (!section->palette[oldIndex].supported)
               --section->unsupportedCells;
             section->cells[localIndex] = paletteIndex;
-            if (!properties.supported)
+            if (!section->palette[paletteIndex].supported)
               ++section->unsupportedCells;
             ++statsChanges;
             changedPositions.push_back(
@@ -2932,6 +2949,9 @@ private:
   std::vector<LightCellRef> ringBatch;
   std::vector<LightCellRef> sortedCells;
   std::vector<LightSectionDelta> deltaBatch;
+  // Per-delta scratch for the state -> light-palette-slot cache.
+  std::array<BlockState::Id, 32> stateCache{};
+  std::array<std::uint16_t, 32> paletteCache{};
   struct ChunkVersion {
     std::uint64_t epoch = 0;
     std::uint64_t requestRevision = 0;

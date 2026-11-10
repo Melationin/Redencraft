@@ -459,8 +459,8 @@ private:
   // LightService::ChunkAccess callbacks. The light worker calls them while it
   // processes a delta, so they must not mutate the world: they read one cell
   // through Section::visible and translate its state to light properties.
-  static BlockLightProperties readLightCell(void *context, const void *chunk,
-                                            std::uint32_t packed);
+  static BlockState::Id readLightCell(void *context, const void *chunk,
+                                    std::uint32_t packed);
   static bool lightSectionEmpty(void *context, const void *chunk,
                                 std::uint32_t packed);
   void installLightChunkAccess();

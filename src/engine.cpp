@@ -985,26 +985,23 @@ void World::loadChunk(int x, int z) {
       lightChunkLifecycleObserver(x, z, true);
   }
 }
-BlockLightProperties World::readLightCell(void *, const void *chunk,
-                                          std::uint32_t packed) {
+BlockState::Id World::readLightCell(void *, const void *chunk,
+                                    std::uint32_t packed) {
   const auto *c = static_cast<const Chunk *>(chunk);
   const auto section = static_cast<std::size_t>(packed >> 12);
   if (!c || section >= c->sections.size())
-    return unsupportedLightProperties();
+    return 0;
   const Section &data = c->sections[section];
   const SectionStorage *base = data.visible.load(std::memory_order_acquire);
   if (!base)
-    return lightPropertiesOf(BlockState::fromId(data.single));
+    return data.single;
   const auto cell = static_cast<std::size_t>(packed & 0xFFFu);
-  BlockState::Id state;
   if (base->bits == 8) {
     const auto *block = static_cast<const SectionStorage8 *>(base);
-    state = block->palette[block->indices[cell]];
-  } else {
-    const auto *block = static_cast<const SectionStorage16 *>(base);
-    state = block->palette[block->indices[cell]];
+    return block->palette[block->indices[cell]];
   }
-  return lightPropertiesOf(BlockState::fromId(state));
+  const auto *block = static_cast<const SectionStorage16 *>(base);
+  return block->palette[block->indices[cell]];
 }
 bool World::lightSectionEmpty(void *, const void *chunk, std::uint32_t packed) {
   const auto *c = static_cast<const Chunk *>(chunk);

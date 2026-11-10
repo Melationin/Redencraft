@@ -240,8 +240,8 @@ public:
   // `packed` is `localSectionIndex << 12 | localIndex`.
   struct ChunkAccess {
     void *context = nullptr;
-    BlockLightProperties (*read)(void *context, const void *chunk,
-                                 std::uint32_t packed) = nullptr;
+    BlockState::Id (*read)(void *context, const void *chunk,
+                           std::uint32_t packed) = nullptr;
     bool (*sectionEmpty)(void *context, const void *chunk,
                          std::uint32_t packed) = nullptr;
   };
