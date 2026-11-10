@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cassert>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -301,8 +303,37 @@ static void entityNumericImport() {
     assert(absent.entities.empty() && !absent.isChunkLoaded(1875032, -1));
   }
 }
-int main() {
-  auto p = std::filesystem::temp_directory_path() / "redstone_storage_fixture";
+class StorageFixture {
+public:
+  StorageFixture() {
+    // CTest runs in the writable build directory. Own a fresh directory so
+    // parallel runs and fixtures left by interrupted runs cannot collide.
+    const auto base = std::filesystem::current_path() /
+                      ("redstone_storage_fixture-" +
+                       std::to_string(std::chrono::steady_clock::now()
+                                          .time_since_epoch().count()));
+    for (unsigned suffix = 0;; ++suffix) {
+      path = base;
+      path += "-" + std::to_string(suffix);
+      if (std::filesystem::create_directory(path))
+        break;
+    }
+  }
+
+  ~StorageFixture() {
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+  }
+
+  StorageFixture(const StorageFixture &) = delete;
+  StorageFixture &operator=(const StorageFixture &) = delete;
+
+  std::filesystem::path path;
+};
+
+int main() try {
+  const StorageFixture fixture;
+  const auto &p = fixture.path;
   std::filesystem::create_directories(p / "region");
   Bytes level = root();
   tag(level, 10, "Data");
@@ -710,5 +741,8 @@ int main() {
   }
   entityStorageFixtures(p / "entity_world");
   entityNumericImport();
-  std::filesystem::remove_all(p);
+  return 0;
+} catch (const std::exception &failure) {
+  std::fprintf(stderr, "storage test failure: %s\n", failure.what());
+  return 1;
 }

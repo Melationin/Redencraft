@@ -1141,6 +1141,42 @@ void crossBatchPublicationOrdering() {
           "west batch's cross-boundary result is not rejected for published east");
 }
 
+void negativeChunkFirstInBatch() {
+  const Pos pos{-8, 8, -8};
+  const auto air = airState();
+  const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  LightService direct(0, 1);
+  require(direct.submitChunk(emptyChunkFixture(-1, -1, 0, 1)) != 0,
+          "negative chunk fixture loads");
+  (void)settledChunk(direct, -1, -1);
+  LightBlockChange change;
+  change.chunkX = change.chunkZ = -1;
+  change.sectionY = pos.y >> 4;
+  change.localIndex = static_cast<std::uint16_t>(lightIndex(pos.x, pos.y, pos.z));
+  change.oldProperties = lightPropertiesOf(air);
+  change.newProperties = lightPropertiesOf(lamp);
+  change.wasEmpty = true;
+  change.isEmpty = false;
+  direct.reportBlockChanges({change});
+  require(blockLightAt(settledChunk(direct, -1, -1), pos.x, pos.y, pos.z) == 15,
+          "a bulk change to (-1,-1) survives as the first and only chunk");
+
+  World world;
+  world.loadChunk(-1, -1);
+  world.enableLighting();
+  auto &service = *world.lightService();
+  const auto initial = settledChunk(service, -1, -1);
+  service.pauseForTesting();
+  require(world.setBlock(pos, lamp), "negative chunk reports a queued cell");
+  require(service.processChunkBatchForTesting(-1, -1),
+          "single-batch request sees cells still in the ring");
+  const auto updated = settledChunk(service, -1, -1);
+  require(updated->revision > initial->revision &&
+              blockLightAt(updated, pos.x, pos.y, pos.z) == 15 &&
+              blockLightAt(initial, pos.x, pos.y, pos.z) == 0,
+          "the queued negative-chunk source publishes without editing the old snapshot");
+}
+
 void blockLightBoundariesAndEpochs() {
   const auto air = airState();
   const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
@@ -1389,6 +1425,7 @@ int main(int argc, char **argv) {
     blockLightStaleAndAuthoritativeRefresh();
     blockLightVerticalPadding();
     crossBatchPublicationOrdering();
+    negativeChunkFirstInBatch();
     blockLightBoundariesAndEpochs();
     directionalShapeOcclusion();
     incompleteMetadataIsExplicit();

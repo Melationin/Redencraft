@@ -571,7 +571,7 @@ public:
     if (changes.empty())
       return;
     std::lock_guard lock(mutex);
-    std::uint64_t currentKey = ~std::uint64_t{0};
+    std::optional<std::uint64_t> currentKey;
     ChunkVersion *active = nullptr;
     PendingChunk *state = nullptr;
     int currentSection = std::numeric_limits<int>::min();
@@ -652,7 +652,8 @@ public:
                            std::size_t count) {
     if (count == 0)
       return;
-    std::uint64_t currentKey = ~std::uint64_t{0};
+    // All packed coordinates are valid, including all ones for (-1, -1).
+    std::optional<std::uint64_t> currentKey;
     ChunkVersion *active = nullptr;
     PendingChunk *state = nullptr;
     std::uint64_t applied = 0;
@@ -882,7 +883,12 @@ public:
   bool processChunkBatchForTesting(int chunkX, int chunkZ) {
     const auto key = chunkKey(chunkX, chunkZ);
     std::unique_lock lock(mutex);
-    if (!paused || closing || forcedChunk || !pending.contains(key))
+    if (!paused || busy || closing || forcedChunk)
+      return false;
+    // The paused worker cannot consume the ring. Coalesce its queued cells
+    // under the same lock before checking for work on the requested chunk.
+    drainCellChangesLocked();
+    if (!pending.contains(key))
       return false;
     const auto before = statsBatches.load(std::memory_order_relaxed);
     forcedChunk = key;
@@ -2333,8 +2339,7 @@ private:
            ringTail.load(std::memory_order_relaxed);
   }
 
-  // Bounded consumer step: at most kRingBatch records per wake-up, so one large
-  // burst cannot starve lifecycle work or delay a publication.
+  // Copy at most kRingBatch records into the consumer's scratch buffer.
   void drainRing(std::vector<LightCellRef> &out) {
     const auto head = ringHead.load(std::memory_order_acquire);
     const auto tail = ringTail.load(std::memory_order_relaxed);
@@ -2385,6 +2390,19 @@ private:
     }
   }
 
+  void drainCellChangesLocked() {
+    // Bound the drain to one ring's worth of batches so continuous writes
+    // cannot keep the worker here indefinitely.
+    for (std::uint32_t round = 0; round < kRingCapacity / kRingBatch &&
+                                  !ringEmpty(); ++round) {
+      drainRing(ringBatch);
+      if (ringBatch.empty())
+        break;
+      groupCellsLocked(ringBatch, deltaBatch);
+      enqueueDeltasLocked(deltaBatch.data(), deltaBatch.size());
+    }
+  }
+
   void notePendingLocked() {
     ++statsSubmitted;
     noteHighWaterLocked();
@@ -2424,30 +2442,19 @@ private:
       // for more writes turns many small batches into one larger batch and
       // clones each hot section far less often. The window closes early as
       // soon as the batch is full, and closing must never wait.
-      if (!closing && options.batchWindowMs > 0 &&
+      if (!closing && !forcedChunk && options.batchWindowMs > 0 &&
           pending.size() < options.batchSize) {
         const auto deadline =
             std::chrono::steady_clock::now() +
             std::chrono::milliseconds(options.batchWindowMs);
-        while (!closing && !paused &&
+        while (!closing && !paused && !forcedChunk &&
                pending.size() < options.batchSize &&
                std::chrono::steady_clock::now() < deadline)
           wake.wait_until(lock, deadline);
       }
-      // Coalesce the queued cells into per-section bitmaps before taking a
-      // pending batch, so the worker does the deduplication instead of the
-      // tick thread. Draining is two orders of magnitude cheaper than
-      // propagating, so keep draining until the ring is empty: that is what
-      // keeps a producer running at 1.4M writes per 1000 ticks from filling
-      // the ring. The round bound only stops a tick thread that never stops
-      // writing from livelocking the worker.
-      for (int rounds = 0; rounds < 256 && !ringEmpty(); ++rounds) {
-        drainRing(ringBatch);
-        if (ringBatch.empty())
-          break;
-        groupCellsLocked(ringBatch, deltaBatch);
-        enqueueDeltasLocked(deltaBatch.data(), deltaBatch.size());
-      }
+      if (paused && !closing)
+        continue;
+      drainCellChangesLocked();
 
       std::vector<PendingChunk> batch;
       if (forcedChunk) {
