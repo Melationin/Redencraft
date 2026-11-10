@@ -421,6 +421,12 @@ int main(int argc, char **argv) {
     // Main-loop CPU only. Formal runs do not enable fingerprints.
     const auto cpuMs = threadCpuMs() - cpuStart;
 #endif
+    // Freeze the worker gauges immediately after the last measured tick and
+    // main-thread CPU sample. Sorting, printing and the final drain stay outside
+    // the formal boundary.
+    LightService::Stats atTickEnd;
+    if (light)
+      atTickEnd = light->stats();
     std::sort(perTick.begin(), perTick.end());
     const auto slowTicks = static_cast<std::size_t>(std::count_if(
         perTick.begin(), perTick.end(), [](double ms) { return ms > 50.0; }));
@@ -439,12 +445,12 @@ int main(int argc, char **argv) {
     std::printf("CPU loop_thread_ms=%.3f\n", cpuMs);
 #endif
     if (light) {
-      const auto atTickEnd = light->stats();
       std::printf(
           "LIGHT_TICK submitted=%llu rejected=%llu batches=%llu changes=%llu "
           "published=%llu stale=%llu sky_sections=%llu block_sections=%llu "
           "queue_high=%llu light_queue=%llu pending_chunks=%llu "
-          "pending_publications=%llu worker_cpu_ms=%.3f\n",
+          "pending_publications=%llu "
+          "worker_cpu_ms_completed_lower_bound=%.3f\n",
           (unsigned long long)atTickEnd.submitted,
           (unsigned long long)atTickEnd.rejected,
           (unsigned long long)atTickEnd.processedBatches,
