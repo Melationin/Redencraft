@@ -56,16 +56,18 @@ std::pair<std::vector<int>, std::vector<int>> sample(World &world) {
   values.reserve(kCells.size());
   rawMissing.reserve(kCells.size());
   for (const Pos &cell : kCells) {
-    auto snapshot = service->latestChunk(cell.x >> 4, cell.z >> 4);
+    auto snapshot =
+        service->latestLayerChunk(LightLayer::Sky, cell.x >> 4, cell.z >> 4);
     if (!snapshot)
-      throw std::runtime_error("sky-light chunk was not published");
+      throw std::runtime_error("sky-light layer was not published");
     values.push_back(snapshot->lightValue(LightLayer::Sky, cell.x, cell.y,
                                           cell.z));
   }
   for (int cellIndex : kRawSamples) {
     const Pos &cell = kCells[static_cast<std::size_t>(cellIndex)];
-    auto snapshot = service->latestChunk(cell.x >> 4, cell.z >> 4);
-    const auto *section = snapshot->section(cell.y >> 4);
+    auto snapshot =
+        service->latestLayerChunk(LightLayer::Sky, cell.x >> 4, cell.z >> 4);
+    const auto *section = snapshot ? snapshot->section(cell.y >> 4) : nullptr;
     rawMissing.push_back(
         !section || section->layers[static_cast<std::size_t>(LightLayer::Sky)]
                         .isMissing()

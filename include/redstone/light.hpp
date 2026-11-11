@@ -6,7 +6,10 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "redstone/block.hpp"
@@ -28,40 +31,167 @@ inline std::size_t lightIndex(int x, int y, int z) {
          static_cast<std::size_t>(x & 15);
 }
 
-// Immutable DataLayer value. Missing and uniform data do not allocate; mixing
-// allocates the exact 2048-byte nibble array. The lower nibble belongs to the
-// even index and the upper nibble to the following index, as DataLayer.java.
+static_assert(sizeof(std::atomic<std::uint8_t>) == 1,
+              "published light state and page bytes must stay one byte");
+static_assert(std::atomic<std::uint8_t>::is_always_lock_free,
+              "published light nibbles require lock-free atomic bytes");
+inline constexpr std::uint8_t kLightUniformFlag = 0x10;
+
+// One independently owned light-layer descriptor. The state byte's high nibble
+// is the uniform flag and its low nibble is the uniform value. Uniform and
+// missing descriptors allocate no page. Mixed owns exactly one shared
+// atomic<uint8_t>[2048] nibble page; its sole layer writer and all readers use
+// relaxed atomic byte loads/stores. Topology changes replace the descriptor in
+// a new section header, never its page pointer in place.
 class LightLayerSnapshot {
 public:
   enum class Storage : std::uint8_t { Missing, Uniform, Mixed };
 
-  LightLayerSnapshot() = default;
+  LightLayerSnapshot();
+  LightLayerSnapshot(const LightLayerSnapshot &other);
+  LightLayerSnapshot &operator=(const LightLayerSnapshot &other);
+  LightLayerSnapshot(LightLayerSnapshot &&other) noexcept;
+  LightLayerSnapshot &operator=(LightLayerSnapshot &&other) noexcept;
+  ~LightLayerSnapshot();
+
   static LightLayerSnapshot missing();
   static LightLayerSnapshot uniform(std::uint8_t value);
-  static LightLayerSnapshot mixed(const std::array<std::uint8_t, kLightVolume> &values);
+  static LightLayerSnapshot mixed(
+      const std::array<std::uint8_t, kLightVolume> &values);
   static LightLayerSnapshot mixedPacked(
       const std::array<std::uint8_t, kLightLayerBytes> &packed);
+  // Allocates the single 2048-byte page for a worker-owned mixed layer.
+  static LightLayerSnapshot mixedEmpty();
 
-  Storage storage() const { return storage_; }
-  bool isMissing() const { return storage_ == Storage::Missing; }
-  bool isUniform() const { return storage_ == Storage::Uniform; }
-  bool isMixed() const { return storage_ == Storage::Mixed; }
-  std::uint8_t uniformValue() const { return uniform_; }
+  Storage storage() const {
+    const std::uint8_t state =
+        state_.load(std::memory_order_acquire);
+    if ((state & kLightUniformFlag) != 0)
+      return Storage::Uniform;
+    return packed_ ? Storage::Mixed : Storage::Missing;
+  }
+  bool isMissing() const { return storage() == Storage::Missing; }
+  bool isUniform() const { return storage() == Storage::Uniform; }
+  bool isMixed() const { return storage() == Storage::Mixed; }
+  std::uint8_t stateByte() const {
+    return state_.load(std::memory_order_relaxed);
+  }
+  std::uint8_t uniformValue() const {
+    return static_cast<std::uint8_t>(
+        stateByte() & static_cast<std::uint8_t>(~kLightUniformFlag & 15));
+  }
   std::uint8_t get(int x, int y, int z) const;
-  const std::uint8_t *packedData() const;
-  std::size_t packedByteCount() const { return packed_.size(); }
-  static constexpr std::size_t packedSize() { return kLightLayerBytes; }
+  std::size_t packedByteCount() const {
+    return isMixed() ? kLightLayerBytes : 0;
+  }
+  std::uint8_t packedByte(std::size_t index) const {
+    if (index >= kLightLayerBytes || !packed_)
+      return 0;
+    return packed_->bytes[index].load(std::memory_order_relaxed);
+  }
+  // Only the layer's sole worker calls these writers. No CAS is required.
+  void writeCell(std::size_t index, std::uint8_t value);
+  void writePackedByte(std::size_t byte, std::uint8_t value);
+  void readPacked(std::array<std::uint8_t, kLightLayerBytes> &out) const;
   bool operator==(const LightLayerSnapshot &other) const;
 
 private:
-  Storage storage_ = Storage::Missing;
-  std::uint8_t uniform_ = 0;
-  std::vector<std::uint8_t> packed_;
+  struct PackedPage {
+    std::atomic<std::uint8_t> bytes[kLightLayerBytes];
+  };
+  static_assert(sizeof(PackedPage) == kLightLayerBytes);
+
+  void makeMixed();
+
+  std::atomic<std::uint8_t> state_{0};
+  std::shared_ptr<PackedPage> packed_;
 };
 
-// A light section contains both independent layers. Direction masks are stored
-// as six 16x16 bit faces; L-1 preserves their validity bit but does not derive
-// shape faces, which belongs to propagation/L-2a.
+// Shared mutable layer payload. Section/header copies retain the same layer
+// object, so worker persistence and main-thread latest share one payload.
+// Replacing a layer in a later section header swaps this pointer; it never
+// mutates a vector visible to a reader.
+class LightLayerRef {
+public:
+  LightLayerRef() = default;
+  LightLayerRef(const LightLayerSnapshot &value)
+      : value_(copy(value)) {}
+  LightLayerRef(LightLayerSnapshot &&value)
+      : value_(move(std::move(value))) {}
+  explicit LightLayerRef(std::shared_ptr<LightLayerSnapshot> value)
+      : value_(std::move(value)) {}
+
+  LightLayerRef &operator=(const LightLayerSnapshot &value) {
+    value_ = copy(value);
+    return *this;
+  }
+  LightLayerRef &operator=(LightLayerSnapshot &&value) {
+    value_ = move(std::move(value));
+    return *this;
+  }
+  LightLayerRef &operator=(std::shared_ptr<LightLayerSnapshot> value) {
+    value_ = std::move(value);
+    return *this;
+  }
+
+  LightLayerSnapshot::Storage storage() const {
+    return value_ ? value_->storage() : LightLayerSnapshot::Storage::Missing;
+  }
+  bool isMissing() const { return !value_ || value_->isMissing(); }
+  bool isUniform() const { return value_ && value_->isUniform(); }
+  bool isMixed() const { return value_ && value_->isMixed(); }
+  std::uint8_t uniformValue() const {
+    return value_ ? value_->uniformValue() : 0;
+  }
+  std::uint8_t get(int x, int y, int z) const {
+    return value_ ? value_->get(x, y, z) : 0;
+  }
+  std::uint8_t packedByte(std::size_t index) const {
+    return value_ ? value_->packedByte(index) : 0;
+  }
+  void writeCell(std::size_t index, std::uint8_t value) {
+    if (value_)
+      value_->writeCell(index, value);
+  }
+  void readPacked(std::array<std::uint8_t, kLightLayerBytes> &out) const {
+    if (value_)
+      value_->readPacked(out);
+    else
+      out.fill(0);
+  }
+  std::shared_ptr<LightLayerSnapshot> shared() const { return value_; }
+  std::size_t packedByteCount() const {
+    return isMixed() ? kLightLayerBytes : 0;
+  }
+  bool operator==(const LightLayerRef &other) const {
+    if (!value_ || !other.value_)
+      return !value_ && !other.value_;
+    return *value_ == *other.value_;
+  }
+  bool operator!=(const LightLayerRef &other) const {
+    return !(*this == other);
+  }
+
+private:
+  static std::shared_ptr<LightLayerSnapshot>
+  copy(const LightLayerSnapshot &value) {
+    return value.isMissing()
+               ? std::shared_ptr<LightLayerSnapshot>{}
+               : std::make_shared<LightLayerSnapshot>(value);
+  }
+  static std::shared_ptr<LightLayerSnapshot>
+  move(LightLayerSnapshot &&value) {
+    return value.isMissing()
+               ? std::shared_ptr<LightLayerSnapshot>{}
+               : std::make_shared<LightLayerSnapshot>(std::move(value));
+  }
+
+  std::shared_ptr<LightLayerSnapshot> value_;
+};
+
+// A section header has two independent layer slots. Production views populate
+// only their own slot and leave the other Missing; optical direction masks are
+// owned by the coordinator geometry rather than copied into light publication.
 bool hasDifferentLightProperties(const BlockState &oldState,
                                  const BlockState &newState);
 bool hasDifferentLightProperties(const BlockLightProperties &oldProperties,
@@ -77,13 +207,13 @@ struct LightSectionSnapshot {
       std::vector<BlockLightProperties> palette = {BlockLightProperties{}},
       std::vector<std::uint16_t> cells = std::vector<std::uint16_t>(kLightVolume,
                                                                    0),
-      std::array<LightLayerSnapshot, kLightLayerCount> layers = {});
+      std::array<LightLayerRef, kLightLayerCount> layers = {});
 
   int sectionY = 0;
   bool empty = true;
   std::vector<BlockLightProperties> palette;
   std::vector<std::uint16_t> cells;
-  std::array<LightLayerSnapshot, kLightLayerCount> layers{};
+  std::array<LightLayerRef, kLightLayerCount> layers{};
   std::uint16_t unsupportedCells = 0;
 
   // An empty cell vector is the uniform representation: every cell uses
@@ -92,6 +222,64 @@ struct LightSectionSnapshot {
   const BlockLightProperties &at(int x, int y, int z) const;
   std::uint8_t light(LightLayer layer, int x, int y, int z) const;
 };
+
+// Immutable optical-class table built from the registered BlockState range.
+// It is published before any conversion or propagation worker starts.
+struct LightOpticalClass {
+  BlockLightProperties properties;
+  bool air = false;
+};
+
+class LightOpticalTable {
+public:
+  LightOpticalTable();
+
+  std::uint8_t classForState(BlockState::Id state) const noexcept;
+  const LightOpticalClass &operator[](std::uint8_t index) const noexcept {
+    return classes_[index];
+  }
+  std::size_t classCount() const noexcept { return classes_.size(); }
+
+private:
+  std::vector<LightOpticalClass> classes_;
+  std::vector<std::uint8_t> stateClasses_;
+};
+
+std::shared_ptr<const LightOpticalTable> defaultLightOpticalTable();
+
+// Compact optical geometry for one 16x16x16 block section. Uniform sections do
+// not allocate a cell array. Mixed sections own exactly one 4096-byte array of
+// light optical-class ids.
+struct GeometrySection {
+  using Cells = std::array<std::uint8_t, kLightVolume>;
+
+  bool empty = true;
+  bool uniform = true;
+  std::uint8_t uniformClass = 0;
+  std::unique_ptr<Cells> cells;
+  std::uint16_t nonAir = 0;
+  std::uint16_t unknown = 0;
+
+  std::uint16_t at(std::size_t index) const {
+    if (uniform)
+      return uniformClass;
+    return (*cells)[index];
+  }
+};
+
+// Read-only view into a live World section. Conversion happens synchronously
+// on the world thread; the view is never stored or read by a worker.
+struct LightSectionView {
+  bool empty = true;
+  std::uint8_t bits = 0; // 0 = single, 8 = cells8, 16 = cells16
+  BlockState::Id single = 0;
+  std::span<const BlockState::Id> palette;
+  std::span<const std::uint8_t> cells8;
+  std::span<const std::uint16_t> cells16;
+};
+
+GeometrySection makeLightGeometrySection(const LightOpticalTable &optical,
+                                         const LightSectionView &section);
 
 struct LightChunkInput {
   int chunkX = 0;
@@ -102,12 +290,27 @@ struct LightChunkInput {
   std::uint64_t lifecycleEpoch = 0;
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
+  // Production load input has exactly blockSectionCount entries converted
+  // directly from World::Chunk::Section. The sections member is only the legacy
+  // attribute-level fixture adapter.
+  std::vector<GeometrySection> geometrySections;
   std::vector<std::shared_ptr<const LightSectionSnapshot>> sections;
 
   int minLightSectionY() const { return minBlockSectionY - 1; }
   int lightSectionCount() const { return blockSectionCount + 2; }
   const LightSectionSnapshot *section(int sectionY) const;
 };
+
+// Fixed-size ordinary block-change payload. The worker owns coordinate
+// validation and optical mapping; the main thread only publishes the final raw
+// state ID.
+struct alignas(16) LightCellUpdate {
+  std::int32_t x = 0;
+  std::int32_t y = 0;
+  std::int32_t z = 0;
+  BlockState::Id state = 0;
+};
+static_assert(sizeof(LightCellUpdate) == 16);
 
 struct LightChunkSnapshot {
   struct LayerChange {
@@ -127,6 +330,9 @@ struct LightChunkSnapshot {
   std::uint64_t lifecycleEpoch = 0;
   std::uint64_t revision = 0;
   bool skyLightEnabled = true;
+  // Set on an independently published layer view. Legacy combined fixtures
+  // leave this empty.
+  std::optional<LightLayer> layer;
   // L-2a may complete the block layer while sky propagation and protocol
   // publication remain unfinished.
   bool blockLightComplete = false;
@@ -137,6 +343,10 @@ struct LightChunkSnapshot {
   // unpublished or incomplete result.
   bool protocolReady = false;
   std::uint32_t unsupportedCells = 0;
+  // Compatibility pointers for hand-built legacy fixtures. Production uses
+  // separate latest layer chunks; they are null on production views.
+  std::shared_ptr<const LightChunkSnapshot> blockLayerSnapshot;
+  std::shared_ptr<const LightChunkSnapshot> skyLayerSnapshot;
   std::vector<std::shared_ptr<const LightSectionSnapshot>> sections;
   // changedSections is a ready-to-ready delta. deltaBaseRevision identifies
   // the last protocol-ready snapshot it was computed from; incomplete drained
@@ -166,20 +376,6 @@ struct LightBlockChange {
   std::uint64_t generation = 0; // assigned by LightService
 };
 
-// One owned block-light input. World fills this from the authoritative state it
-// just wrote; the worker never reads a live chunk, section or storage container.
-// sequence is assigned by LightService and orders records that take the ring
-// and full-ring fallback paths.
-struct LightCellUpdate {
-  std::uint64_t chunkKey = 0;
-  std::uint64_t lifecycleEpoch = 0;
-  std::uint64_t sequence = 0;
-  int sectionY = 0;
-  std::uint16_t localIndex = 0;
-  BlockLightProperties properties;
-  bool sectionEmpty = false;
-};
-
 struct LightWorkerOptions {
   std::size_t batchSize = 1000;
   std::size_t maxQueuedCommands = 4096;
@@ -187,16 +383,22 @@ struct LightWorkerOptions {
   bool startPausedForTesting = false;
   bool hasSkyLight = true;
   bool collectDiagnostics = false;
+  // Affinity for the single light worker. Block and sky run sequentially on it.
   std::uintptr_t workerAffinityMask = 0;
 
-  // Extra time the worker waits for more work before it starts a batch. Every
-  // section a batch touches is cloned for copy-on-write publication, so
-  // coalescing a few milliseconds of writes cuts that clone count; zero
-  // disables the window and takes a batch as soon as anything is pending.
-  int batchWindowMs = 1;
-  // Testing uses a tiny power-of-two ring to exercise the owned overflow path.
-  // Production retains the fixed 1<<18-entry capacity unless explicitly set.
-  std::size_t cellQueueCapacity = std::size_t{1} << 18;
+  // Extra time the worker waits for more work before it starts a batch.
+  // Production mixed pages update in place, while section headers and dirty
+  // metadata are rebuilt only for real writes; zero takes work immediately.
+  int batchWindowMs = 20;
+  // Geometry input uses a 10 MiB SPSC queue by default. Tests may provide a
+  // tiny explicit entry count. A full queue drops the newest record.
+  std::size_t cellQueueCapacity = 0;
+  std::size_t geometryQueueBytes = std::size_t{10} << 20;
+  // One worker publishes complete block and sky layer results into this fixed
+  // SPSC result queue. The main thread is the only consumer.
+  std::size_t resultQueueBytes = std::size_t{4} << 20;
+  // Deterministic test seam invoked once per enabled layer, before propagation.
+  std::function<void(LightLayer)> beforeLayerForTesting;
 };
 
 // Main-thread submission and worker-thread owner. No method on the worker
@@ -209,6 +411,7 @@ public:
     std::uint64_t rejected = 0;
     std::uint64_t processedBatches = 0;
     std::uint64_t processedBlockChanges = 0;
+    std::uint64_t droppedGeometryTasks = 0;
     std::uint64_t published = 0;
     std::uint64_t stalePublications = 0;
     std::uint64_t queueHighWater = 0;
@@ -223,6 +426,15 @@ public:
     std::uint64_t workerAffinityRequested = 0;
     std::uint64_t workerAffinityMask = 0;
     std::uint32_t workerAffinityError = 0;
+    std::uint64_t workerCount = 0;
+    double blockWorkerCpuMs = 0;
+    double skyWorkerCpuMs = 0;
+    std::uint64_t blockWorkerAffinityRequested = 0;
+    std::uint64_t blockWorkerAffinityMask = 0;
+    std::uint32_t blockWorkerAffinityError = 0;
+    std::uint64_t skyWorkerAffinityRequested = 0;
+    std::uint64_t skyWorkerAffinityMask = 0;
+    std::uint32_t skyWorkerAffinityError = 0;
   };
 
   explicit LightService(int minBlockSectionY, int blockSectionCount,
@@ -231,6 +443,9 @@ public:
   LightService(const LightService &) = delete;
   LightService &operator=(const LightService &) = delete;
 
+  // The immutable state-id to optical-class table used for direct World-section
+  // conversion. It is fully built before the service starts its workers.
+  std::shared_ptr<const LightOpticalTable> opticalTable() const;
   // Valid updates are coalesced per chunk and are not rejected by queue
   // capacity. Returns 0 only when the service is closing or input is invalid.
   std::uint64_t submitChunk(LightChunkInput input);
@@ -248,12 +463,25 @@ public:
   void reportBlockCell(LightCellUpdate update);
   bool unloadChunk(int chunkX, int chunkZ);
 
-  // Main-thread publication handoff. A worker batch becomes visible in full;
-  // reading a snapshot never waits for the worker and the shared object is
-  // immutable.
+  // Main-thread publication handoff. Headers are copied at drain, while layer
+  // descriptors and atomic 2048-byte pages are shared with the worker. Mixed
+  // values may update in place after publication and readers may observe a
+  // mixture of old and new nibbles.
   void drainPublished();
   std::shared_ptr<const LightChunkSnapshot> latestChunk(int chunkX,
                                                         int chunkZ) const;
+  // Returns the independently saved layer envelope. Block always exists; sky
+  // is null when that layer is absent.
+  std::shared_ptr<const LightChunkSnapshot> latestLayerChunk(
+      LightLayer layer, int chunkX, int chunkZ) const;
+  // Test-only snapshot of the sky worker's 256 lowest direct-source heights.
+  // Returns nullopt unless the service is currently idle.
+  std::optional<std::array<int, 256>> skyColumnSourcesForTesting(
+      int chunkX, int chunkZ) const;
+  // Test-only read of the coordinator's frozen optical mirror. Production
+  // light snapshots intentionally contain no secondary optical geometry.
+  std::optional<BlockLightProperties> opticalPropertiesForTesting(
+      int x, int y, int z) const;
   void setPublishCallback(
       std::function<void(std::shared_ptr<const LightChunkSnapshot>)> callback);
 

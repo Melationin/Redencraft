@@ -113,16 +113,17 @@ void expectedLayer(const LightChunkSnapshot &current,
                    std::vector<std::uint64_t> &data,
                    std::vector<std::uint64_t> &empty,
                    std::vector<int> &dataSections) {
+  std::unordered_set<int> dirty;
+  if (previous)
+    for (const auto &change : current.changedSections)
+      if (layer == LightLayer::Sky ? change.sky : change.block)
+        dirty.insert(change.sectionY);
   for (int index = 0; index < current.lightSectionCount(); ++index) {
     const int sectionY = current.minLightSectionY() + index;
+    if (previous && !dirty.contains(sectionY))
+      continue;
     const auto &now = current.section(sectionY)
                           ->layers[static_cast<std::size_t>(layer)];
-    const auto *before =
-        previous ? &previous->section(sectionY)
-                           ->layers[static_cast<std::size_t>(layer)]
-                 : nullptr;
-    if (before && now == *before)
-      continue;
     if (now.isMissing()) {
       // The official packet leaves both masks clear for a null DataLayer.
       continue;
@@ -149,7 +150,7 @@ void verifyLayerPayload(Reader &reader, const LightChunkSnapshot &current,
     for (std::size_t byte = 0; byte < payload.size(); ++byte) {
       std::uint8_t expected = 0;
       if (value.isMixed()) {
-        expected = value.packedData()[byte];
+        expected = value.packedByte(byte);
       } else {
         require(value.isUniform() && value.uniformValue() != 0,
                 "data mask references nonempty uniform data");
@@ -188,6 +189,24 @@ void verifyLightData(Reader &reader, const LightChunkSnapshot &current,
   verifyLayerPayload(reader, current, LightLayer::Sky, skySections);
   verifyLayerPayload(reader, current, LightLayer::Block, blockSections);
   require(reader.empty(), "light packet has no trailing bytes");
+}
+
+std::shared_ptr<const LightChunkSnapshot>
+combinedForTesting(LightService &service, int x, int z) {
+  const auto block = service.latestLayerChunk(LightLayer::Block, x, z);
+  const auto sky = service.latestLayerChunk(LightLayer::Sky, x, z);
+  if (!block || !sky)
+    return block ? block : service.latestChunk(x, z);
+  auto merged = std::make_shared<LightChunkSnapshot>(*block);
+  const std::size_t skyIndex = static_cast<std::size_t>(LightLayer::Sky);
+  for (std::size_t i = 0; i < merged->sections.size(); ++i) {
+    if (i >= sky->sections.size() || !sky->sections[i])
+      continue;
+    auto section = std::make_shared<LightSectionSnapshot>(*merged->sections[i]);
+    section->layers[skyIndex] = sky->sections[i]->layers[skyIndex];
+    merged->sections[i] = std::move(section);
+  }
+  return merged;
 }
 
 void verifyChunkLight(Reader &reader, const LightChunkSnapshot &light) {
@@ -236,7 +255,7 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
   require(service && service->waitIdleForTesting(),
           "initial light batch completes without waiting on a socket");
   service->drainPublished();
-  auto initial = service->latestChunk(0, 0);
+  auto initial = combinedForTesting(*service, 0, 0);
   require(initial && initial->protocolReady, "initial chunk light is ready");
 
   ServerOptions options;
@@ -266,7 +285,7 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
           "light source enters the world normally");
   require(service->waitIdleForTesting(), "dynamic light batch completes");
   world.tick();
-  auto changed = service->latestChunk(0, 0);
+  auto changed = combinedForTesting(*service, 0, 0);
   require(changed && changed->revision > initial->revision,
           "world tick publishes the dynamic revision");
   packets = drainPlay(session);
@@ -284,7 +303,7 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
           "light source removal enters the world normally");
   require(service->waitIdleForTesting(), "clear light batch completes");
   world.tick();
-  auto cleared = service->latestChunk(0, 0);
+  auto cleared = combinedForTesting(*service, 0, 0);
   packets = drainPlay(session);
   auto clearBody = packetOf(
       packets, data.packet("play", "clientbound", "light_update"));
@@ -301,6 +320,8 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
   auto stale = std::make_shared<LightChunkSnapshot>(*cleared);
   stale->revision = cleared->revision + 100;
   stale->deltaBaseRevision = cleared->revision;
+  stale->blockLayerSnapshot.reset();
+  stale->skyLayerSnapshot.reset();
   auto changedSection = std::make_shared<LightSectionSnapshot>(
       *stale->sections[1]);
   changedSection->layers[static_cast<std::size_t>(LightLayer::Block)] =
@@ -327,7 +348,7 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
                                          "level_chunk_with_light") &&
               reload.i32() == 0 && reload.i32() == 0,
           "reload packet keeps the chunk identity");
-  verifyChunkLight(reload, *service->latestChunk(0, 0));
+  verifyChunkLight(reload, *combinedForTesting(*service, 0, 0));
 
   Writer ack;
   ack.f32(9);
@@ -368,7 +389,7 @@ void readyIncompleteReadyDelta(const ProtocolData &data) {
   auto *service = world.lightService();
   require(service && service->waitIdleForTesting(), "delta-gap initial batch");
   service->drainPublished();
-  auto initial = service->latestChunk(0, 0);
+  auto initial = combinedForTesting(*service, 0, 0);
   require(initial && initial->protocolReady, "delta-gap initial snapshot ready");
   ServerOptions options;
   options.chunks.push_back({0, 0});
@@ -392,13 +413,26 @@ void readyIncompleteReadyDelta(const ProtocolData &data) {
   require(service->processChunkBatchForTesting(0, 0),
           "incomplete delta-gap batch completes");
   world.tick();
-  auto incomplete = service->latestChunk(0, 0);
+  auto incomplete = combinedForTesting(*service, 0, 0);
   require(incomplete && !incomplete->protocolReady,
           "incomplete middle revision is drained but not ready");
-  auto ignored = drainPlay(session);
-  require(packetOf(ignored, data.packet("play", "clientbound", "light_update"))
-              .empty(),
-          "session does not send the drained incomplete revision");
+  auto incompletePackets = drainPlay(session);
+  const auto incompleteUpdate = packetOf(
+      incompletePackets, data.packet("play", "clientbound", "light_update"));
+  if (!incompleteUpdate.empty()) {
+    Reader onlyReadyLayer(incompleteUpdate);
+    require(onlyReadyLayer.varInt() ==
+                    data.packet("play", "clientbound", "light_update") &&
+                onlyReadyLayer.varInt() == 0 &&
+                onlyReadyLayer.varInt() == 0,
+            "incomplete layer packet has the light-update header");
+    (void)readBitSet(onlyReadyLayer);
+    require(readBitSet(onlyReadyLayer).empty(),
+            "incomplete block layer sends no data mask");
+    (void)readBitSet(onlyReadyLayer);
+    require(readBitSet(onlyReadyLayer).empty(),
+            "incomplete block layer sends no empty mask");
+  }
 
   // T changes only in the next ready revision. Its ready-to-ready delta must
   // still include the earlier S change that the client never received.
@@ -409,7 +443,7 @@ void readyIncompleteReadyDelta(const ProtocolData &data) {
   require(service->processChunkBatchForTesting(0, 0),
           "ready delta-gap batch completes");
   world.tick();
-  auto current = service->latestChunk(0, 0);
+  auto current = combinedForTesting(*service, 0, 0);
   require(current && current->protocolReady &&
               current->deltaBaseRevision == initial->revision,
           "ready delta spans the drained incomplete revision");
@@ -431,7 +465,7 @@ void evictedReadyBaseFallsBack(const ProtocolData &data) {
   auto *service = world.lightService();
   require(service && service->waitIdleForTesting(), "evicted-base initial batch");
   service->drainPublished();
-  auto initial = service->latestChunk(0, 0);
+  auto initial = combinedForTesting(*service, 0, 0);
   require(initial && initial->protocolReady, "evicted-base initial snapshot");
   ServerOptions options;
   options.chunks.push_back({0, 0});
@@ -454,8 +488,23 @@ void evictedReadyBaseFallsBack(const ProtocolData &data) {
               service->processChunkBatchForTesting(0, 0),
           "incomplete C replaces undrained B");
   world.tick();
-  require(session.takeOutput().empty(),
-          "drained incomplete C never reaches the session");
+  auto incompletePackets = drainPlay(session);
+  const auto incompleteUpdate = packetOf(
+      incompletePackets, data.packet("play", "clientbound", "light_update"));
+  if (!incompleteUpdate.empty()) {
+    Reader onlyReadyLayer(incompleteUpdate);
+    require(onlyReadyLayer.varInt() ==
+                    data.packet("play", "clientbound", "light_update") &&
+                onlyReadyLayer.varInt() == 0 &&
+                onlyReadyLayer.varInt() == 0,
+            "incomplete C packet has the light-update header");
+    (void)readBitSet(onlyReadyLayer);
+    require(readBitSet(onlyReadyLayer).empty(),
+            "incomplete block C sends no data mask");
+    (void)readBitSet(onlyReadyLayer);
+    require(readBitSet(onlyReadyLayer).empty(),
+            "incomplete block C sends no empty mask");
+  }
   require(!session.closed(), "incomplete C does not close the session");
 
   require(world.setBlock({3, 8, 3}, Blocks::AIR.defaultState()) &&
@@ -464,7 +513,7 @@ void evictedReadyBaseFallsBack(const ProtocolData &data) {
               service->processChunkBatchForTesting(0, 0),
           "ready D with T completes");
   world.tick();
-  auto current = service->latestChunk(0, 0);
+  auto current = combinedForTesting(*service, 0, 0);
   require(current && current->protocolReady &&
               current->deltaBaseRevision > initial->revision &&
               current->deltaBaseRevision != initial->revision,
@@ -488,7 +537,7 @@ void explicitWorldLifecycleIsolation(const ProtocolData &data) {
   auto *service = world.lightService();
   require(service && service->waitIdleForTesting(), "lifecycle initial batch");
   service->drainPublished();
-  auto initial = service->latestChunk(0, 0);
+  auto initial = combinedForTesting(*service, 0, 0);
   require(initial && initial->protocolReady, "lifecycle initial snapshot");
   ServerOptions options;
   options.chunks.push_back({0, 0});
@@ -563,7 +612,7 @@ void explicitWorldLifecycleIsolation(const ProtocolData &data) {
                                           "level_chunk_with_light") &&
               reloaded.i32() == 0 && reloaded.i32() == 0,
           "same-view reload first packet has exact coordinates");
-  auto latest = service->latestChunk(0, 0);
+  auto latest = combinedForTesting(*service, 0, 0);
   require(latest && latest->protocolReady &&
               latest->lifecycleEpoch > initial->lifecycleEpoch,
           "same-view reload uses a newer lifecycle epoch");
@@ -577,7 +626,7 @@ void protocolFailureIsConnectionLocal(const ProtocolData &data) {
   auto *service = world.lightService();
   require(service && service->waitIdleForTesting(), "connection-error initial batch");
   service->drainPublished();
-  auto initial = service->latestChunk(0, 0);
+  auto initial = combinedForTesting(*service, 0, 0);
   require(initial && initial->protocolReady, "connection-error initial snapshot");
   ServerOptions options;
   options.chunks.push_back({0, 0});
@@ -591,7 +640,8 @@ void protocolFailureIsConnectionLocal(const ProtocolData &data) {
   wrongLifetime->lifecycleEpoch = initial->lifecycleEpoch + 1;
   wrongLifetime->revision = initial->revision + 1;
   wrongLifetime->deltaBaseRevision = initial->revision;
-  wrongLifetime->changedSections = {{0, true, true}};
+  wrongLifetime->layer = LightLayer::Block;
+  wrongLifetime->changedSections = {{0, false, true}};
   failing.lightPublished(wrongLifetime);
   require(failing.closed(),
           "cross-lifetime light error is contained to its connection");
@@ -602,7 +652,10 @@ void protocolFailureIsConnectionLocal(const ProtocolData &data) {
           "healthy connection update enters");
   require(service->waitIdleForTesting(), "healthy connection light completes");
   service->drainPublished();
-  healthy.lightPublished(service->latestChunk(0, 0));
+  healthy.lightPublished(
+      service->latestLayerChunk(LightLayer::Block, 0, 0));
+  healthy.lightPublished(
+      service->latestLayerChunk(LightLayer::Sky, 0, 0));
   auto packets = drainPlay(healthy);
   require(!packetOf(packets, data.packet("play", "clientbound", "light_update"))
                .empty(),
@@ -615,6 +668,8 @@ denseSnapshot(const LightChunkSnapshot &base, std::uint64_t revision,
   auto result = std::make_shared<LightChunkSnapshot>(base);
   result->revision = revision;
   result->deltaBaseRevision = base.revision;
+  result->blockLayerSnapshot.reset();
+  result->skyLayerSnapshot.reset();
   result->sections.clear();
   result->changedSections.clear();
   std::array<std::uint8_t, kLightVolume> values{};
@@ -640,7 +695,7 @@ void lightBackpressure(const ProtocolData &data) {
   auto *service = world.lightService();
   require(service && service->waitIdleForTesting(), "backpressure light load");
   service->drainPublished();
-  auto ready = service->latestChunk(0, 0);
+  auto ready = combinedForTesting(*service, 0, 0);
   require(ready && ready->protocolReady, "backpressure light snapshot ready");
   ServerOptions options;
   options.chunks.push_back({0, 0});
@@ -666,7 +721,7 @@ void noSkyUsesExplicitZero() {
   auto *service = world.lightService();
   require(service && service->waitIdleForTesting(), "no-sky batch completes");
   service->drainPublished();
-  auto missing = service->latestChunk(0, 0);
+  auto missing = combinedForTesting(*service, 0, 0);
   require(missing && missing->protocolReady && !missing->skyLightEnabled,
           "no-sky snapshot is protocol ready without fabricated brightness");
   auto missingPlan = prepareLightUpdate(missing);
@@ -701,6 +756,8 @@ void noSkyUsesExplicitZero() {
 
   auto withSky = std::make_shared<LightChunkSnapshot>(*zero);
   withSky->revision = zero->revision + 1;
+  withSky->blockLayerSnapshot.reset();
+  withSky->skyLayerSnapshot.reset();
   auto skySection = std::make_shared<LightSectionSnapshot>(*withSky->sections[1]);
   skySection->layers[static_cast<std::size_t>(LightLayer::Sky)] =
       LightLayerSnapshot::mixedPacked(std::array<std::uint8_t, kLightLayerBytes>{});
@@ -708,6 +765,8 @@ void noSkyUsesExplicitZero() {
   withSky->changedSections = {{skySection->sectionY, true, false}};
   auto withoutSky = std::make_shared<LightChunkSnapshot>(*withSky);
   withoutSky->revision = withSky->revision + 1;
+  withoutSky->blockLayerSnapshot.reset();
+  withoutSky->skyLayerSnapshot.reset();
   auto missingSection = std::make_shared<LightSectionSnapshot>(*skySection);
   missingSection->layers[static_cast<std::size_t>(LightLayer::Sky)] =
       LightLayerSnapshot::missing();
@@ -737,7 +796,7 @@ void nativeServerFixturePublishesEveryChunk() {
   service->drainPublished();
   for (int x = -1; x <= 1; ++x)
     for (int z = -1; z <= 1; ++z) {
-      auto snapshot = service->latestChunk(x, z);
+      auto snapshot = combinedForTesting(*service, x, z);
       require(snapshot && snapshot->protocolReady,
               "every native server fixture chunk is protocol ready");
     }
@@ -748,7 +807,7 @@ void unpublishedLightDefersJoin(const ProtocolData &data) {
   world.loadChunk(0, 0);
   world.enableLighting(LightWorkerOptions{1000, 4096, true, true});
   auto *service = world.lightService();
-  require(service && service->latestChunk(0, 0) == nullptr,
+  require(service && combinedForTesting(*service, 0, 0) == nullptr,
           "paused worker has no published initial light");
   ServerOptions options;
   options.chunks.push_back({0, 0});
@@ -794,7 +853,7 @@ void unknownOpticsRemainUnpublished(const ProtocolData &data) {
   auto *service = world.lightService();
   require(service && service->waitIdleForTesting(), "unknown-optics batch completes");
   service->drainPublished();
-  auto incomplete = service->latestChunk(0, 0);
+  auto incomplete = combinedForTesting(*service, 0, 0);
   require(incomplete && !incomplete->protocolReady &&
               !incomplete->propagationComplete,
           "unknown optical metadata never becomes protocol ready");
@@ -809,6 +868,79 @@ void unknownOpticsRemainUnpublished(const ProtocolData &data) {
                                             "player_position")).empty(),
           "incomplete optics defer both light and player position");
 }
+void independentLayerDeltaUsesWriteMetadata() {
+  auto makeView = [](std::uint64_t revision) {
+    auto view = std::make_shared<LightChunkSnapshot>();
+    view->chunkX = 0;
+    view->chunkZ = 0;
+    view->minBlockSectionY = 0;
+    view->blockSectionCount = 1;
+    view->lifecycleEpoch = 7;
+    view->revision = revision;
+    view->layer = LightLayer::Block;
+    view->blockLightComplete = true;
+    view->protocolReady = true;
+    for (int sectionY = -1; sectionY <= 1; ++sectionY)
+      view->sections.push_back(std::make_shared<LightSectionSnapshot>(
+          sectionY, true,
+          std::vector<BlockLightProperties>{BlockLightProperties{}},
+          std::vector<std::uint16_t>{}));
+    return view;
+  };
+  auto first = makeView(1);
+  std::array<std::uint8_t, kLightVolume> values{};
+  values[lightIndex(3, 4, 5)] = 9;
+  values[lightIndex(6, 7, 8)] = 1;
+  auto mixed = std::make_shared<LightLayerSnapshot>(
+      LightLayerSnapshot::mixed(values));
+  auto firstSection =
+      std::make_shared<LightSectionSnapshot>(*first->sections[1]);
+  firstSection->layers[static_cast<std::size_t>(LightLayer::Block)] = mixed;
+  first->sections[1] = firstSection;
+
+  auto initial = prepareLayerLightUpdate(first, LightLayer::Block);
+  require(initial.block.dataSections == std::vector<int>{0} &&
+              initial.sky.dataSections.empty() &&
+              initial.sky.emptySections.empty(),
+          "block initial plan reads only the block layer");
+  require(initial.snapshot->section(0)
+                  ->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                  .isMissing(),
+          "block protocol source is not a combined section");
+
+  auto second = makeView(2);
+  second->sections[1] = first->sections[1];
+  second->deltaBaseRevision = 1;
+  second->changedSections = {{0, false, true}};
+  mixed->writeCell(lightIndex(3, 4, 5), 2);
+  const auto firstVersion = lightLayerVersion(*first);
+  auto delta =
+      prepareLayerLightUpdate(second, LightLayer::Block, &firstVersion);
+  require(second->section(0)
+                  ->layers[static_cast<std::size_t>(LightLayer::Block)]
+                  .shared() == mixed &&
+              delta.block.dataSections == std::vector<int>{0} &&
+              delta.sky.dataSections.empty() &&
+              delta.sky.emptySections.empty(),
+          "same mutable page is sent from dirty metadata, not pointer/content diff");
+
+  second->changedSections.clear();
+  auto noChange =
+      prepareLayerLightUpdate(second, LightLayer::Block, &firstVersion);
+  require(noChange.block.dataSections.empty() &&
+              noChange.block.emptySections.empty(),
+          "an unmarked mutable-page revision produces an empty block delta");
+
+  bool wrongLayerRejected = false;
+  try {
+    (void)prepareLayerLightUpdate(second, LightLayer::Sky);
+  } catch (const ProtocolError &) {
+    wrongLayerRejected = true;
+  }
+  require(wrongLayerRejected,
+          "layer delta refuses a view carrying the other layer tag");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -821,6 +953,7 @@ int main(int argc, char **argv) {
     explicitWorldLifecycleIsolation(data);
     protocolFailureIsConnectionLocal(data);
     noSkyUsesExplicitZero();
+    independentLayerDeltaUsesWriteMetadata();
     nativeServerFixturePublishesEveryChunk();
     unpublishedLightDefersJoin(data);
     unknownOpticsRemainUnpublished(data);

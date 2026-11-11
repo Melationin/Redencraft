@@ -103,14 +103,16 @@ struct ProtocolChunkSnapshot {
   int airId = 0, stateBits = 0, biomeId = 0, pistonTypeId = 0;
   std::vector<SectionSnapshot> sections;
   std::vector<BlockEntity> blockEntities;
-  // Published immutable light for the same lifecycle. Null keeps the legacy
-  // visualization path for worlds that have not enabled lighting.
-  std::shared_ptr<const LightChunkSnapshot> light;
+  // Independently published layer views. The chunk packet combines their wire
+  // fields only; it never creates a combined light section or copies a page.
+  std::shared_ptr<const LightChunkSnapshot> blockLight;
+  std::shared_ptr<const LightChunkSnapshot> skyLight;
   std::size_t retainedBytes() const noexcept;
 };
 ProtocolChunkSnapshot prepareChunkSnapshot(
     ChunkSnapshot, const Registry &,
-    std::shared_ptr<const LightChunkSnapshot> light = {});
+    std::shared_ptr<const LightChunkSnapshot> blockLight = {},
+    std::shared_ptr<const LightChunkSnapshot> skyLight = {});
 Bytes encodeChunk(const ProtocolChunkSnapshot &, int chunkX, int chunkZ,
                   const Registry &);
 
@@ -132,6 +134,26 @@ struct ProtocolLightUpdate {
 ProtocolLightUpdate prepareLightUpdate(
     std::shared_ptr<const LightChunkSnapshot> current,
     std::shared_ptr<const LightChunkSnapshot> previous = {});
+// Network base for one layer. Deliberately contains no page pointers or light
+// bytes: the previous revision is used only to reject stale results and decide
+// whether the worker-provided dirty set spans the client's current base.
+struct LightLayerVersion {
+  int chunkX = 0;
+  int chunkZ = 0;
+  int minBlockSectionY = 0;
+  int blockSectionCount = 0;
+  std::uint64_t lifecycleEpoch = 0;
+  std::uint64_t revision = 0;
+};
+inline LightLayerVersion lightLayerVersion(const LightChunkSnapshot &view) {
+  return {view.chunkX, view.chunkZ, view.minBlockSectionY,
+          view.blockSectionCount, view.lifecycleEpoch, view.revision};
+}
+// Production incremental path: reads only the requested independently
+// published layer. changedSections came from that worker's write set.
+ProtocolLightUpdate prepareLayerLightUpdate(
+    std::shared_ptr<const LightChunkSnapshot> current, LightLayer layer,
+    const LightLayerVersion *previous = nullptr);
 // Full packet body for ClientboundLightUpdatePacket: VarInt x/z then light data.
 Bytes encodeLightUpdate(const ProtocolLightUpdate &);
 // One queued clientbound packet: already framed bytes, or a producer that

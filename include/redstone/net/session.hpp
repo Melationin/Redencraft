@@ -154,8 +154,11 @@ private:
   std::set<std::pair<int, int>> awaitingLightChunks_;
   std::map<std::pair<int, int>, std::shared_ptr<std::atomic<bool>>>
       chunkGenerations_;
-  std::map<std::pair<int, int>, std::shared_ptr<const LightChunkSnapshot>>
-      sentChunkLight_;
+  // Independent per-layer delta bases. Each stores only the layer revision,
+  // dimensions and the worker-provided dirty-section metadata that affects the
+  // client; page contents are never diffed after becoming mutable.
+  std::map<std::pair<int, int>, LightLayerVersion> sentChunkBlockLight_;
+  std::map<std::pair<int, int>, LightLayerVersion> sentChunkSkyLight_;
   std::optional<std::pair<int, int>> chunkCenter_;
   bool awaitingChunkBatch_ = false;
   bool joinPositionPending_ = false;

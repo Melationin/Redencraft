@@ -478,10 +478,12 @@ std::size_t lightSnapshotBytes(const LightChunkSnapshot &snapshot) noexcept {
   return bytes;
 }
 
-void appendLayer(Writer &out, const LightLayerSnapshot &layer) {
+void appendLayer(Writer &out, const LightLayerRef &layer) {
   if (layer.isMixed()) {
+    std::array<std::uint8_t, kLightLayerBytes> packed{};
+    layer.readPacked(packed);
     out.varInt(static_cast<int>(kLightLayerBytes));
-    out.raw(std::span<const std::uint8_t>(layer.packedData(), kLightLayerBytes));
+    out.raw(packed);
     return;
   }
   if (!layer.isUniform() || layer.uniformValue() == 0)
@@ -493,7 +495,29 @@ void appendLayer(Writer &out, const LightLayerSnapshot &layer) {
   out.raw(bytes);
 }
 
-void appendLightSections(Writer &out, const ProtocolLightUpdate &update) {
+void collectLayerSections(const LightChunkSnapshot &source, LightLayer type,
+                          ProtocolLightSections &sections) {
+  const std::size_t index = static_cast<std::size_t>(type);
+  for (int sectionY = source.minLightSectionY();
+       sectionY < source.minBlockSectionY + source.blockSectionCount + 1;
+       ++sectionY) {
+    const LightSectionSnapshot *section = source.section(sectionY);
+    if (!section)
+      continue;
+    const auto &layer = section->layers[index];
+    if (layer.isMissing())
+      continue;
+    if (layer.isUniform() && layer.uniformValue() == 0)
+      sections.emptySections.push_back(sectionY);
+    else
+      sections.dataSections.push_back(sectionY);
+  }
+}
+
+void appendLightSections(
+    Writer &out, const ProtocolLightUpdate &update,
+    const LightChunkSnapshot *skySourceOverride = nullptr,
+    const LightChunkSnapshot *blockSourceOverride = nullptr) {
   const auto writeLayer = [&](const ProtocolLightSections &sections,
                               std::vector<std::uint64_t> &mask,
                               std::vector<std::uint64_t> &empty) {
@@ -517,8 +541,25 @@ void appendLightSections(Writer &out, const ProtocolLightUpdate &update) {
                              const std::vector<int> &sections) {
     out.varInt(static_cast<int>(sections.size()));
     const auto layer = static_cast<std::size_t>(type);
+    const LightChunkSnapshot *source =
+        type == LightLayer::Sky ? skySourceOverride : blockSourceOverride;
+    if (!source && update.snapshot->layer &&
+        *update.snapshot->layer == type)
+      source = update.snapshot.get();
+    if (!source && !update.snapshot->layer) {
+      // Explicit compatibility path for hand-built combined test snapshots.
+      // Production layer views always set layer and never reach this branch.
+      source = type == LightLayer::Sky && update.snapshot->skyLayerSnapshot
+                   ? update.snapshot->skyLayerSnapshot.get()
+                   : type == LightLayer::Block &&
+                             update.snapshot->blockLayerSnapshot
+                         ? update.snapshot->blockLayerSnapshot.get()
+                         : update.snapshot.get();
+    }
+    if (!source && !sections.empty())
+      throw ProtocolError("light update has no source for its layer");
     for (int sectionY : sections) {
-      const LightSectionSnapshot *section = update.snapshot->section(sectionY);
+      const LightSectionSnapshot *section = source->section(sectionY);
       if (!section)
         throw ProtocolError("light update references a missing section");
       appendLayer(out, section->layers[layer]);
@@ -537,13 +578,16 @@ std::size_t ProtocolChunkSnapshot::retainedBytes() const noexcept {
              section.indices8.capacity() + section.indices16.capacity() * 2;
   for (const auto &entity : blockEntities)
     bytes += entity.nbt.capacity();
-  if (light)
-    bytes += lightSnapshotBytes(*light);
+  if (blockLight)
+    bytes += lightSnapshotBytes(*blockLight);
+  if (skyLight)
+    bytes += lightSnapshotBytes(*skyLight);
   return bytes;
 }
-ProtocolChunkSnapshot prepareChunkSnapshot(ChunkSnapshot snapshot,
-                                            const Registry &registry,
-    std::shared_ptr<const LightChunkSnapshot> light) {
+ProtocolChunkSnapshot prepareChunkSnapshot(
+    ChunkSnapshot snapshot, const Registry &registry,
+    std::shared_ptr<const LightChunkSnapshot> blockLight,
+    std::shared_ptr<const LightChunkSnapshot> skyLight) {
   ProtocolChunkSnapshot result;
   result.minY = snapshot.minY;
   result.maxY = snapshot.maxY;
@@ -562,12 +606,20 @@ ProtocolChunkSnapshot prepareChunkSnapshot(ChunkSnapshot snapshot,
   result.blockEntities.reserve(snapshot.pistons.size());
   for (const auto &piston : snapshot.pistons)
     result.blockEntities.push_back({piston.pos, encodeMovingPistonNbt(piston)});
-  if (light) {
-    if (!light->protocolReady || light->minLightSectionY() != snapshot.minY / 16 - 1 ||
-        light->lightSectionCount() != (snapshot.maxY - snapshot.minY) / 16 + 2)
-      throw ProtocolError("chunk light is unpublished, incomplete or misaligned");
-    result.light = std::move(light);
-  }
+  const auto validate = [&](const std::shared_ptr<const LightChunkSnapshot> &view,
+                            LightLayer expected) {
+    if (view && (!view->protocolReady || !view->layer ||
+                 *view->layer != expected ||
+                 view->minLightSectionY() != snapshot.minY / 16 - 1 ||
+                 view->lightSectionCount() !=
+                     (snapshot.maxY - snapshot.minY) / 16 + 2))
+      throw ProtocolError(
+          "chunk light is unpublished, incomplete, misaligned or combined");
+  };
+  validate(blockLight, LightLayer::Block);
+  validate(skyLight, LightLayer::Sky);
+  result.blockLight = std::move(blockLight);
+  result.skyLight = std::move(skyLight);
   return result;
 }
 Bytes encodeChunk(const ChunkSnapshot &snapshot, int cx, int cz,
@@ -579,9 +631,9 @@ Bytes encodeChunk(const ProtocolChunkSnapshot &snapshot, int cx, int cz,
   if (snapshot.minY % 16 || snapshot.maxY % 16 ||
       snapshot.minY >= snapshot.maxY)
     throw ProtocolError("chunk height must be aligned to sections");
-  if (snapshot.light &&
-      (snapshot.light->chunkX != cx || snapshot.light->chunkZ != cz))
-    throw ProtocolError("chunk light belongs to a different chunk identity");
+  for (const auto &view : {snapshot.blockLight, snapshot.skyLight})
+    if (view && (view->chunkX != cx || view->chunkZ != cz))
+      throw ProtocolError("chunk light belongs to a different chunk identity");
   Writer out;
   out.i32(cx);
   out.i32(cz);
@@ -655,8 +707,19 @@ Bytes encodeChunk(const ProtocolChunkSnapshot &snapshot, int cx, int cz,
     out.varInt(snapshot.pistonTypeId);
     out.raw(p.nbt);
   }
-  if (snapshot.light) {
-    appendLightSections(out, prepareLightUpdate(snapshot.light));
+  if (snapshot.blockLight || snapshot.skyLight) {
+    ProtocolLightUpdate combined;
+    combined.chunkX = cx;
+    combined.chunkZ = cz;
+    combined.snapshot = snapshot.blockLight ? snapshot.blockLight
+                                            : snapshot.skyLight;
+    if (snapshot.blockLight)
+      collectLayerSections(*snapshot.blockLight, LightLayer::Block,
+                           combined.block);
+    if (snapshot.skyLight)
+      collectLayerSections(*snapshot.skyLight, LightLayer::Sky, combined.sky);
+    appendLightSections(out, combined, snapshot.skyLight.get(),
+                        snapshot.blockLight.get());
     return std::move(out.data);
   }
   // Explicitly unlit worlds retain the legacy visualization fallback. The
@@ -711,7 +774,13 @@ ProtocolLightUpdate prepareLightUpdate(
   const auto append = [&](int sectionY, LightLayer layer, bool changed) {
     if (!changed)
       return;
-    const auto *now = result.snapshot->section(sectionY);
+    const LightChunkSnapshot *source =
+        layer == LightLayer::Sky && result.snapshot->skyLayerSnapshot
+            ? result.snapshot->skyLayerSnapshot.get()
+            : layer == LightLayer::Block && result.snapshot->blockLayerSnapshot
+                  ? result.snapshot->blockLayerSnapshot.get()
+                  : result.snapshot.get();
+    const auto *now = source->section(sectionY);
     if (!now)
       throw ProtocolError("light delta references a missing section");
     const auto &nowLayer = now->layers[static_cast<std::size_t>(layer)];
@@ -739,6 +808,55 @@ ProtocolLightUpdate prepareLightUpdate(
       append(change.sectionY, LightLayer::Sky, change.sky);
       append(change.sectionY, LightLayer::Block, change.block);
     }
+  }
+  return result;
+}
+
+ProtocolLightUpdate prepareLayerLightUpdate(
+    std::shared_ptr<const LightChunkSnapshot> current, LightLayer layer,
+    const LightLayerVersion *previous) {
+  if (!current || !current->protocolReady || !current->layer ||
+      *current->layer != layer)
+    throw ProtocolError("layer update source is not an independent ready view");
+  if (previous &&
+      (previous->chunkX != current->chunkX ||
+       previous->chunkZ != current->chunkZ ||
+       previous->lifecycleEpoch != current->lifecycleEpoch ||
+       previous->revision >= current->revision ||
+       current->deltaBaseRevision != previous->revision ||
+       previous->minBlockSectionY != current->minBlockSectionY ||
+       previous->blockSectionCount != current->blockSectionCount))
+    throw ProtocolError("layer update crossed a chunk lifecycle");
+
+  ProtocolLightUpdate result;
+  result.chunkX = current->chunkX;
+  result.chunkZ = current->chunkZ;
+  result.snapshot = std::move(current);
+  ProtocolLightSections &sections =
+      layer == LightLayer::Sky ? result.sky : result.block;
+  const std::size_t index = static_cast<std::size_t>(layer);
+  const auto append = [&](int sectionY) {
+    const LightSectionSnapshot *now = result.snapshot->section(sectionY);
+    if (!now)
+      return;
+    const auto &value = now->layers[index];
+    if (value.isMissing())
+      return;
+    if (value.isUniform() && value.uniformValue() == 0)
+      sections.emptySections.push_back(sectionY);
+    else
+      sections.dataSections.push_back(sectionY);
+  };
+  if (!previous) {
+    for (int sectionY = result.snapshot->minLightSectionY();
+         sectionY < result.snapshot->minBlockSectionY +
+                        result.snapshot->blockSectionCount + 1;
+         ++sectionY)
+      append(sectionY);
+  } else {
+    for (const auto &change : result.snapshot->changedSections)
+      if (layer == LightLayer::Sky ? change.sky : change.block)
+        append(change.sectionY);
   }
   return result;
 }

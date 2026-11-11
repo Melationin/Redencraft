@@ -220,6 +220,13 @@ public:
   void disableLighting();
   bool lightingEnabled() const { return lightService_ != nullptr; }
   LightService *lightService() const { return lightService_.get(); }
+  // Main-thread result handoff. It is also valid to call while the world tick
+  // is frozen, allowing completed light work to reach sessions immediately.
+  void drainLightPublications();
+  // Query-time vanilla composition. Block and sky remain separate in storage;
+  // this reads the two main-thread layer caches and returns
+  // max(block, sky - skyDarken), without creating a combined section.
+  int getBrightness(Pos pos, int skyDarken = 0) const;
   BlockState getBlock(Pos pos) const;
   // Heightmap.Types final maps. The four live maps are primed on import or
   // explicitly after raw construction; normal setBlock updates them in the
@@ -586,18 +593,15 @@ private:
   // the containersToTick/toRunThisTick drain state. ServerLevel keeps one pair
   // for Block and one for Fluid, so both are templates; they are completed in
   // engine.cpp so the containers stay out of the header.
-  std::unique_ptr<BlockTickQueue> tickQueue_ = std::make_unique<BlockTickQueue>();
+  std::unique_ptr<BlockTickQueue> tickQueue_;
   // ServerLevel.fluidTicks: a second LevelTicks with its own 65536 budget,
   // collected and drained after blockTicks and before the chunk stage.
-  std::unique_ptr<FluidTickQueue> fluidTickQueue_ =
-      std::make_unique<FluidTickQueue>();
+  std::unique_ptr<FluidTickQueue> fluidTickQueue_;
   std::unique_ptr<LightService> lightService_;
-  std::vector<std::shared_ptr<const LightSectionSnapshot>> emptyLightSections_;
 
   // ServerLevel.blockEvents (ObjectLinkedOpenHashSet) + reschedule list.
   struct BlockEventQueue;
-  std::unique_ptr<BlockEventQueue> blockEventQueue_ =
-      std::make_unique<BlockEventQueue>();
+  std::unique_ptr<BlockEventQueue> blockEventQueue_;
   std::vector<BlockEvent> blockEventsToReschedule_;
   std::int64_t nextSubTickCount();
 

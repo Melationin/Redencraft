@@ -261,17 +261,6 @@ const ItemType *itemType(const std::string &name) {
                             [&](const auto &entry) { return entry.name == n; });
   return found == registry.end() ? nullptr : &*found;
 }
-World::World(int minY, int maxY, int maxNeighborUpdates)
-    : minY_(minY), maxY_(maxY), maxUpdates_(maxNeighborUpdates) {
-  // Chunk section storage is a fixed inline array; reject a taller dimension
-  // instead of silently truncating sections or indexing out of bounds.
-  if (sectionCount() > kSectionCapacity)
-    throw std::invalid_argument(
-        "World: vertical range needs more than kSectionCapacity sections");
-}
-World::~World() { disableLighting(); }
-World::World(World &&) noexcept = default;
-World &World::operator=(World &&) noexcept = default;
 // ---------------------------------------------------------------------------
 // ScheduledTick.UNIQUE_TICK_HASH hashes the block identity and the position.
 // The interned name pointer is our Block reference, so the dedupe key is three
@@ -763,6 +752,21 @@ struct World::BlockEventQueue {
   }
 };
 
+World::World(int minY, int maxY, int maxNeighborUpdates)
+    : minY_(minY), maxY_(maxY), maxUpdates_(maxNeighborUpdates),
+      tickQueue_(std::make_unique<BlockTickQueue>()),
+      fluidTickQueue_(std::make_unique<FluidTickQueue>()),
+      blockEventQueue_(std::make_unique<BlockEventQueue>()) {
+  // Chunk section storage is a fixed inline array; reject a taller dimension
+  // instead of silently truncating sections or indexing out of bounds.
+  if (sectionCount() > kSectionCapacity)
+    throw std::invalid_argument(
+        "World: vertical range needs more than kSectionCapacity sections");
+}
+World::~World() { disableLighting(); }
+World::World(World &&) noexcept = default;
+World &World::operator=(World &&) noexcept = default;
+
 bool ScheduledTickDrainOrder::operator()(const ScheduledTick &a,
                                          const ScheduledTick &b) const {
   if (a.trigger != b.trigger)
@@ -1003,56 +1007,69 @@ void World::unloadChunk(int x, int z) {
 
 std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const {
   const Chunk *chunk = chunkAt(x, z);
-  if (!chunk)
+  if (!chunk || !lightService_)
     return nullptr;
+  const auto optical = lightService_->opticalTable();
+  if (!optical)
+    throw std::logic_error("light service has no optical table");
+
   auto input = std::make_unique<LightChunkInput>();
   input->chunkX = x;
   input->chunkZ = z;
   input->lifecycleEpoch = chunk->lightLifecycleEpoch;
   input->minBlockSectionY = minY_ >> 4;
   input->blockSectionCount = sectionCount();
-
-  if (emptyLightSections_.size() !=
-      static_cast<std::size_t>(input->blockSectionCount + 2))
-    throw std::logic_error("light empty-section cache is not initialized");
-  input->sections.push_back(emptyLightSections_.front());
-
+  input->geometrySections.reserve(static_cast<std::size_t>(sectionCount()));
   for (int section = 0; section < sectionCount(); ++section) {
     const Section &data = chunk->sections[section];
-    if (data.hasOnlyAir()) {
-      input->sections.push_back(
-          emptyLightSections_[static_cast<std::size_t>(section + 1)]);
-      continue;
+    LightSectionView view;
+    view.empty = data.hasOnlyAir();
+    if (!data.storage) {
+      view.bits = 0;
+      view.single = data.single;
+    } else if (const SectionStorage8 *block = data.as8()) {
+      view.bits = 8;
+      view.palette =
+          std::span<const BlockState::Id>(block->palette.data(),
+                                          block->paletteSize);
+      view.cells8 =
+          std::span<const std::uint8_t>(block->indices.data(),
+                                        block->indices.size());
+    } else if (const SectionStorage16 *wide = data.as16()) {
+      view.bits = 16;
+      view.palette =
+          std::span<const BlockState::Id>(wide->palette.data(),
+                                          wide->paletteSize);
+      view.cells16 =
+          std::span<const std::uint16_t>(wide->indices.data(),
+                                         wide->indices.size());
+    } else {
+      throw std::logic_error("unknown World section storage");
     }
-    std::vector<BlockLightProperties> palette;
-    std::vector<std::uint16_t> cells;
-    std::unordered_map<BlockState::Id, std::uint16_t> byState;
-    for (int index = 0; index < kLightVolume; ++index) {
-      const BlockState::Id state = data.get(index);
-      auto found = byState.find(state);
-      std::uint16_t paletteIndex;
-      if (found == byState.end()) {
-        paletteIndex = static_cast<std::uint16_t>(palette.size());
-        byState.emplace(state, paletteIndex);
-        palette.push_back(lightPropertiesOf(BlockState::fromId(state)));
-      } else {
-        paletteIndex = found->second;
-      }
-      if (!cells.empty()) {
-        cells[static_cast<std::size_t>(index)] = paletteIndex;
-      } else if (palette.size() > 1) {
-        // A previously uniform section changed representation. All preceding
-        // cells use palette[0].
-        cells.assign(kLightVolume, 0);
-        cells[static_cast<std::size_t>(index)] = paletteIndex;
-      }
-    }
-    input->sections.push_back(std::make_shared<const LightSectionSnapshot>(
-        input->minBlockSectionY + section, data.hasOnlyAir(), std::move(palette),
-        std::move(cells)));
+    input->geometrySections.push_back(
+        makeLightGeometrySection(*optical, view));
   }
-  input->sections.push_back(emptyLightSections_.back());
   return input;
+}
+
+void World::drainLightPublications() {
+  if (lightService_)
+    lightService_->drainPublished();
+}
+
+int World::getBrightness(Pos pos, int skyDarken) const {
+  if (!lightService_ || !isLoaded(pos))
+    return 0;
+  int block = 0;
+  int sky = 0;
+  if (const auto view = lightService_->latestLayerChunk(
+          LightLayer::Block, chunkIndex(pos.x), chunkIndex(pos.z)))
+    block = view->lightValue(LightLayer::Block, pos.x, pos.y, pos.z);
+  if (const auto view = lightService_->latestLayerChunk(
+          LightLayer::Sky, chunkIndex(pos.x), chunkIndex(pos.z)))
+    sky = view->lightValue(LightLayer::Sky, pos.x, pos.y, pos.z);
+  sky = std::max(0, sky - std::max(0, skyDarken));
+  return std::max(block, sky);
 }
 
 void World::enableLighting(LightWorkerOptions options) {
@@ -1063,15 +1080,6 @@ void World::enableLighting(LightWorkerOptions options) {
   if ((minY_ & 15) != 0)
     throw std::invalid_argument(
         "lighting requires minY aligned to a 16-block section");
-  const auto air = lightPropertiesOf(airState());
-  emptyLightSections_.clear();
-  emptyLightSections_.reserve(static_cast<std::size_t>(sectionCount() + 2));
-  for (int section = -1; section <= sectionCount(); ++section) {
-    emptyLightSections_.push_back(
-        std::make_shared<const LightSectionSnapshot>(
-            (minY_ >> 4) + section, true,
-            std::vector<BlockLightProperties>{air}, std::vector<std::uint16_t>{}));
-  }
   lightService_ = std::make_unique<LightService>(
       minY_ >> 4, sectionCount(), options);
   lightService_->setPublishCallback(
@@ -1101,7 +1109,6 @@ void World::refreshLightSnapshots() {
 
 void World::disableLighting() {
   lightService_.reset();
-  emptyLightSections_.clear();
 }
 bool World::isChunkLoaded(int x, int z) const { return chunkAt(x, z) != nullptr; }
 bool World::isLoaded(Pos p) const {
@@ -1258,7 +1265,6 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
                              : BlockState::fromId(targetSection.get(localIndex));
   if (old == state)
     return false;
-  const bool wasSectionEmpty = targetSection.hasOnlyAir();
   targetSection.set(localIndex, state.id());
   if (!changedChunk->heightmaps)
     changedChunk->heightmaps = std::make_unique<ChunkHeightmaps>(
@@ -1327,20 +1333,8 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
           return firstAvailable;
         });
   }
-  if (lightService_) {
-    const bool isEmpty = targetSection.hasOnlyAir();
-    if (hasDifferentLightProperties(old, state) ||
-        hasDifferentSectionLightProperties(wasSectionEmpty, isEmpty)) {
-      LightCellUpdate update;
-      update.chunkKey = chunkKey(chunkIndex(p.x), chunkIndex(p.z));
-      update.lifecycleEpoch = changedChunk->lightLifecycleEpoch;
-      update.sectionY = p.y >> 4;
-      update.localIndex = static_cast<std::uint16_t>(localIndex);
-      update.properties = lightPropertiesOf(state);
-      update.sectionEmpty = isEmpty;
-      lightService_->reportBlockCell(update);
-    }
-  }
+  if (lightService_)
+    lightService_->reportBlockCell({p.x, p.y, p.z, state.id()});
   // TODO: reproduce dirty/client notifications, POI, and generic block-entity
   // pre-removal/creation for supported entity blocks.
   // The opt-in L-1 light handoff is below; propagation remains TODO(L-2a/L-2b).

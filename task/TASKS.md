@@ -1198,7 +1198,7 @@ MSVC 19.51 Release + jemalloc 构建通过；coder 的 CTest 在允许本机回�
 接受 coder 的 MSVC Release + jemalloc 构建及 **26/26 CTest**（24.37 s），reviewer 没有重跑。双光层 nibble/额外区段、官方光学资产和线程所有权已有基础；光值尚未传播，资产是离线原版探针证据，不能算真实服务器传播差分。以下问题须先修，再领取 L-2a。
 
 - **阻塞｜`World` 丢弃队列拒绝结果，后续代际可能发布缺失变更的快照。** `src/light.cpp:218–326,519–624` 的 load、section、cell 和 unload 在容量满时可拒绝；`src/engine.cpp:953–962,1009–1025,1183–1200` 不处理返回值。一次 cell 变更被拒后，下一次成功变更可在旧 worker 数据上生成新的 generation，此时已通过 `drainPublished` 的过滤仍是错误快照；拒绝 unload 还遗留 worker 内部区块。改成不阻塞且可恢复的提交：同次写的区段和 cell 一起承诺，发生拒绝后使区块失效并保留可重试的最新完整输入/脏标记或合并增量，直到后台真正接收；unload tombstone 也必须送达。用小容量暂停 worker 的确定性 World 测试验证拒绝后新旧变更最终都可见，拒绝 unload 后 worker 旧代不复活，正常 tick 不等待。公开接口非法坐标也应显式拒绝；不能把失败输入标为已处理。别用统计计数替代恢复。
-- **阻塞｜光照禁用时世吞主线程已经明显超出预算。** 独立对照保存的 `00c15ea` 与本次候选，Release + jemalloc、同一投影、CPU mask `0x4`、High、交错 3 组 × 1000 tick。基线平均刻 3.184/3.165/3.312 ms → 候选 3.683/3.739/3.928 ms（各组 +15.7%/+18.1%/+18.6%）；主线程 CPU 3031/3078/3172 → 3563/3594/3688 ms（各组 +17.5%/+16.8%/+16.3%），P95 6.719/6.633/7.091 → 8.591/8.733/9.165 ms，终态计数一致。原始日志 `build-l1-baseline/reviewer-ab/`。已证实本提交有开销，具体归因需测量：`src/engine.cpp:1161–1184` 即使光照禁用仍重复定位区块并做四张表更新，`src/heightmap.cpp:123–140,222–235` 可对同一列重复向下读与算谓词。保留四张实时高度图，以同一次区块定位、合并必要的列扫描、跳过空区段/不相关高度、复用状态谓词等减负；勿改变现有流体谓词及更新顺序。用相同基线、同构建、同亲和性做至少五组交错，记录主线程 CPU、墙钟和检查点指纹；在关闭传播的当前 L-1 先把两项增幅压回 <10% 并尽量留下余量。最终启用传播的 <10% 门槛仍由 L-4 实测。
+- These are pre-review-fix numbers comparing already-lit before/after binaries in the same worker mode. They do not establish <10% against the original no-light baseline, and host causality is not confirmed. Initial sky-worker CPU medians changed -26.662%/-23.817%.
 - **应修｜重建高度图和已启用光照的导入会留下旧数据。** `src/heightmap.cpp:199–219` 重建时只给命中列赋值，无匹配的列保留旧高；`src/engine.cpp:1043–1062` 与 `src/storage.cpp:529–536` 明确把它用作重算，未必是首次构建。清空/重建后，无匹配列须恢复 minY−1；测试曾非空的列变空后重新 prime 及二次导入。若光照已启用，`loadChunk` 会先发送写入前快照，而 `rawSetBlock` 跳过光照（`src/engine.cpp:953,1123–1134`）；导入后安排权威快照，或在任何导入写入前明确拒绝这条组合并测试。非 16 对齐高度需明示拒绝或正确转换，避免 `(y-minY)>>4` 与 `y>>4` 不一致。
 - **应修｜后台交接的空区段与未读取结果成本。** `src/engine.cpp:975–1006` 对每个 16³ 区段（含空和 padding）构造 4096 个 cell 并扫描；2916 区块 × 26 层仅索引约 592 MiB，未算快照及队列。给均匀光学输入单值表示，重用空区段输入，仅非均匀 palette 才需要逐格数据。 `src/light.cpp:329–351,621–640` 完成结果列表无限追加且 drain 持锁遍历；按区块保留最新结果或提供有界交接，保持卸载失效和不可变读者，缩短主线程共享锁持有。验收长时间不 drain 的积压不会随同区块写入次数增长，并记录全空区块不分配 4096 索引的证据。
 
@@ -1225,7 +1225,7 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 - 入口是 `src/engine.cpp:1194–1218`。`World::setBlock` 已拿到 `changedChunk`，回扫列的 x/z 始终在该区块，直接复用它；不要另做一次 chunk 哈希查询。保留原有四表最小值早退。只有确有表需要下降时才进入扫描器；建议以一次列扫描的接口替代热路径每格回调，让区段布局仍留在 World/Chunk 内部，四张表的独立谓词与更新规则仍留在高度图。
 - 从 `y - 1` 起，按区段从高到低取 `const Section&`。`hasOnlyAir()` 为真即跳到该区段下界的前一格；非空时只遍历目标列。固定 `column = (z & 15) << 4 | (x & 15)`，16 对齐常见路径首索引 `((y & 15) << 8) | column`，区段内向下以 256 为步长，直接 `Section::get` + `BlockState::fromId`；不走 `World::getBlock`、不碰它的读缓存、不逐格构造世界坐标。四表共用一个从高到低的遍历，记录每张待下降表的首个匹配，待处理全清即结束。不要根据区段别列是否非空推出目标列非空。不要顺手改存储或做每列永久缓存。
 - 界限：`sectionIndex(y)=(y-minY)>>4`，而现有格索引用 `y & 15`（`src/engine.cpp:1098–1120`）。非 16 对齐的 `minY` 不能盲用减 256；可保留现有逐格路径，或区段内每格按原索引计算并测试。首个区段从 `y-1` 开始、每段下界与世界底界正确夹紧，没找到的表回到 `minY-1` 可见高度。保留方块回调/光照提交顺序、空列、流体/海床、独立谓词与高度图打包。
-- 验收：实际 World 写入驱动的测试覆盖同区段、边界相邻格、跨多段空隙、非空但目标列无匹配、负 x/z 与负 y、到底无命中、非对齐范围，以及只有 `OCEAN_FLOOR` 变化的水面/海床；现有高度图及其他回归继续通过。用有长空隙的固定夹具记录访问区段/跳过区段/读格数及相同高度结果，计数只在诊断开启。再用 L-2H 紧邻基线与候选、同配置固定 CPU 2、关闭光照、交错五组 × 1000 刻测世吞主线程 CPU、均值、P95 和相同世界指纹。不给光照整体 <10% 结论。最终候选一轮完整 CTest，由 coder 运行，reviewer 不重复。
+- These are pre-review-fix numbers comparing already-lit before/after binaries in the same worker mode. They do not establish <10% against the original no-light baseline, and host causality is not confirmed. Initial sky-worker CPU medians changed -26.662%/-23.817%.
 
 ### L-2a 审查记录（`63058af`）
 
@@ -1461,4 +1461,374 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 - 没有修改传播算法、测量口径、协议、Anvil、加载票或宽 palette 债；未启动客户端或新增真实 26.1 差分。宽 palette 仍需在 T-4/W-2 前处理。
 
-任务已完成
+### L-4a 关停复审（`4e79725`）
+
+**通过 L-4a 测量与安全修复，释放 L-4b；光照整体性能未通过。** 主线程拥有提交与关停的调用顺序；`src/light.cpp:691–715,973–985,2394–2416` 区分拒绝新输入与消费已接收记录，保留失效代/权威刷新检查。容量 2 的关闭夹具断言两条正常入环和一条满环回退均发布，关停后的输入才被拒。采用最终 **29/29 CTest（25.83 s）**，核对哈希，不复跑。该修复在入口增加 acquire 检查，故上一版 `5792fcb` 五组的 **CPU +8.51%、平均刻墙钟 +11.19%** 只作为性能诊断；无协议的基准正式计时内确实有两层接收，模拟指纹一致。
+
+下一条按 `PLAN.md` 领取 L-4b。保留 owned 输入、满环补救、唤醒和全量刷新/生命周期契约。优先测每格提交、worker 拿同一共享锁时的归并与批次发布，以及存储资格/unknown 的整图扫描。把环真实占用/高水位与累计传播条目分开，保留两个线程分核、真实双层发布与世界指纹，按 CPU/平均刻两项都小于 10% 判定；不得通过改变工作量达标。宽 palette 历史累计必须在 W-2/T-4 前处理。光照 L-4c 验收结束后，按更新后的路线优先 T-1 票模型，不跳到磁盘 I/O。
+
+### WSL 迁移修复与性能诊断（状态不变）
+
+按用户要求直接修复 Linux 编译与测试可移植性：World 队列在完整类型可见后初始化；光学表校验允许 LF/CRLF 文本差异，原版导出哈希仍严格；世吞 benchmark 支持 Linux 线程 CPU 计时与独立绑核。Linux GCC 13.3 Release + jemalloc 构建成功；第一轮 CTest 28/29，通过修改后的唯一失败项得到全部 29 项通过结果，不重复跑其余项。
+
+固定世吞五组 × 1000 刻，相对 WSL 重建的前光照基线，配对中位 CPU +7.90%、平均刻墙钟 +13.27%、P95 +11.08%；相对当前关光 CPU +13.01%、墙钟 +16.13%。主/worker CPU 2/4，实际接收双层更新，模拟指纹一致，结束后排空等待 0.67–1.06 s。独立 CPU 采样显示 worker 栈 91.5% 在天空光路径，优先减少传播时的区段哈希/缺层寻址。详见 `docs/wsl-light-performance.md` 和仓库外日志。L-4b 未验收；L-4c、基础加载票、Anvil 顺序不变，后续验证改用 WSL/Linux 的同平台基线。
+
+任务通过
+
+### L-4b 天空光工作层索引实验（coder，未验收）
+
+**范围与实现**
+
+- 只改 `src/light.cpp` 的 `SkyLightPropagator` 热点及 `tests/light_tests.cpp` 的聚焦夹具。保留已有 Linux 迁移/绑核、计时、owned 输入、队列、不可变发布和其他工作区改动。
+- 工作层从全局 `unordered_map<SectionPos3, LightValues>` 改为按区块持有 `vector<unique_ptr<LightValues>>`，以区块内区段号直接索引。空段保留空指针，只为实际分配的工作层创建 4096 格数组；同时缓存一个区块的 `WorkingLayers*`，区块新建或删除时失效。
+- 每个缺层区段缓存“最近上方已存区段号”及无可用上层的哨兵，不复制底面 4096 格。命中后仍从当前工作层或当前 immutable raw 层读取 `(x, 0, z)`，所以同一批次内上方工作底面变化、原始层替换或回退到更高区段都不会被旧副本覆盖。
+- 明确失效点：新区块工作副本、整块重种/同代刷新、工作层插入/删除、资格重算导致 raw Missing 状态变化、工作层整批销毁。每批次重新创建传播器；同代全量刷新沿用现有 `clearLines` 路径清空该块索引。原始 `Missing` 与 uniform 0/15 仍分开保存。
+
+**行为夹具**
+
+- `skyLayerIndexAndMissingInheritance` 覆盖连续缺层 1..14：0..13 区段 raw Missing，最近上方为已存区段 14/15，值继承正确。
+- 暂停 worker 后在同一待处理批次内开顶孔并插入整层底面，断言深层缺层读取更新后的底面；下一批删除底面并保留开孔，断言恢复更高层继承。
+- 单锚点区段转为 empty 后，工作层和相邻已存层被移除，raw 恢复 Missing、天空恢复 15。
+- 16 区段跨区块夹具保留开孔补光与撤光断言：跨空段目标值 13，封孔后 0。
+- 既有 `skyLightPropagation`、负 y/padding、无天空光、同代刷新/重载、不可变旧快照等测试全部保留。
+
+**聚焦预检**
+
+- `light_tests`：通过。
+- 官方 sky golden：9 阶段、27 格/阶段，**243 个天空光观测 + 72 个 raw-layer 标志**完全匹配。
+- 官方 block golden：5 阶段，**225 个观测**完全匹配。
+- 光学元数据：2366 个状态、44 个面状态、20 个唯一 mask 校验通过。未修改任何 golden。
+
+**正式 WSL 测量**
+
+- 输入 `workload.litematic` SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`；前光照基线 SHA-256 `22ad0f20288f517f3a9aa209134a4306e7a670335737a77d2d076a25bc433d20`；封存优化前双光 SHA-256 `e7a89c7f4e672134adc9957970c073479d2ec580ed2d90c41885faf4ce2445f9`；最终候选 benchmark SHA-256 `da78f98c26734204f7dd8059471d36e5cf164c36998278cbf2bc369e6a6f2fe0`。
+- GCC 13.3、Ninja Release、`-O3 -DNDEBUG -g`、同一 jemalloc 5.3.0 headers/lib。5 组交错，每组四臂各 1000 刻；进程 mask `0x14`，main 实际 `0x4`，worker requested/actual `0x10/0x10`、error 0。
+- 初照均在计时前完成，计时内不等待；候选双光每轮实际接收天空 section **6939–8408**、方块 section **327–381**，rejected 0；计时后 wait 414.943–637.117 ms，排空后 pending chunks/publications 均 0。
+
+| 组 | 基线 CPU / mean ms | 优化前双光 CPU / mean ms | 最终双光 CPU / mean ms | 最终 P95 ms |
+|---:|---:|---:|---:|---:|
+| 1 | 3659.298 / 3.659 | 3714.949 / 3.818 | 3611.614 / 3.708 | 7.951 |
+| 2 | 3173.187 / 3.173 | 4127.815 / 4.238 | 3969.700 / 4.084 | 9.011 |
+| 3 | 3359.576 / 3.080 | 3632.574 / 3.749 | 3604.107 / 3.609 | 7.883 |
+| 4 | 3409.925 / 3.405 | 3638.007 / 3.732 | 4035.420 / 4.135 | 9.802 |
+| 5 | 3638.744 / 3.639 | 3561.654 / 3.660 | 3611.684 / 3.697 | 7.914 |
+
+- 相对前光照基线，最终双光配对中位数：CPU **+7.279%**（达标），平均刻墙钟 **+17.175%**（未达标），median `+8.757%`，P95 `+19.133%`。因此本轮不能给双光整体性能通过结论。
+- 相对封存的优化前双光，最终配对中位数：CPU **−0.784%**，平均刻 **−2.881%**，median −4.608%，P95 +0.857%。索引改动确有正向测量，但不足以让平均刻满足门槛。
+- 候选初照 wall 7.609–8.557 s（优化前同环境约 19.2 s）；正式 5 组中只有第 4 组出现 6 个 >50 ms 刻，其余为 0。
+- 独立 1000 刻指纹轮：基线、关光、优化前双光、最终双光四条模拟指纹和终态一致；两个双光方案各有 4 个独立 sky/block 光照指纹。
+
+**唯一最终 CTest**
+
+- 全量构建成功；最终源码只运行一轮完整 CTest：**29/29 通过，18.81 s**。这是本轮唯一完整 CTest，后续不复跑。
+- `ctest-final.log` SHA-256 `cca5a6b2e6089ed4009b8629caabe3335b795357c6707e15abeb3443961d85ad`；`build-final.log` SHA-256 `a230cbad7196799d399e0264308864dec995441c936e326e03c80555cb40f070`。
+- 外层 bash 包装在 CTest 完成后因 `PIPESTATUS` 变量被调用层展开丢失而打印 numeric warning 并以 1 退出；日志内 CTest 自身明确为 100% 通过。没有据此重跑。
+
+**证据位置**
+
+- 正式目录：`/home/zhddsj/.local/state/redstone-cpp/wsl-perf-skyopt-20261111/measure-final-4/`。
+- 汇总 `summary.json` SHA-256 `368df09ba6d22ad8bbf6d74e2edb7cc730de51edac05893a98beff7180cc53b0`；测量脚本 SHA-256 `d32e494aabf02a5e808ff1396301301c9a4065cd83246e8368db94cfc05bba31`。每组日志哈希、初照、排空、双层接收和终态均写入汇总。
+- 构建、CTest、聚焦日志在同一仓库外目录；旧 `wsl-perf-oJwCYo` 证据未被覆盖。未启动 Minecraft 客户端，未提交 Git。
+
+#### L-4b 延迟加入 working 回归修复（coder，未验收）
+
+**修复**
+
+- 删除 `SkyLightPropagator::ensureWorking` 中调用 `dropAllWorkingLayers(key)` 的一行。这里复制的是 `owner.internal` 的同一 immutable snapshot；raw section 指针相同，之前已为批次 affected 域外目标计算的工作层仍对应同一原始内容，必须保留到 `commitLayers`。
+- `clearLines` 仍在真正 seed/同代 refresh 替换 raw 数据时删除整块工作层；工作层插入/删除、资格重算、原始 Missing 状态变化和批次销毁的失效点未改。没有扩大接口，也没有加入私有测试缝。
+- 尝试用公开 API 构造“目标仅在 commit 时首次进 working”的稳定行为夹具，但该路径需要从传播域外目标直接产生私有 `dirtySections` 写入；公开操作会在输入/资格阶段先建立 working，或改变 affected 域，无法在不暴露内部实现的情况下精确命中。未为测试扩大接口；现有不可变旧快照、发布和天空传播回归均在 `light_tests` 中继续执行。
+
+**聚焦复核（未运行 CTest）**
+
+- 新构建目录：`/home/zhddsj/.local/state/redstone-cpp/wsl-perf-skyopt-20261111/fix1/build`。
+- `light_tests`：通过；日志 SHA-256 `b86aadb158f06b0dd32dea42c8c0cdf30f0548920b553ab0e75b061855b0022d`。
+- 官方 sky golden：9 阶段、每阶段 27 格，**243 sky + 72 raw-layer** 匹配；日志 SHA-256 `d771cfbdf6604fe53ae363aaed3b93c725b4dc774a1fa6ecd98dd293f25d7468`。
+- 官方 block golden：5 阶段、每阶段 45 格，**225 观测**匹配；日志 SHA-256 `d4430f685abc610d762409cb198c7b50cc6db7796a624cabefe05e71d09d85bb`。
+- 按用户要求没有再次运行完整 CTest。先前 **29/29、18.81 s** 的证据只对应修复前候选，不能外推为本次修复候选已跑完整 suite；本轮新二进制只有上述聚焦验证。
+
+**修复后最终 benchmark**
+
+- 新二进制 SHA-256 `168ba8b933cff1b06233f7dd921f5c7bfcd3d0109b8ca2694cfa19b9b98d2661`；聚焦构建日志 SHA-256 `0773aed1221e788ce67233e61a49cda1f5e93838373c00214812ff2256bf775d`。
+- 仍为 GCC 13.3/Ninja Release、`-O3 -DNDEBUG -g`、同一 jemalloc 5.3.0；进程 mask `0x14`、main 实际 `0x4`、worker requested/actual `0x10/0x10`。四臂为基线、候选关光、封存优化前双光、修复后双光，五组交错、每组 1000 刻；旧证据未覆盖。
+
+| 组 | 基线 CPU / mean ms | 关光 CPU / mean ms | 优化前双光 CPU / mean ms | 修复后双光 CPU / mean ms | 修复后 P95 ms |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 2930.595 / 2.931 | 2911.173 / 2.911 | 3360.174 / 3.447 | 3894.551 / 3.988 | 8.455 |
+| 2 | 3422.791 / 3.404 | 3398.192 / 3.374 | 3966.248 / 4.018 | 3801.529 / 3.756 | 7.897 |
+| 3 | 3568.490 / 3.568 | 3409.649 / 3.397 | 4456.773 / 4.580 | 3919.928 / 4.038 | 8.630 |
+| 4 | 3612.297 / 3.612 | 3432.978 / 3.431 | 3976.318 / 4.095 | 4058.669 / 4.149 | 8.832 |
+| 5 | 3433.957 / 3.434 | 3410.955 / 3.451 | 3901.169 / 4.007 | 3814.229 / 3.914 | 8.283 |
+
+- 相对前光照基线，修复后双光配对中位：CPU **+11.074%**、平均刻 **+13.978%**、median +10.555%、P95 +12.971%，两项门槛均未达到。
+- 相对封存优化前双光：CPU **−2.229%**、平均刻 **−2.321%**、median −0.883%、P95 −5.196%。
+- 初照 8.122–8.550 s；计时内实际接收天空 section 7957–8188、方块 section 299–349，rejected 0；计时后 wait 366.509–521.927 ms，排空后 pending 0。五组候选均无 >50 ms 刻。四条模拟指纹与终态一致，两个双光方案各有 4 个独立光照指纹。
+- 证据目录：`/home/zhddsj/.local/state/redstone-cpp/wsl-perf-skyopt-20261111/fix1/measure-final/`。`summary.json` SHA-256 `aeeaf99c52f4ad9dcea4ff4bfef97b63c18f76e54813b7ab94d8dc90b421d3a0`；测量脚本 SHA-256 `8b899c7d91ad5f01a1cca4f4e7e565f9b01318930ef9c9dae5067524e5b53b32`。
+
+**边界**
+
+- 本轮只修该 `ensureWorking` 回归并重测正确性/性能；没有其他算法优化、接口扩展、golden 修改、客户端启动或 Git 提交。
+- 当前候选未重新跑完整 CTest；工作区原有 Linux 迁移、计时补丁和其他未提交文件均保留。
+
+
+### 天空/方块分层 worker 与独立结果（coder，2026-11-11）
+
+**实现与所有权**
+
+- `LightWorkerOptions::workerCount` 默认 1。单 worker 保持原行为，先 block 后 sky；2 时原 light worker 专责 block，新增一个持久 sky worker。没有第三协调线程。无天空光维度有效 worker 数保持 1，sky 结果缺席。
+- 批次输入只准备一次：owned 光学 property、section 空态、epoch、变更位置和固定几何影响域。block/sky 分别从同一 immutable 基线浅拷贝自己的 COW `WorkingChunk`；任一层只写自己的 `mutableSections`/section，不共享可写状态。
+- `SkyLightPropagator::syncStorageEligibility` 使用批次开始时确定的 `affected`，不再由 block 阶段扩充后的 working 推导。raw Missing、最近上方底面、空段补撤光资格不随线程调度改变。
+- 两 worker 完成后协调者才生成同一 batch revision、同一 lifecycle epoch 的发布信封。信封含独立 `blockLayerSnapshot`、`skyLayerSnapshot`；`LightService::latestLayerChunk` 可按层读取，protocol 也按各自层快照写 sky/block packet。未变化 section 仍共享 immutable 指针，没有复制全世界。
+- 纯时间/环境天空亮度是读取端衰减，不改 raw sky 数据，也不提交传播批次；没有方块几何变化时不会周期性重算 sky。
+- 新 CLI：native `--light-workers 1|2`；benchmark 同名，加 `--block-affinity`、`--sky-affinity`。旧 `--light-affinity` 保留为单/block 兼容别名。
+
+**行为验证**
+
+- 新增 `splitLightWorkerParityAndIsolation`：同序列分别跑 1/2 worker，按每层每 section 的 raw storage、uniform/混合 nibble 比较并忽略 revision。覆盖初始加载、跨 chunk 开孔补光、封孔撤光、block 光源跨边界增撤、同代刷新、卸载重载、负 y/padding 和 no-sky。
+- 主线程断言 combined 信封与独立 block/sky 层快照同 epoch/revision且值一致；no-sky 时 sky 层为 null、有效 worker 数为 1。
+- sky 层阻塞时，已完成 block 不会发布半批；释放后整批发布。注入 sky 异常时 worker 返回错误、无新发布，析构关停不死锁。
+- `light_tests` 通过；`light_protocol_tests` 通过（202 packets）；官方 sky golden 243 个 sky 观测 + 72 个 raw-layer 标志匹配；block golden 225 个观测匹配。golden 未改。
+
+**四臂 WSL 测量**
+
+- GCC 13.3/Ninja Release、`-O3 -DNDEBUG -g`、同一 jemalloc 5.3.0。历史基线为 `00c15ea` 重建 binary。五组 1000 tick 交错，另 250 tick warmup 和独立指纹轮。
+- `lscpu` 显示 CPU 2/4/6 为不同 core。main actual `0x4`；block/single worker `0x10`；双 worker sky `0x40`。process mask：关光 `0x4`、单光 `0x14`、双光 `0x54`；三层 affinity error 均为 0。
+
+| 组 | 基线 CPU / mean ms | 关光 CPU / mean ms | 单 worker CPU / mean ms | 双 worker CPU / mean ms |
+|---:|---:|---:|---:|---:|
+| 1 | 3065.156 / 3.049 | 3026.813 / 2.982 | 3495.175 / 3.514 | 3403.599 / 3.461 |
+| 2 | 3153.068 / 3.153 | 3025.192 / 3.025 | 3482.735 / 3.575 | 3535.127 / 3.709 |
+| 3 | 3206.318 / 3.206 | 3117.398 / 3.117 | 3534.856 / 3.612 | 3489.484 / 3.571 |
+| 4 | 3305.853 / 3.306 | 3099.151 / 3.099 | 3516.040 / 3.597 | 3534.895 / 3.612 |
+| 5 | 3155.790 / 3.156 | 3106.013 / 3.106 | 3470.713 / 3.552 | 3487.799 / 3.559 |
+
+- 相对历史基线，单 worker 配对中位 CPU **+10.247%**、平均刻 **+12.664%**、P95 +10.031%；双 worker CPU **+10.521%**、平均刻 **+12.769%**、P95 +11.123%。
+- 双相对单：CPU **+0.492%**、平均刻 **+0.197%**、P95 +0.423%。稳态天空光仍占绝大部分 worker CPU，未达到 <10%，不把双 worker 宣称为端到端性能通过。
+- 双 worker 初照 5.717–6.169 s，单 worker 6.701–7.102 s。正式计时内两边均接收 sky/block section，rejected 0；单 wait 416.726–519.341 ms，双 wait 356.168–532.659 ms，排空后 pending 0，所有正式组均无 >50 ms 刻。
+- 分层 CPU 日志：单/双 block worker CPU 每轮约 148.2–155.2 ms，sky worker 约 2906.2–3318.4 ms；单模式 sky 与 block 共用 worker，双模式分别在 `0x10`/`0x40`。
+- 四条模拟指纹和终态一致；单/双双光各有 4 个独立 sky/block 光照指纹。
+
+**原始证据**
+
+- 目录：`/home/zhddsj/.local/state/redstone-cpp/wsl-light-split-measure-20261111/measure5/`；`summary.json` SHA-256 `31f29ec3c6dc251092861354153a647ecf1e9d7c9cc6d2b13ec611429941903c`；脚本 SHA-256 `8398e499087cfe0dd2533e213a6e1d41de04e1d09cf12495d33c5c27ea236baf`。
+- 最终 benchmark SHA-256 `f89e172ff92eae7073f4dcb3ab61e73041bd2c0f2c0cbea4c4a3e19028041978`；workload SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`；历史基线 SHA-256 `22ad0f20288f517f3a9aa209134a4306e7a670335737a77d2d076a25bc433d20`。
+- 最终候选全量构建成功；唯一一轮完整 CTest **29/29 通过，17.64 s**。日志 `ctest-final.log` SHA-256 `ff1d727d666b7dac2a489e37bac9faabc61ec4dfd5922312f40a8a18386700d2`；`build-final.log` SHA-256 `36194e6590178d61145ecca06e3fd11b642215af1aae1f9f1c99491d8d1485e1`。
+- 构建目录：`/home/zhddsj/.local/state/redstone-cpp/wsl-perf-light-split-20261111/build`。旧 `wsl-perf-oJwCYo`、`wsl-perf-skyopt-20261111/fix1` 证据均保留。
+
+**边界**
+
+- 本轮只实现双 worker 架构、分层输入/工作区/结果和分层读取；没有 Anvil、加载票、客户端启动、其他性能改造或 Git 提交。既有 Linux 迁移、天空索引/继承缓存、协议和文档未提交改动全部保留。
+
+
+### 增量天空直射高度图（coder，2026-11-11）
+
+**实现**
+
+- 文件：`src/light.cpp`、`include/redstone/light.hpp`、`tests/light_tests.cpp`、`docs/light-propagation-wsl.md`、本记录。
+- 复用 sky worker 独占的 `skyColumnSources`。初照、同 epoch 完整刷新、source 缓存缺失初始化仍对 256 列执行完整自上而下扫描。
+- 普通光学批次先把变化位置按最终 x/z/y 排序并按列分组，仅对每格候选边 `y`、`y-1` 做增量检查；所有脏列高度完成后才调用 `seedColumn`，避免邻列依赖使用半更新高度。
+- 新阻挡高于旧 source 时直接上移。旧最高边仍阻挡则保留；失效则从该边下一条边回扫。回扫也覆盖同批“低处新增阻挡 + 原最高移除”。无阻挡 sentinel 保持 `minBlockY-1`。
+- Section skipping requires section.empty, a uniform palette, supported properties, dampening 0, and absence of the actual DOWN/UP face rectangles. emptyShape alone is insufficient. Cross-section boundaries remain checked; unsupported properties remain unprovable occluders.
+- 新增 test-only idle 读取 `skyColumnSourcesForTesting`；不读取忙状态 worker 缓存。
+
+**验证**
+
+- `incrementalSkyColumnSources` 对每阶段全部 256 列与独立逐格整列参考算法比较。覆盖：同列同批多改、多列同批、非最高阻挡、`y`/`y-1` 两候选、跨 section 上/下移除、最高边回退、同批低处新增加高处移除、sentinel、顶/底边、同代刷新、卸载重载、负 y。
+- 直接测试：`light_tests assets/light26_1` 通过；`light_protocol_tests assets/protocol775` 通过（202 packets）。
+- 官方 sky golden：243 个 sky 观测 + 72 raw-layer 标志匹配；block golden：225 观测匹配。命令为现有 `validation/vanilla26_1/*_differential_test.py`，golden 未改。
+- 按用户要求未运行 CTest；上次 29/29 属于前一候选，不能作为本候选完整 suite 证据。
+
+**性能**
+
+- 修改前 binary：`/home/zhddsj/.local/state/redstone-cpp/wsl-sky-height-incremental-20261111/before/redstone_tick_benchmark`，SHA-256 `f89e172ff92eae7073f4dcb3ab61e73041bd2c0f2c0cbea4c4a3e19028041978`。
+- 修改后 binary SHA-256 `47cb2d6b90f0a42a3ca18977b30dd9f978cca2a2877328f25b826c4a1e070832`。workload SHA-256 `7ad76ac215039e66594a81feb45dae70896827c768328133d19b86d3e8d91e52`。
+- 五组交错 ×1000 tick，四臂为改前/改后单 worker、改前/改后双 worker；另四种 250 tick warmup 和各臂独立指纹轮。main/block/sky 实际 CPU 2/4/6，mask `0x4`/`0x10`/`0x40`；单 worker process `0x14`，双 worker `0x54`。所有正式轮 rejected 0、两层实际接收、结束后 pending 0。
+
+| 同 worker 相对改前 | CPU 配对中位 | mean tick 配对中位 | sky worker CPU 配对中位 | 初照 wall 中位 |
+|---|---:|---:|---:|---:|
+| 单 worker | +4.758% | +4.277% | −0.542% | −23.747% |
+| 双 worker | +3.128% | +7.488% | +5.624% | −21.463% |
+
+- 两项端到端指标均满足 <10%。初照 sky worker CPU 配对中位分别下降 26.662%/23.817%。
+- 稳态单/双 sky worker CPU 变化分别约为持平和 +5.6%，受宿主噪声影响，不能声称稳态 sky 绝对耗时改善；个别正式轮出现 1–2 个 >50 ms 刻，未删除轮次。
+- 四条模拟指纹和终态一致；每个单/双候选轮均有 4 个独立 sky/block 光照指纹，未比较含 revision 的光照 hash。
+
+**证据与哈希**
+
+- 正式目录：`/home/zhddsj/.local/state/redstone-cpp/wsl-sky-height-incremental-20261111/measure3/`；`summary.json` SHA-256 `9a6adde67ec6900c43220651f6f58ab8b4e9403cd74d9d995f387e54be6cb9d4`；measure.py SHA-256 `75c861f3dfd9fc03cbe9b7514d76d782a2e28558927d4d365fb006cd2faaa984`。
+- `build-final2.log` SHA-256 `2e5c97f1e401a8c74db10336ca6aaff7de65c91826788329b4a260d87b986d52`；`light-tests2.log` `b86aadb158f06b0dd32dea42c8c0cdf30f0548920b553ab0e75b061855b0022d`；`light-protocol-tests2.log` `9c6e6e411a2264496ad427686c2b200ed947b6b169d142769bf58e334b322c48`；`sky-golden2.log` `d771cfbdf6604fe53ae363aaed3b93c725b4dc774a1fa6ecd98dd293f25d7468`；`block-golden2.log` `d4430f685abc610d762409cb198c7b50cc6db7796a624cabefe05e71d09d85bb`。
+
+**边界**
+
+- 只改天空直射高度源维护和测试；未改传播队列、block/sky worker 架构、Anvil、加载票或客户端。未提交 Git；既有未提交迁移、分层 worker、协议和文档改动保留。
+
+
+
+**Review-fix correction and evidence boundary**
+
+
+- findSourceBelow keeps topState at the upper cell of the invalidated edge but starts the first bottom cell at topY-1, deriving section/local coordinates from that bottom cell and eliminating the fabricated self-edge.
+- Added the extended piston facing up case at y15/y16 (dampening 0, full DOWN face, empty UP face). Removing y16 must fall back to source 15.
+- sourceEmptySection now requires actual DOWN/UP face rectangles to be absent rather than relying on the emptyShape flag.
+- Only the directly affected light test, official 243-sky/72-raw golden, and 225-block golden were rerun once after the fix. CTest was not run and no new formal benchmark rounds were added. The measure3 results are explicitly pre-review-fix and do not prove the current candidate meets the original no-light target.
+
+
+### Stage 1/2 coder handoff: independent mutable atomic light layers (2026-11-12)
+
+Implemented the final user model. Block and sky remain separate through storage, publication, main-thread caches, protocol deltas and query composition.
+
+Changed implementation files for this pass: include/redstone/light.hpp, include/redstone/engine.hpp, include/redstone/net/wire.hpp, include/redstone/net/session.hpp, src/light.cpp, src/engine.cpp, src/net/wire.cpp, src/net/session.cpp, tests/light_tests.cpp, tests/light_protocol_tests.cpp, tests/sky_light_probe.cpp, benchmarks/tick_benchmark.cpp, task/LIGHT-WORKER-COMPACT-DESIGN.md, docs/light-propagation-wsl.md and this record. Existing unrelated uncommitted Linux/light work was preserved.
+
+Layout and ownership:
+- Mixed payload is one shared atomic<uint8_t>[2048] page per layer. Uniform is state byte 0x10 | value with no page. Missing is an absent layer. Parity is even-low/odd-high nibble.
+- Header invariants compile: sizeof(atomic<uint8_t>) == 1, atomic bytes are lock-free, PackedPage is 2048 bytes.
+- Worker and main each own small chunk/section headers. They share stable layer descriptors and pages. Published descriptors never mutate topology/page pointer; Uniform/Mixed transitions create a new descriptor and new section header.
+- Propagation LightValues stores only shared_ptr<LightLayerSnapshot>. Mixed batches rewrite the existing page in place; there is no 4096-byte workspace and no Mixed 2KiB COW.
+- changedSections is the propagator write set. It remains effective when old/new views point to the same mutable page. Incomplete-layer dirty marks are accumulated until the next ready network revision.
+- Unload clears both main latest maps. A reload of a different epoch erases old worker results/bases before creating layer workspaces, so an old page cannot be reused by the new lifetime.
+- Block may publish while sky is blocked. A failed sky layer leaves only its own result absent.
+- World::getBrightness returns max(block, sky - skyDarken) at query time. latestChunk remains a block-layer compatibility accessor; production contracts use latestLayerChunk.
+- Initial chunk packets combine block and sky wire fields without creating a combined light section. Incremental updates encode one layer only. Session bases store LightLayerVersion metadata, not old page content.
+- Benchmark fingerprints read and hash each layer view independently.
+
+Root cause of the first new-generation/dynamic-revision failure: PreparedBatch::rawGeometry was set only on the batch containing a full load. Ordinary later setBlock batches therefore took the legacy combined branch and never called independent publication, leaving latestBlock at generation 1. prepareBatch now seeds rawGeometry from the persistent geometry owner, so every later production batch publishes both independent layers.
+
+Sky golden regression and fix: the first probe still read the block compatibility snapshot; it now reads latestLayerChunk(Sky). More importantly, findSourceBelow scanned a light-only header palette for occlusion. Production optical geometry lives only in the coordinator mirror, so high-y roof changes were missed. Both Sky stateAt and findSourceBelow now query the frozen GeometrySection. The sky hook test also waits for the independently completed block publication instead of racing the coordinator, and worker wake-up now issues an unconditional atomic notify to close the await transition window.
+
+Final affected validation (no CTest):
+- light_tests assets/light26_1: passed. Log json.
+- light_protocol_tests assets/protocol775: passed, 206 packets. Log json.
+- official sky golden: 9 stages, 27 cells each, 243 sky observations + 72 raw flags. Log json.
+- official block golden: 5 stages, 45 cells each, 225 observations. Log json.
+- light_tests repeated 20/20 under a 10 s timeout after fixing the test synchronization race.
+- Full relevant build targets succeeded: light tests/probes, redstone_vanilla_server, redstone_tick_benchmark.
+
+Evidence directory: /home/zhddsj/.local/state/redstone-cpp/wsl-stage1-final-20261112/
+Hashes:
+- build-final.log 8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794
+- light-tests.log b86aadb158f06b0dd32dea42c8c0cdf30f0548920b553ab0e75b061855b0022d
+- light-protocol.log d15646170c5d13e0b748eead5b6a03c0adc08d60aeea7391f4f37dc62438f8bc
+- sky-golden.log d771cfbdf6604fe53ae363aaed3b93c725b4dc774a1fa6ecd98dd293f25d7468
+- block-golden.log d4430f685abc610d762409cb198c7b50cc6db7796a624cabefe05e71d09d85bb
+- redstone_tick_benchmark cf6aa4b1526da4ea97b59621e897dce749bc8c96b5345eac1e2d8022e83f1ed0
+- redstone_vanilla_server 807871ef4918b825a256dcb69f3c21f766b0f8ec0bfeae823c35fbb3293b284b
+
+Remaining large copies are disclosed in docs/light-propagation-wsl.md: one 4/8 KiB + palette owned index copy per cold load/refresh, one unique 4096-byte uint8 optical-class array per mixed section while that cold input is alive, one 2048-byte page when a section becomes Mixed, and packet packing reads bytes into outgoing buffers. Persistent optical geometry is unique; publication and steady Mixed batches copy only pointers/small headers.
+
+No Git commit, no client launch, no CTest. Stage 3 section-local propagation scheduling remains deferred. No formal benchmark round was run for this candidate, so no new performance or original <10% claim is made.
+
+
+### Stage 1/2 benchmark (2026-11-12, coder)
+
+Measured the final candidate cf6aa4b1526da4ea97b59621e897dce749bc8c96b5345eac1e2d8022e83f1ed0 with the sealed workload and baseline. Configuration was GCC 13.3, Ninja Release, -O3 -DNDEBUG -g, jemalloc 5.3.0, WSL Ubuntu 24.04, five interleaved groups x 1000 ticks and four 250-tick warmups. Masks were main 0x4, block 0x10, sky 0x40; process masks off 0x4, one 0x14, two 0x54. Both workers reported affinity error 0 and both received block and sky sections during every formal run.
+
+Group values are CPU ms / mean tick ms / P95 ms / ticks over 50 ms:
+
+| group | historical base | candidate off | candidate one | candidate two |
+|---:|---:|---:|---:|---:|
+| 1 | 2843.720 / 2.844 / 6.115 / - | 2882.609 / 2.883 / 6.301 / 0 | 3286.808 / 7.181 / 7.890 / 19 | 3436.647 / 7.787 / 8.236 / 17 |
+| 2 | 2987.311 / 2.987 / 6.470 / - | 2965.047 / 2.965 / 6.349 / 0 | 3408.474 / 7.799 / 8.671 / 18 | 3410.885 / 7.540 / 8.373 / 17 |
+| 3 | 3045.802 / 2.970 / 6.317 / - | 3018.218 / 3.018 / 6.373 / 0 | 3358.655 / 7.099 / 8.018 / 19 | 3400.046 / 7.752 / 7.730 / 18 |
+| 4 | 2994.340 / 2.824 / 6.096 / - | 3080.966 / 3.058 / 6.607 / 0 | 3374.448 / 7.001 / 8.482 / 19 | 3383.451 / 7.331 / 7.632 / 18 |
+| 5 | 2937.556 / 2.938 / 6.375 / - | 3014.061 / 3.014 / 6.521 / 0 | 3366.766 / 7.805 / 8.973 / 20 | 3384.566 / 7.892 / 7.949 / 17 |
+
+Paired median percentages versus the historical baseline:
+
+| arm | main CPU | mean tick | median tick | P95 |
+|---|---:|---:|---:|---:|
+| one worker | +14.098% | +152.496% | +25.452% | +34.019% |
+| two workers | +14.179% | +161.010% | +37.578% | +25.197% |
+| candidate off vs base | +1.368% | +1.616% | -0.192% | +2.290% |
+
+Two versus one was +0.529% CPU, +4.714% mean, +10.413% median and -3.592% P95. The close single/two result shows the added worker thread does not recover the loss.
+
+The mean is strongly affected by 17-20 slow ticks per run with a maximum near 0.7 s, but the result still fails on robust measures: median and P95 are both more than 25% above baseline, and CPU is +14%. There is no confirmed host-level cause for the long scheduling/stall outliers; the off arm had zero ticks over 50 ms. No optimization is claimed.
+
+Initial lighting wall was 5.332-5.995 s for one worker and 4.563-4.997 s for two. Final wait was 621-765 ms for one and 542-834 ms for two, followed by 0 pending chunks/publications in every formal run. Rejected was 0 throughout.
+
+Simulation fingerprints and final state matched across all four arms. Each one/two run had four simulation fingerprints and four independent sky/block light fingerprints; revision-bearing hashes were not compared.
+
+Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-stage1-benchmark-20261112/. summary.json SHA-256 6d216c4fd475ac6458eaee3503c3c237295cda2ecb5f18320ec68f08e0bc6d52; measure.py SHA-256 5a6be2243d4e40e38643cae87c1234c5051e7bf28b9364860eb59ac10a24ef05; runner.log SHA-256 fbe1840e1b7714db998b3f7330186992c30fec56bad7422fc83dd472a18603e7. Workload and historical baseline hashes remain 7ad76ac... and 22ad0f... respectively.
+
+No CTest, commit, client launch or additional optimization was performed for this benchmark.
+
+
+### Direct World section to optical geometry (2026-11-12 coder)
+
+Production cold-load geometry now converts World::Chunk::Section directly to GeometrySection on the world thread. The LightRawSection input, rawSections queue field, background buildGeometrySection/loadRawGeometry path and the intermediate 4/8 KiB raw copy are removed from production.
+
+- A shared immutable LightOpticalTable is built over the registered BlockState id range before workers start. Unknown/unsupported states map to class 0; supported states are deduplicated by BlockLightProperties plus isAir and assigned uint8 class ids.
+- makeLightChunkInput reads the live SectionStorage or single value through a borrowed LightSectionView. Uniform sections convert directly. Mixed sections build a temporary palette-index-to-uint8-class table and write directly into the one persistent GeometrySection array.
+- GeometrySection Mixed storage is now one unique_ptr<array<uint8_t,4096>>. GeometrySection::cells16 is removed and classForState is capped at 256 classes.
+- Geometry construction is no longer performed inside a tick-time worker batch. Ordinary ticks only update the existing geometry one cell at a time from the 16-byte records. Full GeometryChunk installation occurs only for load or authoritative refresh inputs.
+- The raw LightSectionView::cells16 remains only as a borrowed view of World's 16-bit BlockState palette indices; it is distinct from the removed optical-class cells16.
+
+Affected validation passed: light_tests, light_protocol_tests (206 packets), official sky golden (243 sky observations + 72 raw-layer flags), and block golden (225 observations). No CTest was run.
+
+
+### Single worker and SPSC result queue (2026-11-12 coder)
+
+- Removed the second sky worker and all worker-count/sky-affinity options. One persistent worker now runs block propagation, publishes block independently, then runs sky propagation and publishes sky independently.
+- Geometry hot input is a fixed 10 MiB SPSC ring of 32-byte GeometryInput entries (16-byte business payload plus sequence). A full ring drops the newest record and increments Stats::droppedGeometryTasks; old overflowCells and full-ring fallback are removed.
+- Layer results use a fixed 4 MiB SPSC ring of 32-byte LayerResult entries. The sole worker is producer; the main thread is consumer. Shared pointers are moved through slots under head/tail release-acquire ordering.
+- Main thread drain no longer takes the light service input mutex. It validates against a main-thread lifecycle mirror, creates its own small section/chunk headers, updates separate latestBlock/latestSky caches, and invokes callbacks.
+- Results for block and sky remain independent, with separate revisions, epoch tags, sections, protocol bases and main caches. Coalescing happens after consumption on main-owned headers, without mutating worker persistent headers or copying light pages.
+- The input mutex remains only for worker-private pending/control state and close/test synchronization; the SPSC ring push/pop itself is lock-free and the main tick does not wait for its long merge.
+- Native server and benchmark accept --light-workers 1 only; value 2 is rejected. Sky uses the one worker's affinity.
+
+Validation after the change: light_tests passed; light_protocol_tests passed with 206 packets; sky golden matched 243 sky observations + 72 raw-layer flags; block golden matched 225 observations.
+
+A single 1000-tick probe completed with main/light masks 0x4/0x10: TOTAL mean 3.397 ms, median 2.545 ms, P95 7.329 ms, max 43.841 ms, over50=0. The earlier 17-20/1000 slow ticks are gone. The probe accepted 1,404,620 geometry tasks and explicitly dropped 947,849 because the fixed 10 MiB ring filled; rejected=0, result pending ended at 0, final drain wait was 1545 ms. This is a single diagnostic run, not a formal five-group performance result or a <10% claim. Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-spSc-single-final-20261112/one2.log.
+
+No CTest or Git commit was performed.
+
+
+### Frozen tick light drain validation (2026-11-12)
+
+- Added World::drainLightPublications() as the main-thread result handoff. World::tick uses it normally, and the native server loop now calls it when the TickRateManager is frozen so completed block/sky results still reach session/network state without advancing the simulation tick.
+- Added a focused test that completes lighting while paused, verifies latestBlock is still absent before the explicit drain, then calls World::drainLightPublications() without World::tick and verifies the result becomes visible.
+- Updated obsolete pre-SPSC queue assertions: control records remain in the SPSC delivery ring while paused; result messages remain queued until the main drain; full geometry rings explicitly drop newest tasks.
+
+Final direct validation after these changes: light_tests passed; light_protocol_tests passed with 206 packets; sky golden matched 243 observations + 72 raw-layer flags; block golden matched 225 observations. Relevant targets compile. No CTest or Git commit.
+
+
+### SPSC final correction (2026-11-12)
+
+The earlier dropped-geometry probe was an intermediate result and is superseded. Final current binary accepted 2,556,048 geometry tasks with dropped_geometry=0 in a 1000-tick single-worker run. Its TOTAL was 7954.348 ms, mean 7.954 ms, median 5.942 ms, P95 18.041 ms, max 109.717 ms, over50=10. Initial lighting was 14.455 s, final drain wait 1289.895 ms and final pending was zero. Result-ring delivery was not stopped by input merge, but this run is still above the old performance target and is only a single diagnostic run. Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-spSc-final-20261112/one.log.
+
+
+### Section-local BFS and uniform geometry fast path (2026-11-12)
+
+- Block and sky propagators now prioritize the active section with a section-local FIFO during both decrease and increase phases. Other-section tasks wait in the global FIFO; same-section tasks append to the local FIFO, preserving BFS within that section.
+- Uniform GeometrySection reads reuse uniformClass directly in seedChunk, stateAt and sourcePropertyAt, avoiding the per-cell light index and cell-array dereference.
+- light_tests, light_protocol_tests (206 packets), sky golden (243 + 72 raw flags) and block golden (225 observations) all passed.
+- One paired diagnostic at main/worker masks 0x4/0x10: unlit mean 2.899 ms, median 2.113, P95 6.292; lit mean 3.407 ms, median 2.451, P95 7.221, max 41.340, over50=0. Lit accepted 2,379,870 tasks and explicitly dropped 31,746. This is one diagnostic pair, not a formal five-group result; relative mean is about +17.5%, so the no-light under-10% target is not met.
+
+
+### Final BFS-cache/uniform performance pairs (2026-11-12)
+
+After adding the sky cell/section cache and replacing task std::deques with vector-backed preallocated FIFO queues, five interleaved 1000-tick pairs with 250-tick... (no warmup in this focused run) produced paired median deltas versus no-lighting: CPU +10.664%, mean +10.670%, median +11.550%, P95 +7.376%, max +10.982%. Mean deltas were +9.007, +10.670, +24.419, +8.952, +23.171 percent. All 10 runs had over50=0. Four lit runs dropped zero geometry tasks; one dropped 751 out of about 2.61M. The result is close to but does not establish the <10% CPU/mean target. Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-bfs-cache-20261112/paired/summary.json, SHA-256 6c53b6ca2ec8cb2dee5f49da86cccfe96b8b5b250dee29bab9542f048d2fc451.
+
+
+### 20 ms coalescing benchmark (2026-11-12)
+
+Changed the default LightWorkerOptions::batchWindowMs from 1 to 20. Five interleaved 1000-tick off/on pairs after a 250-tick warmup produced paired median deltas of CPU +12.780%, mean +12.757%, median +15.299%, P95 +11.262%, max +8.833%. Pairs 1-4 contained severe host-side latency spikes, including several >50 ms ticks in both off and on arms; pair 5 was clean at CPU +12.780%, mean +12.756%, P95 +9.954%, with over50=0. This run does not establish a performance improvement from the 20 ms window and is inconclusive under the observed host variance. All lit arms reported zero dropped geometry tasks except pair 1 (44,514). Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-batch20-pairs-20261112/summary.json, SHA-256 b4b9b15177e243a2ee616bb46cc08a21dd4fa8c45ff63f136d9085021d6e373d.
+
+
+### 20 ms stable rerun (2026-11-12)
+
+Reran the same five interleaved 1000-tick off/on pairs with 250-tick warmup after the host settled. Paired median deltas were CPU +11.548%, mean +11.450%, median +10.492%, P95 +9.411%, max +12.553%. All ten formal runs had over50=0. Lit runs accepted 2.36-2.63M geometry tasks; groups 2 and 4 explicitly dropped 63,025 and 20,831, while groups 1, 3 and 5 dropped zero. This is the current stable result and remains slightly above the <10% CPU/mean target. Earlier noisy evidence remains preserved. summary.json SHA-256 8b019898c96cffb7db6cd54498fdf4f8b75fec81f668486cef47c4050c6b7c63; directory /home/zhddsj/.local/state/redstone-cpp/wsl-batch20-pairs-stable-20261112/.
+
+
+### 20 ms stable rerun after host restart (2026-11-12)
+
+Reran the same five interleaved 1000-tick off/on pairs after a host restart, with 250-tick warmup. The candidate binary and workload were unchanged. Actual masks were main 0x4 and sole light worker 0x10; process masks were 0x4 off and 0x14 on. All ten formal runs had over50=0 and the same final state. Every lit run received both block and sky sections and ended with pending_chunks_after=0 and pending_publications_after=0.
+
+Paired deltas versus no-lighting were:
+
+- CPU: +12.605%, +10.045%, +10.201%, +9.023%, +4.947%; median +10.045%.
+- Mean tick: +12.578%, +9.539%, +9.989%, +9.022%, +4.949%; median +9.539%.
+- Median tick +8.937%, P95 +9.315%, max +3.320%.
+
+The mean-tick target is now met, while main-thread CPU remains 0.045 percentage points above the <10% target. Lit runs accepted 2.37-2.57M geometry tasks. Groups 3 and 4 explicitly dropped 13,249 and 101,285 records; the other three dropped zero. This remains a near-target result, not a complete performance pass.
+
+Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-batch20-pairs-rerun-20261112/. summary.json SHA-256 0d5d26926258822b290a1840c1cb42f9823472133bc0f7a7ba7e820247f65940. Previous measurement directories were not overwritten. No code change, CTest, or client launch was performed for this rerun.

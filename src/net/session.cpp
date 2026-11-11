@@ -1177,7 +1177,8 @@ void Session::expireChunk(std::pair<int, int> chunk) {
   if (token != chunkGenerations_.end())
     token->second->store(false, std::memory_order_release);
   chunkGenerations_.erase(chunk);
-  sentChunkLight_.erase(chunk);
+  sentChunkBlockLight_.erase(chunk);
+  sentChunkSkyLight_.erase(chunk);
   awaitingLightChunks_.erase(chunk);
 }
 void Session::refreshChunkView() {
@@ -1236,8 +1237,12 @@ void Session::sendChunkBatch() {
     const auto *service = world_.lightService();
     bool ready = false;
     for (const auto chunk : pendingChunks_) {
-      const auto light = service->latestChunk(chunk.first, chunk.second);
-      if (light && light->protocolReady) {
+      const auto block =
+          service->latestLayerChunk(LightLayer::Block, chunk.first, chunk.second);
+      const auto sky =
+          service->latestLayerChunk(LightLayer::Sky, chunk.first, chunk.second);
+      if (block && block->protocolReady &&
+          (!block->skyLightEnabled || (sky && sky->protocolReady))) {
         ready = true;
         break;
       }
@@ -1261,10 +1266,15 @@ void Session::sendChunkBatch() {
     pendingChunks_.erase(pendingChunks_.begin());
     if (!world_.isChunkLoaded(x, z))
       continue;
-    std::shared_ptr<const LightChunkSnapshot> light;
+    std::shared_ptr<const LightChunkSnapshot> blockLight;
+    std::shared_ptr<const LightChunkSnapshot> skyLight;
     if (world_.lightingEnabled()) {
-      light = world_.lightService()->latestChunk(x, z);
-      if (!light || !light->protocolReady) {
+      const auto *service = world_.lightService();
+      blockLight = service->latestLayerChunk(LightLayer::Block, x, z);
+      skyLight = service->latestLayerChunk(LightLayer::Sky, x, z);
+      if (!blockLight || !blockLight->protocolReady ||
+          (blockLight->skyLightEnabled &&
+           (!skyLight || !skyLight->protocolReady))) {
         awaitingLightChunks_.insert({x, z});
         continue;
       }
@@ -1272,8 +1282,8 @@ void Session::sendChunkBatch() {
     // Snapshot on the tick thread (the world is not thread safe), then let the
     // writer thread run the palette/bit packing. The batch-start ordering is
     // preserved because queue items are drained in order.
-    auto snapshot =
-        prepareChunkSnapshot(world_.snapshotChunk(x, z), data_.registry, light);
+    auto snapshot = prepareChunkSnapshot(world_.snapshotChunk(x, z),
+                                         data_.registry, blockLight, skyLight);
     for (const auto &section : snapshot.sections)
       bytes += section.palette.size() * sizeof(BlockState::Id) +
                section.indices8.size() + section.indices16.size() * 2 + 64;
@@ -1292,8 +1302,10 @@ void Session::sendChunkBatch() {
       return;
     sentChunks_.emplace(x, z);
     chunkGenerations_[{x, z}] = generation;
-    if (light)
-      sentChunkLight_[{x, z}] = std::move(light);
+    if (blockLight)
+      sentChunkBlockLight_[{x, z}] = lightLayerVersion(*blockLight);
+    if (skyLight)
+      sentChunkSkyLight_[{x, z}] = lightLayerVersion(*skyLight);
     awaitingLightChunks_.erase({x, z});
     ++count;
   }
@@ -1306,32 +1318,45 @@ void Session::lightPublished(
     std::shared_ptr<const LightChunkSnapshot> snapshot) {
   try {
     if (closed() || phase_ != Phase::Play || !snapshot ||
-        !snapshot->protocolReady)
+        !snapshot->protocolReady || !snapshot->layer)
       return;
     const std::pair key{snapshot->chunkX, snapshot->chunkZ};
     if (awaitingLightChunks_.contains(key)) {
-      awaitingLightChunks_.erase(key);
-      queuePendingChunk(key);
+      const auto *service = world_.lightService();
+      const auto block = service
+                             ? service->latestLayerChunk(LightLayer::Block,
+                                                         key.first, key.second)
+                             : nullptr;
+      const auto sky = service
+                           ? service->latestLayerChunk(LightLayer::Sky,
+                                                       key.first, key.second)
+                           : nullptr;
+      if (block && block->protocolReady &&
+          (!block->skyLightEnabled || (sky && sky->protocolReady))) {
+        awaitingLightChunks_.erase(key);
+        queuePendingChunk(key);
+      }
       return;
     }
     if (!sentChunks_.contains(key))
       return;
-    auto previous = sentChunkLight_.find(key);
-    if (previous == sentChunkLight_.end() ||
-        snapshot->revision <= previous->second->revision)
+    auto &byLayer = *snapshot->layer == LightLayer::Block
+                        ? sentChunkBlockLight_
+                        : sentChunkSkyLight_;
+    auto previous = byLayer.find(key);
+    if (previous == byLayer.end())
       return;
-    if (snapshot->lifecycleEpoch != previous->second->lifecycleEpoch ||
-        snapshot->chunkX != previous->second->chunkX ||
-        snapshot->chunkZ != previous->second->chunkZ)
-      throw ProtocolError("stale light lifecycle reached the session");
-    // A drained incomplete revision does not advance the ready-to-ready base.
-    // Normally the worker's delta already spans that gap. If a lifecycle or
-    // coalescing gap still exists, send all current layer metadata for this one
-    // chunk rather than scanning every chunk/session on each tick.
-    auto update = snapshot->deltaBaseRevision == previous->second->revision
-                      ? prepareLightUpdate(snapshot, previous->second)
-                      : prepareLightUpdate(snapshot);
-    previous->second = std::move(snapshot);
+    if (snapshot->revision <= previous->second.revision)
+      return;
+    if (snapshot->lifecycleEpoch != previous->second.lifecycleEpoch ||
+        snapshot->chunkX != previous->second.chunkX ||
+        snapshot->chunkZ != previous->second.chunkZ)
+      throw ProtocolError("stale light layer lifecycle reached the session");
+    auto update = snapshot->deltaBaseRevision == previous->second.revision
+                      ? prepareLayerLightUpdate(snapshot, *snapshot->layer,
+                                               &previous->second)
+                      : prepareLayerLightUpdate(snapshot, *snapshot->layer);
+    previous->second = lightLayerVersion(*snapshot);
     if (update.sky.dataSections.empty() &&
         update.sky.emptySections.empty() &&
         update.block.dataSections.empty() &&
@@ -1381,8 +1406,16 @@ void Session::lightChunkLifecycle(int chunkX, int chunkZ, bool loaded) {
   if (!availableChunks_.contains(key) || !chunkVisible(key) ||
       !world_.isChunkLoaded(chunkX, chunkZ))
     return;
-  const auto light = world_.lightService()->latestChunk(chunkX, chunkZ);
-  if (light && light->protocolReady)
+  const auto *service = world_.lightService();
+  const auto block = service
+                         ? service->latestLayerChunk(LightLayer::Block,
+                                                     chunkX, chunkZ)
+                         : nullptr;
+  const auto sky = service
+                       ? service->latestLayerChunk(LightLayer::Sky, chunkX, chunkZ)
+                       : nullptr;
+  if (block && block->protocolReady &&
+      (!block->skyLightEnabled || (sky && sky->protocolReady)))
     queuePendingChunk(key);
   else
     awaitingLightChunks_.insert(key);

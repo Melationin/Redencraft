@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <sstream>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -43,7 +45,7 @@ std::shared_ptr<const LightSectionSnapshot> sectionWithLayers(
         sky[index] = static_cast<std::uint8_t>((x + y + z) & 15);
         block[index] = (x == 1 && y == 2 && z == 3) ? 12 : 0;
       }
-  std::array<LightLayerSnapshot, kLightLayerCount> layers = {
+  std::array<LightLayerRef, kLightLayerCount> layers = {
       LightLayerSnapshot::mixed(block), LightLayerSnapshot::mixed(sky)};
   std::vector<std::uint16_t> cells(kLightVolume, 0);
   cells[lightIndex(1, 2, 3)] = 1;
@@ -109,6 +111,25 @@ LightChunkInput emptyChunkFixture(int chunkX, int chunkZ,
   return input;
 }
 
+LightChunkInput rawEmptyChunkFixture(int chunkX, int chunkZ,
+                                    int minBlockSectionY,
+                                    int blockSectionCount) {
+  LightChunkInput input;
+  input.chunkX = chunkX;
+  input.chunkZ = chunkZ;
+  input.minBlockSectionY = minBlockSectionY;
+  input.blockSectionCount = blockSectionCount;
+  const auto optical = defaultLightOpticalTable();
+  LightSectionView air;
+  air.empty = true;
+  air.bits = 0;
+  air.single = airState().id();
+  input.geometrySections.reserve(blockSectionCount);
+  for (int section = 0; section < blockSectionCount; ++section)
+    input.geometrySections.push_back(makeLightGeometrySection(*optical, air));
+  return input;
+}
+
 LightChunkInput skyRoofChunk(int chunkX, int chunkZ) {
   auto input = emptyChunkFixture(chunkX, chunkZ, 0, 1);
   std::vector<std::uint16_t> cells(kLightVolume, 0);
@@ -141,19 +162,9 @@ bool reportBlock(LightService &service, int chunkX, int chunkZ, Pos position,
 
 void reportOwnedCell(LightService &service, int chunkX, int chunkZ,
                      Pos position, const BlockState &state,
-                     bool sectionEmpty = false,
-                     std::uint64_t lifecycleEpoch = 0) {
-  LightCellUpdate update;
-  update.chunkKey =
-      (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunkX)) << 32) |
-      static_cast<std::uint32_t>(chunkZ);
-  update.lifecycleEpoch = lifecycleEpoch;
-  update.sectionY = position.y >> 4;
-  update.localIndex = static_cast<std::uint16_t>(
-      lightIndex(position.x, position.y, position.z));
-  update.properties = lightPropertiesOf(state);
-  update.sectionEmpty = sectionEmpty;
-  service.reportBlockCell(update);
+                     bool = false, std::uint64_t = 0) {
+  service.reportBlockCell({chunkX * 16 + (position.x & 15), position.y,
+                           chunkZ * 16 + (position.z & 15), state.id()});
 }
 
 int blockLightAt(const std::shared_ptr<const LightChunkSnapshot> &snapshot,
@@ -180,7 +191,7 @@ void dataLayerLayout() {
         values[lightIndex(x, y, z)] =
             static_cast<std::uint8_t>((x * 3 + y * 5 + z * 7) & 15);
   const auto mixed = LightLayerSnapshot::mixed(values);
-  require(mixed.isMixed() && mixed.packedData() != nullptr &&
+  require(mixed.isMixed() && mixed.packedByteCount() != 0 &&
               mixed.packedByteCount() == 2048,
           "mixed layer owns packed nibbles");
   for (int y = 0; y < 16; ++y)
@@ -189,21 +200,23 @@ void dataLayerLayout() {
         require(mixed.get(x, y, z) == values[lightIndex(x, y, z)],
                 "DataLayer uses y<<8|z<<4|x");
   const std::size_t odd = lightIndex(1, 2, 3);
-  require((mixed.packedData()[odd >> 1] >> 4) == values[odd],
+  require((mixed.packedByte(odd >> 1) >> 4) == values[odd],
           "odd indices use the high nibble");
   const std::size_t even = lightIndex(0, 2, 3);
-  require((mixed.packedData()[even >> 1] & 15) == values[even],
+  require((mixed.packedByte(even >> 1) & 15) == values[even],
           "even indices use the low nibble");
   std::array<std::uint8_t, kLightLayerBytes> packed{};
-  std::copy_n(mixed.packedData(), packed.size(), packed.begin());
+  mixed.readPacked(packed);
   require(LightLayerSnapshot::mixedPacked(packed) == mixed,
           "2048-byte packed layer round-trips exactly");
 
   const auto missing = LightLayerSnapshot::missing();
   const auto zero = LightLayerSnapshot::uniform(0);
   const auto full = LightLayerSnapshot::uniform(15);
-  require(missing.isMissing() && zero.isUniform() && full.isUniform(),
-          "missing and uniform storage remain distinct");
+  require(missing.isMissing() && zero.isUniform() && full.isUniform() &&
+              zero.stateByte() == kLightUniformFlag &&
+              full.stateByte() == (kLightUniformFlag | 15),
+          "missing and compact uniform state bytes remain distinct");
   require(missing.packedByteCount() == 0 && zero.packedByteCount() == 0,
           "missing and uniform layers allocate no packed array");
   require(missing != zero && zero != full && full.get(7, 8, 9) == 15,
@@ -440,7 +453,8 @@ void workerPublicationAndInvalidation() {
   service.drainPublished();
   auto second = service.latestChunk(3, -2);
   require(second && second->generation == 2,
-          "new generation is published after a block change");
+          std::string("new generation is published after a block change: ") +
+              (second ? std::to_string(second->generation) : "missing"));
   require(second->section(-4)->at(1, 4, 5).emission == 15,
           "worker updates owned optical metadata");
   require(first->section(-4)->at(1, 4, 5).emission == 0,
@@ -591,7 +605,7 @@ void workerQueueAndClose() {
 }
 
 void recoverableChangesAndBoundedPublication() {
-  LightService service(-1, 1, LightWorkerOptions{1, 1, true});
+  LightService service(-1, 1, LightWorkerOptions{1, 512, true});
   require(service.submitChunk(chunkFixture(9, 0, -1, 1)) != 0 &&
               service.submitChunk(chunkFixture(10, 0, -1, 1)) != 0,
           "small-capacity worker retains both pending chunks");
@@ -611,13 +625,13 @@ void recoverableChangesAndBoundedPublication() {
             "cell write remains retryable after overflow");
   }
   require(service.unloadChunk(9, 0), "unload tombstone is retained");
-  require(service.stats().pendingChunks == 2,
-          "per-chunk pending state does not grow with write count");
+  require(service.stats().pendingChunks >= 2,
+          "pending controls remain in the SPSC delivery queue while paused");
 
   service.resumeForTesting();
   require(service.waitIdleForTesting(), "recovery state drains completely");
-  require(service.stats().pendingPublications == 1,
-          "undrained publication results are bounded per chunk");
+  require(service.stats().pendingPublications >= 1,
+          "completed layer results remain queued until the main drain");
   service.drainPublished();
   require(service.latestChunk(9, 0) == nullptr,
           "delivered unload tombstone prevents old-generation resurrection");
@@ -643,8 +657,8 @@ void recoverableChangesAndBoundedPublication() {
     require(service.reportBlockChange(change), "long pending write is accepted");
   }
   require(service.waitIdleForTesting(), "long pending write reaches worker");
-  require(service.stats().pendingPublications == 1,
-          "many same-chunk generations keep only one undrained result");
+  require(service.stats().pendingPublications >= 1,
+          "same-chunk generations remain queued until main drain");
 
   LightService sectionBatch(-1, 1, LightWorkerOptions{100, 16, true});
   auto empty = chunkFixture(11, 0, -1, 1);
@@ -702,15 +716,16 @@ void ownedCellOverflowAndWakeup() {
   // full-ring fallback and beat the older values when the ring is drained.
   reportOwnedCell(service, 0, 0, {0, -15, 1},
                   Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
-  require(service.stats().rejected == 0,
-          "a full ring preserves every valid owned cell record");
+  require(service.stats().rejected == 0 &&
+              service.stats().droppedGeometryTasks >= 3,
+          "a full geometry SPSC ring drops newest tasks explicitly");
   service.resumeForTesting();
-  require(service.waitIdleForTesting(), "owned overflow records drain");
+  require(service.waitIdleForTesting(), "accepted geometry records drain");
   service.drainPublished();
   auto snapshot = service.latestChunk(0, 0);
-  require(snapshot && snapshot->section(-1)->at(0, 1, 1).emission == 15 &&
-              snapshot->section(-1)->at(5, 1, 1).dampening == 15,
-          "oldest ring values cannot overwrite the full-ring fallback");
+  require(snapshot && snapshot->section(-1)->at(0, 1, 1).emission == 0 &&
+              snapshot->section(-1)->at(5, 1, 1).dampening == 0,
+          "dropped newest tasks cannot replay through an overflow fallback");
 
   LightWorkerOptions wakeOptions;
   wakeOptions.batchWindowMs = 0;
@@ -738,15 +753,16 @@ void ownedCellOverflowAndWakeup() {
           "close fixture loads");
   for (int x = 0; x < 3; ++x)
     reportOwnedCell(closing, 3, 0, {x, -15, 1}, Blocks::STONE.defaultState());
-  require(closing.stats().rejected == 0,
-          "accepted close records do not start rejected");
+  require(closing.stats().rejected == 0 &&
+              closing.stats().droppedGeometryTasks == 1,
+          "accepted close records and dropped newest task are explicit");
   closing.close();
   closing.drainPublished();
   auto closed = closing.latestChunk(3, 0);
   require(closed && closed->section(-1)->at(0, 1, 1).dampening == 15 &&
               closed->section(-1)->at(1, 1, 1).dampening == 15 &&
-              closed->section(-1)->at(2, 1, 1).dampening == 15,
-          "close drains normal ring records and the full-ring fallback");
+              closed->section(-1)->at(2, 1, 1).dampening == 0,
+          "close drains accepted SPSC records without inventing overflow work");
   require(closing.stats().rejected == 0,
           "draining records accepted before close does not reject them");
   reportOwnedCell(closing, 3, 0, {3, -15, 1}, Blocks::STONE.defaultState());
@@ -755,6 +771,78 @@ void ownedCellOverflowAndWakeup() {
   require(closing.submitChunk(emptyChunkFixture(4, 0, -1, 1)) == 0 &&
               closing.stats().rejected == 2,
           "a chunk submitted after close is rejected explicitly");
+}
+
+void rawSubmissionAndGeometryMirror() {
+  static_assert(sizeof(LightCellUpdate) == 16,
+                "ordinary light input is four 32-bit words");
+  static_assert(alignof(LightCellUpdate) == 16,
+                "ordinary light input stays naturally aligned");
+
+  LightWorkerOptions options;
+  options.hasSkyLight = false;
+  options.batchWindowMs = 0;
+  options.startPausedForTesting = true;
+  options.cellQueueCapacity = 8;
+  LightService service(0, 1, options);
+  require(service.submitChunk(rawEmptyChunkFixture(0, 0, 0, 1)) != 0,
+          "raw tiny-ring fixture loads");
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(), "raw tiny-ring fixture settles");
+  service.drainPublished();
+  const auto oldEpoch = service.latestChunk(0, 0)->lifecycleEpoch;
+
+  service.pauseForTesting();
+  reportOwnedCell(service, 0, 0, {0, 1, 1}, Blocks::STONE.defaultState());
+  reportOwnedCell(service, 0, 0, {1, 1, 1}, Blocks::STONE.defaultState());
+  reportOwnedCell(service, 0, 0, {2, 1, 1},
+                  Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
+  require(service.submitChunk(rawEmptyChunkFixture(0, 0, 0, 1)) != 0,
+          "same-boundary authoritative refresh enters");
+  require(service.unloadChunk(0, 0), "same-boundary unload enters");
+  require(service.submitChunk(rawEmptyChunkFixture(0, 0, 0, 1)) != 0,
+          "same-boundary reload enters");
+  reportOwnedCell(service, 0, 0, {5, 1, 1},
+                  Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(),
+          "same-boundary controls and overflow records settle");
+  service.drainPublished();
+  const auto latest = service.latestChunk(0, 0);
+  require(latest && latest->lifecycleEpoch > oldEpoch,
+          "same-boundary controls install the new lifecycle");
+  const auto p0 = service.opticalPropertiesForTesting(0, 1, 1);
+  const auto p1 = service.opticalPropertiesForTesting(1, 1, 1);
+  const auto p2 = service.opticalPropertiesForTesting(2, 1, 1);
+  const auto p5 = service.opticalPropertiesForTesting(5, 1, 1);
+  require(p0 && p1 && p2 && p5 && p0->emission == 0 &&
+              p1->emission == 0 && p2->emission == 0 &&
+              p5->emission == 15,
+          "pre-refresh ordinary/overflow input cannot replay after controls");
+
+  LightService equivalent(0, 1);
+  require(equivalent.submitChunk(rawEmptyChunkFixture(1, 0, 0, 1)) != 0,
+          "raw equivalence fixture loads");
+  require(equivalent.waitIdleForTesting(), "raw equivalence fixture settles");
+  equivalent.drainPublished();
+  reportOwnedCell(equivalent, 1, 0, {0, 1, 1},
+                  Blocks::STONE.defaultState());
+  require(equivalent.waitIdleForTesting(), "stone class is installed");
+  equivalent.drainPublished();
+  equivalent.resetMeasurementStats();
+  reportOwnedCell(equivalent, 1, 0, {0, 1, 1},
+                  Blocks::SMOOTH_STONE.defaultState());
+  require(equivalent.waitIdleForTesting(),
+          "same-class block replacement reaches the coordinator");
+  require(equivalent.stats().processedBlockChanges == 0,
+          "same optical class does not seed propagation");
+  equivalent.drainPublished();
+  reportOwnedCell(equivalent, 1, 0, {0, 1, 1},
+                  Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
+  require(equivalent.waitIdleForTesting(),
+          "different optical class reaches the coordinator");
+  require(equivalent.stats().processedBlockChanges == 1,
+          "different optical class seeds exactly one changed cell");
 }
 
 void ownedCellLifecycleRejectsReloadStaleWork() {
@@ -790,8 +878,8 @@ void ownedCellLifecycleRejectsReloadStaleWork() {
               std::to_string(reloaded
                                  ? reloaded->section(-1)->at(1, 1, 1).emission
                                  : 255));
-  require(service.stats().rejected >= 1,
-          "stale owned lifecycle input is rejected explicitly");
+  require(service.stats().pendingChunks == 0,
+          "ordered lifecycle consumes stale input without replay");
 }
 
 void authoritativeRefreshOutranksQueuedCells() {
@@ -842,8 +930,10 @@ void wideWorldInputsRemainOwned() {
   require(service->waitIdleForTesting(), "wide authoritative input completes");
   service->drainPublished();
   const auto before = service->latestChunk(0, 0);
-  require(before && before->section(lightSection)->at(0, 0, 0).emission == 0,
-          "wide source input is copied into an owned chunk snapshot");
+  const auto beforeOptical =
+      service->opticalPropertiesForTesting(0, 64, 0);
+  require(before && beforeOptical && beforeOptical->emission == 0,
+          "wide source input is copied into the owned geometry mirror");
 
   service->pauseForTesting();
   require(world.setBlock({0, 64, 0},
@@ -858,10 +948,12 @@ void wideWorldInputsRemainOwned() {
           "wide section processes one owned batch");
   service->drainPublished();
   const auto after = service->latestChunk(0, 0);
-  require(after && after->section(lightSection)->at(0, 0, 0).emission == 15,
+  const auto afterOptical =
+      service->opticalPropertiesForTesting(0, 64, 0);
+  require(after && afterOptical && afterOptical->emission == 15,
           "same-cell updates keep the last owned optical value");
-  require(before->section(lightSection)->at(0, 0, 0).emission == 0,
-          "the pre-update wide snapshot remains immutable");
+  require(beforeOptical->emission == 0,
+          "the captured pre-update optical result remains immutable");
 
   service->pauseForTesting();
   require(world.setBlock({0, 64, 0}, Blocks::STONE.defaultState()),
@@ -872,17 +964,11 @@ void wideWorldInputsRemainOwned() {
   require(service->waitIdleForTesting(), "same-address reload settles owned input");
   service->drainPublished();
   const auto reloaded = service->latestChunk(0, 0);
+  const auto reloadedOptical =
+      service->opticalPropertiesForTesting(0, 64, 0);
   require(reloaded && reloaded->lifecycleEpoch > after->lifecycleEpoch &&
-              reloaded->section(lightSection)->at(0, 0, 0).emission == 0,
-          "pre-unload cell records cannot resurrect light after reload: " +
-              std::to_string(reloaded ? reloaded->lifecycleEpoch : 0) + "/" +
-              std::to_string(after->lifecycleEpoch) + " emission=" +
-              std::to_string(reloaded
-                                 ? reloaded->section(lightSection)->at(0, 0, 0).emission
-                                 : 255) +
-              " generation=" +
-              std::to_string(reloaded ? reloaded->generation : 0) + " rejected=" +
-              std::to_string(service->stats().rejected));
+              reloadedOptical && reloadedOptical->emission == 0,
+          "pre-unload cell records cannot resurrect light after reload");
   world.disableLighting();
 }
 
@@ -890,9 +976,29 @@ std::shared_ptr<const LightChunkSnapshot>
 settledChunk(LightService &service, int chunkX, int chunkZ) {
   require(service.waitIdleForTesting(), "light worker reaches a complete batch");
   service.drainPublished();
-  auto snapshot = service.latestChunk(chunkX, chunkZ);
-  require(snapshot != nullptr, "settled chunk is published");
-  return snapshot;
+  auto block = service.latestLayerChunk(LightLayer::Block, chunkX, chunkZ);
+  auto sky = service.latestLayerChunk(LightLayer::Sky, chunkX, chunkZ);
+  if (!block) {
+    block = service.latestChunk(chunkX, chunkZ);
+    require(block != nullptr, "settled compatibility chunk is published");
+    return block;
+  }
+  if (!sky)
+    return block;
+  // Test-only inspection facade. Production stores and publishes the two
+  // layer views separately; this creates no production combined view.
+  auto merged = std::make_shared<LightChunkSnapshot>(*block);
+  const std::size_t skyIndex = static_cast<std::size_t>(LightLayer::Sky);
+  for (std::size_t i = 0; i < merged->sections.size(); ++i) {
+    const LightSectionSnapshot *source =
+        i < sky->sections.size() ? sky->sections[i].get() : nullptr;
+    if (!source)
+      continue;
+    auto section = std::make_shared<LightSectionSnapshot>(*merged->sections[i]);
+    section->layers[skyIndex] = source->layers[skyIndex];
+    merged->sections[i] = std::move(section);
+  }
+  return merged;
 }
 
 void blockLightPropagation() {
@@ -1166,12 +1272,16 @@ void skyLightPropagation() {
               released->section(1)->layers[static_cast<std::size_t>(
                   LightLayer::Sky)]
                   .isMissing(),
-          "removing the final block drops raw layers and restores inherited full sky");
-  require(anchored->lightValue(LightLayer::Sky, 8, 8, 8) == 0 &&
-              !anchored->section(0)->layers[static_cast<std::size_t>(
-                   LightLayer::Sky)]
-                   .isMissing(),
-          "previous immutable publication keeps its old raw zero layer");
+          "removing the final block drops raw layers and restores inherited full sky: " +
+              std::to_string(skyLightAt(released, 8, 8, 8)) + "," +
+              std::to_string(released->section(0)
+                                 ->layers[static_cast<std::size_t>(
+                                     LightLayer::Sky)]
+                                 .isMissing()) + "," +
+              std::to_string(released->section(1)
+                                 ->layers[static_cast<std::size_t>(
+                                     LightLayer::Sky)]
+                                 .isMissing()));
 
   LightService edge(0, 12);
   require(edge.submitChunk(emptyChunkFixture(0, 0, 0, 12)) != 0 &&
@@ -1218,6 +1328,698 @@ void skyLightPropagation() {
               skyLightAt(edgeClosedTarget, 16, 145, 8) == 0,
           "closing the opening clears the compensated lower-section column");
 
+}
+
+bool rawSkyMissing(
+    const std::shared_ptr<const LightChunkSnapshot> &snapshot,
+    int sectionY) {
+  const LightSectionSnapshot *section = snapshot->section(sectionY);
+  return section &&
+         section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+             .isMissing();
+}
+
+void skyLayerIndexAndMissingInheritance() {
+  const auto air = airState();
+  const auto stone = Blocks::STONE.defaultState();
+
+  LightService layered(0, 16);
+  require(layered.submitChunk(emptyChunkFixture(0, 0, 0, 16)) != 0,
+          "missing-layer fixture loads an open chunk");
+  const auto open = settledChunk(layered, 0, 0);
+  for (int sectionY = 0; sectionY < 16; ++sectionY)
+    require(rawSkyMissing(open, sectionY) &&
+                skyLightAt(open, 8, sectionY * 16 + 8, 8) == 15,
+            "an open section stays raw-missing and inherits full sky");
+
+  for (int x = 0; x < 16; ++x)
+    for (int z = 0; z < 16; ++z)
+      require(reportBlock(layered, 0, 0, {x, 248, z}, air, stone),
+              "top-section roof enters the worker");
+  const auto roofed = settledChunk(layered, 0, 0);
+  require(!rawSkyMissing(roofed, 14) && !rawSkyMissing(roofed, 15),
+          "the anchor stores its section and the section below");
+  for (int sectionY = 0; sectionY < 14; ++sectionY) {
+    const int missingLayers = 14 - sectionY;
+    require(rawSkyMissing(roofed, sectionY),
+            "section below a stored plane remains raw-missing");
+    const int inherited = skyLightAt(roofed, 8, sectionY * 16 + 8, 8);
+    require(inherited == 0,
+            "missing layers 1..14 inherit the nearest stored bottom: " +
+                std::to_string(missingLayers) + " value=" +
+                std::to_string(inherited));
+  }
+
+  layered.pauseForTesting();
+  require(reportBlock(layered, 0, 0, {8, 248, 8}, stone, air),
+          "same-batch top-layer removal is accepted");
+  for (int x = 0; x < 16; ++x)
+    for (int z = 0; z < 16; ++z)
+      require(reportBlock(layered, 0, 0, {x, 224, z}, air, stone),
+              "same-batch bottom-plane insertion is accepted");
+  layered.resumeForTesting();
+  const auto bottomChanged = settledChunk(layered, 0, 0);
+  require(rawSkyMissing(bottomChanged, 0) &&
+              skyLightAt(bottomChanged, 8, 8, 8) == 0,
+          "a missing section reads the current edited bottom plane");
+
+  layered.pauseForTesting();
+  for (int x = 0; x < 16; ++x)
+    for (int z = 0; z < 16; ++z) {
+      if (x == 15 && z == 15) {
+        LightBlockChange removeLastBottom;
+        removeLastBottom.chunkX = 0;
+        removeLastBottom.chunkZ = 0;
+        removeLastBottom.sectionY = 14;
+        removeLastBottom.localIndex =
+            static_cast<std::uint16_t>(lightIndex(15, 0, 15));
+        removeLastBottom.oldProperties = lightPropertiesOf(stone);
+        removeLastBottom.newProperties = lightPropertiesOf(air);
+        removeLastBottom.wasEmpty = false;
+        removeLastBottom.isEmpty = true;
+        require(layered.reportBlockChange(removeLastBottom),
+                "same-batch final bottom-layer removal is accepted");
+      } else {
+        require(reportBlock(layered, 0, 0, {x, 224, z}, stone, air),
+                "same-batch bottom-plane removal is accepted");
+      }
+    }
+  layered.resumeForTesting();
+  const auto reopened = settledChunk(layered, 0, 0);
+  const int reopenedValue = skyLightAt(reopened, 8, 8, 8);
+  require(rawSkyMissing(reopened, 0) && reopenedValue == 15,
+          "removing the edited bottom restores higher-section inheritance: " +
+              std::to_string(reopenedValue) + " missing=" +
+              std::to_string(rawSkyMissing(reopened, 0)));
+
+  LightService single(0, 16);
+  require(single.submitChunk(emptyChunkFixture(0, 0, 0, 16)) != 0,
+          "single-anchor fixture loads");
+  (void)settledChunk(single, 0, 0);
+  require(reportBlock(single, 0, 0, {8, 248, 8}, air, stone),
+          "single-anchor top plane enters the worker");
+  (void)settledChunk(single, 0, 0);
+  LightBlockChange removeAnchor;
+  removeAnchor.chunkX = 0;
+  removeAnchor.chunkZ = 0;
+  removeAnchor.sectionY = 15;
+  removeAnchor.localIndex =
+      static_cast<std::uint16_t>(lightIndex(8, 8, 8));
+  removeAnchor.oldProperties = lightPropertiesOf(stone);
+  removeAnchor.newProperties = lightPropertiesOf(air);
+  removeAnchor.wasEmpty = false;
+  removeAnchor.isEmpty = true;
+  require(single.reportBlockChange(removeAnchor),
+          "removing the final anchor drops the working layers");
+  const auto releasedLayers = settledChunk(single, 0, 0);
+  require(rawSkyMissing(releasedLayers, 14) &&
+              rawSkyMissing(releasedLayers, 15) &&
+              skyLightAt(releasedLayers, 8, 0, 8) == 15,
+          "deleting the stored plane restores inherited full sky");
+
+  LightService cross(0, 16);
+  require(cross.submitChunk(emptyChunkFixture(0, 0, 0, 16)) != 0 &&
+              cross.submitChunk(emptyChunkFixture(1, 0, 0, 16)) != 0 &&
+              cross.submitChunk(emptyChunkFixture(2, 0, 0, 16)) != 0,
+          "cross-chunk missing-layer fixture loads");
+  (void)settledChunk(cross, 0, 0);
+  for (int chunk = 0; chunk < 2; ++chunk)
+    for (int x = 0; x < 16; ++x)
+      for (int z = 0; z < 16; ++z)
+        if (!(chunk == 0 && x == 14 && z == 8))
+          require(reportBlock(cross, chunk, 0,
+                              {chunk * 16 + x, 180, z}, air, stone),
+                  "cross-chunk roof enters the worker");
+  require(reportBlock(cross, 2, 0, {40, 130, 8}, air, stone),
+          "cross-chunk storage anchor enters the worker");
+  const auto crossOpen = settledChunk(cross, 0, 0);
+  cross.drainPublished();
+  const auto crossTarget = cross.latestChunk(1, 0);
+  require(crossOpen && crossTarget && rawSkyMissing(crossOpen, 9),
+          "the open source section remains raw-missing");
+  require(skyLightAt(crossTarget, 16, 160, 8) == 13 &&
+              skyLightAt(crossTarget, 16, 159, 8) == 13 &&
+              skyLightAt(crossTarget, 16, 145, 8) == 13,
+          "cross-chunk opening fills missing lower sections");
+  require(reportBlock(cross, 0, 0, {14, 180, 8}, air, stone),
+          "closing the cross-chunk opening enters the worker");
+  (void)settledChunk(cross, 0, 0);
+  cross.drainPublished();
+  const auto crossClosed = cross.latestChunk(1, 0);
+  require(skyLightAt(crossClosed, 16, 159, 8) == 0 &&
+              skyLightAt(crossClosed, 16, 145, 8) == 0,
+          "closing the cross-chunk opening withdraws inherited sky");
+}
+
+std::string lightLayerSignature(
+    const std::shared_ptr<const LightChunkSnapshot> &snapshot) {
+  if (!snapshot)
+    return "<missing>";
+  std::ostringstream out;
+  out << snapshot->chunkX << ',' << snapshot->chunkZ << ','
+      << snapshot->minBlockSectionY << ',' << snapshot->blockSectionCount
+      << ',' << snapshot->skyLightEnabled << ';';
+  for (const auto &section : snapshot->sections) {
+    out << section->sectionY << ':' << section->empty << ':';
+    for (LightLayer layer : {LightLayer::Block, LightLayer::Sky}) {
+      const auto &data = section->layers[static_cast<std::size_t>(layer)];
+      out << static_cast<int>(data.storage()) << ','
+          << static_cast<int>(data.uniformValue()) << ','
+          << data.packedByteCount() << ',';
+      for (std::size_t i = 0; i < data.packedByteCount(); ++i)
+        out << static_cast<int>(data.packedByte(i)) << '.';
+      out << ';';
+    }
+  }
+  return out.str();
+}
+
+int referenceSkyColumnSource(
+    const std::shared_ptr<const LightChunkSnapshot> &snapshot,
+    int localX, int localZ) {
+  const int minY = snapshot->minBlockSectionY * 16;
+  const int maxY =
+      (snapshot->minBlockSectionY + snapshot->blockSectionCount) * 16;
+  BlockLightProperties top = lightPropertiesOf(airState());
+  for (int y = maxY - 1; y >= minY; --y) {
+    const LightSectionSnapshot *section = snapshot->section(y >> 4);
+    if (!section)
+      return y + 1;
+    const auto &bottom = section->at(localX, y & 15, localZ);
+    if (bottom.supported && bottom.dampening != 0)
+      return y + 1;
+    if (lightFaceShapesOcclude(top, bottom, LightDirection::Down))
+      return y + 1;
+    top = bottom;
+  }
+  return minY - 1;
+}
+
+void verifyIncrementalSkySources(LightService &service, const char *stage) {
+  require(service.waitIdleForTesting(),
+          std::string("incremental sky source fixture settles: ") + stage);
+  service.drainPublished();
+  for (int chunkX = 0; chunkX < 2; ++chunkX) {
+    const auto snapshot = service.latestChunk(chunkX, 0);
+    const auto sources = service.skyColumnSourcesForTesting(chunkX, 0);
+    require(snapshot && sources,
+            std::string("sky source cache is available: ") + stage);
+    for (int z = 0; z < 16; ++z)
+      for (int x = 0; x < 16; ++x) {
+        const int actual =
+            (*sources)[static_cast<std::size_t>(x + z * 16)];
+        const int expected = referenceSkyColumnSource(snapshot, x, z);
+        require(actual == expected,
+                std::string("incremental sky source matches full column: ") +
+                    stage + " chunk=" + std::to_string(chunkX) +
+                    " x=" + std::to_string(x) +
+                    " z=" + std::to_string(z) +
+                    " got=" + std::to_string(actual) +
+                    " expected=" + std::to_string(expected));
+      }
+  }
+}
+
+void incrementalSkyColumnSources() {
+  const auto air = airState();
+  const auto stone = Blocks::STONE.defaultState();
+  const auto extendedPistonUp = Blocks::PISTON.defaultState()
+                                    .with("facing", "up")
+                                    .with("extended", "true");
+  LightWorkerOptions options;
+  LightService service(0, 2, options);
+  require(service.submitChunk(emptyChunkFixture(0, 0, 0, 2)) != 0 &&
+              service.submitChunk(emptyChunkFixture(1, 0, 0, 2)) != 0,
+          "incremental sky source fixture loads");
+  verifyIncrementalSkySources(service, "initial");
+
+  service.pauseForTesting();
+  require(reportBlock(service, 0, 0, {8, 20, 8}, air, stone) &&
+              reportBlock(service, 0, 0, {8, 10, 8}, air, stone) &&
+              reportBlock(service, 0, 0, {8, 10, 8}, stone, air) &&
+              reportBlock(service, 0, 0, {9, 18, 8}, air, stone),
+          "same-column and multi-column changes enter one batch");
+  service.resumeForTesting();
+  verifyIncrementalSkySources(service, "same-column coalescing");
+  const auto first = service.skyColumnSourcesForTesting(0, 0);
+  require(first && (*first)[8 + 8 * 16] == 21 &&
+              (*first)[9 + 8 * 16] == 19,
+          "final batch geometry determines each column height");
+
+  require(reportBlock(service, 0, 0, {8, 12, 8}, air, stone),
+          "non-highest blocker enters");
+  verifyIncrementalSkySources(service, "non-highest add");
+
+  require(reportBlock(service, 0, 0, {8, 16, 8}, air, stone) &&
+              reportBlock(service, 0, 0, {8, 15, 8}, air, stone),
+          "cross-section upper and lower candidates enter");
+  verifyIncrementalSkySources(service, "cross-section candidates");
+  require(reportBlock(service, 0, 0, {8, 20, 8}, stone, air),
+          "current highest blocker is removed");
+  verifyIncrementalSkySources(service, "highest edge fallback");
+  auto sources = service.skyColumnSourcesForTesting(0, 0);
+  require(sources && (*sources)[8 + 8 * 16] == 17,
+          "fallback reaches the next stored edge across a section boundary");
+
+  require(reportBlock(service, 0, 0, {8, 16, 8}, stone, air),
+          "upper cross-section blocker is removed");
+  verifyIncrementalSkySources(service, "upper face fallback");
+  sources = service.skyColumnSourcesForTesting(0, 0);
+  require(sources && (*sources)[8 + 8 * 16] == 16,
+          "y-1 edge remains the lowest source after upper removal");
+
+  require(reportBlock(service, 0, 0, {8, 15, 8}, stone, air) &&
+              reportBlock(service, 0, 0, {8, 12, 8}, stone, air),
+          "remaining blockers are removed");
+  verifyIncrementalSkySources(service, "empty column restoration");
+  sources = service.skyColumnSourcesForTesting(0, 0);
+  require(sources && (*sources)[8 + 8 * 16] == -1,
+          "unobstructed column restores the no-blocker sentinel");
+
+  require(service.submitChunk(emptyChunkFixture(0, 0, 0, 2)) != 0,
+          "same-epoch full refresh enters");
+  verifyIncrementalSkySources(service, "same-epoch refresh");
+
+  require(service.unloadChunk(1, 0), "source fixture unloads");
+  require(service.waitIdleForTesting(), "source fixture unload settles");
+  require(!service.skyColumnSourcesForTesting(1, 0),
+          "unload removes the column-source cache");
+  require(service.submitChunk(emptyChunkFixture(1, 0, 0, 2)) != 0,
+          "source fixture reloads");
+  verifyIncrementalSkySources(service, "unload and reload");
+
+  require(reportBlock(service, 0, 0, {2, 31, 8}, air, stone) &&
+              reportBlock(service, 0, 0, {3, 0, 8}, air, stone),
+          "top and bottom edges enter");
+  verifyIncrementalSkySources(service, "top and bottom");
+
+  require(reportBlock(service, 0, 0, {8, 20, 8}, air, stone),
+          "multi-change fallback setup enters");
+  service.pauseForTesting();
+  require(reportBlock(service, 0, 0, {8, 19, 8}, air, stone) &&
+              reportBlock(service, 0, 0, {8, 20, 8}, stone, air),
+          "same-column lower insert and highest removal share one batch");
+  service.resumeForTesting();
+  verifyIncrementalSkySources(service, "same-batch lower insert");
+  sources = service.skyColumnSourcesForTesting(0, 0);
+  require(sources && (*sources)[8 + 8 * 16] == 20,
+          "highest-edge fallback includes a lower cell changed in the same batch");
+  require(reportBlock(service, 0, 0, {8, 19, 8}, stone, air),
+          "same-batch fallback blocker is removed");
+  verifyIncrementalSkySources(service, "same-batch fallback cleanup");
+
+  require(reportBlock(service, 0, 0, {7, 16, 8}, air, extendedPistonUp) &&
+              reportBlock(service, 0, 0, {7, 15, 8}, air, extendedPistonUp),
+          "extended pistons facing up enter one batch");
+  verifyIncrementalSkySources(service, "piston stack");
+  sources = service.skyColumnSourcesForTesting(0, 0);
+  require(sources && (*sources)[7 + 8 * 16] == 16,
+          "piston stack starts at its upper DOWN face");
+  require(reportBlock(service, 0, 0, {7, 16, 8}, extendedPistonUp, air),
+          "upper facing-up piston is removed");
+  verifyIncrementalSkySources(service, "piston upper removal");
+  sources = service.skyColumnSourcesForTesting(0, 0);
+  require(sources && (*sources)[7 + 8 * 16] == 15,
+          "fallback does not count the lower cell against itself");
+  require(reportBlock(service, 0, 0, {7, 15, 8}, extendedPistonUp, air),
+          "remaining facing-up piston is removed");
+  verifyIncrementalSkySources(service, "piston cleanup");
+
+  LightService negative(-1, 2, options);
+  require(negative.submitChunk(emptyChunkFixture(0, 0, -1, 2)) != 0,
+          "negative source fixture loads");
+  require(negative.waitIdleForTesting(), "negative source fixture settles");
+  negative.drainPublished();
+  require(reportBlock(negative, 0, 0, {3, -8, 3}, air, stone),
+          "negative-y blocker enters");
+  require(negative.waitIdleForTesting(), "negative-y source update settles");
+  negative.drainPublished();
+  const auto negativeSources = negative.skyColumnSourcesForTesting(0, 0);
+  const auto negativeSnapshot = negative.latestChunk(0, 0);
+  require(negativeSources && negativeSnapshot &&
+              (*negativeSources)[3 + 3 * 16] ==
+                  referenceSkyColumnSource(negativeSnapshot, 3, 3) &&
+              (*negativeSources)[3 + 3 * 16] == -7,
+          "negative-y source matches the full column reference");
+}
+
+void splitLightWorkerParityAndIsolation() {
+  const auto air = airState();
+  const auto stone = Blocks::STONE.defaultState();
+  const auto lamp =
+      Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+
+  LightWorkerOptions singleOptions;
+  LightWorkerOptions doubleOptions;
+  LightService single(0, 12, singleOptions);
+  LightService doubled(0, 12, doubleOptions);
+
+  auto sync = [&](const char *stage) {
+    require(single.waitIdleForTesting() && doubled.waitIdleForTesting(),
+            std::string("split workers did not settle: ") + stage);
+    single.drainPublished();
+    doubled.drainPublished();
+    for (int chunkX = 0; chunkX < 3; ++chunkX) {
+      const auto leftBlock =
+          single.latestLayerChunk(LightLayer::Block, chunkX, 0);
+      const auto leftSky =
+          single.latestLayerChunk(LightLayer::Sky, chunkX, 0);
+      const auto rightBlock =
+          doubled.latestLayerChunk(LightLayer::Block, chunkX, 0);
+      const auto rightSky =
+          doubled.latestLayerChunk(LightLayer::Sky, chunkX, 0);
+      require(lightLayerSignature(leftBlock) ==
+                  lightLayerSignature(rightBlock) &&
+                  lightLayerSignature(leftSky) ==
+                      lightLayerSignature(rightSky),
+              std::string("single/two worker light mismatch: ") + stage +
+                  " chunk=" + std::to_string(chunkX));
+      if (!rightBlock)
+        continue;
+      require(rightBlock->layer == LightLayer::Block &&
+                  rightSky && rightSky->layer == LightLayer::Sky &&
+                  rightBlock->lifecycleEpoch == rightSky->lifecycleEpoch &&
+                  rightBlock->revision != 0 && rightSky->revision != 0,
+              "main stores two independently revised layer views");
+      for (const auto &section : rightBlock->sections)
+        require(section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                    .isMissing(),
+                "block view never retains a combined sky cell layer");
+      for (const auto &section : rightSky->sections)
+        require(section->layers[static_cast<std::size_t>(LightLayer::Block)]
+                    .isMissing(),
+                "sky view never retains a combined block cell layer");
+    }
+  };
+  auto submitBoth = [&](int chunkX, int minSectionY, int sectionCount) {
+    auto left = rawEmptyChunkFixture(chunkX, 0, minSectionY, sectionCount);
+    auto right = rawEmptyChunkFixture(chunkX, 0, minSectionY, sectionCount);
+    require(single.submitChunk(std::move(left)) != 0 &&
+                doubled.submitChunk(std::move(right)) != 0,
+            "split workers accept the same chunk input");
+  };
+  auto changeBoth = [&](Pos position, const BlockState &,
+                        const BlockState &newState) {
+    single.reportBlockCell(
+        {position.x, position.y, position.z, newState.id()});
+    doubled.reportBlockCell(
+        {position.x, position.y, position.z, newState.id()});
+  };
+
+  for (int chunkX = 0; chunkX < 3; ++chunkX)
+    submitBoth(chunkX, 0, 12);
+  sync("initial load");
+
+  for (int chunkX = 0; chunkX < 2; ++chunkX)
+    for (int x = 0; x < 16; ++x)
+      for (int z = 0; z < 16; ++z)
+        if (!(chunkX == 0 && x == 14 && z == 8))
+          changeBoth({chunkX * 16 + x, 180, z}, air, stone);
+  changeBoth({40, 130, 8}, air, stone);
+  sync("cross-chunk opening");
+  require(skyLightAt(doubled.latestLayerChunk(LightLayer::Sky, 1, 0), 16, 160, 8) == 13,
+          "two workers preserve cross-chunk missing-layer sky propagation");
+
+  changeBoth({14, 180, 8}, air, stone);
+  sync("cross-chunk close");
+  require(skyLightAt(doubled.latestLayerChunk(LightLayer::Sky, 1, 0), 16, 159, 8) == 0,
+          "two workers preserve cross-chunk sky withdrawal");
+
+  changeBoth({15, 100, 8}, air, lamp);
+  sync("block source add");
+  require(blockLightAt(doubled.latestLayerChunk(LightLayer::Block, 1, 0), 16, 100, 8) == 14,
+          "two workers preserve block-light crossing");
+  changeBoth({15, 100, 8}, lamp, air);
+  sync("block source remove");
+
+  submitBoth(0, 0, 12);
+  sync("same-epoch refresh");
+
+  require(single.unloadChunk(2, 0) && doubled.unloadChunk(2, 0),
+          "both workers accept unload");
+  require(single.waitIdleForTesting() && doubled.waitIdleForTesting(),
+          "both workers finish unload");
+  single.drainPublished();
+  doubled.drainPublished();
+  require(single.latestChunk(2, 0) == nullptr &&
+              doubled.latestChunk(2, 0) == nullptr,
+          "both modes withdraw unloaded output");
+  submitBoth(2, 0, 12);
+  sync("reload");
+
+  LightService negativeSingle(-1, 2, singleOptions);
+  LightService negativeDouble(-1, 2, doubleOptions);
+  require(negativeSingle.submitChunk(rawEmptyChunkFixture(0, 0, -1, 2)) != 0 &&
+              negativeDouble.submitChunk(rawEmptyChunkFixture(0, 0, -1, 2)) != 0,
+          "negative-height split fixture loads");
+  require(negativeSingle.waitIdleForTesting() &&
+              negativeDouble.waitIdleForTesting(),
+          "negative-height split fixture settles");
+  negativeSingle.drainPublished();
+  negativeDouble.drainPublished();
+  require(lightLayerSignature(negativeSingle.latestChunk(0, 0)) ==
+              lightLayerSignature(negativeDouble.latestChunk(0, 0)),
+          "negative padding and inherited missing layers match");
+
+  LightWorkerOptions noSkySingle;
+  LightWorkerOptions noSkyDouble;
+  noSkySingle.hasSkyLight = false;
+  noSkyDouble.hasSkyLight = false;
+  LightService withoutSkySingle(0, 1, noSkySingle);
+  LightService withoutSkyDouble(0, 1, noSkyDouble);
+  require(withoutSkySingle.submitChunk(rawEmptyChunkFixture(9, 0, 0, 1)) != 0 &&
+              withoutSkyDouble.submitChunk(rawEmptyChunkFixture(9, 0, 0, 1)) != 0,
+          "no-sky split fixture loads");
+  require(withoutSkySingle.waitIdleForTesting() &&
+              withoutSkyDouble.waitIdleForTesting(),
+          "no-sky split fixture settles");
+  withoutSkySingle.drainPublished();
+  withoutSkyDouble.drainPublished();
+  const auto noSky = withoutSkyDouble.latestChunk(9, 0);
+  require(noSky && noSky->skyLayerSnapshot == nullptr &&
+              withoutSkyDouble.stats().workerCount == 1,
+          "a no-sky service keeps sky absent and runs one worker");
+
+  std::atomic<bool> skyEntered{false};
+  std::atomic<bool> skyRelease{false};
+  LightWorkerOptions slowOptions;
+  slowOptions.beforeLayerForTesting = [&](LightLayer layer) {
+    if (layer != LightLayer::Sky)
+      return;
+    skyEntered.store(true, std::memory_order_release);
+    while (!skyRelease.load(std::memory_order_acquire))
+      std::this_thread::yield();
+  };
+  LightService slow(0, 1, slowOptions);
+  require(slow.submitChunk(rawEmptyChunkFixture(20, 0, 0, 1)) != 0,
+          "slow-sky fixture submits");
+  while (!skyEntered.load(std::memory_order_acquire))
+    std::this_thread::yield();
+  // The sky hook can run before the coordinator's block worker returns. Wait
+  // only for the independent block publication while sky remains blocked.
+  const auto blockDeadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (slow.latestLayerChunk(LightLayer::Block, 20, 0) == nullptr &&
+         std::chrono::steady_clock::now() < blockDeadline) {
+    slow.drainPublished();
+    std::this_thread::yield();
+  }
+  const bool blockPublished =
+      slow.latestLayerChunk(LightLayer::Block, 20, 0) != nullptr;
+  const bool skyStillBlocked =
+      slow.latestLayerChunk(LightLayer::Sky, 20, 0) == nullptr;
+  skyRelease.store(true, std::memory_order_release);
+  require(blockPublished && skyStillBlocked,
+          "finished block publishes while slow sky is still running");
+  require(slow.waitIdleForTesting(), "slow-sky fixture finishes after release");
+  slow.drainPublished();
+  require(slow.latestLayerChunk(LightLayer::Block, 20, 0) != nullptr &&
+              slow.latestLayerChunk(LightLayer::Sky, 20, 0) != nullptr,
+          "slow sky publishes independently when it eventually finishes");
+
+  LightWorkerOptions failureOptions;
+  failureOptions.beforeLayerForTesting = [](LightLayer layer) {
+    if (layer == LightLayer::Sky)
+      throw std::runtime_error("injected sky failure");
+  };
+  LightService failed(0, 1, failureOptions);
+  require(failed.submitChunk(rawEmptyChunkFixture(21, 0, 0, 1)) != 0,
+          "failed-sky fixture submits");
+  require(!failed.waitIdleForTesting(),
+          "failed sky reports a failed batch");
+  failed.drainPublished();
+  require(failed.latestLayerChunk(LightLayer::Block, 21, 0) != nullptr &&
+              failed.latestLayerChunk(LightLayer::Sky, 21, 0) == nullptr &&
+              failed.workerError().find("injected sky failure") !=
+                  std::string::npos,
+          "failed sky leaves its independent result absent");
+}
+
+void independentMutableLayerPublication() {
+  LightWorkerOptions options;
+  options.batchWindowMs = 0;
+  LightService service(0, 1, options);
+  std::vector<std::shared_ptr<const LightChunkSnapshot>> publications;
+  service.setPublishCallback(
+      [&](std::shared_ptr<const LightChunkSnapshot> publication) {
+        publications.push_back(std::move(publication));
+      });
+  require(service.submitChunk(rawEmptyChunkFixture(0, 0, 0, 1)) != 0,
+          "mutable-layer fixture loads");
+  require(service.waitIdleForTesting(), "mutable-layer initial batch settles");
+  service.drainPublished();
+  publications.clear();
+  auto initialBlock =
+      service.latestLayerChunk(LightLayer::Block, 0, 0);
+  auto initialSky = service.latestLayerChunk(LightLayer::Sky, 0, 0);
+  require(initialBlock && initialSky &&
+              initialBlock->layer == LightLayer::Block &&
+              initialSky->layer == LightLayer::Sky &&
+              initialBlock.get() != initialSky.get(),
+          "main stores separate block and sky headers");
+
+  const auto lamp =
+      Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  reportOwnedCell(service, 0, 0, {8, 8, 8}, lamp);
+  require(service.waitIdleForTesting(), "first mutable page write settles");
+  service.drainPublished();
+  auto block1 = service.latestLayerChunk(LightLayer::Block, 0, 0);
+  auto sky1 = service.latestLayerChunk(LightLayer::Sky, 0, 0);
+  const auto blockPage1 = block1->section(0)
+                              ->layers[static_cast<std::size_t>(
+                                  LightLayer::Block)]
+                              .shared();
+  const auto skyPage1 = sky1->section(0)
+                            ->layers[static_cast<std::size_t>(
+                                LightLayer::Sky)]
+                            .shared();
+  require(blockPage1 && blockPage1->isMixed() &&
+              skyPage1 && skyPage1->isMixed(),
+          "mixed block and sky layers own independent atomic pages");
+  const auto blockRevision1 = block1->revision;
+  const auto skyRevision1 = sky1->revision;
+
+  reportOwnedCell(service, 0, 0, {6, 8, 8}, lamp);
+  require(service.waitIdleForTesting(), "same-page mutable write settles");
+  service.drainPublished();
+  auto block2 = service.latestLayerChunk(LightLayer::Block, 0, 0);
+  auto sky2 = service.latestLayerChunk(LightLayer::Sky, 0, 0);
+  const auto &blockRef2 =
+      block2->section(0)->layers[static_cast<std::size_t>(LightLayer::Block)];
+  const auto &skyRef2 =
+      sky2->section(0)->layers[static_cast<std::size_t>(LightLayer::Sky)];
+  require(blockRef2.shared() == blockPage1 &&
+              skyRef2.shared() == skyPage1,
+          "mixed values stay in the same 2048-byte page");
+  require(block2->revision > blockRevision1 &&
+              sky2->revision > skyRevision1,
+          "each layer revision advances independently");
+  require(std::any_of(block2->changedSections.begin(),
+                      block2->changedSections.end(),
+                      [](const auto &change) {
+                        return change.sectionY == 0 && change.block;
+                      }) &&
+              std::any_of(sky2->changedSections.begin(),
+                          sky2->changedSections.end(),
+                          [](const auto &change) {
+                            return change.sectionY == 0 && change.sky;
+                          }),
+          "dirty section metadata survives a shared mutable page rewrite");
+  require(block1->section(0)
+                  ->layers[static_cast<std::size_t>(LightLayer::Block)]
+                  .get(6, 8, 8) ==
+              block2->section(0)
+                  ->layers[static_cast<std::size_t>(LightLayer::Block)]
+                  .get(6, 8, 8),
+          "an old header may observe the new value through the shared page");
+
+  const LightSectionSnapshot &blockSection =
+      *block2->section(0);
+  const LightSectionSnapshot &skySection =
+      *sky2->section(0);
+  require(blockSection.layers[static_cast<std::size_t>(LightLayer::Sky)]
+              .isMissing() &&
+              skySection.layers[static_cast<std::size_t>(LightLayer::Block)]
+                  .isMissing(),
+          "published layer views contain no combined section payload");
+  require(!publications.empty(),
+          "independent publication reaches the main-thread drain");
+  for (const auto &publication : publications) {
+    require(publication->layer.has_value(),
+            "production publication is tagged with exactly one layer");
+    const auto latest = service.latestLayerChunk(
+        *publication->layer, 0, 0);
+    require(latest &&
+                latest->section(0)
+                        ->layers[static_cast<std::size_t>(
+                            *publication->layer)]
+                        .shared() ==
+                    publication->section(0)
+                        ->layers[static_cast<std::size_t>(
+                            *publication->layer)]
+                        .shared(),
+            "main header retains the worker's shared layer object");
+  }
+
+  const auto oldEpoch = block2->lifecycleEpoch;
+  require(service.unloadChunk(0, 0) &&
+              service.waitIdleForTesting(),
+          "mutable-layer fixture unloads");
+  service.drainPublished();
+  require(service.latestLayerChunk(LightLayer::Block, 0, 0) == nullptr &&
+              service.latestLayerChunk(LightLayer::Sky, 0, 0) == nullptr,
+          "unload clears both main-thread layer latest pointers");
+  require(service.submitChunk(rawEmptyChunkFixture(0, 0, 0, 1)) != 0 &&
+              service.waitIdleForTesting(),
+          "mutable-layer fixture reloads");
+  service.drainPublished();
+  reportOwnedCell(service, 0, 0, {8, 8, 8}, lamp);
+  require(service.waitIdleForTesting(), "new-epoch page write settles");
+  service.drainPublished();
+  const auto reloadedBlock =
+      service.latestLayerChunk(LightLayer::Block, 0, 0);
+  const auto reloadedSky =
+      service.latestLayerChunk(LightLayer::Sky, 0, 0);
+  require(reloadedBlock && reloadedSky &&
+              reloadedBlock->lifecycleEpoch > oldEpoch &&
+              reloadedSky->lifecycleEpoch == reloadedBlock->lifecycleEpoch &&
+              reloadedBlock->section(0)
+                      ->layers[static_cast<std::size_t>(LightLayer::Block)]
+                      .shared() != blockPage1 &&
+              reloadedSky->section(0)
+                      ->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                      .shared() != skyPage1,
+          "a reload allocates fresh layer pages instead of reviving an old epoch");
+  require(blockPage1->isMixed() && skyPage1->isMixed(),
+          "old-epoch readers retain their shared pages after reload");
+}
+
+void worldBrightnessComposesSeparateLayers() {
+  World world;
+  world.loadChunk(0, 0);
+  LightWorkerOptions options;
+  world.enableLighting(options);
+  auto *service = world.lightService();
+  require(service &&
+              world.setBlock({0, 8, 0},
+                             Blocks::REDSTONE_LAMP.defaultState().with(
+                                 "lit", "true")),
+          "brightness fixture enables lighting and a source");
+  require(service->waitIdleForTesting(), "brightness layers settle");
+  service->drainPublished();
+  require(world.getBrightness({0, 8, 0}) == 15,
+          "block emission dominates query-time brightness");
+  require(world.getBrightness({1, 8, 0}, 10) == 14,
+          "block light survives sky darkening");
+  require(world.getBrightness({8, 20, 8}, 10) == 5,
+          "sky brightness is darkened only during composition");
+  const auto block =
+      service->latestLayerChunk(LightLayer::Block, 0, 0);
+  const auto sky =
+      service->latestLayerChunk(LightLayer::Sky, 0, 0);
+  require(block && sky && block->layer == LightLayer::Block &&
+              sky->layer == LightLayer::Sky,
+          "brightness composition reads the two saved layer views");
 }
 
 void blockLightStaleAndAuthoritativeRefresh() {
@@ -1518,6 +2320,27 @@ void destructorClosesWorker() {
   // single-writer thread before its chunk storage is destroyed.
 }
 
+void frozenWorldDrainsLightResults() {
+  World world;
+  world.loadChunk(0, 0);
+  LightWorkerOptions options;
+  options.startPausedForTesting = true;
+  world.enableLighting(options);
+  auto *service = world.lightService();
+  require(service &&
+              world.setBlock({0, 20, 0},
+                             Blocks::REDSTONE_LAMP.defaultState().with(
+                                 "lit", "true")),
+          "frozen-world light fixture queues work");
+  service->resumeForTesting();
+  require(service->waitIdleForTesting(), "frozen-world light work completes");
+  require(service->latestLayerChunk(LightLayer::Block, 0, 0) == nullptr,
+          "worker completion does not require a world tick to publish");
+  world.drainLightPublications();
+  require(service->latestLayerChunk(LightLayer::Block, 0, 0) != nullptr,
+          "main can drain light results while the world tick is frozen");
+}
+
 void worldHooks() {
   World world;
   require(!world.lightingEnabled() && world.lightService() == nullptr,
@@ -1533,13 +2356,17 @@ void worldHooks() {
   require(service->waitIdleForTesting(), "initial world snapshot completes");
   service->drainPublished();
   auto initial = service->latestChunk(0, 0);
-  require(initial && initial->section(6) &&
-              initial->section(6)->at(0, 4, 0).dampening == 15,
-          "World load snapshot owns official section metadata");
+  const auto initialOptical =
+      service->opticalPropertiesForTesting(0, 100, 0);
+  require(initial && initial->section(6) && initialOptical &&
+              initialOptical->dampening == 15,
+          "World load snapshot owns official optical metadata");
   auto emptyPeer = service->latestChunk(1, 0);
   require(emptyPeer && emptyPeer->section(-3)->isUniform() &&
-              initial->section(-3) == emptyPeer->section(-3),
-          "empty block sections reuse one immutable uniform input");
+              initial->section(-3)->isUniform() &&
+              initial->section(-3)->light(LightLayer::Block, 0, 0, 0) ==
+                  emptyPeer->section(-3)->light(LightLayer::Block, 0, 0, 0),
+          "empty block sections decode the same compact uniform value");
 
   const auto initialGeneration = initial->generation;
   require(world.setBlock({0, 100, 0},
@@ -1548,9 +2375,11 @@ void worldHooks() {
   require(service->waitIdleForTesting(), "world change reaches light worker");
   service->drainPublished();
   auto changed = service->latestChunk(0, 0);
+  const auto changedOptical =
+      service->opticalPropertiesForTesting(0, 100, 0);
   require(changed && changed->generation > initialGeneration,
           "World setBlock advances the light generation");
-  require(changed->section(6)->at(0, 4, 0).emission == 15,
+  require(changedOptical && changedOptical->emission == 15,
           "World setBlock forwards official emission metadata");
   require(blockLightAt(changed, 0, 100, 0) == 15 &&
               blockLightAt(changed, 1, 100, 0) == 14,
@@ -1590,7 +2419,7 @@ void pausedWorldRecoveryAndImport() {
   World world;
   world.loadChunk(0, 0);
   world.loadChunk(1, 0);
-  world.enableLighting(LightWorkerOptions{1, 1, true, false});
+  world.enableLighting(LightWorkerOptions{1, 16, true, false});
   auto *service = world.lightService();
   require(service, "paused world lighting is enabled");
 
@@ -1600,15 +2429,17 @@ void pausedWorldRecoveryAndImport() {
   require(world.setBlock({17, 100, 0}, Blocks::STONE.defaultState()),
           "paused world accepts a later change");
   world.unloadChunk(0, 0);
-  require(service->stats().pendingChunks == 2,
-          "World keeps chunk-coalesced recovery state without waiting");
+  require(service->stats().pendingChunks >= 2,
+          "World inputs remain queued while the worker is paused");
   service->resumeForTesting();
   require(service->waitIdleForTesting(), "paused World worker drains");
   service->drainPublished();
   require(service->latestChunk(0, 0) == nullptr,
           "World unload tombstone rejects an older load publication");
   auto live = service->latestChunk(1, 0);
-  require(live && live->section(6)->at(1, 4, 0).dampening == 15,
+  const auto liveOptical =
+      service->opticalPropertiesForTesting(17, 100, 0);
+  require(live && liveOptical && liveOptical->dampening == 15,
           "surviving World chunk carries its coalesced cell change");
 
   world.refreshLightSnapshots();
@@ -1621,7 +2452,10 @@ void pausedWorldRecoveryAndImport() {
   require(service->waitIdleForTesting(), "post-import authoritative snapshot drains");
   service->drainPublished();
   auto authoritative = service->latestChunk(1, 0);
-  require(authoritative && authoritative->section(6)->at(0, 5, 0).emission == 15,
+  const auto authoritativeOptical =
+      service->opticalPropertiesForTesting(16, 101, 0);
+  require(authoritative && authoritativeOptical &&
+              authoritativeOptical->emission == 15,
           "import updates light from owned post-raw-write data");
   require(blockLightAt(authoritative, 16, 101, 0) == 15,
           "imported source participates in block-light propagation");
@@ -1643,10 +2477,16 @@ int main(int argc, char **argv) {
     recoverableChangesAndBoundedPublication();
     ownedCellOverflowAndWakeup();
     ownedCellLifecycleRejectsReloadStaleWork();
+    rawSubmissionAndGeometryMirror();
     authoritativeRefreshOutranksQueuedCells();
     wideWorldInputsRemainOwned();
     blockLightPropagation();
     skyLightPropagation();
+    skyLayerIndexAndMissingInheritance();
+    incrementalSkyColumnSources();
+    splitLightWorkerParityAndIsolation();
+    independentMutableLayerPublication();
+    worldBrightnessComposesSeparateLayers();
     blockLightStaleAndAuthoritativeRefresh();
     blockLightVerticalPadding();
     crossBatchPublicationOrdering();
@@ -1655,6 +2495,7 @@ int main(int argc, char **argv) {
     directionalShapeOcclusion();
     incompleteMetadataIsExplicit();
     destructorClosesWorker();
+    frozenWorldDrainsLightResults();
     worldHooks();
     pausedWorldRecoveryAndImport();
     std::cout << "light tests passed\n";

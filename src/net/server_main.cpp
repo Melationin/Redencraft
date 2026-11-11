@@ -403,6 +403,7 @@ int runServer(int argc, char **argv) {
     bool consoleEnabled = true, fluidFixture = false;
     LitematicOptions schematicOptions;
     ServerOptions options;
+    LightWorkerOptions lightOptions;
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg == "--help") {
@@ -411,7 +412,8 @@ int runServer(int argc, char **argv) {
                "directory] [--world directory | --schematic file]\n"
                "  [--chunk x,z ...] [--ticks N] [--spawn x,y,z]\n"
                "  [--offset x,y,z] [--view-distance 3] [--force-margin 2]\n"
-               "  [--allow-unsupported] [--fluid-basin] [--no-console]\n"
+               "  [--allow-unsupported] [--fluid-basin] [--no-console] "
+               "[--light-workers 1|2]\n"
                "Local offline protocol 775 creative editor. Fixed loaded "
                "simulation region; no saving. Litematic: anvils become "
                "obsidian, signs are omitted. Tick time sent to chat.\n";
@@ -451,6 +453,10 @@ int runServer(int argc, char **argv) {
         options.viewDistance = integer(value, 2, maxViewDistance);
       else if (arg == "--force-margin")
         forceMargin = integer(value, 0, 16);
+      else if (arg == "--light-workers") {
+        if (integer(value, 1, 2) != 1)
+          throw ProtocolError("--light-workers only supports one worker");
+      }
       else if (arg == "--offset") {
         std::istringstream in(value);
         char a, b;
@@ -638,7 +644,7 @@ int runServer(int argc, char **argv) {
     // The native protocol path uses published light rather than placeholder
     // brightness. Initial chunk sends wait asynchronously for the first complete
     // worker snapshot; no connection callback waits on the light worker.
-    world.enableLighting();
+    world.enableLighting(lightOptions);
     SocketSystem socketSystem;
     Socket listener(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     if (listener.get() == invalidSocket)
@@ -664,7 +670,7 @@ int runServer(int argc, char **argv) {
 #endif
     std::cout << "LISTENING 127.0.0.1:" << ntohs(address.sin_port)
               << " protocol=775 allocator=" << REDSTONE_ALLOCATOR_NAME
-              << std::endl;
+              << " workers=1" << std::endl;
     std::vector<std::shared_ptr<Connection>> connections;
     // Payloads/snapshots are collected on the main thread; framing, chunk
     // encoding and socket writes happen on the writer thread.
@@ -875,6 +881,8 @@ int runServer(int argc, char **argv) {
         // keeps connections alive.
         if (tickRate.runsNormally())
           world.tick();
+        else
+          world.drainLightPublications();
         for (auto &c : connections)
           if (!c->dead.load()) c->session.tick();
         if (tickRate.runsNormally())

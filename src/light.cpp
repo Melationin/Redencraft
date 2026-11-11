@@ -9,8 +9,10 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -18,6 +20,10 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#elif defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#include <time.h>
 #endif
 
 namespace redstone {
@@ -76,13 +82,19 @@ double currentThreadCpuMs() {
            value.dwLowDateTime;
   };
   return static_cast<double>(ticks(kernel) + ticks(user)) / 10000.0;
+#elif defined(__linux__)
+  timespec time{};
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) != 0)
+    return 0;
+  return static_cast<double>(time.tv_sec) * 1000.0 + time.tv_nsec / 1.0e6;
 #else
   return 0;
 #endif
 }
 
-ThreadAffinityResult applyThreadAffinity(void *threadHandle,
-                                        std::uintptr_t mask) {
+#if defined(_WIN32) || defined(__linux__)
+ThreadAffinityResult applyThreadAffinity(std::thread::native_handle_type threadHandle,
+                                         std::uintptr_t mask) {
 #ifdef _WIN32
   if (!mask)
     return {};
@@ -101,11 +113,29 @@ ThreadAffinityResult applyThreadAffinity(void *threadHandle,
               : static_cast<std::uint64_t>(mask),
           0};
 #else
-  (void)threadHandle;
-  (void)mask;
-  return {};
+  if (!mask)
+    return {};
+  cpu_set_t requested;
+  CPU_ZERO(&requested);
+  for (std::size_t cpu = 0; cpu < std::numeric_limits<std::uintptr_t>::digits; ++cpu)
+    if ((mask >> cpu) & 1)
+      CPU_SET(cpu, &requested);
+  if (const int error =
+          pthread_setaffinity_np(threadHandle, sizeof(requested), &requested))
+    return {0, static_cast<std::uint32_t>(error)};
+  cpu_set_t actual;
+  CPU_ZERO(&actual);
+  if (const int error =
+          pthread_getaffinity_np(threadHandle, sizeof(actual), &actual))
+    return {0, static_cast<std::uint32_t>(error)};
+  std::uint64_t actualMask = 0;
+  for (std::size_t cpu = 0; cpu < std::numeric_limits<std::uint64_t>::digits; ++cpu)
+    if (CPU_ISSET(cpu, &actual))
+      actualMask |= std::uint64_t{1} << cpu;
+  return {actualMask, 0};
 #endif
 }
+#endif
 
 std::uint64_t chunkKey(int x, int z) {
   return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
@@ -222,6 +252,88 @@ struct LightPosHash {
   }
 };
 
+template <class T> class SpscRing {
+public:
+  explicit SpscRing(std::size_t capacity)
+      : slots_(std::max<std::size_t>(capacity, 2)) {}
+
+  bool push(T value) {
+    const auto head = head_.load(std::memory_order_relaxed);
+    const auto tail = tail_.load(std::memory_order_acquire);
+    if (head - tail >= slots_.size())
+      return false;
+    slots_[static_cast<std::size_t>(head % slots_.size())] =
+        std::move(value);
+    head_.store(head + 1, std::memory_order_release);
+    return true;
+  }
+
+  const T *front() const {
+    const auto tail = tail_.load(std::memory_order_relaxed);
+    const auto head = head_.load(std::memory_order_acquire);
+    if (tail == head)
+      return nullptr;
+    return &slots_[static_cast<std::size_t>(tail % slots_.size())];
+  }
+
+  bool pop(T &value) {
+    const auto tail = tail_.load(std::memory_order_relaxed);
+    const auto head = head_.load(std::memory_order_acquire);
+    if (tail == head)
+      return false;
+    value = std::move(slots_[static_cast<std::size_t>(tail % slots_.size())]);
+    tail_.store(tail + 1, std::memory_order_release);
+    return true;
+  }
+
+  bool empty() const {
+    return head_.load(std::memory_order_acquire) ==
+           tail_.load(std::memory_order_acquire);
+  }
+  bool full() const {
+    return head_.load(std::memory_order_relaxed) -
+               tail_.load(std::memory_order_acquire) >=
+           slots_.size();
+  }
+  std::size_t size() const {
+    return static_cast<std::size_t>(
+        head_.load(std::memory_order_acquire) -
+        tail_.load(std::memory_order_acquire));
+  }
+
+private:
+  std::vector<T> slots_;
+  std::atomic<std::uint64_t> head_{0};
+  std::atomic<std::uint64_t> tail_{0};
+};
+
+template <class T> class TaskQueue {
+public:
+  TaskQueue() { values_.reserve(4096); }
+  bool empty() const { return head_ == values_.size(); }
+  const T &front() const { return values_[head_]; }
+  void push(T value) { values_.push_back(std::move(value)); }
+  T pop() {
+    T result = std::move(values_[head_++]);
+    if (head_ >= 4096 && head_ * 2 >= values_.size()) {
+      values_.erase(values_.begin(), values_.begin() +
+                                           static_cast<std::ptrdiff_t>(head_));
+      head_ = 0;
+    }
+    return result;
+  }
+
+private:
+  std::vector<T> values_;
+  std::size_t head_ = 0;
+};
+
+struct GeometryInput {
+  std::uint64_t sequence = 0;
+  LightCellUpdate update;
+};
+static_assert(sizeof(GeometryInput) == 32);
+
 struct SectionPos3 {
   int x = 0;
   int y = 0;
@@ -261,57 +373,223 @@ std::size_t vectorIndex(const std::vector<T> &values, int sectionY) {
 
 } // namespace
 
+LightOpticalTable::LightOpticalTable() {
+  classes_.push_back({{}, false}); // conservative unsupported sentinel
+  stateClasses_.resize(detail::gStateCount, 0);
+  std::unordered_map<std::uint64_t, std::uint8_t> byOptics;
+  for (BlockState::Id stateId = 0; stateId < detail::gStateCount; ++stateId) {
+    const BlockState state = BlockState::fromId(stateId);
+    const BlockLightProperties properties = lightPropertiesOf(state);
+    if (!properties.supported)
+      continue;
+    const std::uint64_t key =
+        (static_cast<std::uint64_t>(
+             std::bit_cast<std::uint32_t>(properties))
+         << 1) |
+        (state.isAir() ? 1u : 0u);
+    const auto existing = byOptics.find(key);
+    if (existing != byOptics.end()) {
+      stateClasses_[stateId] = existing->second;
+      continue;
+    }
+    if (classes_.size() >= 256)
+      throw std::runtime_error("light optical class table exceeds uint8");
+    const auto id = static_cast<std::uint8_t>(classes_.size());
+    classes_.push_back({properties, state.isAir()});
+    byOptics.emplace(key, id);
+    stateClasses_[stateId] = id;
+  }
+}
+
+std::uint8_t
+LightOpticalTable::classForState(BlockState::Id state) const noexcept {
+  return state < stateClasses_.size() ? stateClasses_[state] : 0;
+}
+
+std::shared_ptr<const LightOpticalTable> defaultLightOpticalTable() {
+  static const auto table = std::make_shared<LightOpticalTable>();
+  return table;
+}
+
+GeometrySection makeLightGeometrySection(const LightOpticalTable &optical,
+                                         const LightSectionView &section) {
+  GeometrySection result;
+  if (section.bits == 0) {
+    result.uniformClass = optical.classForState(section.single);
+    const auto &klass = optical[result.uniformClass];
+    result.nonAir = klass.air ? 0 : kLightVolume;
+    result.empty = result.nonAir == 0;
+    result.unknown = klass.properties.supported ? 0 : kLightVolume;
+    return result;
+  }
+  if (section.bits != 8 && section.bits != 16)
+    throw std::runtime_error("World section has invalid palette width");
+  if (section.palette.empty())
+    throw std::runtime_error("World section has an empty palette");
+
+  // This palette is temporary and private to the conversion. It maps a World
+  // palette index to the compact optical-class id.
+  std::vector<std::uint8_t> palette;
+  palette.reserve(section.palette.size());
+  for (BlockState::Id state : section.palette)
+    palette.push_back(optical.classForState(state));
+
+  result.cells = std::make_unique<GeometrySection::Cells>();
+  for (std::size_t i = 0; i < kLightVolume; ++i) {
+    const std::uint16_t index =
+        section.bits == 8 ? section.cells8[i] : section.cells16[i];
+    if (index >= palette.size())
+      throw std::runtime_error("World section palette index out of range");
+    (*result.cells)[i] = palette[index];
+  }
+  result.uniform = false;
+  for (std::uint8_t classId : *result.cells) {
+    const auto &klass = optical[classId];
+    result.nonAir += klass.air ? 0 : 1;
+    result.unknown += klass.properties.supported ? 0 : 1;
+  }
+  result.empty = result.nonAir == 0;
+  return result;
+}
+
+LightLayerSnapshot::LightLayerSnapshot() = default;
+
+LightLayerSnapshot::LightLayerSnapshot(const LightLayerSnapshot &other)
+    : state_(other.stateByte()) {
+  if (const auto page = other.packed_) {
+    // Explicit compatibility copies allocate their own page; production
+    // section/header copies share the descriptor and thus this page pointer.
+    packed_ = std::make_shared<PackedPage>();
+    for (std::size_t i = 0; i < kLightLayerBytes; ++i)
+      packed_->bytes[i].store(
+          page->bytes[i].load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+  }
+}
+
+LightLayerSnapshot &
+LightLayerSnapshot::operator=(const LightLayerSnapshot &other) {
+  if (this == &other)
+    return *this;
+  state_.store(other.stateByte(), std::memory_order_relaxed);
+  packed_ = other.packed_;
+  return *this;
+}
+
+LightLayerSnapshot::LightLayerSnapshot(LightLayerSnapshot &&other) noexcept
+    : state_(other.stateByte()), packed_(std::move(other.packed_)) {
+  other.state_.store(0, std::memory_order_relaxed);
+}
+
+LightLayerSnapshot &
+LightLayerSnapshot::operator=(LightLayerSnapshot &&other) noexcept {
+  if (this == &other)
+    return *this;
+  state_.store(other.stateByte(), std::memory_order_relaxed);
+  packed_ = std::move(other.packed_);
+  other.state_.store(0, std::memory_order_relaxed);
+  return *this;
+}
+
+LightLayerSnapshot::~LightLayerSnapshot() = default;
+
 LightLayerSnapshot LightLayerSnapshot::missing() { return {}; }
 
 LightLayerSnapshot LightLayerSnapshot::uniform(std::uint8_t value) {
   if (!validLightValue(value))
     throw std::invalid_argument("light value must be in 0..15");
   LightLayerSnapshot result;
-  result.storage_ = Storage::Uniform;
-  result.uniform_ = value;
+  result.state_.store(
+      static_cast<std::uint8_t>(kLightUniformFlag | (value & 15)),
+      std::memory_order_relaxed);
+  return result;
+}
+
+LightLayerSnapshot LightLayerSnapshot::mixedEmpty() {
+  LightLayerSnapshot result;
+  result.makeMixed();
   return result;
 }
 
 LightLayerSnapshot LightLayerSnapshot::mixed(
     const std::array<std::uint8_t, kLightVolume> &values) {
-  LightLayerSnapshot result;
-  result.storage_ = Storage::Mixed;
-  result.packed_.assign(kLightLayerBytes, 0);
+  LightLayerSnapshot result = mixedEmpty();
   for (std::size_t i = 0; i < values.size(); ++i) {
     if (!validLightValue(values[i]))
       throw std::invalid_argument("light value must be in 0..15");
-    result.packed_[i >> 1] |=
-        static_cast<std::uint8_t>((values[i] & 15) << ((i & 1) * 4));
+    result.writeCell(i, values[i]);
   }
   return result;
 }
 
 LightLayerSnapshot LightLayerSnapshot::mixedPacked(
     const std::array<std::uint8_t, kLightLayerBytes> &packed) {
-  LightLayerSnapshot result;
-  result.storage_ = Storage::Mixed;
-  result.packed_.assign(packed.begin(), packed.end());
+  LightLayerSnapshot result = mixedEmpty();
+  for (std::size_t i = 0; i < packed.size(); ++i)
+    result.writePackedByte(i, packed[i]);
   return result;
 }
 
-std::uint8_t LightLayerSnapshot::get(int x, int y, int z) const {
-  if (storage_ == Storage::Missing)
-    return 0;
-  if (storage_ == Storage::Uniform)
-    return uniform_;
-  const std::size_t index = lightIndex(x, y, z);
-  return static_cast<std::uint8_t>((packed_[index >> 1] >> ((index & 1) * 4)) &
-                                   15);
+void LightLayerSnapshot::makeMixed() {
+  state_.store(0, std::memory_order_relaxed);
+  packed_ = std::make_shared<PackedPage>();
+  for (auto &byte : packed_->bytes)
+    byte.store(0, std::memory_order_relaxed);
 }
 
-const std::uint8_t *LightLayerSnapshot::packedData() const {
-  return storage_ == Storage::Mixed ? packed_.data() : nullptr;
+std::uint8_t LightLayerSnapshot::get(int x, int y, int z) const {
+  const Storage current = storage();
+  if (current == Storage::Missing)
+    return 0;
+  if (current == Storage::Uniform)
+    return uniformValue();
+  const std::size_t index = lightIndex(x, y, z);
+  return static_cast<std::uint8_t>(
+      (packedByte(index >> 1) >> ((index & 1) * 4)) & 15);
+}
+
+void LightLayerSnapshot::writeCell(std::size_t index, std::uint8_t value) {
+  if (index >= kLightVolume || value > 15 || !packed_)
+    throw std::invalid_argument("invalid mixed light cell");
+  const std::size_t byte = index >> 1;
+  const unsigned shift = static_cast<unsigned>((index & 1) * 4);
+  auto &slot = packed_->bytes[byte];
+  const std::uint8_t old = slot.load(std::memory_order_relaxed);
+  const std::uint8_t mask = static_cast<std::uint8_t>(15u << shift);
+  slot.store(static_cast<std::uint8_t>((old & ~mask) |
+                                      ((value & 15u) << shift)),
+             std::memory_order_relaxed);
+}
+
+void LightLayerSnapshot::writePackedByte(std::size_t byte,
+                                         std::uint8_t value) {
+  if (byte >= kLightLayerBytes || !packed_)
+    throw std::invalid_argument("invalid mixed light byte");
+  packed_->bytes[byte].store(value, std::memory_order_relaxed);
+}
+
+void LightLayerSnapshot::readPacked(
+    std::array<std::uint8_t, kLightLayerBytes> &out) const {
+  if (!packed_) {
+    out.fill(0);
+    return;
+  }
+  for (std::size_t i = 0; i < kLightLayerBytes; ++i)
+    out[i] = packed_->bytes[i].load(std::memory_order_relaxed);
 }
 
 bool LightLayerSnapshot::operator==(const LightLayerSnapshot &other) const {
-  if (storage_ != other.storage_ || uniform_ != other.uniform_)
+  const Storage mine = storage();
+  if (mine != other.storage())
     return false;
-  return storage_ != Storage::Mixed || packed_ == other.packed_;
+  if (mine == Storage::Uniform)
+    return uniformValue() == other.uniformValue();
+  if (mine != Storage::Mixed)
+    return true;
+  for (std::size_t i = 0; i < kLightLayerBytes; ++i)
+    if (packedByte(i) != other.packedByte(i))
+      return false;
+  return true;
 }
 
 const BlockLightProperties &unsupportedLightProperties() noexcept {
@@ -391,7 +669,7 @@ bool lightFaceShapesOcclude(const BlockLightProperties &from,
 LightSectionSnapshot::LightSectionSnapshot(
     int section, bool is_empty, std::vector<BlockLightProperties> lightPalette,
     std::vector<std::uint16_t> lightCells,
-    std::array<LightLayerSnapshot, kLightLayerCount> lightLayers)
+    std::array<LightLayerRef, kLightLayerCount> lightLayers)
     : sectionY(section), empty(is_empty), palette(std::move(lightPalette)),
       cells(std::move(lightCells)), layers(std::move(lightLayers)) {
   if (palette.empty())
@@ -445,6 +723,31 @@ const LightSectionSnapshot *LightChunkSnapshot::section(int sectionY) const {
 }
 
 int LightChunkSnapshot::lightValue(LightLayer layer, int x, int y, int z) const {
+  if (sections.empty()) {
+    const LightChunkSnapshot *view =
+        layer == LightLayer::Block ? blockLayerSnapshot.get()
+                                   : skyLayerSnapshot.get();
+    if (!view)
+      return layer == LightLayer::Block ? 0 : (skyLightEnabled ? 15 : 0);
+    const int sectionY = y >> 4;
+    const auto layerIndex = static_cast<std::size_t>(layer);
+    const LightSectionSnapshot *current = view->section(sectionY);
+    if (!current)
+      return 0;
+    if (!current->layers[layerIndex].isMissing())
+      return current->light(layer, x & 15, y & 15, z & 15);
+    if (layer == LightLayer::Block)
+      return 0;
+    if (!skyLightEnabled)
+      return 0;
+    for (int aboveY = sectionY + 1;
+         aboveY < minBlockSectionY + blockSectionCount + 1; ++aboveY) {
+      const LightSectionSnapshot *above = view->section(aboveY);
+      if (above && !above->layers[layerIndex].isMissing())
+        return above->light(LightLayer::Sky, x & 15, 0, z & 15);
+    }
+    return 15;
+  }
   const int sectionY = y >> 4;
   const LightSectionSnapshot *current = section(sectionY);
   if (!current)
@@ -470,8 +773,7 @@ class LightService::Impl {
 
   struct OwnedCell {
     std::uint64_t sequence = 0;
-    BlockLightProperties properties;
-    bool sectionEmpty = false;
+    BlockState::Id state = 0;
   };
   struct SectionStatusValue {
     std::uint64_t sequence = 0;
@@ -483,11 +785,90 @@ class LightService::Impl {
   };
   struct CoalescedSection {
     std::uint64_t chunkKey = 0;
-    std::uint64_t lifecycleEpoch = 0;
     int sectionY = 0;
     std::uint64_t sectionSequence = 0;
-    bool sectionEmpty = false;
     std::vector<CoalescedCell> cells;
+  };
+
+  struct PendingChunk {
+    std::uint64_t key = 0;
+    std::uint64_t generation = 0;
+    // Generation of the newest full authoritative snapshot. Every record at or
+    // below this sequence is already represented by that snapshot.
+    std::uint64_t inputSequence = 0;
+    std::uint64_t lifecycleEpoch = 0;
+    std::uint64_t revision = 0;
+    std::unique_ptr<LightChunkInput> load;
+    bool unload = false;
+    std::unordered_map<std::uint32_t, LightBlockChange> changes;
+    // Owned hot-path hand-off: one latest value per dirty cell. A full ring
+    // merges here under the same sequence ordering as the normal worker drain.
+    std::unordered_map<std::uint32_t, OwnedCell> ownedCells;
+    std::unordered_map<int, SectionStatusValue> sectionStatus;
+  };
+
+  struct WorkingChunk {
+    std::uint64_t key = 0;
+    std::uint64_t lifecycleEpoch = 0;
+    int chunkX = 0;
+    int chunkZ = 0;
+    std::shared_ptr<LightChunkSnapshot> snapshot;
+    std::unordered_map<int, std::shared_ptr<LightSectionSnapshot>>
+        mutableSections;
+    // Real writes performed by this layer's propagator. This, rather than a
+    // comparison with a previous page, drives protocol section deltas.
+    std::unordered_set<int> dirtySections;
+    bool dirty = false;
+
+    LightSectionSnapshot *sectionForEdit(int sectionY) {
+      const auto working = mutableSections.find(sectionY);
+      if (working != mutableSections.end())
+        return working->second.get();
+      const auto index = vectorIndex(snapshot->sections, sectionY);
+      if (index >= snapshot->sections.size())
+        return nullptr;
+      auto copy = std::make_shared<LightSectionSnapshot>(
+          *snapshot->sections[index]);
+      snapshot->sections[index] = copy;
+      mutableSections.emplace(sectionY, copy);
+      return copy.get();
+    }
+  };
+
+  struct PreparedBatch {
+    bool rawGeometry = false;
+    std::unordered_map<std::uint64_t, WorkingChunk> chunks;
+    std::unordered_set<std::uint64_t> removed;
+    std::unordered_set<std::uint64_t> replaced;
+    std::unordered_set<std::uint64_t> loaded;
+    std::unordered_set<std::uint64_t> affected;
+    std::vector<LightPos> changedPositions;
+    std::uint64_t maxGeneration = 0;
+  };
+
+  struct LayerWorkspace {
+    std::unordered_map<std::uint64_t, WorkingChunk> chunks;
+    std::unordered_set<std::uint64_t> removed;
+  };
+
+  struct LayerOutcome {
+    LayerWorkspace layers;
+    bool complete = false;
+  };
+
+  struct LayerResult {
+    bool hasLayer = false;
+    LightLayer layer = LightLayer::Block;
+    std::uint64_t key = 0;
+    std::shared_ptr<LightChunkSnapshot> snapshot;
+  };
+  static_assert(sizeof(LayerResult) == 32);
+
+  struct GeometryChunk {
+    int chunkX = 0;
+    int chunkZ = 0;
+    std::uint64_t lifecycleEpoch = 0;
+    std::vector<GeometrySection> sections;
   };
 
 public:
@@ -498,35 +879,55 @@ public:
       throw std::invalid_argument("light service needs block sections");
     if (options.batchSize == 0 || options.maxQueuedCommands == 0)
       throw std::invalid_argument("light worker limits must be positive");
-    if (options.cellQueueCapacity < 2 ||
-        !std::has_single_bit(options.cellQueueCapacity))
-      throw std::invalid_argument("light cell queue capacity must be a power of two");
-    ring.resize(options.cellQueueCapacity);
-    ringMask = options.cellQueueCapacity - 1;
-    ringBatchLimit = std::min<std::size_t>(1024, ring.size());
+    if (options.cellQueueCapacity != 0 && options.cellQueueCapacity < 2)
+      throw std::invalid_argument("light cell queue capacity must be at least two");
+    const std::size_t geometryCapacity =
+        options.cellQueueCapacity != 0
+            ? options.cellQueueCapacity
+            : std::max<std::size_t>(2, options.geometryQueueBytes /
+                                          sizeof(GeometryInput));
+    inputQueue = std::make_unique<SpscRing<GeometryInput>>(geometryCapacity);
+    resultQueue = std::make_unique<SpscRing<LayerResult>>(
+        std::max<std::size_t>(2, options.resultQueueBytes /
+                                    sizeof(LayerResult)));
+    controlQueue = std::make_unique<SpscRing<PendingChunk>>(
+        std::max<std::size_t>(2, options.maxQueuedCommands));
+    opticalTable = defaultLightOpticalTable();
     worker = std::thread([this] { run(); });
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
     const auto affinity =
         applyThreadAffinity(worker.native_handle(), options.workerAffinityMask);
     statsWorkerAffinity.store(affinity.mask, std::memory_order_relaxed);
     statsWorkerAffinityError.store(affinity.error,
                                    std::memory_order_relaxed);
+    statsBlockWorkerAffinity.store(affinity.mask, std::memory_order_relaxed);
+    statsBlockWorkerAffinityError.store(affinity.error,
+                                        std::memory_order_relaxed);
 #endif
   }
 
   ~Impl() { close(); }
+
+  bool enqueueControl(PendingChunk state) {
+    if (controlQueue->full() || !controlQueue->push(std::move(state))) {
+      ++statsRejected;
+      return false;
+    }
+    ++statsSubmitted;
+    signalWorkerLocked(true);
+    return true;
+  }
 
   std::uint64_t submitChunk(LightChunkInput input) {
     if (!validInput(input)) {
       ++statsRejected;
       return 0;
     }
-    const auto key = chunkKey(input.chunkX, input.chunkZ);
-    std::lock_guard lock(mutex);
-    if (!accepting) {
+    if (!accepting || controlQueue->full()) {
       ++statsRejected;
       return 0;
     }
+    const auto key = chunkKey(input.chunkX, input.chunkZ);
     auto &active = versions[key];
     const bool newLifetime = active.inactive || active.requestRevision == 0;
     if (newLifetime) {
@@ -536,6 +937,8 @@ public:
         ++active.epoch;
       active.requestRevision = 0;
       latest.erase(key);
+      latestBlock.erase(key);
+      latestSky.erase(key);
     } else if (input.lifecycleEpoch != 0 &&
                input.lifecycleEpoch != active.epoch) {
       ++statsRejected;
@@ -544,23 +947,15 @@ public:
     const auto generation = nextRequestGeneration();
     ++active.requestRevision;
     active.inactive = false;
-    const bool preserveUnload = pending.contains(key) && pending.at(key).unload;
+    mainVersions[key] = active;
     PendingChunk state;
     state.key = key;
     state.generation = generation;
-    // This full snapshot includes every cell change up to `generation`.
-    // Older ring/block records must not be replayed on top of it.
     state.inputSequence = generation;
     state.lifecycleEpoch = active.epoch;
     state.revision = active.requestRevision;
     state.load = std::make_unique<LightChunkInput>(std::move(input));
-    // An unload enqueued before this reload remains an ordered tombstone. The
-    // worker clears the old internal generation before installing this load.
-    state.unload = preserveUnload;
-    pending[key] = std::move(state);
-    notePendingLocked();
-    signalWorkerLocked(true);
-    return generation;
+    return enqueueControl(std::move(state)) ? generation : 0;
   }
 
   bool reportSectionStatus(int chunkX, int chunkZ, int sectionY, bool empty) {
@@ -569,23 +964,22 @@ public:
       return false;
     }
     const auto key = chunkKey(chunkX, chunkZ);
-    std::lock_guard lock(mutex);
-    auto active = versions.find(key);
-    if (!accepting || active == versions.end() || active->second.inactive) {
+    const auto active = versions.find(key);
+    if (!accepting || controlQueue->full() || active == versions.end() ||
+        active->second.inactive) {
       ++statsRejected;
       return false;
     }
     const auto generation = nextRequestGeneration();
-    ++active->second.requestRevision;
-    PendingChunk &state = pending[key];
+    auto &version = active->second;
+    ++version.requestRevision;
+    PendingChunk state;
     state.key = key;
     state.generation = generation;
-    state.lifecycleEpoch = active->second.epoch;
-    state.revision = active->second.requestRevision;
+    state.lifecycleEpoch = version.epoch;
+    state.revision = version.requestRevision;
     state.sectionStatus[sectionY] = {generation, empty};
-    notePendingLocked();
-    signalWorkerLocked(true);
-    return true;
+    return enqueueControl(std::move(state));
   }
 
   bool reportBlockChange(LightBlockChange change) {
@@ -603,74 +997,115 @@ public:
   // chunk, so the per-cell version/pending/section lookups collapse into one set
   // of lookups per chunk-section and the mutex is taken once for the whole tick.
   void reportBlockChanges(const std::vector<LightBlockChange> &changes) {
-    if (changes.empty())
-      return;
-    std::lock_guard lock(mutex);
-    std::optional<std::uint64_t> currentKey;
-    ChunkVersion *active = nullptr;
-    PendingChunk *state = nullptr;
-    int currentSection = std::numeric_limits<int>::min();
-    std::uint64_t applied = 0;
-    for (const auto &source : changes) {
-      if (!validSection(source.sectionY) ||
-          source.localIndex >= kLightVolume) {
+    // Compatibility path for attribute-level probes. Production World writes
+    // use the raw 16-byte reportBlockCell ring.
+    for (const auto &change : changes)
+      if (!applyBlockChange(change))
         ++statsRejected;
-        continue;
-      }
-      const auto key = chunkKey(source.chunkX, source.chunkZ);
-      if (key != currentKey) {
-        currentKey = key;
-        currentSection = std::numeric_limits<int>::min();
-        active = nullptr;
-        state = nullptr;
-        auto found = versions.find(key);
-        if (accepting && found != versions.end() && !found->second.inactive) {
-          active = &found->second;
-          auto stateIt = pending.find(key);
-          if (stateIt == pending.end())
-            stateIt = pending.emplace(key, PendingChunk{}).first;
-          state = &stateIt->second;
-          state->key = key;
-          state->lifecycleEpoch = active->epoch;
-        }
-      }
-      if (!state) {
-        ++statsRejected;
-        continue;
-      }
-      const auto generation = nextRequestGeneration();
-      if (generation <= state->inputSequence)
-        continue;
-      if (source.sectionY != currentSection) {
-        currentSection = source.sectionY;
-        state->sectionStatus[currentSection] = {generation, source.isEmpty};
-      }
-      ++active->requestRevision;
-      state->generation = generation;
-      state->revision = active->requestRevision;
-      const auto slot = changeSlot(source.sectionY, source.localIndex);
-      const auto found = state->changes.find(slot);
-      if (found == state->changes.end()) {
-        LightBlockChange stored = source;
-        stored.generation = generation;
-        state->changes.emplace(slot, std::move(stored));
-      } else {
-        found->second.newProperties = source.newProperties;
-        found->second.isEmpty = source.isEmpty;
-        found->second.generation = generation;
-      }
-      ++applied;
-    }
-    if (applied != 0) {
-      ++statsSubmitted;
-      noteHighWaterLocked();
-    }
-    if (applied != 0)
-      signalWorkerLocked();
   }
 
   std::uint64_t nextRequestGeneration() {
     return nextGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+  }
+
+  const LightOpticalClass &opticalClass(std::uint16_t id) const {
+    return (*opticalTable)[static_cast<std::uint8_t>(id)];
+  }
+
+  std::uint8_t classForState(BlockState::Id stateId) const {
+    return opticalTable->classForState(stateId);
+  }
+
+  void loadGeometry(std::uint64_t key, LightChunkInput &input) {
+    GeometryChunk chunk;
+    chunk.chunkX = input.chunkX;
+    chunk.chunkZ = input.chunkZ;
+    chunk.lifecycleEpoch = input.lifecycleEpoch;
+    chunk.sections = std::move(input.geometrySections);
+    geometry[key] = std::move(chunk);
+  }
+
+  GeometrySection *geometrySection(std::uint64_t key, int sectionY) {
+    const auto chunk = geometry.find(key);
+    if (chunk == geometry.end())
+      return nullptr;
+    const int index = sectionY - minBlockSectionY;
+    if (index < 0 || index >= blockSectionCount)
+      return nullptr;
+    return &chunk->second.sections[static_cast<std::size_t>(index)];
+  }
+
+  const GeometrySection *geometrySection(std::uint64_t key,
+                                         int sectionY) const {
+    const auto chunk = geometry.find(key);
+    if (chunk == geometry.end())
+      return nullptr;
+    const int index = sectionY - minBlockSectionY;
+    if (index < 0 || index >= blockSectionCount)
+      return nullptr;
+    return &chunk->second.sections[static_cast<std::size_t>(index)];
+  }
+
+  const std::shared_ptr<const LightChunkSnapshot> &
+  storedLayerSnapshot(LightLayer layer, std::uint64_t key) const {
+    static const std::shared_ptr<const LightChunkSnapshot> empty;
+    const auto &source =
+        layer == LightLayer::Block ? lastReadyBlock : lastReadySky;
+    const auto found = source.find(key);
+    if (found != source.end())
+      return found->second;
+    // Attribute-level compatibility fixtures still use the legacy combined
+    // owner state. Raw production never stores an entry there.
+    const auto legacy = internal.find(key);
+    return legacy == internal.end() ? empty : legacy->second;
+  }
+
+  struct RawCellResult {
+    bool opticalChanged = false;
+    bool emptyChanged = false;
+  };
+
+  RawCellResult applyRawGeometryCell(std::uint64_t key, int sectionY,
+                                     std::uint16_t localIndex,
+                                     BlockState::Id stateId) {
+    RawCellResult result;
+    GeometrySection *section = geometrySection(key, sectionY);
+    if (!section)
+      return result;
+    const std::uint16_t oldClass = section->at(localIndex);
+    const std::uint16_t newClass = classForState(stateId);
+    const auto &oldOptical = opticalClass(oldClass);
+    const auto &newOptical = opticalClass(newClass);
+    result.opticalChanged =
+        oldOptical.properties != newOptical.properties ||
+        oldOptical.air != newOptical.air;
+    if (!result.opticalChanged)
+      return result;
+    const bool oldEmpty = section->empty;
+    if (!oldOptical.air)
+      --section->nonAir;
+    if (!oldOptical.properties.supported)
+      --section->unknown;
+    if (!newOptical.air)
+      ++section->nonAir;
+    if (!newOptical.properties.supported)
+      ++section->unknown;
+    if (section->uniform && oldClass == section->uniformClass) {
+      if (newClass == section->uniformClass) {
+        // Equal class path handled above; this is unreachable on a change.
+      } else {
+        section->cells = std::make_unique<GeometrySection::Cells>();
+        section->cells->fill(
+            static_cast<std::uint8_t>(section->uniformClass));
+        (*section->cells)[localIndex] = static_cast<std::uint8_t>(newClass);
+        section->uniform = false;
+      }
+    } else {
+      (*section->cells)[localIndex] = static_cast<std::uint8_t>(newClass);
+    }
+    section->empty = section->nonAir == 0;
+    result.emptyChanged = oldEmpty != section->empty;
+    return result;
   }
 
   // Atomic wait is used for the cell ring so the producer does not take the
@@ -678,8 +1113,11 @@ public:
   // the ring head; a worker that captured an older sequence cannot miss it.
   void notifyWorkerSleeping() {
     wakeSequence.fetch_add(1, std::memory_order_release);
-    if (workerSleeping.exchange(false, std::memory_order_acq_rel))
-      wakeSequence.notify_one();
+    workerSleeping.store(false, std::memory_order_release);
+    // The flag is only an optimization: an unconditional wake closes the
+    // producer/awaitWork state-transition window where a notification could
+    // otherwise be lost while the worker is about to enter atomic wait.
+    wakeSequence.notify_one();
   }
 
   void signalWorkerLocked(bool batchWindow = false) {
@@ -688,166 +1126,211 @@ public:
       wake.notify_all();
   }
 
-  bool applyOwnedCellLocked(const LightCellUpdate &update) {
-    if (!validSection(update.sectionY) || update.localIndex >= kLightVolume) {
+  bool applyOwnedCellLocked(std::uint64_t sequence,
+                            const LightCellUpdate &update) {
+    const int sectionY = update.y >> 4;
+    if (!validSection(sectionY)) {
       ++statsRejected;
       return false;
     }
-    auto active = versions.find(update.chunkKey);
-    if (active == versions.end() || active->second.inactive ||
-        (update.lifecycleEpoch != 0 &&
-         update.lifecycleEpoch != active->second.epoch)) {
+    const auto key = chunkKey(update.x >> 4, update.z >> 4);
+    auto active = workerVersions.find(key);
+    if (active == workerVersions.end() || active->second.inactive) {
       ++statsRejected;
       return false;
     }
-    auto stateIt = pending.find(update.chunkKey);
-    if (stateIt == pending.end())
-      stateIt = pending.emplace(update.chunkKey, PendingChunk{}).first;
-    PendingChunk &state = stateIt->second;
-    state.key = update.chunkKey;
-    if (update.sequence <= state.inputSequence)
-      return true;
-    state.generation = update.sequence;
-    state.lifecycleEpoch = active->second.epoch;
-    state.revision = ++active->second.requestRevision;
-    auto &status = state.sectionStatus[update.sectionY];
-    if (update.sequence > status.sequence)
-      status = {update.sequence, update.sectionEmpty};
-    const auto slot = changeSlot(update.sectionY, update.localIndex);
-    auto &owned = state.ownedCells[slot];
-    if (update.sequence > owned.sequence)
-      owned = {update.sequence, update.properties, update.sectionEmpty};
-    notePendingLocked();
-    return true;
-  }
-
-  void enqueueCoalescedLocked(const CoalescedSection *sections,
-                              std::size_t count) {
-    for (std::size_t i = 0; i < count; ++i) {
-      const CoalescedSection &section = sections[i];
-      if (!validSection(section.sectionY)) {
-        ++statsRejected;
-        continue;
-      }
-      for (const CoalescedCell &cell : section.cells) {
-        LightCellUpdate update;
-        update.chunkKey = section.chunkKey;
-        update.lifecycleEpoch = section.lifecycleEpoch;
-        update.sequence = cell.value.sequence;
-        update.sectionY = section.sectionY;
-        update.localIndex = cell.localIndex;
-        update.properties = cell.value.properties;
-        update.sectionEmpty = cell.value.sectionEmpty;
-        applyOwnedCellLocked(update);
-      }
-    }
-  }
-
-  // Shared merge step of the single and the bulk report path. Must be called
-  // with `mutex` held and a validated section/local index.
-  bool applyBlockChangeLocked(LightBlockChange &change) {
-    const auto key = chunkKey(change.chunkX, change.chunkZ);
-    auto active = versions.find(key);
-    if (!accepting || active == versions.end() || active->second.inactive) {
-      ++statsRejected;
-      return false;
-    }
-    change.generation = nextRequestGeneration();
     auto stateIt = pending.find(key);
     if (stateIt == pending.end())
       stateIt = pending.emplace(key, PendingChunk{}).first;
     PendingChunk &state = stateIt->second;
-    if (change.generation <= state.inputSequence)
-      return true;
-    ++active->second.requestRevision;
     state.key = key;
-    state.generation = change.generation;
+    if (sequence <= state.inputSequence)
+      return true;
+    state.generation = sequence;
     state.lifecycleEpoch = active->second.epoch;
-    state.revision = active->second.requestRevision;
-    state.sectionStatus[change.sectionY] = {change.generation, change.isEmpty};
-    const auto slot = changeSlot(change.sectionY, change.localIndex);
-    const auto found = state.changes.find(slot);
-    if (found == state.changes.end()) {
-      state.changes.emplace(slot, std::move(change));
-    } else {
-      // Preserve the first old state (the worker's current base) while folding
-      // later writes into the latest authoritative state for the same cell.
-      found->second.newProperties = change.newProperties;
-      found->second.isEmpty = change.isEmpty;
-      found->second.generation = change.generation;
-    }
+    state.revision = ++active->second.requestRevision;
+    const std::uint16_t localIndex =
+        static_cast<std::uint16_t>(
+            lightIndex(update.x, update.y, update.z));
+    auto &owned = state.ownedCells[changeSlot(sectionY, localIndex)];
+    if (sequence > owned.sequence)
+      owned = {sequence, update.state};
     notePendingLocked();
     return true;
   }
 
   bool applyBlockChange(LightBlockChange change) {
-    std::lock_guard lock(mutex);
-    const bool applied = applyBlockChangeLocked(change);
-    if (applied)
-      signalWorkerLocked();
-    return applied;
+    const auto key = chunkKey(change.chunkX, change.chunkZ);
+    const auto active = versions.find(key);
+    if (!accepting || controlQueue->full() || active == versions.end() ||
+        active->second.inactive) {
+      ++statsRejected;
+      return false;
+    }
+    change.generation = nextRequestGeneration();
+    auto &version = active->second;
+    ++version.requestRevision;
+    PendingChunk state;
+    state.key = key;
+    state.generation = change.generation;
+    state.lifecycleEpoch = version.epoch;
+    state.revision = version.requestRevision;
+    state.sectionStatus[change.sectionY] = {
+        change.generation, change.isEmpty};
+    const auto slot = changeSlot(change.sectionY, change.localIndex);
+    state.changes.emplace(slot, std::move(change));
+    return enqueueControl(std::move(state));
   }
 
   bool unloadChunk(int chunkX, int chunkZ) {
     const auto key = chunkKey(chunkX, chunkZ);
-    std::lock_guard lock(mutex);
-    auto active = versions.find(key);
-    if (!accepting || active == versions.end()) {
+    const auto active = versions.find(key);
+    if (!accepting || controlQueue->full() || active == versions.end()) {
       ++statsRejected;
       return false;
     }
     const auto generation = nextRequestGeneration();
-    ++active->second.epoch;
-    active->second.requestRevision = 0;
+    auto &version = active->second;
+    ++version.epoch;
+    version.requestRevision = 0;
+    version.inactive = true;
     latest.erase(key);
-    active->second.inactive = true;
+    latestBlock.erase(key);
+    latestSky.erase(key);
+    mainVersions[key] = version;
     PendingChunk state;
     state.key = key;
     state.generation = generation;
-    state.lifecycleEpoch = active->second.epoch;
+    state.lifecycleEpoch = version.epoch;
     state.unload = true;
-    pending[key] = std::move(state);
-    notePendingLocked();
-    signalWorkerLocked(true);
-    return true;
+    return enqueueControl(std::move(state));
+  }
+
+  std::shared_ptr<const LightChunkSnapshot> mainLayerView(
+      const LightChunkSnapshot &worker) const {
+    auto result = std::make_shared<LightChunkSnapshot>(worker);
+    result->sections.clear();
+    result->sections.reserve(worker.sections.size());
+    result->blockLayerSnapshot.reset();
+    result->skyLayerSnapshot.reset();
+    const auto layer = result->layer;
+    if (!layer) {
+      result->sections = worker.sections;
+      return result;
+    }
+    const std::size_t index = static_cast<std::size_t>(*layer);
+    for (const auto &source : worker.sections) {
+      if (!source) {
+        result->sections.push_back(nullptr);
+        continue;
+      }
+      // Main owns this tiny section header. Only the layer descriptor and its
+      // optional atomic page are shared with the worker.
+      auto section = std::make_shared<LightSectionSnapshot>(
+          source->sectionY, source->empty,
+          std::vector<BlockLightProperties>{emptyLightProperties()},
+          std::vector<std::uint16_t>{});
+      section->unsupportedCells = source->unsupportedCells;
+      section->layers[index] = source->layers[index];
+      result->sections.push_back(std::move(section));
+    }
+    return result;
   }
 
   void drainPublished() {
-    std::vector<std::vector<std::pair<
-        std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>>>
-        ready;
-    std::vector<std::shared_ptr<const LightChunkSnapshot>> callbacks;
-    std::function<void(std::shared_ptr<const LightChunkSnapshot>)> callback;
-    {
-      std::lock_guard lock(mutex);
-      ready.swap(published);
-      callback = publishCallback;
-      for (const auto &batch : ready) {
-        for (const auto &[key, snapshot] : batch) {
-          const auto active = versions.find(key);
-          if (active != versions.end() &&
-              active->second.epoch == snapshot->lifecycleEpoch &&
-              !active->second.inactive) {
-            const auto current = latest.find(key);
-            if (current == latest.end() ||
-                current->second->revision <= snapshot->revision) {
-              latest[key] = snapshot;
-              for (const auto &change : snapshot->changedSections) {
-                if (change.sky)
-                  statsReceivedSkySections.fetch_add(
-                      1, std::memory_order_relaxed);
-                if (change.block)
-                  statsReceivedBlockSections.fetch_add(
-                      1, std::memory_order_relaxed);
-              }
-              if (callback)
-                callbacks.push_back(snapshot);
-            }
-          } else {
-            ++statsStale;
-          }
-        }
+    std::vector<LayerResult> ready;
+    LayerResult result;
+    while (resultQueue->pop(result))
+      ready.push_back(std::move(result));
+
+    std::map<std::tuple<int, std::uint64_t, std::uint64_t>, std::size_t>
+        latestResult;
+    std::vector<LayerResult> coalesced;
+    for (LayerResult &item : ready) {
+      if (!item.snapshot) {
+        coalesced.push_back(std::move(item));
+        continue;
       }
+      // The queued object is still the worker's persistent header. Main makes
+      // its own small header before merging dirty metadata; section payloads
+      // remain shared and no light page is copied.
+      item.snapshot = std::make_shared<LightChunkSnapshot>(*item.snapshot);
+      const auto identity = std::make_tuple(
+          item.hasLayer ? static_cast<int>(item.layer) : -1, item.key,
+          item.snapshot->lifecycleEpoch);
+      const auto found = latestResult.find(identity);
+      if (found == latestResult.end()) {
+        latestResult.emplace(identity, coalesced.size());
+        coalesced.push_back(std::move(item));
+        continue;
+      }
+      LayerResult &current = coalesced[found->second];
+      std::map<int, std::pair<bool, bool>> merged;
+      for (const auto &change : current.snapshot->changedSections)
+        merged[change.sectionY] = {change.sky, change.block};
+      for (const auto &change : item.snapshot->changedSections) {
+        auto &flags = merged[change.sectionY];
+        flags.first |= change.sky;
+        flags.second |= change.block;
+      }
+      if (item.snapshot->deltaBaseRevision ==
+          current.snapshot->revision)
+        item.snapshot->deltaBaseRevision =
+            current.snapshot->deltaBaseRevision;
+      item.snapshot->changedSections.clear();
+      for (const auto &[sectionY, flags] : merged)
+        item.snapshot->changedSections.push_back(
+            {sectionY, flags.first, flags.second});
+      current = std::move(item);
+    }
+    ready = std::move(coalesced);
+
+    std::vector<std::shared_ptr<const LightChunkSnapshot>> callbacks;
+    std::function<void(std::shared_ptr<const LightChunkSnapshot>)> callback =
+        publishCallback;
+    for (LayerResult &item : ready) {
+      if (!item.snapshot) {
+        ++statsStale;
+        continue;
+      }
+      const auto active = mainVersions.find(item.key);
+      if (active == mainVersions.end() || active->second.inactive ||
+          active->second.epoch != item.snapshot->lifecycleEpoch) {
+        ++statsStale;
+        continue;
+      }
+      if (!item.hasLayer) {
+        const auto current = latest.find(item.key);
+        if (current == latest.end() ||
+            current->second->revision <= item.snapshot->revision) {
+          latest[item.key] = item.snapshot;
+          for (const auto &change : item.snapshot->changedSections) {
+            statsReceivedSkySections.fetch_add(change.sky ? 1 : 0,
+                                               std::memory_order_relaxed);
+            statsReceivedBlockSections.fetch_add(change.block ? 1 : 0,
+                                                 std::memory_order_relaxed);
+          }
+          if (callback)
+            callbacks.push_back(item.snapshot);
+        }
+        continue;
+      }
+      auto &latestForLayer =
+          item.layer == LightLayer::Block ? latestBlock : latestSky;
+      const auto current = latestForLayer.find(item.key);
+      if (current != latestForLayer.end() &&
+          current->second->revision > item.snapshot->revision)
+        continue;
+      auto main = mainLayerView(*item.snapshot);
+      latestForLayer[item.key] = main;
+      for (const auto &change : item.snapshot->changedSections) {
+        statsReceivedBlockSections.fetch_add(change.block ? 1 : 0,
+                                             std::memory_order_relaxed);
+        statsReceivedSkySections.fetch_add(change.sky ? 1 : 0,
+                                           std::memory_order_relaxed);
+      }
+      if (callback)
+        callbacks.push_back(std::move(main));
     }
     if (callback)
       for (const auto &snapshot : callbacks)
@@ -855,9 +1338,45 @@ public:
   }
 
   std::shared_ptr<const LightChunkSnapshot> latestChunk(int x, int z) const {
-    std::lock_guard lock(mutex);
+    const auto block = latestBlock.find(chunkKey(x, z));
+    if (block != latestBlock.end())
+      return block->second;
     const auto found = latest.find(chunkKey(x, z));
     return found == latest.end() ? nullptr : found->second;
+  }
+
+  std::shared_ptr<const LightChunkSnapshot> latestLayerChunk(
+      LightLayer layer, int x, int z) const {
+    const auto &source = layer == LightLayer::Block ? latestBlock : latestSky;
+    const auto found = source.find(chunkKey(x, z));
+    return found == source.end() ? nullptr : found->second;
+  }
+
+  std::optional<std::array<int, 256>> skyColumnSourcesForTesting(
+      int x, int z) const {
+    std::lock_guard lock(mutex);
+    if (busy || !pending.empty() || !ringEmpty())
+      return std::nullopt;
+    const auto found = skyColumnSources.find(chunkKey(x, z));
+    if (found == skyColumnSources.end())
+      return std::nullopt;
+    return found->second;
+  }
+
+  std::shared_ptr<const LightOpticalTable> opticalTableForTesting() const {
+    return opticalTable;
+  }
+
+  std::optional<BlockLightProperties> opticalPropertiesForTesting(
+      int x, int y, int z) const {
+    std::lock_guard lock(mutex);
+    if (busy || !pending.empty() || !ringEmpty())
+      return std::nullopt;
+    const GeometrySection *section =
+        geometrySection(chunkKey(x >> 4, z >> 4), y >> 4);
+    if (!section)
+      return std::nullopt;
+    return opticalClass(section->at(lightIndex(x, y, z))).properties;
   }
 
   void setPublishCallback(
@@ -868,10 +1387,13 @@ public:
 
   Stats stats() const {
     Stats result;
+    result.workerCount = 1;
     result.submitted = statsSubmitted.load(std::memory_order_relaxed);
     result.rejected = statsRejected.load(std::memory_order_relaxed);
     result.processedBatches = statsBatches.load(std::memory_order_relaxed);
     result.processedBlockChanges = statsChanges.load(std::memory_order_relaxed);
+    result.droppedGeometryTasks =
+        statsDroppedGeometry.load(std::memory_order_relaxed);
     result.published = statsPublished.load(std::memory_order_relaxed);
     result.stalePublications = statsStale.load(std::memory_order_relaxed);
     result.queueHighWater = statsHighWater.load(std::memory_order_relaxed);
@@ -885,23 +1407,40 @@ public:
         statsReceivedSkySections.load(std::memory_order_relaxed);
     result.receivedBlockSections =
         statsReceivedBlockSections.load(std::memory_order_relaxed);
-    result.workerCpuMs = statsWorkerCpuMs.load(std::memory_order_relaxed);
+    result.workerCpuMs =
+        statsWorkerCpuMs.load(std::memory_order_relaxed);
+    result.blockWorkerCpuMs =
+        statsBlockWorkerCpuMs.load(std::memory_order_relaxed);
+    result.skyWorkerCpuMs =
+        statsSkyWorkerCpuMs.load(std::memory_order_relaxed);
     result.workerAffinityMask =
         statsWorkerAffinity.load(std::memory_order_relaxed);
     result.workerAffinityRequested =
         static_cast<std::uint64_t>(options.workerAffinityMask);
     result.workerAffinityError =
         statsWorkerAffinityError.load(std::memory_order_relaxed);
+    result.blockWorkerAffinityRequested =
+        static_cast<std::uint64_t>(options.workerAffinityMask);
+    result.blockWorkerAffinityMask =
+        statsBlockWorkerAffinity.load(std::memory_order_relaxed);
+    result.blockWorkerAffinityError =
+        statsBlockWorkerAffinityError.load(std::memory_order_relaxed);
+    result.skyWorkerAffinityRequested =
+        static_cast<std::uint64_t>(options.workerAffinityMask);
+    result.skyWorkerAffinityMask =
+        statsWorkerAffinity.load(std::memory_order_relaxed);
+    result.skyWorkerAffinityError =
+        statsWorkerAffinityError.load(std::memory_order_relaxed);
     std::lock_guard lock(mutex);
-    result.pendingChunks = pending.size() + busyChunks;
-    for (const auto &batch : published)
-      result.pendingPublications += batch.size();
+    result.pendingChunks = pendingChunkCountLocked();
+    result.pendingPublications = resultQueue->size();
     return result;
   }
 
   void resetMeasurementStats() {
     statsSubmitted.store(0, std::memory_order_relaxed);
     statsRejected.store(0, std::memory_order_relaxed);
+    statsDroppedGeometry.store(0, std::memory_order_relaxed);
     statsBatches.store(0, std::memory_order_relaxed);
     statsChanges.store(0, std::memory_order_relaxed);
     statsPublished.store(0, std::memory_order_relaxed);
@@ -924,7 +1463,7 @@ public:
     // The ring is drained by the worker, so idleness also means no queued cell
     // is still waiting to be coalesced into pending.
     idle.wait(lock, [&] {
-      return !busy && pending.empty() && ringEmpty();
+      return !busy && pending.empty() && orderedInputEmptyLocked();
     });
     return error.empty();
   }
@@ -990,49 +1529,93 @@ public:
   }
 
 private:
-  struct PendingChunk {
-    std::uint64_t key = 0;
-    std::uint64_t generation = 0;
-    // Generation of the newest full authoritative snapshot. Every record at or
-    // below this sequence is already represented by that snapshot.
-    std::uint64_t inputSequence = 0;
-    std::uint64_t lifecycleEpoch = 0;
-    std::uint64_t revision = 0;
-    std::unique_ptr<LightChunkInput> load;
-    bool unload = false;
-    std::unordered_map<std::uint32_t, LightBlockChange> changes;
-    // Owned hot-path hand-off: one latest value per dirty cell. A full ring
-    // merges here under the same sequence ordering as the normal worker drain.
-    std::unordered_map<std::uint32_t, OwnedCell> ownedCells;
-    std::unordered_map<int, SectionStatusValue> sectionStatus;
-  };
+  class LightValues {
+  public:
+    class CellRef {
+    public:
+      CellRef(LightValues &owner, std::size_t index)
+          : owner_(owner), index_(index) {}
+      operator std::uint8_t() const { return owner_.value(index_); }
+      CellRef &operator=(std::uint8_t value) {
+        owner_.write(index_, value);
+        return *this;
+      }
 
-  struct WorkingChunk {
-    std::uint64_t key = 0;
-    std::uint64_t lifecycleEpoch = 0;
-    int chunkX = 0;
-    int chunkZ = 0;
-    std::shared_ptr<LightChunkSnapshot> snapshot;
-    std::unordered_map<int, std::shared_ptr<LightSectionSnapshot>>
-        mutableSections;
-    bool dirty = false;
+    private:
+      LightValues &owner_;
+      std::size_t index_;
+    };
 
-    LightSectionSnapshot *sectionForEdit(int sectionY) {
-      const auto working = mutableSections.find(sectionY);
-      if (working != mutableSections.end())
-        return working->second.get();
-      const auto index = vectorIndex(snapshot->sections, sectionY);
-      if (index >= snapshot->sections.size())
-        return nullptr;
-      auto copy = std::make_shared<LightSectionSnapshot>(
-          *snapshot->sections[index]);
-      snapshot->sections[index] = copy;
-      mutableSections.emplace(sectionY, copy);
-      return copy.get();
+    LightValues()
+        : layer_(std::make_shared<LightLayerSnapshot>(
+              LightLayerSnapshot::missing())) {}
+    LightValues(const LightValues &) = default;
+    LightValues &operator=(const LightValues &) = default;
+    LightValues(LightValues &&) noexcept = default;
+    LightValues &operator=(LightValues &&) noexcept = default;
+
+    static LightValues fromLayer(const LightLayerRef &layer) {
+      LightValues result;
+      if (auto shared = layer.shared())
+        result.layer_ = std::move(shared);
+      return result;
     }
-  };
 
-  using LightValues = std::array<std::uint8_t, kLightVolume>;
+    CellRef operator[](std::size_t index) { return {*this, index}; }
+    std::uint8_t operator[](std::size_t index) const {
+      return value(index);
+    }
+    void fill(std::uint8_t value) {
+      // A whole-section fill is a topology conversion. Publish a tiny uniform
+      // descriptor; a later cell write expands it once into a mixed page.
+      layer_ = std::make_shared<LightLayerSnapshot>(
+          LightLayerSnapshot::uniform(value));
+    }
+    std::optional<std::uint8_t> uniformValue() const {
+      if (!layer_ || layer_->isMissing())
+        return std::nullopt;
+      if (layer_->isUniform())
+        return layer_->uniformValue();
+      const std::uint8_t first = (*this)[0];
+      for (std::size_t i = 1; i < kLightVolume; ++i)
+        if ((*this)[i] != first)
+          return std::nullopt;
+      return first;
+    }
+    const std::shared_ptr<LightLayerSnapshot> &shared() const {
+      return layer_;
+    }
+    std::shared_ptr<LightLayerSnapshot> &shared() { return layer_; }
+
+  private:
+    std::uint8_t value(std::size_t index) const {
+      return layer_ ? layer_->get(static_cast<int>(index & 15),
+                                 static_cast<int>((index >> 8) & 15),
+                                 static_cast<int>((index >> 4) & 15))
+                    : 0;
+    }
+    void write(std::size_t index, std::uint8_t value) {
+      if (!layer_)
+        layer_ = std::make_shared<LightLayerSnapshot>(
+            LightLayerSnapshot::missing());
+      if (layer_->isUniform()) {
+        const std::uint8_t fill = layer_->uniformValue();
+        auto mixed = std::make_shared<LightLayerSnapshot>(
+            LightLayerSnapshot::mixedEmpty());
+        const std::uint8_t packed =
+            static_cast<std::uint8_t>((fill << 4) | (fill & 15));
+        for (std::size_t byte = 0; byte < kLightLayerBytes; ++byte)
+          mixed->writePackedByte(byte, packed);
+        layer_ = std::move(mixed);
+      } else if (layer_->isMissing()) {
+        layer_ = std::make_shared<LightLayerSnapshot>(
+            LightLayerSnapshot::mixedEmpty());
+      }
+      layer_->writeCell(index, value);
+    }
+
+    std::shared_ptr<LightLayerSnapshot> layer_;
+  };
 
   struct IncreaseTask {
     LightPos position;
@@ -1074,12 +1657,23 @@ private:
         const bool inBlockRange =
             sectionY >= chunk->minBlockSectionY &&
             sectionY < chunk->minBlockSectionY + chunk->blockSectionCount;
+        const GeometrySection *geometry =
+            owner.geometrySection(key, sectionY);
         for (int index = 0; index < kLightVolume; ++index) {
           const int x = index & 15;
           const int z = (index >> 4) & 15;
           const int y = (index >> 8) & 15;
           const BlockLightProperties &properties =
-              inBlockRange ? data->at(x, y, z) : emptyLightProperties();
+              inBlockRange
+                  ? (geometry
+                         ? owner.opticalClass(
+                               geometry->uniform
+                                   ? geometry->uniformClass
+                                   : geometry->at(
+                                         static_cast<std::size_t>(index)))
+                               .properties
+                         : data->at(x, y, z))
+                  : emptyLightProperties();
           if (inBlockRange && !properties.supported)
             incomplete = true;
           const LightPos position{chunk->chunkX * 16 + x,
@@ -1143,17 +1737,31 @@ private:
         checks.erase(position);
         checkNode(position);
       }
-      while (!decreaseQueue.empty()) {
-        const DecreaseTask task = decreaseQueue.front();
-        decreaseQueue.pop_front();
+      while (!currentDecreaseQueue.empty() || !decreaseQueue.empty()) {
+        if (currentDecreaseQueue.empty()) {
+          const DecreaseTask first = decreaseQueue.pop();
+          currentDecreaseQueue.push(std::move(first));
+          activeDecreaseSection =
+              sectionOf(currentDecreaseQueue.front().position);
+        }
+        DecreaseTask task = currentDecreaseQueue.pop();
         ++owner.statsLightQueueEntries;
         propagateDecrease(task);
+        if (currentDecreaseQueue.empty())
+          activeDecreaseSection.reset();
       }
-      while (!increaseQueue.empty()) {
-        const IncreaseTask task = increaseQueue.front();
-        increaseQueue.pop_front();
+      while (!currentIncreaseQueue.empty() || !increaseQueue.empty()) {
+        if (currentIncreaseQueue.empty()) {
+          const IncreaseTask first = increaseQueue.pop();
+          currentIncreaseQueue.push(std::move(first));
+          activeIncreaseSection =
+              sectionOf(currentIncreaseQueue.front().position);
+        }
+        IncreaseTask task = currentIncreaseQueue.pop();
         ++owner.statsLightQueueEntries;
         propagateIncrease(task);
+        if (currentIncreaseQueue.empty())
+          activeIncreaseSection.reset();
       }
     }
 
@@ -1170,15 +1778,14 @@ private:
         if (found == lightValues.end())
           continue;
         const LightValues &values = found->second;
-        if (std::all_of(values.begin(), values.end(),
-                        [&](std::uint8_t value) {
-                          return value == values.front();
-                        }))
-          section->layers[static_cast<std::size_t>(LightLayer::Block)] =
-              LightLayerSnapshot::uniform(values.front());
-        else
-          section->layers[static_cast<std::size_t>(LightLayer::Block)] =
-              LightLayerSnapshot::mixed(values);
+        const auto uniform = values.uniformValue();
+        const auto payload =
+            uniform && values.shared()->isMixed()
+                ? std::make_shared<LightLayerSnapshot>(
+                      LightLayerSnapshot::uniform(*uniform))
+                : values.shared();
+        section->layers[static_cast<std::size_t>(LightLayer::Block)] = payload;
+        chunk->dirtySections.insert(position.y);
         chunk->dirty = true;
       }
     }
@@ -1192,8 +1799,8 @@ private:
       const auto workingChunk = working.find(key);
       if (workingChunk != working.end())
         return workingChunk->second.snapshot.get();
-      const auto stored = owner.internal.find(key);
-      return stored == owner.internal.end() ? nullptr : stored->second.get();
+      const auto &stored = owner.storedLayerSnapshot(LightLayer::Block, key);
+      return stored ? stored.get() : nullptr;
     }
 
     const LightChunkSnapshot *stateFor(int chunkX, int chunkZ) const {
@@ -1206,15 +1813,15 @@ private:
       const auto found = working.find(key);
       if (found != working.end())
         return &found->second;
-      const auto stored = owner.internal.find(key);
-      if (stored == owner.internal.end())
+      const auto &stored = owner.storedLayerSnapshot(LightLayer::Block, key);
+      if (!stored)
         return nullptr;
       WorkingChunk next;
       next.key = key;
-      next.lifecycleEpoch = stored->second->lifecycleEpoch;
-      next.chunkX = stored->second->chunkX;
-      next.chunkZ = stored->second->chunkZ;
-      next.snapshot = std::make_shared<LightChunkSnapshot>(*stored->second);
+      next.lifecycleEpoch = stored->lifecycleEpoch;
+      next.chunkX = stored->chunkX;
+      next.chunkZ = stored->chunkZ;
+      next.snapshot = std::make_shared<LightChunkSnapshot>(*stored);
       auto inserted = working.emplace(key, std::move(next)).first;
       return &inserted->second;
     }
@@ -1230,13 +1837,23 @@ private:
     }
 
     const BlockLightProperties &stateAt(LightPos position) const {
-      // LevelChunk.getBlockState returns air outside the playable height, while
-      // block-light storage still owns one section of vertical padding above
-      // and below it.
       if (position.y < owner.minBlockSectionY * 16 ||
           position.y >=
               (owner.minBlockSectionY + owner.blockSectionCount) * 16)
         return emptyLightProperties();
+      const std::uint64_t key =
+          chunkKey(position.x >> 4, position.z >> 4);
+      if (const GeometrySection *geometry =
+              owner.geometrySection(key, position.y >> 4)) {
+        const std::uint16_t classId =
+            geometry->uniform
+                ? geometry->uniformClass
+                : geometry->at(lightIndex(position.x, position.y, position.z));
+        const auto &properties = owner.opticalClass(classId).properties;
+        if (!properties.supported)
+          incomplete = true;
+        return properties;
+      }
       const LightSectionSnapshot *section = sectionAt(position);
       if (!section)
         return unsupportedLightProperties();
@@ -1266,15 +1883,11 @@ private:
         return false;
       const SectionPos3 key{position.x >> 4, position.y >> 4,
                             position.z >> 4};
-      auto inserted = lightValues.try_emplace(key);
+      auto inserted = lightValues.try_emplace(
+          key, LightValues::fromLayer(
+                   section->layers[static_cast<std::size_t>(
+                       LightLayer::Block)]));
       LightValues &values = inserted.first->second;
-      if (inserted.second) {
-        for (int y = 0; y < 16; ++y)
-          for (int z = 0; z < 16; ++z)
-            for (int x = 0; x < 16; ++x)
-              values[lightIndex(x, y, z)] =
-                  section->light(LightLayer::Block, x, y, z);
-      }
       const auto index = lightIndex(position.x, position.y, position.z);
       if (values[index] == level)
         return false;
@@ -1396,17 +2009,31 @@ private:
       }
     }
 
+    static SectionPos3 sectionOf(LightPos position) {
+      return {position.x >> 4, position.y >> 4, position.z >> 4};
+    }
+
     void enqueueIncrease(LightPos position, std::uint8_t level,
                          std::uint8_t directions, bool fromEmpty,
                          bool fromEmission) {
-      if (level > 0)
-        increaseQueue.push_back(
-            {position, level, directions, fromEmpty, fromEmission});
+      if (level == 0)
+        return;
+      IncreaseTask task{position, level, directions, fromEmpty, fromEmission};
+      if (activeIncreaseSection &&
+          sectionOf(position) == *activeIncreaseSection)
+        currentIncreaseQueue.push(std::move(task));
+      else
+        increaseQueue.push(std::move(task));
     }
 
     void enqueueDecrease(LightPos position, std::uint8_t level,
                          std::uint8_t directions) {
-      decreaseQueue.push_back({position, level, directions});
+      DecreaseTask task{position, level, directions};
+      if (activeDecreaseSection &&
+          sectionOf(position) == *activeDecreaseSection)
+        currentDecreaseQueue.push(std::move(task));
+      else
+        decreaseQueue.push(std::move(task));
     }
 
     Impl &owner;
@@ -1414,8 +2041,12 @@ private:
     const std::unordered_set<std::uint64_t> &removed;
     std::unordered_set<LightPos, LightPosHash> checks;
     std::deque<LightPos> checkQueue;
-    std::deque<DecreaseTask> decreaseQueue;
-    std::deque<IncreaseTask> increaseQueue;
+    TaskQueue<DecreaseTask> decreaseQueue;
+    TaskQueue<IncreaseTask> increaseQueue;
+    TaskQueue<DecreaseTask> currentDecreaseQueue;
+    TaskQueue<IncreaseTask> currentIncreaseQueue;
+    std::optional<SectionPos3> activeDecreaseSection;
+    std::optional<SectionPos3> activeIncreaseSection;
     std::unordered_map<SectionPos3, LightValues, SectionPos3Hash> lightValues;
     std::unordered_set<SectionPos3, SectionPos3Hash> dirtySections;
     mutable bool incomplete = false;
@@ -1429,9 +2060,10 @@ private:
         Impl &light,
         std::unordered_map<std::uint64_t, WorkingChunk> &workingChunks,
         const std::unordered_set<std::uint64_t> &removedChunks,
-        std::unordered_map<std::uint64_t, SkyColumnSources> &sources)
+        std::unordered_map<std::uint64_t, SkyColumnSources> &sources,
+        const std::unordered_set<std::uint64_t> &affectedChunks)
         : owner(light), working(workingChunks), removed(removedChunks),
-          sourceHeights(sources) {}
+          sourceHeights(sources), affected(affectedChunks) {}
 
     void enqueueCheck(LightPos position) {
       if (checks.insert(position).second)
@@ -1477,9 +2109,9 @@ private:
           maxFirst = std::max(maxFirst, first);
         }
         if (maxFirst <= 0) {
-          std::fill(layer->begin(), layer->end(), std::uint8_t{15});
+          layer->fill(15);
         } else if (minFirst >= 16) {
-          std::fill(layer->begin(), layer->end(), std::uint8_t{0});
+          layer->fill(0);
         } else {
           for (int index = 0; index < kLightVolume; ++index) {
             const int x = index & 15;
@@ -1536,23 +2168,8 @@ private:
     }
 
     void syncStorageEligibility() {
-      std::unordered_set<std::uint64_t> affected;
-      for (auto &[key, chunk] : working) {
-        (void)chunk;
-        affected.insert(key);
-        const int x = static_cast<int>(key >> 32);
-        const int z = static_cast<int>(static_cast<std::uint32_t>(key));
-        for (int dx = -1; dx <= 1; ++dx)
-          for (int dz = -1; dz <= 1; ++dz)
-            affected.insert(chunkKey(x + dx, z + dz));
-      }
-      for (std::uint64_t key : removed) {
-        const int x = static_cast<int>(key >> 32);
-        const int z = static_cast<int>(static_cast<std::uint32_t>(key));
-        for (int dx = -1; dx <= 1; ++dx)
-          for (int dz = -1; dz <= 1; ++dz)
-            affected.insert(chunkKey(x + dx, z + dz));
-      }
+      // affectedChunks is fixed from the batch's shared geometry before either
+      // layer starts. It cannot depend on chunks materialized by block commit.
       storedEligible.clear();
       eligibleValid = false;
       // A section from an already-published chunk outside this batch's
@@ -1560,7 +2177,9 @@ private:
       // layer proves the old storage rule admitted it; keeping that evidence
       // avoids treating a cross-edge target as air merely because this batch
       // did not recompute its block sections.
-      for (const auto &[key, chunk] : owner.internal) {
+      const auto &storedSky =
+          owner.lastReadySky.empty() ? owner.internal : owner.lastReadySky;
+      for (const auto &[key, chunk] : storedSky) {
         if (affected.contains(key) || removed.contains(key))
           continue;
         for (int y = chunk->minLightSectionY();
@@ -1614,8 +2233,8 @@ private:
             storedEligible.insert(sectionKey);
             allocateSection(key, y);
           } else {
-            values.erase(sectionKey);
-            cacheValid = false;
+            dropWorkingLayer(key, y);
+            invalidateInheritedBases(key);
             dirtySections.erase(sectionKey);
             const auto *old = chunk.snapshot->section(y);
             if (old &&
@@ -1624,6 +2243,7 @@ private:
               auto *edit = chunk.sectionForEdit(y);
               edit->layers[static_cast<std::size_t>(LightLayer::Sky)] =
                   LightLayerSnapshot::missing();
+              chunk.dirtySections.insert(y);
               chunk.dirty = true;
             }
           }
@@ -1632,32 +2252,81 @@ private:
       storageReady = true;
     }
 
-    int updateColumn(std::uint64_t key, int localX, int localZ) {
+    int columnSource(std::uint64_t key, int localX, int localZ) {
       WorkingChunk *chunk = workingChunk(key);
       if (!chunk)
         return owner.minBlockSectionY * 16 - 1;
-      auto &sources = sourceHeights[key];
-      const int column = HeightmapColumnKey(localX, localZ);
-      const int oldSource = sources[column];
-      const int newSource = computeSource(*chunk, localX, localZ);
-      if (oldSource == newSource)
-        return newSource;
+      return sourcesForWorking(key, *chunk)[
+          HeightmapColumnKey(localX, localZ)];
+    }
 
+    SkyColumnSources &sourcesForWorking(std::uint64_t key,
+                                        WorkingChunk &chunk) {
+      auto found = sourceHeights.find(key);
+      if (found == sourceHeights.end())
+        found = sourceHeights.emplace(key, computeSources(chunk)).first;
+      return found->second;
+    }
+
+    // Reconcile only the two vertical edges touched by this changed cell.
+    // Every lookup reads the final optical batch snapshot. The caller defers
+    // seedColumn until all changed columns have final heights.
+    int updateColumnSource(std::uint64_t key, int localX, int localZ,
+                           int changedY) {
+      WorkingChunk *chunk = workingChunk(key);
+      if (!chunk)
+        return owner.minBlockSectionY * 16 - 1;
+      auto &sources = sourcesForWorking(key, *chunk);
+      const int column = HeightmapColumnKey(localX, localZ);
+      int source = sources[column];
+      if (changedY + 1 < source)
+        return source;
+
+      const auto updateEdge = [&](int edgeY) {
+        if (edgeY < owner.minBlockSectionY * 16)
+          return;
+        const int upperY = edgeY + 1;
+        const auto &top = sourcePropertyAt(*chunk, localX, upperY, localZ);
+        const auto &bottom =
+            sourcePropertyAt(*chunk, localX, edgeY, localZ);
+        if (isSourceEdgeOccluded(top, bottom)) {
+          if (upperY > source)
+            source = upperY;
+        } else if (upperY == source) {
+          // Re-evaluate the next edge below the invalid one. This includes a
+          // different cell changed in the same batch at edgeY - 1.
+          source = findSourceBelow(*chunk, localX, localZ, edgeY);
+        }
+      };
+      updateEdge(changedY);
+      updateEdge(changedY - 1);
+      sources[column] = source;
+      return source;
+    }
+
+    void applyColumnSource(std::uint64_t key, int localX, int localZ,
+                           int oldSource, int newSource) {
+      WorkingChunk *chunk = workingChunk(key);
+      if (!chunk || oldSource == newSource)
+        return;
       const int blockMinY = owner.minBlockSectionY * 16;
       const int lightBottom = (owner.minBlockSectionY - 1) * 16;
       if (newSource > oldSource) {
-        const int oldFirst = oldSource == blockMinY - 1 ? lightBottom : oldSource;
+        const int oldFirst =
+            oldSource == blockMinY - 1 ? lightBottom : oldSource;
         for (int y = oldFirst; y < newSource; ++y) {
           const LightPos position{chunk->chunkX * 16 + localX, y,
                                   chunk->chunkZ * 16 + localZ};
           const int oldLevel = storedLevel(position);
           if (oldLevel > 0) {
             setStoredLevel(position, 0);
-            enqueueDecrease(position, static_cast<std::uint8_t>(oldLevel), 63);
+            enqueueDecrease(position,
+                            static_cast<std::uint8_t>(oldLevel), 63);
           }
         }
       } else {
-        const int newFirst = newSource == blockMinY - 1 ? lightBottom : newSource;
+        const int newFirst =
+            newSource == blockMinY - 1 ? lightBottom : newSource;
         for (int y = newFirst; y < oldSource; ++y) {
           const LightPos position{chunk->chunkX * 16 + localX, y,
                                   chunk->chunkZ * 16 + localZ};
@@ -1665,9 +2334,7 @@ private:
           enqueueIncrease(position, 15, 63, false, true);
         }
       }
-      sources[column] = newSource;
       seedColumn(key, chunk, localX, localZ, newSource);
-      return newSource;
     }
 
     void run() {
@@ -1677,17 +2344,31 @@ private:
         checks.erase(position);
         checkNode(position);
       }
-      while (!decreaseQueue.empty()) {
-        const DecreaseTask task = decreaseQueue.front();
-        decreaseQueue.pop_front();
+      while (!currentDecreaseQueue.empty() || !decreaseQueue.empty()) {
+        if (currentDecreaseQueue.empty()) {
+          const DecreaseTask first = decreaseQueue.pop();
+          currentDecreaseQueue.push(std::move(first));
+          activeDecreaseSection =
+              sectionOf(currentDecreaseQueue.front().position);
+        }
+        DecreaseTask task = currentDecreaseQueue.pop();
         ++owner.statsLightQueueEntries;
         propagateDecrease(task);
+        if (currentDecreaseQueue.empty())
+          activeDecreaseSection.reset();
       }
-      while (!increaseQueue.empty()) {
-        const IncreaseTask task = increaseQueue.front();
-        increaseQueue.pop_front();
+      while (!currentIncreaseQueue.empty() || !increaseQueue.empty()) {
+        if (currentIncreaseQueue.empty()) {
+          const IncreaseTask first = increaseQueue.pop();
+          currentIncreaseQueue.push(std::move(first));
+          activeIncreaseSection =
+              sectionOf(currentIncreaseQueue.front().position);
+        }
+        IncreaseTask task = currentIncreaseQueue.pop();
         ++owner.statsLightQueueEntries;
         propagateIncrease(task);
+        if (currentIncreaseQueue.empty())
+          activeIncreaseSection.reset();
       }
     }
 
@@ -1708,18 +2389,18 @@ private:
         LightSectionSnapshot *section = chunk->sectionForEdit(position.y);
         if (!section)
           continue;
-        const auto found = values.find(position);
-        if (found == values.end())
+        const LightValues *layer =
+            workingLayer(chunkKey(position.x, position.z), position.y);
+        if (!layer)
           continue;
-        const LightValues &layer = found->second;
-        if (std::all_of(layer.begin(), layer.end(), [&](std::uint8_t value) {
-              return value == layer.front();
-            }))
-          section->layers[static_cast<std::size_t>(LightLayer::Sky)] =
-              LightLayerSnapshot::uniform(layer.front());
-        else
-          section->layers[static_cast<std::size_t>(LightLayer::Sky)] =
-              LightLayerSnapshot::mixed(layer);
+        const auto uniform = layer->uniformValue();
+        const auto payload =
+            uniform && layer->shared()->isMixed()
+                ? std::make_shared<LightLayerSnapshot>(
+                      LightLayerSnapshot::uniform(*uniform))
+                : layer->shared();
+        section->layers[static_cast<std::size_t>(LightLayer::Sky)] = payload;
+        chunk->dirtySections.insert(position.y);
         chunk->dirty = true;
       }
     }
@@ -1728,9 +2409,191 @@ private:
 
   private:
     static int HeightmapColumnKey(int x, int z) { return x + z * 16; }
+    static constexpr int kUnknownInheritedSection =
+        std::numeric_limits<int>::min();
+    static constexpr int kNoInheritedSection =
+        std::numeric_limits<int>::max();
+
+    // A chunk owns at most one 4096-cell array per allocated light section.
+    // Empty sections stay null, so the direct index does not allocate storage
+    // for every missing layer. inherited[] caches only the section number of
+    // the nearest stored layer above; its bottom value is always read from the
+    // current working or immutable raw layer.
+    struct WorkingLayers {
+      explicit WorkingLayers(std::size_t count)
+          : sections(count), inherited(count, kUnknownInheritedSection) {}
+
+      std::vector<std::unique_ptr<LightValues>> sections;
+      mutable std::vector<int> inherited;
+    };
+
+    int workingSectionIndex(int sectionY) const {
+      const std::int64_t index =
+          static_cast<std::int64_t>(sectionY) -
+          static_cast<std::int64_t>(owner.minBlockSectionY - 1);
+      return index >= 0 && index < owner.blockSectionCount + 2
+                 ? static_cast<int>(index)
+                 : -1;
+    }
+
+    WorkingLayers &workingLayers(std::uint64_t chunkKeyValue) const {
+      if (cachedLayersValid && cachedLayersKey == chunkKeyValue)
+        return *cachedLayersPtr;
+      const auto found = layersByChunk.find(chunkKeyValue);
+      if (found != layersByChunk.end()) {
+        cachedLayersKey = chunkKeyValue;
+        cachedLayersPtr = &found->second;
+        cachedLayersValid = true;
+        return found->second;
+      }
+      cachedLayersValid = false;
+      WorkingLayers &inserted =
+          layersByChunk
+              .try_emplace(
+                  chunkKeyValue,
+                  static_cast<std::size_t>(owner.blockSectionCount + 2))
+              .first->second;
+      cachedLayersKey = chunkKeyValue;
+      cachedLayersPtr = &inserted;
+      cachedLayersValid = true;
+      return inserted;
+    }
+
+    LightValues *workingLayer(std::uint64_t chunkKeyValue, int sectionY) {
+      return const_cast<LightValues *>(
+          std::as_const(*this).workingLayer(chunkKeyValue, sectionY));
+    }
+
+    const LightValues *workingLayer(std::uint64_t chunkKeyValue,
+                                    int sectionY) const {
+      const int index = workingSectionIndex(sectionY);
+      if (index < 0)
+        return nullptr;
+      const auto found = layersByChunk.find(chunkKeyValue);
+      if (found == layersByChunk.end())
+        return nullptr;
+      return found->second.sections[static_cast<std::size_t>(index)].get();
+    }
+
+    void invalidateInheritedBases(std::uint64_t chunkKeyValue) const {
+      const auto found = layersByChunk.find(chunkKeyValue);
+      if (found == layersByChunk.end())
+        return;
+      std::fill(found->second.inherited.begin(),
+                found->second.inherited.end(), kUnknownInheritedSection);
+    }
+
+    LightValues *insertWorkingLayer(std::uint64_t chunkKeyValue, int sectionY,
+                                    LightValues values) {
+      const int index = workingSectionIndex(sectionY);
+      if (index < 0)
+        return nullptr;
+      WorkingLayers &layers = workingLayers(chunkKeyValue);
+      std::unique_ptr<LightValues> &slot =
+          layers.sections[static_cast<std::size_t>(index)];
+      if (slot)
+        return slot.get();
+      slot = std::make_unique<LightValues>(std::move(values));
+      invalidateInheritedBases(chunkKeyValue);
+      cellCacheValid = false;
+      return slot.get();
+    }
+
+    void dropWorkingLayer(std::uint64_t chunkKeyValue, int sectionY) {
+      const int index = workingSectionIndex(sectionY);
+      if (index < 0)
+        return;
+      const auto found = layersByChunk.find(chunkKeyValue);
+      if (found == layersByChunk.end())
+        return;
+      auto &slot = found->second.sections[static_cast<std::size_t>(index)];
+      if (!slot)
+        return;
+      slot.reset();
+      invalidateInheritedBases(chunkKeyValue);
+      cellCacheValid = false;
+    }
+
+    void dropAllWorkingLayers(std::uint64_t chunkKeyValue) {
+      cachedLayersValid = false;
+      cellCacheValid = false;
+      layersByChunk.erase(chunkKeyValue);
+    }
+
+    int inheritedBase(WorkingLayers &layers,
+                      const LightChunkSnapshot *chunk, int sectionY) const {
+      const int index = workingSectionIndex(sectionY);
+      if (index < 0)
+        return kNoInheritedSection;
+      const std::size_t cacheIndex = static_cast<std::size_t>(index);
+      if (layers.inherited[cacheIndex] != kUnknownInheritedSection)
+        return layers.inherited[cacheIndex];
+      int result = kNoInheritedSection;
+      for (int aboveY = sectionY + 1;
+           aboveY <
+           chunk->minBlockSectionY + chunk->blockSectionCount + 1;
+           ++aboveY) {
+        const int aboveIndex = workingSectionIndex(aboveY);
+        if (aboveIndex < 0)
+          continue;
+        if (layers.sections[static_cast<std::size_t>(aboveIndex)]) {
+          result = aboveY;
+          break;
+        }
+        const LightSectionSnapshot *above = chunk->section(aboveY);
+        if (above &&
+            !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                 .isMissing()) {
+          result = aboveY;
+          break;
+        }
+      }
+      layers.inherited[cacheIndex] = result;
+      return result;
+    }
+
+    LightValues initialWorkingLayer(std::uint64_t chunkKeyValue,
+                                    const LightChunkSnapshot *chunk,
+                                    int sectionY) const {
+      LightValues layer{};
+      const LightSectionSnapshot *section = chunk->section(sectionY);
+      if (section &&
+          !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+               .isMissing())
+        return LightValues::fromLayer(
+            section->layers[static_cast<std::size_t>(LightLayer::Sky)]);
+
+      WorkingLayers &layers = workingLayers(chunkKeyValue);
+      const int baseY = inheritedBase(layers, chunk, sectionY);
+      const int baseIndex =
+          baseY == kNoInheritedSection ? -1 : workingSectionIndex(baseY);
+      const LightValues *workingBase =
+          baseIndex < 0
+              ? nullptr
+              : layers.sections[static_cast<std::size_t>(baseIndex)].get();
+      const LightSectionSnapshot *rawBase =
+          baseY == kNoInheritedSection ? nullptr : chunk->section(baseY);
+      for (int z = 0; z < 16; ++z) {
+        for (int x = 0; x < 16; ++x) {
+          std::uint8_t inherited = 15;
+          if (workingBase)
+            inherited = (*workingBase)[lightIndex(x, 0, z)];
+          else if (rawBase &&
+                   !rawBase->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                        .isMissing())
+            inherited = rawBase->light(LightLayer::Sky, x, 0, z);
+          for (int y = 0; y < 16; ++y)
+            layer[lightIndex(x, y, z)] = inherited;
+        }
+      }
+      return layer;
+    }
 
     bool blockSectionNonEmpty(int x, int y, int z) const {
-      const LightChunkSnapshot *chunk = stateFor(chunkKey(x, z));
+      const auto key = chunkKey(x, z);
+      if (const GeometrySection *geometry = owner.geometrySection(key, y))
+        return !geometry->empty;
+      const LightChunkSnapshot *chunk = stateFor(key);
       if (!chunk || y < chunk->minBlockSectionY ||
           y >= chunk->minBlockSectionY + chunk->blockSectionCount)
         return false;
@@ -1745,27 +2608,6 @@ private:
       return ensureWorking(key);
     }
 
-    // Seeding walks one section at a time, so this layer cache turns the two
-    // hash lookups of every storedLevel (working chunk, working section) into a
-    // pointer compare. Any mutation of the value map invalidates it.
-    const LightValues *cachedLayer(std::uint64_t chunkKeyValue, int sectionY) {
-      if (cacheValid && cachedChunkKey == chunkKeyValue &&
-          cachedSectionY == sectionY)
-        return cachedLayerPtr;
-      cacheValid = false;
-      const SectionPos3 key{static_cast<int>(chunkKeyValue >> 32), sectionY,
-                            static_cast<int>(
-                                static_cast<std::uint32_t>(chunkKeyValue))};
-      const auto found = values.find(key);
-      if (found == values.end())
-        return nullptr;
-      cachedChunkKey = chunkKeyValue;
-      cachedSectionY = sectionY;
-      cachedLayerPtr = &found->second;
-      cacheValid = true;
-      return cachedLayerPtr;
-    }
-
     const LightChunkSnapshot *stateFor(std::uint64_t key) const {
       if (cachedStateValid && cachedStateKey == key)
         return cachedStatePtr;
@@ -1777,9 +2619,9 @@ private:
       if (current != working.end())
         result = current->second.snapshot.get();
       else {
-        const auto stored = owner.internal.find(key);
-        if (stored != owner.internal.end())
-          result = stored->second.get();
+        const auto &stored = owner.storedLayerSnapshot(LightLayer::Sky, key);
+        if (stored)
+          result = stored.get();
       }
       cachedStateKey = key;
       cachedStatePtr = result;
@@ -1793,17 +2635,43 @@ private:
       const auto current = working.find(key);
       if (current != working.end())
         return &current->second;
-      const auto stored = owner.internal.find(key);
-      if (stored == owner.internal.end())
+      const auto &stored = owner.storedLayerSnapshot(LightLayer::Sky, key);
+      if (!stored)
         return nullptr;
       WorkingChunk next;
       next.key = key;
-      next.lifecycleEpoch = stored->second->lifecycleEpoch;
-      next.chunkX = stored->second->chunkX;
-      next.chunkZ = stored->second->chunkZ;
-      next.snapshot = std::make_shared<LightChunkSnapshot>(*stored->second);
+      next.lifecycleEpoch = stored->lifecycleEpoch;
+      next.chunkX = stored->chunkX;
+      next.chunkZ = stored->chunkZ;
+      next.snapshot = std::make_shared<LightChunkSnapshot>(*stored);
+      // This shallow snapshot copy shares the same immutable raw section
+      // pointers. Work layers calculated for an out-of-domain destination
+      // before it joins the batch are based on that same raw data, so retain
+      // them for commit. clearLines invalidates them when raw data is actually
+      // replaced by a seed/refresh.
       cachedStateValid = false;
+      cellCacheValid = false;
       return &working.emplace(key, std::move(next)).first->second;
+    }
+
+    void refreshCellCache(LightPos position) const {
+      const SectionPos3 section{position.x >> 4, position.y >> 4,
+                                position.z >> 4};
+      if (cellCacheValid && section == cachedCellSection)
+        return;
+      cachedCellSection = section;
+      cachedCellChunk =
+          chunkKey(position.x >> 4, position.z >> 4);
+      WorkingLayers &layers = workingLayers(cachedCellChunk);
+      const int index = workingSectionIndex(section.y);
+      cachedCellValues =
+          index < 0
+              ? nullptr
+              : layers.sections[static_cast<std::size_t>(index)].get();
+      const LightChunkSnapshot *chunk = stateFor(cachedCellChunk);
+      cachedCellSectionSnapshot =
+          chunk ? chunk->section(section.y) : nullptr;
+      cellCacheValid = true;
     }
 
     const LightSectionSnapshot *sectionAt(LightPos position) const {
@@ -1811,9 +2679,8 @@ private:
           position.y >=
               (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16)
         return nullptr;
-      const LightChunkSnapshot *chunk =
-          stateFor(chunkKey(position.x >> 4, position.z >> 4));
-      return chunk ? chunk->section(position.y >> 4) : nullptr;
+      refreshCellCache(position);
+      return cachedCellSectionSnapshot;
     }
 
     const BlockLightProperties &stateAt(LightPos position) const {
@@ -1821,6 +2688,19 @@ private:
           position.y >=
               (owner.minBlockSectionY + owner.blockSectionCount) * 16)
         return emptyLightProperties();
+      const std::uint64_t key =
+          chunkKey(position.x >> 4, position.z >> 4);
+      if (const GeometrySection *geometry =
+              owner.geometrySection(key, position.y >> 4)) {
+        const std::uint16_t classId =
+            geometry->uniform
+                ? geometry->uniformClass
+                : geometry->at(lightIndex(position.x, position.y, position.z));
+        const auto &properties = owner.opticalClass(classId).properties;
+        if (!properties.supported)
+          incomplete = true;
+        return properties;
+      }
       const LightSectionSnapshot *section = sectionAt(position);
       if (!section)
         return unsupportedLightProperties();
@@ -1832,45 +2712,35 @@ private:
     }
 
     int storedLevel(LightPos position) const {
-      const std::uint64_t chunkKeyValue =
-          chunkKey(position.x >> 4, position.z >> 4);
+      refreshCellCache(position);
       const int sectionY = position.y >> 4;
-      if (cacheValid && cachedChunkKey == chunkKeyValue &&
-          cachedSectionY == sectionY)
-        return (*cachedLayerPtr)[lightIndex(position.x, position.y, position.z)];
-      const LightChunkSnapshot *chunk = stateFor(chunkKeyValue);
+      if (cachedCellValues)
+        return (*cachedCellValues)[lightIndex(position.x, position.y,
+                                              position.z)];
+      const LightChunkSnapshot *chunk = stateFor(cachedCellChunk);
       if (!chunk)
         return 0;
-      const SectionPos3 key{position.x >> 4, sectionY, position.z >> 4};
-      const auto found = values.find(key);
-      if (found != values.end()) {
-        cacheValid = true;
-        cachedChunkKey = chunkKeyValue;
-        cachedSectionY = sectionY;
-        cachedLayerPtr = &found->second;
-        return found->second[lightIndex(position.x, position.y, position.z)];
-      }
-      const LightSectionSnapshot *section = chunk->section(sectionY);
+      const LightSectionSnapshot *section = cachedCellSectionSnapshot;
       if (section && !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
                            .isMissing())
         return section->light(LightLayer::Sky, position.x & 15,
                               position.y & 15, position.z & 15);
-      for (int aboveY = (position.y >> 4) + 1;
-           aboveY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
-           ++aboveY) {
-        const SectionPos3 aboveKey{position.x >> 4, aboveY, position.z >> 4};
-        const auto edited = values.find(aboveKey);
-        if (edited != values.end())
-          return edited->second[lightIndex(position.x, aboveY * 16,
-                                           position.z)];
-        const LightSectionSnapshot *above = chunk->section(aboveY);
-        if (above &&
-            !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
-                 .isMissing())
-          return above->light(LightLayer::Sky, position.x & 15, 0,
-                              position.z & 15);
-      }
-      return 15;
+      WorkingLayers &layers = workingLayers(cachedCellChunk);
+      const int baseY = inheritedBase(layers, chunk, sectionY);
+      if (baseY == kNoInheritedSection)
+        return 15;
+      const int baseIndex = workingSectionIndex(baseY);
+      if (const LightValues *layer =
+              baseIndex < 0
+                  ? nullptr
+                  : layers.sections[static_cast<std::size_t>(baseIndex)].get())
+        return (*layer)[lightIndex(position.x, 0, position.z)];
+      const LightSectionSnapshot *above = chunk->section(baseY);
+      return above && !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                            .isMissing()
+                 ? above->light(LightLayer::Sky, position.x & 15, 0,
+                                position.z & 15)
+                 : 15;
     }
 
     // Bulk seeding needs the working layer of a whole section without the
@@ -1882,56 +2752,22 @@ private:
       if (sectionY < owner.minBlockSectionY - 1 ||
           sectionY > owner.minBlockSectionY + owner.blockSectionCount)
         return nullptr;
-      const SectionPos3 key{static_cast<int>(chunkKeyValue >> 32), sectionY,
-                            static_cast<int>(
-                                static_cast<std::uint32_t>(chunkKeyValue))};
-      const auto found = values.find(key);
-      if (found != values.end())
-        return &found->second;
-      if (storageReady && !eligibleHere(key.x, key.y, key.z))
+      if (LightValues *layer = workingLayer(chunkKeyValue, sectionY))
+        return layer;
+      const int sectionX =
+          static_cast<int>(static_cast<std::int32_t>(chunkKeyValue >> 32));
+      const int sectionZ =
+          static_cast<int>(static_cast<std::uint32_t>(chunkKeyValue));
+      if (storageReady && !eligibleHere(sectionX, sectionY, sectionZ))
         return nullptr;
       const LightChunkSnapshot *chunk = stateFor(chunkKeyValue);
       const LightSectionSnapshot *section =
           chunk ? chunk->section(sectionY) : nullptr;
       if (!section)
         return nullptr;
-      LightValues layer{};
-      if (!section->layers[static_cast<std::size_t>(LightLayer::Sky)]
-               .isMissing()) {
-        for (int y = 0; y < 16; ++y)
-          for (int z = 0; z < 16; ++z)
-            for (int x = 0; x < 16; ++x)
-              layer[lightIndex(x, y, z)] =
-                  section->light(LightLayer::Sky, x, y, z);
-      } else {
-        for (int z = 0; z < 16; ++z) {
-          for (int x = 0; x < 16; ++x) {
-            int inherited = 15;
-            for (int aboveY = sectionY + 1;
-                 aboveY <
-                 chunk->minBlockSectionY + chunk->blockSectionCount + 1;
-                 ++aboveY) {
-              const SectionPos3 aboveKey{key.x, aboveY, key.z};
-              const auto edited = values.find(aboveKey);
-              if (edited != values.end()) {
-                inherited = edited->second[lightIndex(x, aboveY * 16, z)];
-                break;
-              }
-              const LightSectionSnapshot *above = chunk->section(aboveY);
-              if (above &&
-                  !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
-                       .isMissing()) {
-                inherited = above->light(LightLayer::Sky, x, 0, z);
-                break;
-              }
-            }
-            for (int y = 0; y < 16; ++y)
-              layer[lightIndex(x, y, z)] = static_cast<std::uint8_t>(inherited);
-          }
-        }
-      }
-      cacheValid = false;
-      return &values.emplace(key, layer).first->second;
+      return insertWorkingLayer(
+          chunkKeyValue, sectionY,
+          initialWorkingLayer(chunkKeyValue, chunk, sectionY));
     }
 
     // Flat probe of the current batch's storedEligible set. A seeding pass
@@ -1952,7 +2788,8 @@ private:
     }
 
     bool setStoredLevel(LightPos position, int level) {
-      const LightSectionSnapshot *section = sectionAt(position);
+      refreshCellCache(position);
+      const LightSectionSnapshot *section = cachedCellSectionSnapshot;
       if (!section)
         return false;
       const int current = storedLevel(position);
@@ -1960,51 +2797,26 @@ private:
         return false;
       const SectionPos3 key{position.x >> 4, position.y >> 4,
                             position.z >> 4};
-      if (storageReady && !eligibleHere(key.x, key.y, key.z) &&
-          !values.contains(key))
-        return false;
-      auto inserted = values.try_emplace(key);
-      cacheValid = false;
-      LightValues &layer = inserted.first->second;
-      if (inserted.second) {
-        if (!section->layers[static_cast<std::size_t>(LightLayer::Sky)]
-                 .isMissing()) {
-          for (int y = 0; y < 16; ++y)
-            for (int z = 0; z < 16; ++z)
-              for (int x = 0; x < 16; ++x)
-                layer[lightIndex(x, y, z)] =
-                    section->light(LightLayer::Sky, x, y, z);
-        } else {
-          const LightChunkSnapshot *chunk =
-              stateFor(chunkKey(position.x >> 4, position.z >> 4));
-          for (int z = 0; z < 16; ++z) {
-            for (int x = 0; x < 16; ++x) {
-              int inherited = 15;
-              for (int aboveY = key.y + 1;
-                   aboveY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
-                   ++aboveY) {
-                const SectionPos3 aboveKey{key.x, aboveY, key.z};
-                const auto edited = values.find(aboveKey);
-                if (edited != values.end()) {
-                  inherited = edited->second[lightIndex(x, aboveY * 16, z)];
-                  break;
-                }
-                const LightSectionSnapshot *above = chunk->section(aboveY);
-                if (above &&
-                    !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
-                         .isMissing()) {
-                  inherited = above->light(LightLayer::Sky, x, 0, z);
-                  break;
-                }
-              }
-              for (int y = 0; y < 16; ++y)
-                layer[lightIndex(x, y, z)] = static_cast<std::uint8_t>(inherited);
-            }
-          }
-        }
+      const std::uint64_t chunkKeyValue =
+          chunkKey(position.x >> 4, position.z >> 4);
+      LightValues *layer = cachedCellValues;
+      if (!layer)
+        layer = workingLayer(chunkKeyValue, key.y);
+      if (!layer) {
+        if (storageReady && !eligibleHere(key.x, key.y, key.z))
+          return false;
+        const LightChunkSnapshot *chunk = stateFor(chunkKeyValue);
+        if (!chunk)
+          return false;
+        layer = insertWorkingLayer(
+            chunkKeyValue, key.y,
+            initialWorkingLayer(chunkKeyValue, chunk, key.y));
+        if (!layer)
+          return false;
       }
       const auto index = lightIndex(position.x, position.y, position.z);
-      layer[index] = static_cast<std::uint8_t>(level);
+      (*layer)[index] = static_cast<std::uint8_t>(level);
+      cachedCellValues = layer;
       dirtySections.insert(key);
       return true;
     }
@@ -2013,7 +2825,7 @@ private:
       const SectionPos3 key{static_cast<int>(chunkKeyValue >> 32), sectionY,
                             static_cast<int>(
                                 static_cast<std::uint32_t>(chunkKeyValue))};
-      if (values.contains(key))
+      if (workingLayer(chunkKeyValue, sectionY))
         return;
       const LightChunkSnapshot *chunk = stateFor(chunkKeyValue);
       if (!chunk)
@@ -2022,48 +2834,115 @@ private:
       if (!section || !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
                           .isMissing())
         return;
-      LightValues layer{};
-      for (int z = 0; z < 16; ++z) {
-        for (int x = 0; x < 16; ++x) {
-          int inherited = 15;
-          for (int aboveY = sectionY + 1;
-               aboveY < chunk->minBlockSectionY + chunk->blockSectionCount + 1;
-               ++aboveY) {
-            const SectionPos3 aboveKey{key.x, aboveY, key.z};
-            const auto edited = values.find(aboveKey);
-            if (edited != values.end()) {
-              inherited = edited->second[lightIndex(x, aboveY * 16, z)];
-              break;
-            }
-            const LightSectionSnapshot *above = chunk->section(aboveY);
-            if (above &&
-                !above->layers[static_cast<std::size_t>(LightLayer::Sky)]
-                     .isMissing()) {
-              inherited = above->light(LightLayer::Sky, x, 0, z);
-              break;
-            }
-          }
-          for (int y = 0; y < 16; ++y)
-            layer[lightIndex(x, y, z)] = static_cast<std::uint8_t>(inherited);
+      insertWorkingLayer(
+          chunkKeyValue, sectionY,
+          initialWorkingLayer(chunkKeyValue, chunk, sectionY));
+      dirtySections.insert(key);
+    }
+
+    const BlockLightProperties &sourcePropertyAt(
+        const WorkingChunk &chunk, int x, int y, int z) const {
+      const int minY = owner.minBlockSectionY * 16;
+      const int maxY =
+          (owner.minBlockSectionY + owner.blockSectionCount) * 16;
+      if (y < minY || y >= maxY)
+        return emptyLightProperties();
+      if (const GeometrySection *geometry =
+              owner.geometrySection(chunk.key, y >> 4)) {
+        const std::uint16_t classId =
+            geometry->uniform
+                ? geometry->uniformClass
+                : geometry->at(lightIndex(x, y, z));
+        return owner.opticalClass(classId).properties;
+      }
+      const LightSectionSnapshot *section = chunk.snapshot->section(y >> 4);
+      return section ? section->at(x, y & 15, z)
+                     : unsupportedLightProperties();
+    }
+
+    static bool sourceEmptySection(const LightSectionSnapshot *section) {
+      if (!section || !section->empty || !section->isUniform())
+        return false;
+      const auto &properties = section->palette.front();
+      // emptyShape() is a logical flag. Face occlusion consults the actual
+      // shape ID, so prove both vertical faces are absent before skipping.
+      return properties.supported && properties.dampening == 0 &&
+             faceRect(properties, 0) == nullptr &&
+             faceRect(properties, 1) == nullptr;
+    }
+
+    static bool isSourceEdgeOccluded(
+        const BlockLightProperties &top,
+        const BlockLightProperties &bottom) {
+      if (bottom.supported && bottom.dampening != 0)
+        return true;
+      return faceShapesOcclude(top, bottom, 0);
+    }
+
+    int findSourceBelow(const WorkingChunk &chunk, int x, int z,
+                        int topY) const {
+      const int minY = owner.minBlockSectionY * 16;
+      const int firstBottomY = topY - 1;
+      if (firstBottomY < minY)
+        return minY - 1;
+      const int firstSectionY = firstBottomY >> 4;
+      const int bottomSectionY = minY >> 4;
+      const auto &top = sourcePropertyAt(chunk, x, topY, z);
+      const BlockLightProperties *topState = &top;
+      for (int sectionY = firstSectionY; sectionY >= bottomSectionY;
+           --sectionY) {
+        const LightSectionSnapshot *section =
+            chunk.snapshot->section(sectionY);
+        const int baseY = sectionY * 16;
+        const int localStart =
+            sectionY == firstSectionY ? (firstBottomY & 15) : 15;
+        if (sourceEmptySection(section)) {
+          const auto &empty = emptyLightProperties();
+          if (isSourceEdgeOccluded(*topState, empty))
+            return baseY + localStart + 1;
+          topState = &empty;
+          continue;
+        }
+        if (!section)
+          return baseY + localStart + 1;
+        for (int localY = localStart; localY >= 0; --localY) {
+          const auto &bottom =
+              sourcePropertyAt(chunk, x, baseY + localY, z);
+          if (isSourceEdgeOccluded(*topState, bottom))
+            return baseY + localY + 1;
+          topState = &bottom;
         }
       }
-      values.emplace(key, layer);
-      dirtySections.insert(key);
+      return minY - 1;
     }
 
     int computeSource(WorkingChunk &chunk, int x, int z) const {
       const int minY = owner.minBlockSectionY * 16;
-      const int maxY =
-          (owner.minBlockSectionY + owner.blockSectionCount) * 16;
-      const BlockLightProperties *top = &emptyLightProperties();
-      for (int y = maxY - 1; y >= minY; --y) {
-        const auto &bottom =
-            chunk.snapshot->section(y >> 4)->at(x, y & 15, z);
-        if (bottom.supported && bottom.dampening != 0)
-          return y + 1;
-        if (faceShapesOcclude(*top, bottom, 0))
-          return y + 1;
-        top = &bottom;
+      const int topSectionY =
+          owner.minBlockSectionY + owner.blockSectionCount - 1;
+      const int bottomSectionY = owner.minBlockSectionY;
+      const auto &empty = emptyLightProperties();
+      const BlockLightProperties *top = &empty;
+      for (int sectionY = topSectionY; sectionY >= bottomSectionY;
+           --sectionY) {
+        const LightSectionSnapshot *section =
+            chunk.snapshot->section(sectionY);
+        const int baseY = sectionY * 16;
+        if (sourceEmptySection(section)) {
+          if (isSourceEdgeOccluded(*top, empty))
+            return baseY + 16;
+          top = &empty;
+          continue;
+        }
+        if (!section)
+          return baseY + 16;
+        for (int localY = 15; localY >= 0; --localY) {
+          const auto &bottom =
+              sourcePropertyAt(chunk, x, baseY + localY, z);
+          if (isSourceEdgeOccluded(*top, bottom))
+            return baseY + localY + 1;
+          top = &bottom;
+        }
       }
       return minY - 1;
     }
@@ -2084,14 +2963,10 @@ private:
         section = copy;
       }
       chunk.mutableSections.clear();
+      dropAllWorkingLayers(chunkKey(chunk.chunkX, chunk.chunkZ));
+      invalidateInheritedBases(chunkKey(chunk.chunkX, chunk.chunkZ));
       cachedStateValid = false;
-      // Seeding always rebuilds one chunk's layers at a time; erase only that
-      // chunk's sections instead of scanning every working value of the batch.
-      for (int sectionY = owner.minBlockSectionY - 1;
-           sectionY <= owner.minBlockSectionY + owner.blockSectionCount;
-           ++sectionY)
-        values.erase({chunk.chunkX, sectionY, chunk.chunkZ});
-      cacheValid = false;
+      cellCacheValid = false;
     }
 
     int sourceFor(int blockX, int blockZ) {
@@ -2326,34 +3201,57 @@ private:
       }
     }
 
+    static SectionPos3 sectionOf(LightPos position) {
+      return {position.x >> 4, position.y >> 4, position.z >> 4};
+    }
+
     void enqueueIncrease(LightPos position, std::uint8_t level,
                          std::uint8_t directions, bool fromEmpty,
                          bool source) {
-      if (level > 0)
-        increaseQueue.push_back({position, level, directions, fromEmpty, source});
+      if (level == 0)
+        return;
+      IncreaseTask task{position, level, directions, fromEmpty, source};
+      if (activeIncreaseSection &&
+          sectionOf(position) == *activeIncreaseSection)
+        currentIncreaseQueue.push(std::move(task));
+      else
+        increaseQueue.push(std::move(task));
     }
 
     void enqueueDecrease(LightPos position, std::uint8_t level,
                          std::uint8_t directions) {
-      decreaseQueue.push_back({position, level, directions});
+      DecreaseTask task{position, level, directions};
+      if (activeDecreaseSection &&
+          sectionOf(position) == *activeDecreaseSection)
+        currentDecreaseQueue.push(std::move(task));
+      else
+        decreaseQueue.push(std::move(task));
     }
 
     Impl &owner;
     std::unordered_map<std::uint64_t, WorkingChunk> &working;
     const std::unordered_set<std::uint64_t> &removed;
     std::unordered_map<std::uint64_t, SkyColumnSources> &sourceHeights;
+    const std::unordered_set<std::uint64_t> &affected;
     std::unordered_set<LightPos, LightPosHash> checks;
     std::deque<LightPos> checkQueue;
-    std::deque<DecreaseTask> decreaseQueue;
-    std::deque<IncreaseTask> increaseQueue;
-    std::unordered_map<SectionPos3, LightValues, SectionPos3Hash> values;
+    TaskQueue<DecreaseTask> decreaseQueue;
+    TaskQueue<IncreaseTask> increaseQueue;
+    TaskQueue<DecreaseTask> currentDecreaseQueue;
+    TaskQueue<IncreaseTask> currentIncreaseQueue;
+    std::optional<SectionPos3> activeDecreaseSection;
+    std::optional<SectionPos3> activeIncreaseSection;
+    mutable std::unordered_map<std::uint64_t, WorkingLayers> layersByChunk;
+    mutable bool cellCacheValid = false;
+    mutable SectionPos3 cachedCellSection{};
+    mutable std::uint64_t cachedCellChunk = 0;
+    mutable LightValues *cachedCellValues = nullptr;
+    mutable const LightSectionSnapshot *cachedCellSectionSnapshot = nullptr;
+    mutable bool cachedLayersValid = false;
+    mutable std::uint64_t cachedLayersKey = 0;
+    mutable WorkingLayers *cachedLayersPtr = nullptr;
     std::unordered_set<SectionPos3, SectionPos3Hash> dirtySections;
     std::unordered_set<SectionPos3, SectionPos3Hash> storedEligible;
-    // Layer cache for storedLevel, see cachedLayer.
-    mutable bool cacheValid = false;
-    mutable std::uint64_t cachedChunkKey = 0;
-    mutable int cachedSectionY = 0;
-    mutable const LightValues *cachedLayerPtr = nullptr;
     // stateFor is called for every cell too; cache its chunk lookup and drop
     // the cache whenever the working set or a section is replaced.
     mutable bool cachedStateValid = false;
@@ -2378,6 +3276,24 @@ private:
     if (input.minBlockSectionY != minBlockSectionY ||
         input.blockSectionCount != blockSectionCount)
       return false;
+    if (!input.geometrySections.empty()) {
+      if (input.geometrySections.size() !=
+          static_cast<std::size_t>(blockSectionCount))
+        return false;
+      for (const GeometrySection &section : input.geometrySections) {
+        if (section.uniform) {
+          if (section.cells || section.uniformClass >= opticalTable->classCount())
+            return false;
+        } else if (!section.cells) {
+          return false;
+        } else {
+          for (std::uint8_t classId : *section.cells)
+            if (classId >= opticalTable->classCount())
+              return false;
+        }
+      }
+      return true;
+    }
     if (input.sections.size() !=
         static_cast<std::size_t>(blockSectionCount + 2))
       return false;
@@ -2394,107 +3310,89 @@ private:
   }
 
   void reportBlockCell(LightCellUpdate update) {
-    if (!validSection(update.sectionY) || update.localIndex >= kLightVolume) {
-      ++statsRejected;
-      return;
-    }
     if (!acceptingCells.load(std::memory_order_acquire)) {
       ++statsRejected;
       return;
     }
-    update.sequence = nextRequestGeneration();
-    const auto head = ringHead.load(std::memory_order_relaxed);
-    const auto tail = ringTail.load(std::memory_order_acquire);
-    if (static_cast<std::size_t>(head - tail) >= ring.size()) {
-      // The lock-free path is saturated. Preserve the owned record in the same
-      // pending map the worker consumes; sequence ordering prevents an older
-      // ring entry drained later from overwriting this newer value.
-      std::lock_guard lock(mutex);
-      applyOwnedCellLocked(update);
-      signalWorkerLocked(true);
+    GeometryInput input{nextRequestGeneration(), update};
+    if (!inputQueue->push(std::move(input))) {
+      ++statsDroppedGeometry;
       return;
     }
-    ring[static_cast<std::size_t>(head) & ringMask] = update;
-    ringHead.store(head + 1, std::memory_order_release);
     notifyWorkerSleeping();
   }
 
-  bool ringEmpty() const {
-    return ringHead.load(std::memory_order_acquire) ==
-           ringTail.load(std::memory_order_relaxed);
+  bool ringEmpty() const { return inputQueue->empty(); }
+
+  bool orderedInputEmptyLocked() const {
+    return controlQueue->empty() && ringEmpty();
   }
 
-  // Copy at most one bounded ring batch into the consumer's scratch buffer.
-  void drainRing(std::vector<LightCellUpdate> &out) {
-    const auto head = ringHead.load(std::memory_order_acquire);
-    const auto tail = ringTail.load(std::memory_order_relaxed);
-    std::size_t count = static_cast<std::size_t>(head - tail);
-    count = std::min(count, ringBatchLimit);
-    out.clear();
-    if (count == 0)
+  void applyOrderedControlLocked(PendingChunk control) {
+    workerVersions[control.key] = {control.lifecycleEpoch, control.revision,
+                                   control.unload};
+    if (control.load || control.unload) {
+      pending[control.key] = std::move(control);
       return;
-    out.reserve(count);
-    for (std::size_t i = 0; i < count; ++i)
-      out.push_back(
-          ring[(static_cast<std::size_t>(tail) + i) & ringMask]);
-    ringTail.store(tail + static_cast<std::uint32_t>(count),
-                   std::memory_order_release);
-  }
-
-  // Collapse a drained ring batch to the newest owned value for each cell.
-  void groupCellsLocked(const std::vector<LightCellUpdate> &cells,
-                        std::vector<CoalescedSection> &sections) {
-    sections.clear();
-    if (cells.empty())
+    }
+    auto inserted = pending.try_emplace(control.key, PendingChunk{});
+    PendingChunk &state = inserted.first->second;
+    if (control.generation <= state.inputSequence)
       return;
-    sortedCells = cells;
-    std::sort(sortedCells.begin(), sortedCells.end(),
-              [](const LightCellUpdate &a, const LightCellUpdate &b) {
-                if (a.chunkKey != b.chunkKey)
-                  return a.chunkKey < b.chunkKey;
-                if (a.lifecycleEpoch != b.lifecycleEpoch)
-                  return a.lifecycleEpoch < b.lifecycleEpoch;
-                if (a.sectionY != b.sectionY)
-                  return a.sectionY < b.sectionY;
-                if (a.localIndex != b.localIndex)
-                  return a.localIndex < b.localIndex;
-                return a.sequence < b.sequence;
-              });
-    for (const LightCellUpdate &cell : sortedCells) {
-      if (sections.empty() || sections.back().chunkKey != cell.chunkKey ||
-          sections.back().lifecycleEpoch != cell.lifecycleEpoch ||
-          sections.back().sectionY != cell.sectionY) {
-        sections.push_back({});
-        sections.back().chunkKey = cell.chunkKey;
-        sections.back().lifecycleEpoch = cell.lifecycleEpoch;
-        sections.back().sectionY = cell.sectionY;
-      }
-      CoalescedSection &section = sections.back();
-      if (cell.sequence > section.sectionSequence) {
-        section.sectionSequence = cell.sequence;
-        section.sectionEmpty = cell.sectionEmpty;
-      }
-      OwnedCell value{cell.sequence, cell.properties, cell.sectionEmpty};
-      if (!section.cells.empty() &&
-          section.cells.back().localIndex == cell.localIndex) {
-        section.cells.back().value = value;
+    state.key = control.key;
+    state.generation = control.generation;
+    state.lifecycleEpoch = control.lifecycleEpoch;
+    state.revision = control.revision;
+    for (auto &[slot, change] : control.changes) {
+      const auto found = state.changes.find(slot);
+      if (found == state.changes.end()) {
+        state.changes.emplace(slot, std::move(change));
       } else {
-        section.cells.push_back({cell.localIndex, value});
+        found->second.newProperties = change.newProperties;
+        found->second.isEmpty = change.isEmpty;
+        found->second.generation = change.generation;
       }
+    }
+    for (const auto &[sectionY, status] : control.sectionStatus) {
+      auto &current = state.sectionStatus[sectionY];
+      if (status.sequence > current.sequence)
+        current = status;
+    }
+    for (const auto &[slot, owned] : control.ownedCells) {
+      auto &current = state.ownedCells[slot];
+      if (owned.sequence > current.sequence)
+        current = owned;
     }
   }
 
   void drainCellChangesLocked() {
-    // Bound the drain to one ring's worth of batches so continuous writes
-    // cannot keep the worker here indefinitely.
-    const std::size_t maxRounds =
-        (ring.size() + ringBatchLimit - 1) / ringBatchLimit;
-    for (std::size_t round = 0; round < maxRounds && !ringEmpty(); ++round) {
-      drainRing(ringBatch);
-      if (ringBatch.empty())
+    const std::size_t initialGeometry = inputQueue->size();
+    const std::size_t initialControls = controlQueue->size();
+    const std::size_t maximum = initialGeometry + initialControls;
+    for (std::size_t round = 0; round < maximum; ++round) {
+      const PendingChunk *control = controlQueue->front();
+      const GeometryInput *geometry = inputQueue->front();
+      const std::optional<std::uint64_t> nextGeometry =
+          geometry ? std::optional<std::uint64_t>{geometry->sequence}
+                   : std::optional<std::uint64_t>{};
+      const std::optional<std::uint64_t> nextControl =
+          control ? std::optional<std::uint64_t>{control->generation}
+                  : std::optional<std::uint64_t>{};
+      if (!nextGeometry && !nextControl)
         break;
-      groupCellsLocked(ringBatch, coalescedSections);
-      enqueueCoalescedLocked(coalescedSections.data(), coalescedSections.size());
+      if (nextControl &&
+          (!nextGeometry || *nextControl < *nextGeometry)) {
+        PendingChunk state;
+        if (!controlQueue->pop(state))
+          break;
+        applyOrderedControlLocked(std::move(state));
+        noteHighWaterLocked();
+      } else {
+        GeometryInput input;
+        if (!inputQueue->pop(input))
+          break;
+        (void)applyOwnedCellLocked(input.sequence, input.update);
+      }
     }
   }
 
@@ -2505,8 +3403,12 @@ private:
 
   // The queue length only grows when a chunk first becomes pending, so the CAS
   // is skipped whenever the current length is already at or below the mark.
+  std::size_t pendingChunkCountLocked() const {
+    return pending.size() + controlQueue->size() + busyChunks;
+  }
+
   void noteHighWaterLocked() {
-    const auto current = pending.size() + busyChunks;
+    const auto current = pendingChunkCountLocked();
     auto previous = statsHighWater.load(std::memory_order_relaxed);
     if (current <= previous)
       return;
@@ -2519,7 +3421,8 @@ private:
 
   void awaitWork(std::unique_lock<std::mutex> &lock) {
     for (;;) {
-      if (closing || (!paused && (!pending.empty() || !ringEmpty())))
+      if (closing ||
+          (!paused && (!pending.empty() || !orderedInputEmptyLocked())))
         return;
       workerSleeping.store(true, std::memory_order_release);
       sleepState.notify_all();
@@ -2528,7 +3431,8 @@ private:
       // before the capture, the re-check sees its work; if it runs after, the
       // atomic wait is released by the newer sequence.
       const auto observed = wakeSequence.load(std::memory_order_acquire);
-      if (closing || (!paused && (!pending.empty() || !ringEmpty()))) {
+      if (closing ||
+          (!paused && (!pending.empty() || !orderedInputEmptyLocked()))) {
         workerSleeping.store(false, std::memory_order_release);
         return;
       }
@@ -2544,7 +3448,7 @@ private:
     std::unique_lock lock(mutex);
     for (;;) {
       awaitWork(lock);
-      if (closing && pending.empty() && ringEmpty())
+      if (closing && pending.empty() && orderedInputEmptyLocked())
         break;
       if (paused && !closing)
         continue;
@@ -2613,50 +3517,50 @@ private:
       }
       idle.notify_all();
       batchDone.notify_all();
-      if (closing && pending.empty() && ringEmpty())
+      if (closing && pending.empty() && orderedInputEmptyLocked())
         break;
     }
   }
 
-  void processBatch(std::vector<PendingChunk> &batch) {
-    std::unordered_map<std::uint64_t, WorkingChunk> working;
-    std::unordered_set<std::uint64_t> removed;
-    std::unordered_set<std::uint64_t> replaced;
-    std::unordered_set<std::uint64_t> loaded;
-    std::vector<LightPos> changedPositions;
-    std::uint64_t maxGeneration = 0;
-
-    const auto ensureWorking = [&](std::uint64_t key) -> WorkingChunk * {
-      if (removed.contains(key))
+  PreparedBatch prepareBatch(std::vector<PendingChunk> &batch) {
+    PreparedBatch prepared;
+    // Once this owner has accepted raw production geometry, subsequent
+    // ordinary cell batches continue through the independent layer path even
+    // though they do not carry a full load record.
+    prepared.rawGeometry = !geometry.empty();
+    const auto ensurePrepared = [&](std::uint64_t key) -> WorkingChunk * {
+      if (prepared.removed.contains(key))
         return nullptr;
-      const auto found = working.find(key);
-      if (found != working.end())
+      const auto found = prepared.chunks.find(key);
+      if (found != prepared.chunks.end())
         return &found->second;
-      const auto stored = internal.find(key);
-      if (stored == internal.end())
+      const auto &layerStored = storedLayerSnapshot(LightLayer::Block, key);
+      const auto stored =
+          layerStored ? layerStored : storedLayerSnapshot(LightLayer::Sky, key);
+      if (!stored)
         return nullptr;
       WorkingChunk next;
       next.key = key;
-      next.lifecycleEpoch = stored->second->lifecycleEpoch;
-      next.chunkX = stored->second->chunkX;
-      next.chunkZ = stored->second->chunkZ;
-      next.snapshot = std::make_shared<LightChunkSnapshot>(*stored->second);
-      auto inserted = working.emplace(key, std::move(next)).first;
-      return &inserted->second;
+      next.lifecycleEpoch = stored->lifecycleEpoch;
+      next.chunkX = stored->chunkX;
+      next.chunkZ = stored->chunkZ;
+      next.snapshot = std::make_shared<LightChunkSnapshot>(*stored);
+      return &prepared.chunks.emplace(key, std::move(next)).first->second;
     };
 
     for (PendingChunk &command : batch) {
       const auto key = command.key;
-      maxGeneration = std::max(maxGeneration, command.generation);
+      prepared.maxGeneration = std::max(prepared.maxGeneration,
+                                        command.generation);
       if (command.unload) {
-        removed.insert(key);
-        loaded.erase(key);
-        working.erase(key);
+        prepared.removed.insert(key);
+        prepared.loaded.erase(key);
+        prepared.chunks.erase(key);
       }
 
       WorkingChunk *chunk = nullptr;
       if (command.load) {
-        removed.erase(key);
+        prepared.removed.erase(key);
         auto snapshot = std::make_shared<LightChunkSnapshot>();
         snapshot->chunkX = command.load->chunkX;
         snapshot->chunkZ = command.load->chunkZ;
@@ -2666,21 +3570,54 @@ private:
         snapshot->generation = command.generation;
         snapshot->lifecycleEpoch = command.lifecycleEpoch;
         snapshot->revision = 0;
-        snapshot->sections = command.load->sections;
+        if (!command.load->geometrySections.empty()) {
+          prepared.rawGeometry = true;
+          loadGeometry(key, *command.load);
+          snapshot->sections.reserve(
+              static_cast<std::size_t>(blockSectionCount + 2));
+          for (int sectionY = minBlockSectionY - 1;
+               sectionY <= minBlockSectionY + blockSectionCount;
+               ++sectionY) {
+            const GeometrySection *geometry =
+                geometrySection(key, sectionY);
+            const bool sectionEmpty = geometry ? geometry->empty : true;
+            auto section = std::make_shared<LightSectionSnapshot>(
+                sectionY, sectionEmpty,
+                std::vector<BlockLightProperties>{emptyLightProperties()},
+                std::vector<std::uint16_t>{});
+            if (geometry)
+              section->unsupportedCells = geometry->unknown;
+            snapshot->sections.push_back(std::move(section));
+          }
+        } else {
+          snapshot->sections = command.load->sections;
+        }
 
-        const auto old = internal.find(key);
-        if (old != internal.end() &&
-            old->second->lifecycleEpoch != command.lifecycleEpoch)
-          replaced.insert(key);
-        if (old != internal.end() &&
-            old->second->lifecycleEpoch == command.lifecycleEpoch) {
-          // A full same-epoch input can change source columns without a per-cell
-          // command. Invalidate the old cross-boundary sky dependencies before
-          // rebuilding the chunk from the authoritative snapshot.
-          replaced.insert(key);
+        const auto &oldLayer = storedLayerSnapshot(LightLayer::Block, key);
+        const bool replacedEpoch =
+            oldLayer && oldLayer->lifecycleEpoch != command.lifecycleEpoch;
+        const bool sameEpoch =
+            oldLayer && oldLayer->lifecycleEpoch == command.lifecycleEpoch;
+        if (replacedEpoch) {
+          // A reload must never inherit an old epoch's mutable pages. Readers
+          // that already hold them stay valid, but the new lifetime starts
+          // with absent layers and fresh mixed allocations.
+          lastReadyBlock.erase(key);
+          lastReadySky.erase(key);
+          protocolBaseBlock.erase(key);
+          protocolBaseSky.erase(key);
+          pendingProtocolDirtyBlock.erase(key);
+          pendingProtocolDirtySky.erase(key);
+          pendingProtocolEpochBlock.erase(key);
+          pendingProtocolEpochSky.erase(key);
+          internal.erase(key);
+          prepared.replaced.insert(key);
+        }
+        if (sameEpoch) {
+          prepared.replaced.insert(key);
           for (std::size_t i = 0;
                i < snapshot->sections.size() &&
-               i < old->second->sections.size();
+               i < oldLayer->sections.size();
                ++i) {
             for (LightLayer layer : {LightLayer::Block, LightLayer::Sky}) {
               const auto index = static_cast<std::size_t>(layer);
@@ -2688,18 +3625,14 @@ private:
                 continue;
               auto section = std::make_shared<LightSectionSnapshot>(
                   *snapshot->sections[i]);
-              section->layers[index] = old->second->sections[i]->layers[index];
+              section->layers[index] = oldLayer->sections[i]->layers[index];
               snapshot->sections[i] = section;
             }
           }
-          // A full authoritative snapshot is also an optical delta. The old
-          // light layer is retained until propagation completes, but every
-          // changed property must re-check its old emission/dependency.
           for (int section = 0; section < command.load->blockSectionCount;
                ++section) {
             const int sectionY = command.load->minBlockSectionY + section;
-            const LightSectionSnapshot *oldSection =
-                old->second->section(sectionY);
+            const LightSectionSnapshot *oldSection = oldLayer->section(sectionY);
             const LightSectionSnapshot *newSection = snapshot->section(sectionY);
             if (!oldSection || !newSection)
               continue;
@@ -2712,7 +3645,7 @@ private:
               const int y = (index >> 8) & 15;
               if (oldSection->at(x, y, z) == newSection->at(x, y, z))
                 continue;
-              changedPositions.push_back(
+              prepared.changedPositions.push_back(
                   {snapshot->chunkX * 16 + x, sectionY * 16 + y,
                    snapshot->chunkZ * 16 + z});
             }
@@ -2722,7 +3655,8 @@ private:
         if (!options.hasSkyLight) {
           for (std::size_t i = 0; i < snapshot->sections.size(); ++i) {
             const auto &layer = snapshot->sections[i]
-                                    ->layers[static_cast<std::size_t>(LightLayer::Sky)];
+                                    ->layers[static_cast<std::size_t>(
+                                        LightLayer::Sky)];
             if (layer.isMissing() ||
                 (layer.isUniform() && layer.uniformValue() == 0))
               continue;
@@ -2741,11 +3675,11 @@ private:
         next.chunkZ = snapshot->chunkZ;
         next.snapshot = std::move(snapshot);
         next.dirty = true;
-        auto inserted = working.insert_or_assign(key, std::move(next)).first;
-        chunk = &inserted->second;
-        loaded.insert(key);
+        chunk = &prepared.chunks.insert_or_assign(
+                               key, std::move(next)).first->second;
+        prepared.loaded.insert(key);
       } else if (!command.unload) {
-        chunk = ensureWorking(key);
+        chunk = ensurePrepared(key);
         if (!chunk)
           continue;
       }
@@ -2784,7 +3718,7 @@ private:
         if (!change.newProperties.supported)
           ++section->unsupportedCells;
         ++statsChanges;
-        changedPositions.push_back(
+        prepared.changedPositions.push_back(
             {chunk->chunkX * 16 + (change.localIndex & 15),
              change.sectionY * 16 + ((change.localIndex >> 8) & 15),
              chunk->chunkZ * 16 + ((change.localIndex >> 4) & 15)});
@@ -2797,15 +3731,17 @@ private:
         LightSectionSnapshot *section = chunk->sectionForEdit(sectionY);
         if (!section)
           throw std::runtime_error("light change references a missing section");
+        const auto properties = lightPropertiesOf(
+            BlockState::fromId(value.state));
         const auto paletteIt = std::find(section->palette.begin(),
                                          section->palette.end(),
-                                         value.properties);
+                                         properties);
         std::uint16_t paletteIndex = 0;
         if (paletteIt == section->palette.end()) {
           if (section->palette.size() >= 65536)
             throw std::runtime_error("light section palette exceeds uint16");
           paletteIndex = static_cast<std::uint16_t>(section->palette.size());
-          section->palette.push_back(value.properties);
+          section->palette.push_back(properties);
         } else {
           paletteIndex = static_cast<std::uint16_t>(
               paletteIt - section->palette.begin());
@@ -2821,11 +3757,21 @@ private:
         section->cells[localIndex] = paletteIndex;
         if (!section->palette[paletteIndex].supported)
           ++section->unsupportedCells;
-        ++statsChanges;
-        changedPositions.push_back(
-            {chunk->chunkX * 16 + static_cast<int>(localIndex & 15),
-             sectionY * 16 + static_cast<int>((localIndex >> 8) & 15),
-             chunk->chunkZ * 16 + static_cast<int>((localIndex >> 4) & 15)});
+        const RawCellResult rawChange = applyRawGeometryCell(
+            key, sectionY, localIndex, value.state);
+        if (const GeometrySection *geometry =
+                geometrySection(key, sectionY)) {
+          section->empty = geometry->empty;
+        }
+        const bool geometryMissing = geometrySection(key, sectionY) == nullptr;
+        if (rawChange.opticalChanged || rawChange.emptyChanged ||
+            geometryMissing) {
+          ++statsChanges;
+          prepared.changedPositions.push_back(
+              {chunk->chunkX * 16 + static_cast<int>(localIndex & 15),
+               sectionY * 16 + static_cast<int>((localIndex >> 8) & 15),
+               chunk->chunkZ * 16 + static_cast<int>((localIndex >> 4) & 15)});
+        }
       }
       for (const auto &[sectionY, status] : command.sectionStatus) {
         if (auto *section = chunk->sectionForEdit(sectionY))
@@ -2834,59 +3780,414 @@ private:
       chunk->dirty = true;
     }
 
-    BlockLightPropagator propagation(*this, working, removed);
-    for (const LightPos &position : changedPositions)
+    for (const auto &[key, chunk] : prepared.chunks) {
+      (void)chunk;
+      prepared.affected.insert(key);
+      const int x = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+      const int z = static_cast<int>(static_cast<std::uint32_t>(key));
+      for (int dx = -1; dx <= 1; ++dx)
+        for (int dz = -1; dz <= 1; ++dz)
+          prepared.affected.insert(chunkKey(x + dx, z + dz));
+    }
+    for (std::uint64_t key : prepared.removed) {
+      const int x = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+      const int z = static_cast<int>(static_cast<std::uint32_t>(key));
+      for (int dx = -1; dx <= 1; ++dx)
+        for (int dz = -1; dz <= 1; ++dz)
+          prepared.affected.insert(chunkKey(x + dx, z + dz));
+    }
+    return prepared;
+  }
+
+  LayerWorkspace layerWorkspace(const PreparedBatch &prepared,
+                                LightLayer layer) const {
+    LayerWorkspace result;
+    result.removed = prepared.removed;
+    for (const auto &[key, base] : prepared.chunks) {
+      if (prepared.removed.contains(key))
+        continue;
+      WorkingChunk chunk;
+      chunk.key = base.key;
+      chunk.lifecycleEpoch = base.lifecycleEpoch;
+      chunk.chunkX = base.chunkX;
+      chunk.chunkZ = base.chunkZ;
+      const auto &ownView = prepared.rawGeometry
+                                ? storedLayerSnapshot(layer, key)
+                                : std::shared_ptr<const LightChunkSnapshot>{};
+      const LightChunkSnapshot &source =
+          prepared.rawGeometry && ownView ? *ownView : *base.snapshot;
+      chunk.snapshot = std::make_shared<LightChunkSnapshot>(source);
+      chunk.snapshot->blockLayerSnapshot.reset();
+      chunk.snapshot->skyLayerSnapshot.reset();
+      if (prepared.rawGeometry) {
+        const std::size_t other =
+            static_cast<std::size_t>(layer == LightLayer::Block
+                                         ? LightLayer::Sky
+                                         : LightLayer::Block);
+        for (auto &section : chunk.snapshot->sections) {
+          if (!section)
+            continue;
+          const bool inBlockRange =
+              section->sectionY >= chunk.snapshot->minBlockSectionY &&
+              section->sectionY < chunk.snapshot->minBlockSectionY +
+                                      chunk.snapshot->blockSectionCount;
+          const GeometrySection *geometry =
+              inBlockRange ? geometrySection(key, section->sectionY) : nullptr;
+          const bool finalEmpty = geometry ? geometry->empty : true;
+          if (!section->layers[other].isMissing() ||
+              section->empty != finalEmpty) {
+            auto copy = std::make_shared<LightSectionSnapshot>(*section);
+            copy->layers[other] = LightLayerSnapshot::missing();
+            if (copy->empty != finalEmpty) {
+              copy->empty = finalEmpty;
+              chunk.dirtySections.insert(section->sectionY);
+            }
+            section = std::move(copy);
+          }
+        }
+      }
+      chunk.dirty = base.dirty;
+      if (prepared.loaded.contains(key)) {
+        for (int sectionY = chunk.snapshot->minLightSectionY();
+             sectionY <= chunk.snapshot->minBlockSectionY +
+                             chunk.snapshot->blockSectionCount;
+             ++sectionY)
+          chunk.dirtySections.insert(sectionY);
+      }
+      result.chunks.emplace(key, std::move(chunk));
+    }
+    return result;
+  }
+
+  LayerOutcome executeBlockLayer(const PreparedBatch &prepared) {
+    const double cpuStart = currentThreadCpuMs();
+    if (options.beforeLayerForTesting)
+      options.beforeLayerForTesting(LightLayer::Block);
+    LayerOutcome result;
+    result.layers = layerWorkspace(prepared, LightLayer::Block);
+    BlockLightPropagator propagation(*this, result.layers.chunks,
+                                     result.layers.removed);
+    for (const LightPos &position : prepared.changedPositions)
       propagation.enqueueCheck(position);
-    for (std::uint64_t key : loaded) {
+    for (std::uint64_t key : prepared.loaded) {
       propagation.seedChunk(key);
       propagation.seedIncoming(key);
     }
-    for (std::uint64_t key : removed)
+    for (std::uint64_t key : prepared.removed)
       propagation.clearIncomingFrom(key);
-    for (std::uint64_t key : replaced)
-      if (!removed.contains(key))
+    for (std::uint64_t key : prepared.replaced)
+      if (!prepared.removed.contains(key))
         propagation.clearIncomingFrom(key);
     propagation.run();
     propagation.commitLayers();
+    result.complete = propagation.isComplete();
+    statsBlockWorkerCpuMs.fetch_add(
+        currentThreadCpuMs() - cpuStart, std::memory_order_relaxed);
+    return result;
+  }
 
-    bool blockComplete = propagation.isComplete();
-    bool skyComplete = !options.hasSkyLight;
-    if (options.hasSkyLight) {
-      SkyLightPropagator sky(*this, working, removed, skyColumnSources);
-      for (std::uint64_t key : loaded) {
-        sky.seedChunk(key);
-        sky.seedIncoming(key);
-      }
-      for (std::uint64_t key : removed)
-        sky.clearIncomingFrom(key);
-      for (std::uint64_t key : replaced)
-        if (!removed.contains(key))
-          sky.clearIncomingFrom(key);
-
-      std::unordered_set<std::uint64_t> changedColumns;
-      for (const LightPos &position : changedPositions)
-        changedColumns.insert(
-            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(position.x))
-             << 32) |
-            static_cast<std::uint32_t>(position.z));
-      for (std::uint64_t column : changedColumns) {
-        const int x = static_cast<int>(column >> 32);
-        const int z = static_cast<int>(static_cast<std::uint32_t>(column));
-        sky.updateColumn(chunkKey(x >> 4, z >> 4), x & 15, z & 15);
-      }
-      for (const LightPos &position : changedPositions)
-        sky.enqueueCheck(position);
-      sky.syncStorageEligibility();
-      sky.run();
-      sky.commitLayers();
-      skyComplete = sky.isComplete();
+  LayerOutcome executeSkyLayer(const PreparedBatch &prepared) {
+    const double cpuStart = currentThreadCpuMs();
+    if (options.beforeLayerForTesting)
+      options.beforeLayerForTesting(LightLayer::Sky);
+    LayerOutcome result;
+    result.layers = layerWorkspace(prepared, LightLayer::Sky);
+    SkyLightPropagator sky(*this, result.layers.chunks,
+                           result.layers.removed, skyColumnSources,
+                           prepared.affected);
+    for (std::uint64_t key : prepared.loaded) {
+      sky.seedChunk(key);
+      sky.seedIncoming(key);
     }
-    for (const auto &[key, chunk] : working) {
-      if (removed.contains(key))
+    for (std::uint64_t key : prepared.removed)
+      sky.clearIncomingFrom(key);
+    for (std::uint64_t key : prepared.replaced)
+      if (!prepared.removed.contains(key))
+        sky.clearIncomingFrom(key);
+
+    std::vector<LightPos> orderedChanges = prepared.changedPositions;
+    std::sort(orderedChanges.begin(), orderedChanges.end(),
+              [](const LightPos &left, const LightPos &right) {
+                if (left.x != right.x)
+                  return left.x < right.x;
+                if (left.z != right.z)
+                  return left.z < right.z;
+                return left.y < right.y;
+              });
+    struct PendingColumn {
+      std::uint64_t key;
+      int x;
+      int z;
+      int oldSource;
+      int newSource;
+    };
+    std::vector<PendingColumn> postSeed;
+    for (std::size_t begin = 0; begin < orderedChanges.size();) {
+      std::size_t end = begin + 1;
+      while (end < orderedChanges.size() &&
+             orderedChanges[end].x == orderedChanges[begin].x &&
+             orderedChanges[end].z == orderedChanges[begin].z)
+        ++end;
+      const LightPos &first = orderedChanges[begin];
+      const std::uint64_t key =
+          chunkKey(first.x >> 4, first.z >> 4);
+      const int localX = first.x & 15;
+      const int localZ = first.z & 15;
+      const int oldSource = sky.columnSource(key, localX, localZ);
+      int newSource = oldSource;
+      for (std::size_t i = begin; i < end; ++i)
+        newSource = sky.updateColumnSource(key, localX, localZ,
+                                           orderedChanges[i].y);
+      postSeed.push_back({key, localX, localZ, oldSource, newSource});
+      begin = end;
+    }
+    // All column heights now describe the final optical batch. Only after this
+    // point may seeding read neighboring heights.
+    for (const PendingColumn &column : postSeed)
+      sky.applyColumnSource(column.key, column.x, column.z,
+                            column.oldSource, column.newSource);
+    for (const LightPos &position : prepared.changedPositions)
+      sky.enqueueCheck(position);
+    sky.syncStorageEligibility();
+    sky.run();
+    sky.commitLayers();
+    for (std::uint64_t key : prepared.removed)
+      skyColumnSources.erase(key);
+    result.complete = sky.isComplete();
+    statsSkyWorkerCpuMs.fetch_add(
+        currentThreadCpuMs() - cpuStart, std::memory_order_relaxed);
+    return result;
+  }
+
+  void publishResult(LayerResult result) {
+    while (!resultQueue->push(std::move(result))) {
+      if (closing.load(std::memory_order_acquire))
+        return;
+      std::this_thread::yield();
+    }
+  }
+
+  void publishIndependentLayer(const PreparedBatch &prepared,
+                               LayerOutcome &outcome,
+                               LightLayer layer) {
+    if (layer == LightLayer::Sky && !options.hasSkyLight)
+      return;
+    auto &nextRevision =
+        layer == LightLayer::Block ? nextBlockLayerRevision
+                                   : nextSkyLayerRevision;
+    auto &last = layer == LightLayer::Block ? lastReadyBlock : lastReadySky;
+    auto &protocolBase =
+        layer == LightLayer::Block ? protocolBaseBlock : protocolBaseSky;
+    auto &pendingDirty =
+        layer == LightLayer::Block ? pendingProtocolDirtyBlock
+                                   : pendingProtocolDirtySky;
+    auto &pendingEpoch =
+        layer == LightLayer::Block ? pendingProtocolEpochBlock
+                                   : pendingProtocolEpochSky;
+    std::vector<LayerResult> ready;
+    for (auto &[key, chunk] : outcome.layers.chunks) {
+      if (!chunk.dirty || prepared.removed.contains(key))
         continue;
-      chunk.snapshot->unsupportedCells = 0;
-      for (const auto &section : chunk.snapshot->sections)
-        chunk.snapshot->unsupportedCells += section->unsupportedCells;
+      // The layer workspace owns sections for this layer only. Publish that
+      // same envelope and its section headers; no combined view is created.
+      auto view = chunk.snapshot;
+      view->layer = layer;
+      view->blockLayerSnapshot.reset();
+      view->skyLayerSnapshot.reset();
+      view->generation = prepared.maxGeneration;
+      view->revision = ++nextRevision;
+      view->lifecycleEpoch = chunk.lifecycleEpoch;
+      view->blockLightComplete =
+          layer == LightLayer::Block ? outcome.complete : false;
+      view->skyLightComplete =
+          layer == LightLayer::Sky
+              ? outcome.complete
+              : (!options.hasSkyLight && layer == LightLayer::Block);
+      view->propagationComplete = outcome.complete;
+      view->protocolReady = outcome.complete;
+      view->changedSections.clear();
+      view->deltaBaseRevision = 0;
+      // A mixed page is mutable and may already share its allocation with the
+      // reader's previous view. Equality against that page cannot prove this
+      // batch changed. Only this layer's propagator write set is authoritative.
+      std::set<int> changed(chunk.dirtySections.begin(),
+                            chunk.dirtySections.end());
+      if (outcome.complete) {
+        const auto base = protocolBase.find(key);
+        if (base != protocolBase.end() && base->second &&
+            base->second->lifecycleEpoch == view->lifecycleEpoch &&
+            base->second->minLightSectionY() == view->minLightSectionY() &&
+            base->second->lightSectionCount() == view->lightSectionCount())
+          view->deltaBaseRevision = base->second->revision;
+        const auto pending = pendingDirty.find(key);
+        if (pending != pendingDirty.end() &&
+            pendingEpoch[key] == view->lifecycleEpoch) {
+          changed.insert(pending->second.begin(), pending->second.end());
+          pendingDirty.erase(pending);
+          pendingEpoch.erase(key);
+        }
+        protocolBase[key] = view;
+      } else {
+        auto &pending = pendingDirty[key];
+        pending.insert(changed.begin(), changed.end());
+        pendingEpoch[key] = view->lifecycleEpoch;
+      }
+      for (int sectionY : changed)
+        view->changedSections.push_back(
+            {sectionY, layer == LightLayer::Sky, layer == LightLayer::Block});
+      if (options.collectDiagnostics) {
+        const auto count = static_cast<std::uint64_t>(changed.size());
+        if (layer == LightLayer::Block)
+          statsBlockChanges.fetch_add(count, std::memory_order_relaxed);
+        else
+          statsSkyChanges.fetch_add(count, std::memory_order_relaxed);
+      }
+      last[key] = view;
+      ready.push_back({true, layer, key, view});
+    }
+    for (LayerResult &result : ready)
+      publishResult(std::move(result));
+    statsPublished.fetch_add(ready.size(), std::memory_order_relaxed);
+  }
+
+  struct CombinedLayerResult {
+    std::unordered_map<std::uint64_t, WorkingChunk> chunks;
+    std::unordered_set<std::uint64_t> dirtyKeys;
+    std::unordered_map<std::uint64_t,
+                       std::shared_ptr<const LightChunkSnapshot>>
+        blockSnapshots;
+    std::unordered_map<std::uint64_t,
+                       std::shared_ptr<const LightChunkSnapshot>>
+        skySnapshots;
+    bool blockComplete = false;
+    bool skyComplete = false;
+  };
+
+  CombinedLayerResult executeLayers(const PreparedBatch &prepared) {
+    LayerOutcome block = executeBlockLayer(prepared);
+    if (prepared.rawGeometry)
+      publishIndependentLayer(prepared, block, LightLayer::Block);
+    std::optional<LayerOutcome> sky;
+    if (options.hasSkyLight) {
+      sky = executeSkyLayer(prepared);
+      if (prepared.rawGeometry)
+        publishIndependentLayer(prepared, *sky, LightLayer::Sky);
+    }
+
+    CombinedLayerResult result;
+    result.blockComplete = block.complete;
+    result.skyComplete = options.hasSkyLight ? sky->complete : true;
+    for (const auto &[key, chunk] : block.layers.chunks) {
+      result.blockSnapshots.emplace(key, chunk.snapshot);
+      if (chunk.dirty)
+        result.dirtyKeys.insert(key);
+    }
+    if (sky)
+      for (const auto &[key, chunk] : sky->layers.chunks) {
+        result.skySnapshots.emplace(key, chunk.snapshot);
+        if (chunk.dirty)
+          result.dirtyKeys.insert(key);
+      }
+    if (prepared.rawGeometry)
+      return result;
+    if (!sky) {
+      result.chunks = std::move(block.layers.chunks);
+      return result;
+    }
+
+    result.chunks = std::move(block.layers.chunks);
+    for (auto &[key, skyChunk] : sky->layers.chunks) {
+      if (prepared.removed.contains(key))
+        continue;
+      auto found = result.chunks.find(key);
+      if (found == result.chunks.end()) {
+        if (skyChunk.dirty)
+          result.chunks.emplace(key, std::move(skyChunk));
+        continue;
+      }
+      WorkingChunk &blockChunk = found->second;
+      if (!blockChunk.dirty && !skyChunk.dirty)
+        continue;
+      auto merged =
+          std::make_shared<LightChunkSnapshot>(*blockChunk.snapshot);
+      const std::size_t count =
+          std::min(merged->sections.size(), skyChunk.snapshot->sections.size());
+      for (std::size_t index = 0; index < count; ++index) {
+        const auto &blockSection = merged->sections[index];
+        const auto &skySection = skyChunk.snapshot->sections[index];
+        if (!blockSection)
+          merged->sections[index] = skySection;
+        else if (blockSection != skySection) {
+          auto section =
+              std::make_shared<LightSectionSnapshot>(*blockSection);
+          if (skySection)
+            section->layers[static_cast<std::size_t>(LightLayer::Sky)] =
+                skySection->layers[static_cast<std::size_t>(LightLayer::Sky)];
+          merged->sections[index] = std::move(section);
+        }
+      }
+      blockChunk.snapshot = std::move(merged);
+      blockChunk.mutableSections.clear();
+      blockChunk.dirty = blockChunk.dirty || skyChunk.dirty;
+    }
+    return result;
+  }
+
+  std::shared_ptr<const LightChunkSnapshot> layerEnvelope(
+      const std::shared_ptr<const LightChunkSnapshot> &source,
+      const LightChunkSnapshot &combined, LightLayer layer) const {
+    if (!source)
+      return nullptr;
+    auto result = std::make_shared<LightChunkSnapshot>(*source);
+    result->blockLayerSnapshot.reset();
+    result->skyLayerSnapshot.reset();
+    result->generation = combined.generation;
+    result->revision = combined.revision;
+    result->lifecycleEpoch = combined.lifecycleEpoch;
+    result->blockLightComplete = combined.blockLightComplete;
+    result->skyLightComplete = combined.skyLightComplete;
+    result->propagationComplete = combined.propagationComplete;
+    result->protocolReady = combined.protocolReady;
+    result->deltaBaseRevision = combined.deltaBaseRevision;
+    result->changedSections.clear();
+    const bool wanted = layer == LightLayer::Block;
+    for (const auto &change : combined.changedSections)
+      if (wanted ? change.block : change.sky)
+        result->changedSections.push_back(change);
+    return result;
+  }
+
+  void processBatch(std::vector<PendingChunk> &batch) {
+    PreparedBatch prepared = prepareBatch(batch);
+    CombinedLayerResult layers = executeLayers(prepared);
+    if (prepared.rawGeometry) {
+      // Block and sky were published independently at the point each worker
+      // finished. There is no combined publication or reader-side merge.
+      for (std::uint64_t key : prepared.removed) {
+        geometry.erase(key);
+        internal.erase(key);
+        lastReadyBlock.erase(key);
+        lastReadySky.erase(key);
+        protocolBaseBlock.erase(key);
+        protocolBaseSky.erase(key);
+        pendingProtocolDirtyBlock.erase(key);
+        pendingProtocolDirtySky.erase(key);
+        pendingProtocolEpochBlock.erase(key);
+        pendingProtocolEpochSky.erase(key);
+      }
+      return;
+    }
+    auto &working = layers.chunks;
+    bool blockComplete = layers.blockComplete;
+    bool skyComplete = layers.skyComplete;
+    for (const auto &[key, chunk] : working) {
+      if (prepared.removed.contains(key))
+        continue;
+      if (!prepared.rawGeometry) {
+        chunk.snapshot->unsupportedCells = 0;
+        for (const auto &section : chunk.snapshot->sections)
+          chunk.snapshot->unsupportedCells += section->unsupportedCells;
+      }
       if (chunk.snapshot->unsupportedCells != 0) {
         blockComplete = false;
         if (options.hasSkyLight)
@@ -2894,7 +4195,7 @@ private:
       }
     }
     for (const auto &[key, chunk] : internal) {
-      if (!removed.contains(key) && !working.contains(key) &&
+      if (!prepared.removed.contains(key) && !working.contains(key) &&
           chunk->unsupportedCells != 0) {
         blockComplete = false;
         if (options.hasSkyLight)
@@ -2907,9 +4208,9 @@ private:
     std::vector<std::pair<std::uint64_t, std::shared_ptr<LightChunkSnapshot>>>
         publication;
     for (auto &[key, chunk] : working) {
-      if (removed.contains(key) || !chunk.dirty)
+      if (prepared.removed.contains(key) || !chunk.dirty)
         continue;
-      chunk.snapshot->generation = maxGeneration;
+      chunk.snapshot->generation = prepared.maxGeneration;
       chunk.snapshot->revision = publicationRevision;
       chunk.snapshot->lifecycleEpoch = chunk.lifecycleEpoch;
       chunk.snapshot->blockLightComplete = blockComplete;
@@ -2927,35 +4228,120 @@ private:
             base->second->lightSectionCount() ==
                 chunk.snapshot->lightSectionCount())
           chunk.snapshot->deltaBaseRevision = base->second->revision;
-        for (const auto &now : chunk.snapshot->sections) {
-          bool skyChanged = true;
-          bool blockChanged = true;
-          if (chunk.snapshot->deltaBaseRevision != 0) {
-            const LightSectionSnapshot *before =
-                base->second->section(now->sectionY);
-            if (before == now.get()) {
-              skyChanged = false;
-              blockChanged = false;
-            } else if (before) {
-              skyChanged =
-                  before->layers[static_cast<std::size_t>(LightLayer::Sky)] !=
-                  now->layers[static_cast<std::size_t>(LightLayer::Sky)];
-              blockChanged =
-                  before->layers[static_cast<std::size_t>(LightLayer::Block)] !=
-                  now->layers[static_cast<std::size_t>(LightLayer::Block)];
+        if (prepared.rawGeometry) {
+          std::map<int, std::pair<bool, bool>> changes;
+          const auto block = layers.blockSnapshots.find(key);
+          const auto sky = layers.skySnapshots.find(key);
+          const auto changedAgainst = [&](const LightChunkSnapshot *now,
+                                          const LightChunkSnapshot *before,
+                                          LightLayer layer) {
+            if (!now)
+              return;
+            for (const auto &section : now->sections) {
+              const LightSectionSnapshot *oldSection =
+                  before ? before->section(section->sectionY) : nullptr;
+              const bool changed =
+                  !oldSection ||
+                  oldSection->layers[static_cast<std::size_t>(layer)] !=
+                      section->layers[static_cast<std::size_t>(layer)];
+              if (!changed)
+                continue;
+              auto &flags = changes[section->sectionY];
+              if (layer == LightLayer::Block)
+                flags.second = true;
+              else
+                flags.first = true;
             }
-          }
-          if (skyChanged || blockChanged)
+          };
+          const LightChunkSnapshot *before = base->second.get();
+          changedAgainst(
+              block == layers.blockSnapshots.end()
+                  ? nullptr
+                  : block->second.get(),
+              before ? before->blockLayerSnapshot.get() : nullptr,
+              LightLayer::Block);
+          changedAgainst(
+              sky == layers.skySnapshots.end()
+                  ? nullptr
+                  : sky->second.get(),
+              before ? before->skyLayerSnapshot.get() : nullptr,
+              LightLayer::Sky);
+          for (const auto &[sectionY, flags] : changes)
             chunk.snapshot->changedSections.push_back(
-                {now->sectionY, skyChanged, blockChanged});
-          skySectionChanges += skyChanged ? 1 : 0;
-          blockSectionChanges += blockChanged ? 1 : 0;
+                {sectionY, flags.first, flags.second});
+          for (const auto &[sectionY, flags] : changes) {
+            (void)sectionY;
+            skySectionChanges += flags.first ? 1 : 0;
+            blockSectionChanges += flags.second ? 1 : 0;
+          }
+        } else {
+          for (const auto &now : chunk.snapshot->sections) {
+            bool skyChanged = true;
+            bool blockChanged = true;
+            if (chunk.snapshot->deltaBaseRevision != 0) {
+              const LightSectionSnapshot *before =
+                  base->second->section(now->sectionY);
+              if (before == now.get()) {
+                skyChanged = false;
+                blockChanged = false;
+              } else if (before) {
+                skyChanged =
+                    before->layers[static_cast<std::size_t>(LightLayer::Sky)] !=
+                    now->layers[static_cast<std::size_t>(LightLayer::Sky)];
+                blockChanged =
+                    before->layers[static_cast<std::size_t>(LightLayer::Block)] !=
+                    now->layers[static_cast<std::size_t>(LightLayer::Block)];
+              }
+            }
+            if (skyChanged || blockChanged)
+              chunk.snapshot->changedSections.push_back(
+                  {now->sectionY, skyChanged, blockChanged});
+            skySectionChanges += skyChanged ? 1 : 0;
+            blockSectionChanges += blockChanged ? 1 : 0;
+          }
         }
       }
-      publication.emplace_back(key, chunk.snapshot);
+      std::shared_ptr<const LightChunkSnapshot> blockSource;
+      if (const auto found = layers.blockSnapshots.find(key);
+          found != layers.blockSnapshots.end())
+        blockSource = found->second;
+      else if (const auto found = internal.find(key);
+               found != internal.end())
+        blockSource = found->second;
+      if (!blockSource) {
+        if (const auto found = layers.skySnapshots.find(key);
+            found != layers.skySnapshots.end())
+          blockSource = found->second;
+      }
+      chunk.snapshot->blockLayerSnapshot =
+          prepared.rawGeometry
+              ? blockSource
+              : layerEnvelope(blockSource, *chunk.snapshot,
+                              LightLayer::Block);
+
+      std::shared_ptr<const LightChunkSnapshot> skySource;
+      if (options.hasSkyLight) {
+        if (const auto found = layers.skySnapshots.find(key);
+            found != layers.skySnapshots.end())
+          skySource = found->second;
+        else if (const auto found = internal.find(key);
+                 found != internal.end())
+          skySource = found->second;
+        if (!skySource)
+          skySource = blockSource;
+      }
+      chunk.snapshot->skyLayerSnapshot =
+          skySource && !prepared.rawGeometry
+              ? layerEnvelope(skySource, *chunk.snapshot, LightLayer::Sky)
+              : skySource;
+      if (prepared.rawGeometry)
+        internal[key] = chunk.snapshot;
+      else
+        publication.emplace_back(key, chunk.snapshot);
     }
     if (options.collectDiagnostics) {
-      statsSkyChanges.fetch_add(skySectionChanges, std::memory_order_relaxed);
+      statsSkyChanges.fetch_add(skySectionChanges,
+                                std::memory_order_relaxed);
       statsBlockChanges.fetch_add(blockSectionChanges,
                                   std::memory_order_relaxed);
     }
@@ -2964,60 +4350,20 @@ private:
                 [](const auto &left, const auto &right) {
                   return left.first < right.first;
                 });
-      std::lock_guard lock(mutex);
-      // Keep the undrained publication state bounded by one latest snapshot per
-      // chunk. Removing an older occurrence preserves every remaining batch's
-      // all-at-once visibility while allowing a newer revision to supersede it.
-      for (auto queuedBatch = published.begin(); queuedBatch != published.end();) {
-        std::erase_if(*queuedBatch, [&](const auto &entry) {
-          for (auto &newEntry : publication) {
-            if (newEntry.first != entry.first)
-              continue;
-            if (entry.second->protocolReady &&
-                newEntry.second->protocolReady &&
-                entry.second->lifecycleEpoch ==
-                    newEntry.second->lifecycleEpoch) {
-              std::map<int, std::pair<bool, bool>> merged;
-              for (const auto &change : entry.second->changedSections)
-                merged[change.sectionY] = {change.sky, change.block};
-              for (const auto &change : newEntry.second->changedSections) {
-                auto &flags = merged[change.sectionY];
-                flags.first |= change.sky;
-                flags.second |= change.block;
-              }
-              newEntry.second->changedSections.clear();
-              for (const auto &[sectionY, flags] : merged)
-                newEntry.second->changedSections.push_back(
-                    {sectionY, flags.first, flags.second});
-              newEntry.second->deltaBaseRevision =
-                  entry.second->deltaBaseRevision;
-            }
-            return true;
-          }
-          return false;
-        });
-        if (queuedBatch->empty())
-          queuedBatch = published.erase(queuedBatch);
-        else
-          ++queuedBatch;
-      }
-      std::vector<std::pair<std::uint64_t,
-                            std::shared_ptr<const LightChunkSnapshot>>>
-          committed;
-      committed.reserve(publication.size());
       for (auto &[key, snapshot] : publication) {
         internal[key] = snapshot;
         if (snapshot->protocolReady)
           lastReady[key] = snapshot;
-        committed.emplace_back(key, std::move(snapshot));
+        publishResult({false, LightLayer::Block, key, std::move(snapshot)});
       }
-      statsPublished.fetch_add(committed.size(), std::memory_order_relaxed);
-      published.push_back(std::move(committed));
+      statsPublished.fetch_add(publication.size(), std::memory_order_relaxed);
     }
-    for (std::uint64_t key : removed) {
+    for (std::uint64_t key : prepared.removed) {
+      geometry.erase(key);
       internal.erase(key);
       lastReady.erase(key);
-      skyColumnSources.erase(key);
+      lastReadyBlock.erase(key);
+      lastReadySky.erase(key);
     }
   }
 
@@ -3030,17 +4376,11 @@ private:
   std::condition_variable batchDone;
   std::condition_variable sleepState;
   std::unordered_map<std::uint64_t, PendingChunk> pending;
-  // Single-producer owned-cell ring. A full ring hands the newest owned record
-  // to the pending map; the generation sequence prevents a later ring drain
-  // from replacing it with older input.
-  std::vector<LightCellUpdate> ring;
-  std::size_t ringMask = 0;
-  std::size_t ringBatchLimit = 1024;
-  std::atomic<std::uint32_t> ringHead{0};
-  std::atomic<std::uint32_t> ringTail{0};
-  std::vector<LightCellUpdate> ringBatch;
-  std::vector<LightCellUpdate> sortedCells;
-  std::vector<CoalescedSection> coalescedSections;
+  std::shared_ptr<const LightOpticalTable> opticalTable;
+  std::unordered_map<std::uint64_t, GeometryChunk> geometry;
+  std::unique_ptr<SpscRing<GeometryInput>> inputQueue;
+  std::unique_ptr<SpscRing<PendingChunk>> controlQueue;
+  std::unique_ptr<SpscRing<LayerResult>> resultQueue;
   struct ChunkVersion {
     std::uint64_t epoch = 0;
     std::uint64_t requestRevision = 0;
@@ -3049,6 +4389,11 @@ private:
     bool inactive = false;
   };
   std::unordered_map<std::uint64_t, ChunkVersion> versions;
+  // Worker-maintained lifecycle view consumed with the SPSC control stream.
+  std::unordered_map<std::uint64_t, ChunkVersion> workerVersions;
+  // Main-thread-only lifecycle view used by result draining; never touched by
+  // the worker, so publication consumption cannot wait on input merging.
+  std::unordered_map<std::uint64_t, ChunkVersion> mainVersions;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       latest;
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
@@ -3056,13 +4401,32 @@ private:
   std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
       lastReady;
   std::unordered_map<std::uint64_t, SkyColumnSources> skyColumnSources;
-  std::vector<std::vector<std::pair<
-      std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>>>
-      published;
+  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+      latestBlock;
+  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+      latestSky;
+  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+      lastReadyBlock;
+  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+      lastReadySky;
+  // Last network-visible complete result and dirty sections accumulated while
+  // one layer was incomplete. Mutable pages make content comparison invalid.
+  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+      protocolBaseBlock;
+  std::unordered_map<std::uint64_t, std::shared_ptr<const LightChunkSnapshot>>
+      protocolBaseSky;
+  std::unordered_map<std::uint64_t, std::unordered_set<int>>
+      pendingProtocolDirtyBlock;
+  std::unordered_map<std::uint64_t, std::unordered_set<int>>
+      pendingProtocolDirtySky;
+  std::unordered_map<std::uint64_t, std::uint64_t> pendingProtocolEpochBlock;
+  std::unordered_map<std::uint64_t, std::uint64_t> pendingProtocolEpochSky;
+  std::uint64_t nextBlockLayerRevision = 0;
+  std::uint64_t nextSkyLayerRevision = 0;
   std::function<void(std::shared_ptr<const LightChunkSnapshot>)> publishCallback;
   std::thread worker;
   bool accepting = true;
-  bool closing = false;
+  std::atomic<bool> closing{false};
   bool busy = false;
   std::size_t busyChunks = 0;
   std::atomic<std::uint64_t> nextGeneration{0};
@@ -3078,6 +4442,7 @@ private:
   std::string error;
   mutable std::atomic<std::uint64_t> statsSubmitted{0};
   mutable std::atomic<std::uint64_t> statsRejected{0};
+  mutable std::atomic<std::uint64_t> statsDroppedGeometry{0};
   mutable std::atomic<std::uint64_t> statsBatches{0};
   mutable std::atomic<std::uint64_t> statsChanges{0};
   mutable std::atomic<std::uint64_t> statsPublished{0};
@@ -3089,8 +4454,14 @@ private:
   mutable std::atomic<std::uint64_t> statsReceivedSkySections{0};
   mutable std::atomic<std::uint64_t> statsReceivedBlockSections{0};
   mutable std::atomic<double> statsWorkerCpuMs{0};
+  mutable std::atomic<double> statsBlockWorkerCpuMs{0};
+  mutable std::atomic<double> statsSkyWorkerCpuMs{0};
   mutable std::atomic<std::uint64_t> statsWorkerAffinity{0};
   mutable std::atomic<std::uint32_t> statsWorkerAffinityError{0};
+  mutable std::atomic<std::uint64_t> statsBlockWorkerAffinity{0};
+  mutable std::atomic<std::uint32_t> statsBlockWorkerAffinityError{0};
+  mutable std::atomic<std::uint64_t> statsSkyWorkerAffinity{0};
+  mutable std::atomic<std::uint32_t> statsSkyWorkerAffinityError{0};
 };
 
 LightService::LightService(int minBlockSectionY, int blockSectionCount,
@@ -3098,6 +4469,10 @@ LightService::LightService(int minBlockSectionY, int blockSectionCount,
     : impl_(std::make_unique<Impl>(minBlockSectionY, blockSectionCount, options)) {}
 
 LightService::~LightService() = default;
+
+std::shared_ptr<const LightOpticalTable> LightService::opticalTable() const {
+  return impl_->opticalTable;
+}
 
 std::uint64_t LightService::submitChunk(LightChunkInput input) {
   return impl_->submitChunk(std::move(input));
@@ -3130,6 +4505,21 @@ void LightService::drainPublished() { impl_->drainPublished(); }
 std::shared_ptr<const LightChunkSnapshot> LightService::latestChunk(
     int chunkX, int chunkZ) const {
   return impl_->latestChunk(chunkX, chunkZ);
+}
+
+std::shared_ptr<const LightChunkSnapshot> LightService::latestLayerChunk(
+    LightLayer layer, int chunkX, int chunkZ) const {
+  return impl_->latestLayerChunk(layer, chunkX, chunkZ);
+}
+
+std::optional<std::array<int, 256>>
+LightService::skyColumnSourcesForTesting(int chunkX, int chunkZ) const {
+  return impl_->skyColumnSourcesForTesting(chunkX, chunkZ);
+}
+
+std::optional<BlockLightProperties>
+LightService::opticalPropertiesForTesting(int x, int y, int z) const {
+  return impl_->opticalPropertiesForTesting(x, y, z);
 }
 
 void LightService::setPublishCallback(
