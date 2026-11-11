@@ -1832,3 +1832,14 @@ Paired deltas versus no-lighting were:
 The mean-tick target is now met, while main-thread CPU remains 0.045 percentage points above the <10% target. Lit runs accepted 2.37-2.57M geometry tasks. Groups 3 and 4 explicitly dropped 13,249 and 101,285 records; the other three dropped zero. This remains a near-target result, not a complete performance pass.
 
 Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-batch20-pairs-rerun-20261112/. summary.json SHA-256 0d5d26926258822b290a1840c1cb42f9823472133bc0f7a7ba7e820247f65940. Previous measurement directories were not overwritten. No code change, CTest, or client launch was performed for this rerun.
+
+
+### Growable SPSC queues (2026-11-12)
+
+The fixed geometry and result rings were replaced with segmented SPSC queues. The first geometry segment remains 10 MiB and the first result segment remains 4 MiB. When a segment fills, the producer allocates and links a same-size successor without moving queued values; the consumer frees a segment after draining it. One producer and one consumer preserve FIFO order across segment boundaries, and the per-record path remains lock-free.
+
+This removes capacity-based geometry drops and prevents the worker from spinning when a burst of layer results exceeds the initial result segment. The control queue remains bounded by maxQueuedCommands. Focused light tests cover a four-entry initial geometry segment, close-time drain across segments, and four result publications with a two-entry initial result segment. A host allocation failure still increments droppedGeometryTasks; ordinary capacity exhaustion does not.
+
+Final affected validation: light_tests passed; light_protocol_tests passed with 206 packets; sky golden matched 243 observations + 72 raw-layer flags; block golden matched 225 observations. Final benchmark binary SHA-256 is e7e5e2069624b9f90596e2ac876b6698724499d25c0164c04881dbddc1715948. A 1000-tick diagnostic accepted 2,630,119 geometry tasks with rejected=0 and dropped_geometry=0; mean tick was 3.193 ms, median 2.334 ms, P95 6.862 ms, max 36.449 ms and over50=0, with pending zero after a 932.365 ms final wait. This is only a single diagnostic run, not a new performance claim. No CTest was run.
+
+Evidence is in /home/zhddsj/.local/state/redstone-cpp/wsl-growable-ring-20261112-*.log. Build log SHA-256 6e5c7d459bec3710b94bb50e3f7fb559b0ebd8c04590822f94bf49de78aaf0d0; light tests b86aadb158f06b0dd32dea42c8c0cdf30f0548920b553ab0e75b061855b0022d; protocol d15646170c5d13e0b748eead5b6a03c0adc08d60aeea7391f4f37dc62438f8bc; sky golden d771cfbdf6604fe53ae363aaed3b93c725b4dc774a1fa6ecd98dd293f25d7468; block golden d4430f685abc610d762409cb198c7b50cc6db7796a624cabefe05e71d09d85bb; final probe c3b8a18051083f12449be4972aca81824872fac31d1197ec348acd90ccba795f.

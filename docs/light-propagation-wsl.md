@@ -138,8 +138,8 @@ Validation for the final tree is in /home/zhddsj/.local/state/redstone-cpp/wsl-s
 ## Single worker and SPSC result handoff (2026-11-12)
 
 - The selectable second sky worker has been removed. One persistent worker executes block propagation and publishes it, then executes sky propagation and publishes that independently.
-- Geometry input is a 10 MiB fixed SPSC ring. A full ring drops the newest record and increments droppedGeometryTasks; the former overflow map and full-ring mutex fallback are gone.
-- Layer results use a fixed 4 MiB SPSC ring. The worker publishes the worker-owned header shared pointer; the main thread pops, constructs its own small header, updates latestBlock/latestSky, and invokes callbacks. Result consumption does not take the input-state mutex that was responsible for the long tick stalls.
+- Geometry input starts with a 10 MiB SPSC segment. When it fills, the producer allocates and appends another segment; already queued records are not moved or copied. The former overflow map and full-ring mutex fallback are gone, and capacity exhaustion no longer drops the newest record.
+- Layer results start with a 4 MiB SPSC segment with the same automatic segment growth. The worker publishes the worker-owned header shared pointer; the main thread pops, constructs its own small header, updates latestBlock/latestSky, and invokes callbacks. Result consumption does not take the input-state mutex that was responsible for the long tick stalls.
 - Main cache lookups and result draining are main-thread-only. Per-layer lifecycle validation uses the main-thread lifecycle mirror, so a worker input merge cannot block publication consumption.
 - Native server and benchmark accept --light-workers 1 only; 2 is rejected. Sky shares the sole worker affinity.
 
@@ -153,3 +153,10 @@ Validation for the final tree is in /home/zhddsj/.local/state/redstone-cpp/wsl-s
 
 
 Final focused performance pairs for the BFS-cache/uniform build: five interleaved 1000-tick lit/unlit pairs yielded paired median deltas of CPU +10.664%, mean +10.670%, median +11.550%, P95 +7.376% and max +10.982%. All runs had no tick over 50 ms. Four lit runs dropped zero geometry tasks and one dropped 751. This is still slightly outside the CPU/mean <10% target.
+
+
+## Growable SPSC segments (2026-11-12)
+
+Both the geometry input queue and the worker-to-main result queue now retain SPSC ordering while growing on demand. Each queue begins with its configured segment size (10 MiB geometry, 4 MiB results). When the producer reaches the end of a full segment, it allocates a same-size successor, publishes that link with release ordering, and continues there. The consumer follows the link with acquire ordering and frees a segment only after draining it.
+
+Queued values never move during growth, so a burst cannot copy a 10 MiB geometry backlog or 4 MiB result backlog. No mutex is needed on the per-record path: there is still one producer and one consumer, and only the producer allocates or links the next segment. Capacity no longer drops geometry records; per-record submission and result handoff remain bounded by consumer progress and available memory. The control queue remains the explicitly bounded lifecycle-command queue.

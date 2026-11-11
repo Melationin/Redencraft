@@ -8,6 +8,7 @@
 #include <iterator>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -305,6 +306,95 @@ private:
   std::vector<T> slots_;
   std::atomic<std::uint64_t> head_{0};
   std::atomic<std::uint64_t> tail_{0};
+};
+
+// SPSC queue whose logical capacity grows by appending fixed-size segments.
+// The producer owns write_ and links a fully allocated next segment with a
+// release store. The consumer follows that link with an acquire load and frees
+// only segments it has drained. Existing slots never move, so growth does not
+// copy queued values and does not add a mutex to the per-record fast path.
+template <class T> class GrowableSpscRing {
+  struct Segment {
+    explicit Segment(std::size_t capacity) : slots(capacity) {}
+    std::vector<T> slots;
+    std::atomic<std::size_t> head{0};
+    std::atomic<std::size_t> tail{0};
+    std::atomic<Segment *> next{nullptr};
+  };
+
+public:
+  explicit GrowableSpscRing(std::size_t capacity)
+      : read_(new Segment(std::max<std::size_t>(capacity, 2))),
+        write_(read_) {}
+  ~GrowableSpscRing() {
+    Segment *segment = read_;
+    while (segment) {
+      Segment *next = segment->next.load(std::memory_order_acquire);
+      delete segment;
+      segment = next;
+    }
+  }
+  GrowableSpscRing(const GrowableSpscRing &) = delete;
+  GrowableSpscRing &operator=(const GrowableSpscRing &) = delete;
+
+  bool push(T value) {
+    Segment *segment = write_;
+    auto head = segment->head.load(std::memory_order_relaxed);
+    if (head == segment->slots.size()) {
+      Segment *next = new Segment(segment->slots.size());
+      write_ = next;
+      segment->next.store(next, std::memory_order_release);
+      segment = next;
+      head = 0;
+    }
+    segment->slots[head] = std::move(value);
+    segment->head.store(head + 1, std::memory_order_release);
+    published_.store(published_.load(std::memory_order_relaxed) + 1,
+                     std::memory_order_release);
+    return true;
+  }
+
+  const T *front() {
+    for (;;) {
+      Segment *segment = read_;
+      const auto tail = segment->tail.load(std::memory_order_relaxed);
+      const auto head = segment->head.load(std::memory_order_acquire);
+      if (tail != head)
+        return &segment->slots[tail];
+      Segment *next = segment->next.load(std::memory_order_acquire);
+      if (!next)
+        return nullptr;
+      read_ = next;
+      delete segment;
+    }
+  }
+
+  bool pop(T &value) {
+    if (!front())
+      return false;
+    Segment *segment = read_;
+    const auto tail = segment->tail.load(std::memory_order_relaxed);
+    value = std::move(segment->slots[tail]);
+    segment->tail.store(tail + 1, std::memory_order_release);
+    consumed_.store(consumed_.load(std::memory_order_relaxed) + 1,
+                    std::memory_order_release);
+    return true;
+  }
+
+  bool empty() const { return size() == 0; }
+  std::size_t size() const {
+    // Read the consumer first so a concurrent producer can only make the
+    // result larger, never underflow the unsigned subtraction.
+    const auto consumed = consumed_.load(std::memory_order_acquire);
+    const auto published = published_.load(std::memory_order_acquire);
+    return static_cast<std::size_t>(published - consumed);
+  }
+
+private:
+  Segment *read_ = nullptr;
+  Segment *write_ = nullptr;
+  std::atomic<std::uint64_t> published_{0};
+  std::atomic<std::uint64_t> consumed_{0};
 };
 
 template <class T> class TaskQueue {
@@ -886,8 +976,9 @@ public:
             ? options.cellQueueCapacity
             : std::max<std::size_t>(2, options.geometryQueueBytes /
                                           sizeof(GeometryInput));
-    inputQueue = std::make_unique<SpscRing<GeometryInput>>(geometryCapacity);
-    resultQueue = std::make_unique<SpscRing<LayerResult>>(
+    inputQueue = std::make_unique<GrowableSpscRing<GeometryInput>>(
+        geometryCapacity);
+    resultQueue = std::make_unique<GrowableSpscRing<LayerResult>>(
         std::max<std::size_t>(2, options.resultQueueBytes /
                                     sizeof(LayerResult)));
     controlQueue = std::make_unique<SpscRing<PendingChunk>>(
@@ -3315,7 +3406,14 @@ private:
       return;
     }
     GeometryInput input{nextRequestGeneration(), update};
-    if (!inputQueue->push(std::move(input))) {
+    try {
+      if (!inputQueue->push(std::move(input))) {
+        ++statsDroppedGeometry;
+        return;
+      }
+    } catch (const std::bad_alloc &) {
+      // Segment growth is unbounded up to available memory. Preserve the old
+      // explicit-drop reporting if a host cannot allocate the next segment.
       ++statsDroppedGeometry;
       return;
     }
@@ -4378,9 +4476,9 @@ private:
   std::unordered_map<std::uint64_t, PendingChunk> pending;
   std::shared_ptr<const LightOpticalTable> opticalTable;
   std::unordered_map<std::uint64_t, GeometryChunk> geometry;
-  std::unique_ptr<SpscRing<GeometryInput>> inputQueue;
+  std::unique_ptr<GrowableSpscRing<GeometryInput>> inputQueue;
   std::unique_ptr<SpscRing<PendingChunk>> controlQueue;
-  std::unique_ptr<SpscRing<LayerResult>> resultQueue;
+  std::unique_ptr<GrowableSpscRing<LayerResult>> resultQueue;
   struct ChunkVersion {
     std::uint64_t epoch = 0;
     std::uint64_t requestRevision = 0;

@@ -390,12 +390,14 @@ struct LightWorkerOptions {
   // Production mixed pages update in place, while section headers and dirty
   // metadata are rebuilt only for real writes; zero takes work immediately.
   int batchWindowMs = 20;
-  // Geometry input uses a 10 MiB SPSC queue by default. Tests may provide a
-  // tiny explicit entry count. A full queue drops the newest record.
+  // Geometry input uses a 10 MiB initial SPSC segment by default. When a
+  // segment fills, the producer appends another segment without moving queued
+  // records. Tests may provide a tiny explicit segment size.
   std::size_t cellQueueCapacity = 0;
   std::size_t geometryQueueBytes = std::size_t{10} << 20;
-  // One worker publishes complete block and sky layer results into this fixed
-  // SPSC result queue. The main thread is the only consumer.
+  // One worker publishes complete block and sky layer results into this SPSC
+  // queue. This value is the initial segment size; the main-thread consumer
+  // keeps receiving if a burst needs additional segments.
   std::size_t resultQueueBytes = std::size_t{4} << 20;
   // Deterministic test seam invoked once per enabled layer, before propagation.
   std::function<void(LightLayer)> beforeLayerForTesting;

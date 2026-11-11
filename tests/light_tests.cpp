@@ -699,7 +699,7 @@ void recoverableChangesAndBoundedPublication() {
 std::shared_ptr<const LightChunkSnapshot>
 settledChunk(LightService &service, int chunkX, int chunkZ);
 
-void ownedCellOverflowAndWakeup() {
+void ownedCellQueueGrowthAndWakeup() {
   LightWorkerOptions small;
   small.batchSize = 16;
   small.maxQueuedCommands = 16;
@@ -712,20 +712,21 @@ void ownedCellOverflowAndWakeup() {
           "small owned-cell ring fixture loads");
   for (int x = 0; x < 6; ++x)
     reportOwnedCell(service, 0, 0, {x, -15, 1}, Blocks::STONE.defaultState());
-  // This newest record targets a cell already in the ring. It must survive the
-  // full-ring fallback and beat the older values when the ring is drained.
+  // This newest record crosses the initial segment boundary and targets a
+  // cell queued in the first segment. It must retain global FIFO ordering.
   reportOwnedCell(service, 0, 0, {0, -15, 1},
                   Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
   require(service.stats().rejected == 0 &&
-              service.stats().droppedGeometryTasks >= 3,
-          "a full geometry SPSC ring drops newest tasks explicitly");
+              service.stats().droppedGeometryTasks == 0,
+          "a full initial geometry segment grows without rejecting work");
   service.resumeForTesting();
   require(service.waitIdleForTesting(), "accepted geometry records drain");
   service.drainPublished();
   auto snapshot = service.latestChunk(0, 0);
-  require(snapshot && snapshot->section(-1)->at(0, 1, 1).emission == 0 &&
-              snapshot->section(-1)->at(5, 1, 1).dampening == 0,
-          "dropped newest tasks cannot replay through an overflow fallback");
+  require(snapshot && snapshot->section(-1)->at(0, 1, 1).emission == 15 &&
+              snapshot->section(-1)->at(5, 1, 1).dampening == 15,
+          "records appended to a new segment replay in order with the newest "
+          "value winning");
 
   LightWorkerOptions wakeOptions;
   wakeOptions.batchWindowMs = 0;
@@ -754,15 +755,15 @@ void ownedCellOverflowAndWakeup() {
   for (int x = 0; x < 3; ++x)
     reportOwnedCell(closing, 3, 0, {x, -15, 1}, Blocks::STONE.defaultState());
   require(closing.stats().rejected == 0 &&
-              closing.stats().droppedGeometryTasks == 1,
-          "accepted close records and dropped newest task are explicit");
+              closing.stats().droppedGeometryTasks == 0,
+          "close drains records appended to additional segments");
   closing.close();
   closing.drainPublished();
   auto closed = closing.latestChunk(3, 0);
   require(closed && closed->section(-1)->at(0, 1, 1).dampening == 15 &&
               closed->section(-1)->at(1, 1, 1).dampening == 15 &&
-              closed->section(-1)->at(2, 1, 1).dampening == 0,
-          "close drains accepted SPSC records without inventing overflow work");
+              closed->section(-1)->at(2, 1, 1).dampening == 15,
+          "close drains every accepted record across SPSC segments");
   require(closing.stats().rejected == 0,
           "draining records accepted before close does not reject them");
   reportOwnedCell(closing, 3, 0, {3, -15, 1}, Blocks::STONE.defaultState());
@@ -771,6 +772,27 @@ void ownedCellOverflowAndWakeup() {
   require(closing.submitChunk(emptyChunkFixture(4, 0, -1, 1)) == 0 &&
               closing.stats().rejected == 2,
           "a chunk submitted after close is rejected explicitly");
+}
+
+void growableResultQueueHandsOffBurst() {
+  LightWorkerOptions options;
+  options.batchWindowMs = 0;
+  options.startPausedForTesting = true;
+  options.hasSkyLight = false;
+  options.resultQueueBytes = 2 * 32;
+  LightService service(-1, 1, options);
+  for (int chunkX = 10; chunkX < 14; ++chunkX)
+    require(service.submitChunk(emptyChunkFixture(chunkX, 0, -1, 1)) != 0,
+            "result-growth chunk load is accepted");
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(),
+          "worker completes while the main result consumer is not draining");
+  service.drainPublished();
+  for (int chunkX = 10; chunkX < 14; ++chunkX)
+    require(service.latestChunk(chunkX, 0) != nullptr,
+            "each result appended beyond the first segment is delivered");
+  require(service.stats().pendingPublications == 0,
+          "the grown result ring is fully drained");
 }
 
 void rawSubmissionAndGeometryMirror() {
@@ -2475,8 +2497,9 @@ int main(int argc, char **argv) {
     coalescedProtocolDeltaIsCumulative();
     workerQueueAndClose();
     recoverableChangesAndBoundedPublication();
-    ownedCellOverflowAndWakeup();
+    ownedCellQueueGrowthAndWakeup();
     ownedCellLifecycleRejectsReloadStaleWork();
+    growableResultQueueHandsOffBurst();
     rawSubmissionAndGeometryMirror();
     authoritativeRefreshOutranksQueuedCells();
     wideWorldInputsRemainOwned();
