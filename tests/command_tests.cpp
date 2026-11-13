@@ -3,6 +3,7 @@
 // ServerTickRateManager behaviour this simulator mirrors.
 #include "redstone/command.hpp"
 #include "redstone/net/wire.hpp"
+#include "redstone/storage.hpp"
 #include <cassert>
 #include <algorithm>
 #include <cmath>
@@ -256,6 +257,278 @@ void suggestions() {
           "an unknown subcommand stops the walk");
 }
 
+struct TimeFixture {
+  Dispatcher dispatcher;
+  World world;
+  WorldClocks clocks;
+  Context context;
+  std::vector<BuiltinWorldClock> changed;
+  TimeFixture() {
+    registerTimeCommand(dispatcher);
+    world.setGameTime(1234);
+    context.world = &world;
+    context.worldClocks = &clocks;
+    context.worldClockChanged = [this](BuiltinWorldClock clock) {
+      changed.push_back(clock);
+    };
+  }
+  int run(Source &source, const std::string &line) {
+    source.messages.clear();
+    changed.clear();
+    return dispatcher.run(line, source, context);
+  }
+};
+
+void timeCommands() {
+  TimeFixture fixture;
+  Source player;
+  player.permissionLevel = 1;
+  require(fixture.run(player, "time query gametime") == -1,
+          "/time requires gamemaster permission");
+  require(fixture.changed.empty(), "denied command changes no clock");
+
+  Source source = admin();
+  require(fixture.run(source, "time query gametime") == 1234,
+          "timestamp return is gameTime modulo int max");
+  require(find(source, "commands.time.query.gametime").args ==
+              std::vector<std::string>{"1234"},
+          "gameTime uses its own query message");
+  require(fixture.changed.empty(), "query does not broadcast a clock update");
+
+  WorldClockState overworld;
+  overworld.totalTicks = 100;
+  overworld.partialTick = 0.75f;
+  overworld.rate = 2.0f;
+  fixture.clocks.setClock(BuiltinWorldClock::Overworld, overworld);
+  require(fixture.run(source, "time query time") >= 0,
+          "default time query succeeds");
+  require(find(source, "commands.time.query.absolute").args ==
+              std::vector<std::string>{"minecraft:overworld", "100"},
+          "default query resolves the overworld clock");
+  require(fixture.changed.empty(), "clock query has no side effect");
+
+  require(fixture.run(source, "time set 0.5t") == 1,
+          "0.5t uses Java Math.round rounding");
+  require(fixture.clocks.state(BuiltinWorldClock::Overworld).totalTicks == 1 &&
+              fixture.clocks.state(BuiltinWorldClock::Overworld).partialTick ==
+                  0.0f,
+          "set replaces total and clears partial");
+  require(fixture.changed ==
+              std::vector<BuiltinWorldClock>{BuiltinWorldClock::Overworld},
+          "set broadcasts exactly the changed clock");
+  require(find(source, "commands.time.set.absolute").args ==
+              std::vector<std::string>{"minecraft:overworld", "1"},
+          "set reports the new total");
+
+  overworld = fixture.clocks.state(BuiltinWorldClock::Overworld);
+  overworld.partialTick = 0.25f;
+  fixture.clocks.setClock(BuiltinWorldClock::Overworld, overworld);
+  require(fixture.run(source, "time add -0.5t") >= 0,
+          "negative half tick rounds to zero");
+  require(fixture.clocks.state(BuiltinWorldClock::Overworld).totalTicks == 1 &&
+              fixture.clocks.state(BuiltinWorldClock::Overworld).partialTick ==
+                  0.25f,
+          "add preserves partial and applies Java negative-half rounding");
+  require(fixture.run(source, "time add -100000t") >= 0,
+          "large negative add is accepted by the parser");
+  require(fixture.clocks.state(BuiltinWorldClock::Overworld).totalTicks == 0 &&
+              fixture.clocks.state(BuiltinWorldClock::Overworld).partialTick ==
+                  0.25f,
+          "add clamps total to zero and keeps partial");
+
+  require(fixture.run(source, "time rate 0.00001") == 1,
+          "minimum rate is accepted");
+  require(find(source, "commands.time.rate").args[1] == "1.0E-5",
+          "rate message uses Java float text");
+  require(fixture.clocks.state(BuiltinWorldClock::Overworld).rate == 0.00001f,
+          "minimum rate is stored as f32");
+  require(fixture.run(source, "time rate 0.000009") == -1,
+          "rate below the minimum is rejected");
+  require(fixture.run(source, "time rate 1000") == 1,
+          "maximum rate is accepted");
+  require(find(source, "commands.time.rate").args[1] == "1000.0",
+          "integral rate retains Java .0 suffix");
+  require(fixture.run(source, "time rate 1000.1") == -1,
+          "rate above the maximum is rejected");
+  require(fixture.run(source, "time pause") == 1 &&
+              fixture.clocks.state(BuiltinWorldClock::Overworld).paused,
+          "pause affects the default clock");
+  require(fixture.run(source, "time resume") == 1 &&
+              !fixture.clocks.state(BuiltinWorldClock::Overworld).paused,
+          "resume clears pause");
+
+  require(fixture.run(source, "time of minecraft:the_end set 2d") == 48000,
+          "namespace-qualified explicit clock set");
+  require(fixture.run(source, "time of the_end add -1s") >= 0,
+          "resource shorthand resolves the_end");
+  require(fixture.clocks.state(BuiltinWorldClock::TheEnd).totalTicks == 47980,
+          "explicit add updates only the_end");
+  require(fixture.run(source, "time of minecraft:the_end query time") >= 0 &&
+              find(source, "commands.time.query.absolute").args ==
+                  std::vector<std::string>{"minecraft:the_end", "47980"},
+          "explicit clock query reports the_end");
+  require(fixture.run(source, "time of minecraft:overworld query time") >= 0 &&
+              find(source, "commands.time.query.absolute").args ==
+                  std::vector<std::string>{"minecraft:overworld", "0"},
+          "explicit overworld query remains separate");
+
+  require(fixture.run(source, "time set -1") == 0 &&
+              has(source, "commands.time.no_time_marker_found"),
+          "a negative duration can only fall through to the marker identifier");
+  require(fixture.run(source, "time add 1m") == -1,
+          "unknown duration unit is rejected");
+  require(fixture.run(source, "time of minecraft:bad set 1") == -1,
+          "unknown world clock is rejected");
+}
+
+void timeMarkersAndTimelines() {
+  TimeFixture fixture;
+  Source source = admin();
+  WorldClockState overworld;
+  overworld.totalTicks = 12000;
+  overworld.partialTick = 0.75f;
+  overworld.rate = 1.0f;
+  fixture.clocks.setClock(BuiltinWorldClock::Overworld, overworld);
+
+  require(fixture.dispatcher.suggestions("time set ", source).texts ==
+              (std::vector<std::string>{
+                  "0d", "0s", "0t", "0", "minecraft:day", "minecraft:noon",
+                  "minecraft:night", "minecraft:midnight"}),
+          "marker suggestions expose only the four visible built-ins");
+  const auto endSuggestions = fixture.dispatcher.suggestions(
+      "time of minecraft:the_end set ", source).texts;
+  require(std::find(endSuggestions.begin(), endSuggestions.end(),
+                    "minecraft:noon") == endSuggestions.end(),
+          "the End exposes no Overworld marker suggestions");
+
+  require(fixture.run(source, "time query minecraft:day") == 12000,
+          "timeline query returns current ticks");
+  require(find(source, "commands.time.query.timeline").args ==
+              std::vector<std::string>{"minecraft:day", "12000"},
+          "timeline query message args");
+  require(fixture.run(source, "time query day repetition") == 0,
+          "day timeline repetition count");
+  require(find(source, "commands.time.query.timeline.repetitions").args ==
+              std::vector<std::string>{"minecraft:day", "0"},
+          "timeline repetition message args");
+
+  require(fixture.run(source, "time set noon") == 30000,
+          "visible marker moves to its next occurrence");
+  require(fixture.clocks.state(BuiltinWorldClock::Overworld).partialTick == 0.0f,
+          "marker move clears partial");
+  require(fixture.run(source, "time set noon") == 54000,
+          "same marker at its position advances one full period");
+  require(fixture.run(source, "time set wake_up_from_sleep") == 72000,
+          "hidden marker remains directly usable");
+  require(fixture.run(source, "time set roll_village_siege") == 90000,
+          "hidden village marker remains directly usable");
+  require(fixture.run(source, "time set nope") == 0 &&
+              has(source, "commands.time.no_time_marker_found"),
+          "unknown marker returns the official no-marker failure");
+
+  overworld = fixture.clocks.state(BuiltinWorldClock::Overworld);
+  overworld.totalTicks = 192001;
+  overworld.partialTick = 0.5f;
+  fixture.clocks.setClock(BuiltinWorldClock::Overworld, overworld);
+  require(fixture.run(source, "time query moon") == 1,
+          "moon timeline current ticks use its 192000 period");
+  require(fixture.run(source, "time query moon repetition") == 1,
+          "moon timeline repetition count");
+  require(fixture.run(source, "time query early_game") == 192001,
+          "periodless timeline reports total ticks");
+  require(fixture.run(source, "time query early_game repetition") == 0,
+          "periodless timeline has zero repetitions");
+  require(fixture.run(source, "time of minecraft:overworld query moon") == 1,
+          "explicit overworld can query matching timeline");
+  require(fixture.run(source, "time query day repetition") == 8,
+          "day timeline counts completed periods");
+
+  require(fixture.run(source, "time of minecraft:the_end query day") == 0 &&
+              has(source, "commands.time.wrong_timeline_for_clock"),
+          "End rejects an Overworld timeline");
+  require(find(source, "commands.time.wrong_timeline_for_clock").args ==
+              std::vector<std::string>{"minecraft:day", "minecraft:the_end"},
+          "wrong timeline error names both values");
+  require(fixture.run(source, "time of minecraft:the_end set noon") == 0 &&
+              has(source, "commands.time.no_time_marker_found"),
+          "End has no Overworld time markers");
+  require(find(source, "commands.time.no_time_marker_found").args ==
+              (std::vector<std::string>{
+                  "ResourceKey[minecraft:clock_time_marker / minecraft:noon]",
+                  "minecraft:the_end"}),
+          "no-marker error preserves the vanilla ResourceKey text");
+
+  const auto defaultTimelines =
+      fixture.dispatcher.suggestions("time query ", source).texts;
+  for (const char *timeline :
+       {"minecraft:day", "minecraft:early_game", "minecraft:moon",
+        "minecraft:villager_schedule"})
+    require(std::find(defaultTimelines.begin(), defaultTimelines.end(),
+                      timeline) != defaultTimelines.end(),
+            "default Overworld timeline suggestions");
+  const auto endTimelines =
+      fixture.dispatcher.suggestions("time of minecraft:the_end query ", source)
+          .texts;
+  require(std::find(endTimelines.begin(), endTimelines.end(), "minecraft:day") ==
+              endTimelines.end(),
+          "End exposes no Overworld timeline suggestions");
+
+  overworld = fixture.clocks.state(BuiltinWorldClock::Overworld);
+  overworld.totalTicks = std::numeric_limits<std::int64_t>::max();
+  overworld.partialTick = 0.5f;
+  fixture.clocks.setClock(BuiltinWorldClock::Overworld, overworld);
+  require(fixture.run(source, "time set noon") == -2147461457,
+          "marker jump follows Java long wrap at INT64_MAX");
+  require(fixture.clocks.state(BuiltinWorldClock::Overworld).totalTicks ==
+              -9223372036854753616LL,
+          "wrapped marker target matches Java long bits");
+  require(fixture.clocks.state(BuiltinWorldClock::Overworld).partialTick ==
+              0.0f,
+          "wrapped marker jump still clears partial");
+
+  overworld = fixture.clocks.state(BuiltinWorldClock::Overworld);
+  overworld.totalTicks = 24000LL * 2147483648LL;
+  fixture.clocks.setClock(BuiltinWorldClock::Overworld, overworld);
+  require(fixture.run(source, "time query day repetition") == -1,
+          "timeline repetition follows Java long-to-int narrowing");
+  require(find(source, "commands.time.query.timeline.repetitions").args[1] ==
+              "-2147483648",
+          "narrowed repetition keeps the signed int value");
+}
+
+void numericGrammar() {
+  TimeFixture time;
+  Source adminSource = admin();
+  require(time.run(adminSource, "time rate 1e0") == -1,
+          "scientific notation is not Brigadier readFloat grammar");
+  require(time.run(adminSource, "time rate 0x1p0") == -1,
+          "hexadecimal float is not Brigadier readFloat grammar");
+  require(time.run(adminSource, "time rate +1") == -1,
+          "plus sign is not Brigadier readFloat grammar");
+  require(time.run(adminSource, "time rate 1") >= 0,
+          "plain decimal is accepted");
+  require(time.run(adminSource, "time set .5s") >= 0,
+          "leading decimal point is accepted");
+  require(time.run(adminSource, "time set 1.d") >= 0,
+          "trailing decimal point is accepted");
+
+  Fixture fixture;
+  require(time.run(adminSource, "time add 1e2t") == -1,
+          "time argument rejects exponent notation");
+  require(time.run(adminSource, "time add 0x1p2t") == -1,
+          "time argument rejects hexadecimal floats");
+  require(time.run(adminSource, "time add +1t") == -1,
+          "time argument rejects plus signs");
+  require(time.run(adminSource, "time add 1-2t") == -1,
+          "time argument rejects embedded signs");
+  require(time.run(adminSource, "time add .5t") >= 0,
+          "time argument accepts leading decimal point");
+  require(time.run(adminSource, "time add 1.t") >= 0,
+          "time argument accepts trailing decimal point");
+  require(fixture.run(adminSource, "tick step 1e2t") == -1,
+          "/tick step shares the tightened numeric grammar");
+}
+
 void permissionAndSyntax() {
   Fixture fixture;
   Source player;
@@ -343,6 +616,80 @@ void commandTreeEncoding() {
 }
 #endif
 
+#if REDSTONE_HAVE_PROTOCOL
+void timeCommandTreeEncoding() {
+  Dispatcher dispatcher;
+  registerTickCommand(dispatcher);
+  registerTimeCommand(dispatcher);
+  const auto body = net::encodeCommandTree(dispatcher.root());
+  net::Reader reader(body);
+  const int count = reader.varInt();
+  struct Entry {
+    std::uint8_t flags = 0;
+    std::vector<int> children;
+    std::string name;
+    int parser = -1;
+    std::string registry;
+  };
+  std::vector<Entry> entries;
+  for (int i = 0; i < count; ++i) {
+    Entry entry;
+    entry.flags = reader.u8();
+    const int childCount = reader.varInt();
+    for (int c = 0; c < childCount; ++c)
+      entry.children.push_back(reader.varInt());
+    if ((entry.flags & 3) == 1) {
+      entry.name = reader.string();
+    } else if ((entry.flags & 3) == 2) {
+      entry.name = reader.string();
+      entry.parser = reader.varInt();
+      if (entry.parser == 1) {
+        (void)reader.u8();
+        (void)reader.f32();
+        (void)reader.f32();
+      } else if (entry.parser == 43) {
+        (void)reader.i32();
+      } else if (entry.parser == 46) {
+        entry.registry = reader.string();
+      } else if (entry.parser == 36) {
+        // IdentifierArgument's singleton serializer has no payload.
+      } else {
+        throw std::runtime_error("unexpected command parser id");
+      }
+    }
+    entries.push_back(std::move(entry));
+  }
+  require(reader.varInt() == 0 && reader.empty(),
+          "time command tree is fully encoded");
+  require(entries[0].children.size() == 2,
+          "root exposes tick and time");
+  int timeIndex = -1;
+  for (int child : entries[0].children)
+    if (entries[child].name == "time")
+      timeIndex = child;
+  require(timeIndex >= 0, "time command node exists");
+  require((entries[timeIndex].flags & 0x20) != 0,
+          "time is restricted to gamemasters");
+  bool clockResource = false, timelineResource = false, markerIdentifier = false;
+  for (const auto &entry : entries) {
+    if (entry.parser == 46 && entry.name == "clock") {
+      require(entry.registry == "minecraft:world_clock",
+              "clock resource names the world_clock registry");
+      clockResource = true;
+    } else if (entry.parser == 46 && entry.name == "timeline") {
+      require(entry.registry == "minecraft:timeline",
+              "timeline resource names the timeline registry");
+      timelineResource = true;
+    } else if (entry.parser == 36 && entry.name == "timemarker") {
+      markerIdentifier = true;
+    }
+  }
+  require(clockResource, "minecraft:resource=46 is exported for clocks");
+  require(timelineResource, "minecraft:resource=46 is exported for timelines");
+  require(markerIdentifier, "minecraft:resource_location=36 is used for markers");
+}
+#endif
+
 void messagesCarryTranslateKeys() {
   Fixture fixture;
   Source source = admin();
@@ -360,9 +707,13 @@ int main() {
     tickRateManager();
     tickRateCommands();
     suggestions();
+    timeCommands();
+    timeMarkersAndTimelines();
+    numericGrammar();
     permissionAndSyntax();
 #if REDSTONE_HAVE_PROTOCOL
     commandTreeEncoding();
+    timeCommandTreeEncoding();
 #endif
     messagesCarryTranslateKeys();
     std::cout << "command tests passed\n";

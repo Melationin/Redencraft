@@ -88,11 +88,15 @@ python validation/light_metadata/generate_light_occlusion.py `
 
 当前没有注册 `LeavesBlock`，因此 no-leaves 类型对已注册状态使用同一 motion-blocking 谓词；未知导入方块不伪造 leaves 身份。协议仍沿用既有区块编码高度图，尚未切换到这份 live map。
 
-## 未实现与后续
+## Anvil 光照持久化与当前边界
 
-// TODO(W-2/W-3): read and write Anvil `SkyLight`, `BlockLight` and `isLightOn`.
+L-4c 对照 26.1 `SerializableChunkData` 接入了 Anvil `BlockLight`、`SkyLight` 与 `isLightOn` 的读写与生命周期管理：
 
-方块光 benchmark 只观察正常 worker 工作量。启用天空光、方块光和发布后的 L-4 仍须做至少五组交错 A/B，并把主线程固定在同一性能核、worker 固定在另一物理核，判断主线程额外 CPU/平均刻墙钟 <10%。
+- 解码阶段读取 chunk 根节点的 `isLightOn` 与各 section 的 `BlockLight` / `SkyLight`（含上下边界纯光照段 `minBlockSectionY - 1` 与 `maxBlockSectionY + 1`，按 2048 bytes 校验）。`isLightOn=1` 的已照明区块在 `World` / `WorldChunkManager` 载入后复用持久化光层、补建 `skyColumnSources` 并仅沿与已加载邻区共享的边界 `seedOutgoing` 补光；未载入邻区计入 `LightService::Stats::unloadedNeighborSkips` 并在 `LightService::chunkStatus(cx, cz)` 的 `unloadedNeighborMask` 暴露，不阻塞主线程等待磁盘或同步补算。
+- 写回阶段依据 `WorldChunkManager` 对齐最新同代已发布方块/天空光快照，按原版规则只写非全零的 2048-byte `BlockLight` / `SkyLight` 与 `isLightOn=true`；后台保存积压或不完整光照不阻塞在线 `scheduleSave` / 自动保存，`WorldChunkManager::close()` 显式等待光照队列收敛后再落盘。`isLightOn=false`（或旧代失效回写）会清除过时 `BlockLight` / `SkyLight` 标签。
+- 已覆盖：C++ 单元测试与真实 26.1 `TerrainWorldCycleFixtureProbe` 区域夹具读写循环，并用官方 `server-26.1.jar` (`RegionFile` + `NbtIo` + `DataLayer`) 回读验证 C++ 写出的 `isLightOn=true`、`BlockLight` 与 `SkyLight`。官方整图 `interop-world`（超平坦）因包含未支持方块（`minecraft:dirt`），`terrain_codec` 当前仍按 `DecodeStatus::Unsupported` 拒绝。
+
+当前 L-4c 复核（Release + `jemalloc`，五组 × 1000 tick 交错对照）下，`redstone_tick_benchmark` 主线程 `loop_thread_ms` 中位增幅为 **+8.36%**（`<10%`），平均刻墙钟 `mean_ms` 中位增幅为 **+15.09%**（关光 `2.889 ms` vs 开光 `3.325 ms`，`over50=0`）。未在真实 Minecraft 客户端运行完整端到端游戏，也未在逐 tick 维度运行原版 26.1 全服性能差分，因此不声称原版等价。
 
 ## 聚焦验证
 

@@ -5,12 +5,33 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <utility>
 
 namespace redstone {
 namespace {
+std::array<std::int32_t, 4> generateEntityUuid() {
+  static thread_local std::mt19937_64 generator([] {
+    std::random_device device;
+    std::seed_seq seed{device(), device(), device(), device()};
+    return std::mt19937_64(seed);
+  }());
+  std::uint64_t high = 0;
+  std::uint64_t low = 0;
+  do {
+    high = generator();
+    low = generator();
+    high = (high & 0xFFFFFFFFFFFF0FFFull) | 0x0000000000004000ull;
+    low = (low & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull;
+  } while (high == 0 && low == 0);
+  return {static_cast<std::int32_t>(high >> 32),
+          static_cast<std::int32_t>(high),
+          static_cast<std::int32_t>(low >> 32),
+          static_cast<std::int32_t>(low)};
+}
+
 constexpr double EPS = 1.0e-7;
 const std::array<Vec3, 1352> &explosionSteps() {
   static const auto steps = [] {
@@ -363,7 +384,7 @@ void Entity::baseTick(World &world) {
     }
   }
   if (isInLava(world))
-    fallDistance *= 0.5f;
+    fallDistance *= 0.5;
   checkBelowWorld(world);
 }
 Vec3 Entity::limitPistonMovement(World &world, Vec3 movement) {
@@ -751,6 +772,12 @@ PrimedTnt::PrimedTnt(World &world, Vec3 pos) : Entity("minecraft:tnt") {
                    -std::cos(rotation) * 0.02);
   oldPosition = position;
 }
+PrimedTnt::PrimedTnt(World &, Vec3 pos, Vec3 motion)
+    : Entity("minecraft:tnt") {
+  setPos(pos);
+  setDeltaMovement(motion);
+  oldPosition = position;
+}
 void PrimedTnt::tick(World &world) {
   deltaMovement.y -= 0.04;
   move(world, deltaMovement);
@@ -758,6 +785,9 @@ void PrimedTnt::tick(World &world) {
   deltaMovement = deltaMovement * 0.98;
   if (onGround)
     deltaMovement = deltaMovement.multiply(0.7, -0.5, 0.7);
+  // World::tickEntities owns both the normal moved notification and the
+  // removal notification after tick(), including a same-tick cross-chunk
+  // disappearance. Notifying here would update the ledger twice.
   --fuse;
   if (fuse <= 0) {
     discard();
@@ -933,7 +963,7 @@ void Minecart::tick(World &world) {
   if (isInLava(world)) {
     igniteForSeconds(15.0f);
     lavaHurt(world);
-    fallDistance *= 0.5f;
+    fallDistance *= 0.5;
   }
   firstTick = false;
 }
@@ -1170,11 +1200,28 @@ void Minecart::pushAndPickupEntities(World &world) {
   }
 }
 
+int World::allocateEntityId() { return nextEntityId++; }
+bool World::hasEntityUuid(
+    const std::array<std::int32_t, 4> &uuid) const {
+  return entityUuids_.contains(uuid);
+}
 std::shared_ptr<Entity> World::addEntity(std::shared_ptr<Entity> entity) {
-  entity->id = nextEntityId++;
+  entity->id = allocateEntityId();
+  if (entity->uuid == std::array<std::int32_t, 4>{}) {
+    do {
+      entity->uuid = generateEntityUuid();
+    } while (hasEntityUuid(entity->uuid));
+  } else if (hasEntityUuid(entity->uuid)) {
+    throw std::logic_error("duplicate entity UUID");
+  }
+  if (!entityUuids_.insert(entity->uuid).second)
+    throw std::logic_error("generated duplicate entity UUID");
   entity->removalObserved_ = false;
   entities.push_back(entity);
   entitySectionAdd(*entity);
+  if (managedEntityMutationObserver)
+    managedEntityMutationObserver(entity->position, entity->position,
+                                  entity->uuid, false);
   if (entityAddedObserver)
     entityAddedObserver(*entity);
   return entity;
@@ -1197,6 +1244,9 @@ void World::broadcastEntityRemovals() {
 void World::entitySectionAdd(Entity &entity) {
   entity.entitySection = entitySectionKey(entity.position);
   entitySections_[entity.entitySection].push_back(&entity);
+  const auto key = chunkKey(sectionKeyX(entity.entitySection),
+                            sectionKeyZ(entity.entitySection));
+  ++entityCountsByChunk_[key];
 }
 void World::entitySectionRemove(Entity &entity) {
   auto it = entitySections_.find(entity.entitySection);
@@ -1206,6 +1256,11 @@ void World::entitySectionRemove(Entity &entity) {
   list.erase(std::remove(list.begin(), list.end(), &entity), list.end());
   if (list.empty())
     entitySections_.erase(it);
+  const auto chunk = chunkKey(sectionKeyX(entity.entitySection),
+                              sectionKeyZ(entity.entitySection));
+  auto count = entityCountsByChunk_.find(chunk);
+  if (count != entityCountsByChunk_.end() && --count->second == 0)
+    entityCountsByChunk_.erase(count);
 }
 void World::entitySectionUpdate(Entity &entity) {
   const auto key = entitySectionKey(entity.position);
@@ -1254,6 +1309,153 @@ std::vector<Entity *> World::entitiesInSectionRange(int minX, int maxX, int minZ
   return result;
 }
 
+void World::synchronizeEntityAfterMove(Entity &entity, Vec3 previousPosition) {
+  entitySectionUpdate(entity);
+  if (managedEntityMutationObserver)
+    managedEntityMutationObserver(previousPosition, entity.position, entity.uuid,
+                                  entity.isRemoved());
+}
+
+void World::moveEntityForManagedTest(const Entity &entity, Vec3 to) {
+  const Vec3 from = entity.position;
+  auto mutableEntity = std::find_if(
+      entities.begin(), entities.end(),
+      [&](const std::shared_ptr<Entity> &candidate) {
+        return candidate.get() == &entity;
+      });
+  if (mutableEntity == entities.end())
+    throw std::logic_error("fixture entity is not registered in World");
+  (*mutableEntity)->setPos(to);
+  entitySectionUpdate(**mutableEntity);
+  if (managedEntityMutationObserver)
+    managedEntityMutationObserver(from, (*mutableEntity)->position,
+                                  (*mutableEntity)->uuid, false);
+}
+
+std::vector<std::array<std::int32_t, 4>>
+World::chunkEntityOrderForTest(int chunkX, int chunkZ) const {
+  const auto snapshot = snapshotChunkItemEntities(chunkX, chunkZ);
+  std::vector<std::array<std::int32_t, 4>> result;
+  result.reserve(snapshot.records.size());
+  for (const auto &record : snapshot.records)
+    result.push_back(entity_codec::recordUuid(record));
+  return result;
+}
+
+World::ItemEntitySnapshotResult
+World::snapshotChunkItemEntities(int chunkX, int chunkZ) const {
+  ItemEntitySnapshotResult result;
+  const auto entities =
+      entitiesInSectionRange(chunkX, chunkX, chunkZ, chunkZ);
+  for (const Entity *entity : entities) {
+    if (const auto *tnt = dynamic_cast<const PrimedTnt *>(entity)) {
+      if (tnt->uuid == entity_codec::EntityUuid{} || tnt->usedPortal ||
+          tnt->blockState.id() != defaultState("tnt").id() ||
+          !std::isfinite(tnt->explosionPower) || tnt->explosionPower < 0.0f ||
+          tnt->explosionPower > 128.0f) {
+        result.hasUnsupported = true;
+        result.detail = "primed tnt has unsupported persisted state";
+        return result;
+      }
+      entity_codec::TntEntityData record;
+      record.uuid = tnt->uuid;
+      record.pos = {tnt->position.x, tnt->position.y, tnt->position.z};
+      record.motion = {tnt->deltaMovement.x, tnt->deltaMovement.y,
+                       tnt->deltaMovement.z};
+      record.rotation = {tnt->yaw, tnt->pitch};
+      record.onGround = tnt->onGround;
+      record.fireTicks = tnt->remainingFireTicks;
+      record.fallDistance = tnt->fallDistance;
+      record.fuse = tnt->fuse;
+      record.explosionPower = tnt->explosionPower;
+      result.records.emplace_back(std::move(record));
+      continue;
+    }
+    if (const auto *minecart = dynamic_cast<const Minecart *>(entity)) {
+      if (minecart->uuid == entity_codec::EntityUuid{}) {
+        result.hasUnsupported = true;
+        result.detail = "minecart has no persistable UUID";
+        return result;
+      }
+      entity_codec::MinecartEntityData record;
+      record.uuid = minecart->uuid;
+      record.pos = {minecart->position.x, minecart->position.y,
+                    minecart->position.z};
+      record.motion = {minecart->deltaMovement.x, minecart->deltaMovement.y,
+                       minecart->deltaMovement.z};
+      record.rotation = {minecart->yaw, minecart->pitch};
+      record.onGround = minecart->onGround;
+      record.fireTicks = minecart->remainingFireTicks;
+      record.fallDistance = minecart->fallDistance;
+      record.flipped = minecart->flipped;
+      record.firstTick = minecart->firstTick;
+      result.records.emplace_back(std::move(record));
+      continue;
+    }
+    if (const auto *falling =
+            dynamic_cast<const FallingBlockEntity *>(entity)) {
+      if (falling->uuid == entity_codec::EntityUuid{} ||
+          falling->blockState != defaultState("sand") ||
+          falling->time < 0 ||
+          falling->time >= std::numeric_limits<int>::max() ||
+          falling->hurtEntities || falling->fallDamagePerDistance != 0.0f ||
+          falling->fallDamageMax != 40) {
+        result.hasUnsupported = true;
+        result.detail =
+            "falling block has unsupported persisted state";
+        return result;
+      }
+      entity_codec::FallingBlockEntityData record;
+      record.uuid = falling->uuid;
+      record.pos = {falling->position.x, falling->position.y,
+                    falling->position.z};
+      record.motion = {falling->deltaMovement.x, falling->deltaMovement.y,
+                       falling->deltaMovement.z};
+      record.rotation = {falling->yaw, falling->pitch};
+      record.onGround = falling->onGround;
+      record.fireTicks = falling->remainingFireTicks;
+      record.fallDistance = falling->fallDistance;
+      record.blockId = falling->blockState.name();
+      record.time = falling->time;
+      record.dropItem = falling->dropItem;
+      record.cancelDrop = falling->cancelDrop;
+      record.hurtEntities = falling->hurtEntities;
+      record.fallDamagePerDistance = falling->fallDamagePerDistance;
+      record.fallDamageMax = falling->fallDamageMax;
+      result.records.emplace_back(std::move(record));
+      continue;
+    }
+    const auto *item = dynamic_cast<const ItemEntity *>(entity);
+    if (!item) {
+      result.hasUnsupported = true;
+      result.detail = "chunk contains an entity type outside persistence";
+      return result;
+    }
+    if (item->item.empty() || item->item.count <= 0 ||
+        item->uuid == entity_codec::EntityUuid{}) {
+      result.hasUnsupported = true;
+      result.detail = "item entity has no persistable item/UUID";
+      return result;
+    }
+    entity_codec::ItemEntityData record;
+    record.uuid = item->uuid;
+    record.pos = {item->position.x, item->position.y, item->position.z};
+    record.motion = {item->deltaMovement.x, item->deltaMovement.y,
+                     item->deltaMovement.z};
+    record.rotation = {item->yaw, item->pitch};
+    record.onGround = item->onGround;
+    record.fireTicks = item->remainingFireTicks;
+    record.fallDistance = item->fallDistance;
+    record.age = item->age;
+    record.pickupDelay = item->pickupDelay;
+    record.health = item->health;
+    record.itemId = item->item.id;
+    record.itemCount = item->item.count;
+    result.records.emplace_back(std::move(record));
+  }
+  return result;
+}
+
 // TODO: entity-to-entity collisions and the vehicle/passenger tick recursion
 // (ServerLevel.tickPassenger). Simple entities have no passengers yet.
 void World::tickEntities() {
@@ -1264,22 +1466,40 @@ void World::tickEntities() {
     // Entity-ticking visibility belongs to the X/Z chunk, including sections
     // above/below build height. isLoaded(BlockPos) also bounds Y and would
     // freeze falling entities before they can reach Entity.onBelowWorld.
-    if (!isChunkLoaded(static_cast<int>(std::floor(entity->position.x / 16)),
-                        static_cast<int>(std::floor(entity->position.z / 16))))
+    const int chunkX =
+        static_cast<int>(std::floor(entity->position.x / 16));
+    const int chunkZ =
+        static_cast<int>(std::floor(entity->position.z / 16));
+    if (!isChunkLoaded(chunkX, chunkZ))
       continue;
+    if (entityTickPositionReady &&
+        !entityTickPositionReady(
+            {static_cast<int>(std::floor(entity->position.x)),
+             static_cast<int>(std::floor(entity->position.y)),
+             static_cast<int>(std::floor(entity->position.z))}))
+      continue;
+    const Vec3 previousPosition = entity->position;
     entity->setOldPosAndRot();
     ++entity->tickCount;
     entity->tick(*this);
     // TransientEntitySectionManager: moved entities change their bucket.
-    if (!entity->isRemoved())
+    if (!entity->isRemoved()) {
       entitySectionUpdate(*entity);
+      if (managedEntityMutationObserver)
+        managedEntityMutationObserver(previousPosition, entity->position,
+                                      entity->uuid, false);
+    }
   }
   const auto newEnd = std::remove_if(
       entities.begin(), entities.end(), [this](const auto &entity) {
         if (entity && !entity->isRemoved())
           return false;
         if (entity) {
+          if (managedEntityMutationObserver)
+            managedEntityMutationObserver(entity->position, entity->position,
+                                          entity->uuid, true);
           notifyEntityRemoved(*entity);
+          entityUuids_.erase(entity->uuid);
           entitySectionRemove(*entity);
         }
         return true;

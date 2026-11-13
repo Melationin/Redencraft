@@ -9,6 +9,11 @@
 #include <string_view>
 #include <vector>
 
+namespace redstone {
+class World;
+class WorldClocks;
+enum class BuiltinWorldClock : std::uint8_t;
+}
 namespace redstone::command {
 // One chat line a command produced. Vanilla sends a translatable component and
 // lets the client resolve the key, so only the key and its arguments travel.
@@ -20,9 +25,13 @@ struct Message {
   // player that may see the command, false only to the caller.
   bool broadcast = false;
 };
-// Server state /tick query needs. The caller refreshes it every tick.
+// Server state for /tick and /time. The caller refreshes timing data every tick.
 struct Context {
   TickRateManager *ticks = nullptr;
+  World *world = nullptr;
+  WorldClocks *worldClocks = nullptr;
+  // ServerClockManager.modifyClock broadcasts only the changed clock.
+  std::function<void(BuiltinWorldClock)> worldClockChanged;
   std::int64_t averageTickTimeNanos = 0;
   // MinecraftServer.tickTimesNanos: 100-entry ring, zero-filled at startup.
   std::array<std::int64_t, 100> tickTimes{};
@@ -45,9 +54,9 @@ struct Completion {
 };
 struct Node {
   enum class Kind { Root, Literal, Argument };
-  // Argument types /tick uses. The wire export maps these onto the vanilla
-  // parser ids (brigadier:float, minecraft:time).
-  enum class ArgumentKind { Float, Time };
+  // Argument types /tick and /time use. The wire export maps these onto the
+  // official parser ids (float=1, time=43, resource=46).
+  enum class ArgumentKind { Float, Time, Resource, Identifier };
 
   Kind kind = Kind::Root;
   std::string name;
@@ -55,15 +64,33 @@ struct Node {
   std::function<bool(const Source &)> requirement;
   ArgumentKind argumentKind = ArgumentKind::Float;
   double minimum = 0, maximum = 0;
+  // ResourceArgument.Info payload and the only registry values this command
+  // tree can currently resolve.
+  std::string resourceRegistry;
+  std::map<std::string, int> resourceValues;
   // ArgumentCommandNode.getCustomSuggestions: the fixed examples vanilla offers
   // for an argument (/tick rate -> "20", step/sprint time -> "1t", "1s", ...).
   std::vector<std::string> suggestions;
+  // Resource/command-specific completions that depend on arguments already
+  // parsed (for example timelines compatible with the selected clock).
+  std::function<std::vector<std::string>(
+      const std::map<std::string, double> &)>
+      dynamicSuggestions;
   std::function<int(const Context &, Source &,
                     const std::map<std::string, double> &)>
       executes;
+  // IdentifierArgument retains its textual, normalized value for commands such
+  // as /time set <timemarker>.
+  std::function<int(const Context &, Source &,
+                    const std::map<std::string, double> &,
+                    const std::map<std::string, std::string> &)>
+      executesWithStrings;
   std::vector<std::unique_ptr<Node>> children;
 
-  bool executable() const { return static_cast<bool>(executes); }
+  bool executable() const {
+    return static_cast<bool>(executes) ||
+           static_cast<bool>(executesWithStrings);
+  }
   bool restricted() const { return static_cast<bool>(requirement); }
 };
 
@@ -84,6 +111,8 @@ private:
   std::unique_ptr<Node> root_;
 };
 
-// Registers /tick exactly as TickCommand.register does.
+// Registers the supported command tree. registerTimeCommand is opt-in because
+// the legacy offline projections have no WorldClocks owner.
 void registerTickCommand(Dispatcher &);
+void registerTimeCommand(Dispatcher &);
 } // namespace redstone::command

@@ -18,27 +18,15 @@ LightChunkInput emptyChunk() {
   input.chunkZ = 0;
   input.minBlockSectionY = 0;
   input.blockSectionCount = 1;
-  const BlockLightProperties air = lightPropertiesOf(airState());
-  for (int section = -1; section <= 1; ++section)
-    input.sections.push_back(std::make_shared<const LightSectionSnapshot>(
-        section, true, std::vector<BlockLightProperties>{air},
-        std::vector<std::uint16_t>{}));
+  const auto table = defaultLightOpticalTable();
+  const LightSectionView view{true, 0, airState().id(), {}, {}, {}};
+  input.geometrySections.push_back(makeLightGeometrySection(*table, view));
   return input;
 }
 
-void change(LightService &service, int x, const BlockState &oldState,
+void change(LightService &service, int x, const BlockState &,
             const BlockState &newState) {
-  LightBlockChange update;
-  update.chunkX = 0;
-  update.chunkZ = 0;
-  update.sectionY = 0;
-  update.localIndex = static_cast<std::uint16_t>(lightIndex(x, 8, 8));
-  update.oldProperties = lightPropertiesOf(oldState);
-  update.newProperties = lightPropertiesOf(newState);
-  update.wasEmpty = false;
-  update.isEmpty = false;
-  if (!service.reportBlockChange(update))
-    throw std::runtime_error("light change rejected");
+  service.reportBlockCell({x, 8, 8, newState.id()});
 }
 
 } // namespace

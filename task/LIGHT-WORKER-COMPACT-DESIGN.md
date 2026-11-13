@@ -17,7 +17,7 @@ out/analysis.json SHA-256：6819ed1e1cd242b40129e5edb8b03d42ff1633f59b7a38b6884b
 
 ## 1. 输入和后台几何
 
-- 几何输入与结果交接使用分段SPSC queue。几何首段默认10MiB、结果首段默认4MiB；段满时producer分配并追加同一初始大小的新段，已排队记录不搬移、不复制。每段一个producer和一个consumer，跨段仍保持FIFO；不增加逐记录互斥锁，扩容分配只发生在段切换慢路径。
+- 几何输入、生命周期控制与结果交接使用分段SPSC queue。几何首段默认10MiB、结果首段默认4MiB、控制首段为maxQueuedCommands，后者仍同时限制每批控制预算；段满时producer分配并追加同一初始大小的新段，已排队记录不搬移、不复制。每段一个producer和一个consumer，跨段仍保持FIFO；不增加逐记录互斥锁，扩容分配只发生在段切换慢路径。
 - 普通几何记录业务载荷为三个int32坐标+uint32 stateId共16B，附加单调sequence。主线程不比较/解析光学属性，不为光照额外检查section空态。只有实际内存分配失败才计入失败；不再因固定容量丢弃newest。
 - SPSC记录可靠有序，加载/刷新/卸载控制与普通记录保持同一顺序。不得把刷新前旧记录或旧代记录重放到新区块；内部额外序号数组等开销必须单列，不能只报告16B业务载荷。
 - 加载和权威刷新交owned原始ID section快照，保持rawSetBlock导入后刷新契约。World目前没有写COW，不能把主世界storage指针直接共享给后台。

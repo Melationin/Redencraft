@@ -484,9 +484,11 @@ double getMovement(const Aabb &moving, Direction movement,
     return moving.maxY - entity.minY;
   }
 }
-void moveEntityByPiston(World &world, Direction pistonDirection, redstone::Entity &entity,
-                        double delta, Direction movement) {
+void moveEntityByPistonImpl(World &world, Direction pistonDirection,
+                            redstone::Entity &entity, double delta,
+                            Direction movement) {
   world.pistonNoClip = pistonDirection;
+  const Vec3 previousPosition = entity.position;
   entity.move(world,
               Vec3{delta * (movement == Direction::East
                                 ? 1.0
@@ -498,8 +500,9 @@ void moveEntityByPiston(World &world, Direction pistonDirection, redstone::Entit
                                 ? 1.0
                                 : movement == Direction::North ? -1.0 : 0.0)},
               true);
-  entity.applyEffectsFromBlocks(world);
   world.pistonNoClip.reset();
+  world.synchronizeEntityAfterMove(entity, previousPosition);
+  entity.applyEffectsFromBlocks(world);
 }
 void fixEntityWithinPistonBase(World &world, Pos pos, redstone::Entity &entity,
                                Direction movement, double deltaProgress) {
@@ -519,7 +522,7 @@ void fixEntityWithinPistonBase(World &world, Pos pos, redstone::Entity &entity,
   double deltaIntersected = getMovement(pistonBox, opposite, intersection) + 0.01;
   if (std::abs(delta - deltaIntersected) < 0.01) {
     delta = std::min(delta, deltaProgress) + 0.01;
-    moveEntityByPiston(world, movement, entity, delta, opposite);
+    moveEntityByPistonImpl(world, movement, entity, delta, opposite);
   }
 }
 void moveCollidedEntities(World &world, Pos pos, float newProgress,
@@ -561,7 +564,7 @@ void moveCollidedEntities(World &world, Pos pos, float newProgress,
     if (delta <= 0)
       continue;
     delta = std::min(delta, deltaProgress) + 0.01;
-    moveEntityByPiston(world, movement, entity, delta, movement);
+    moveEntityByPistonImpl(world, movement, entity, delta, movement);
     if (!self.extending && self.source)
       fixEntityWithinPistonBase(world, pos, entity, movement, deltaProgress);
   }
@@ -586,10 +589,16 @@ void moveStuckEntities(World &world, Pos pos, float newProgress,
     if (!(entity.position.x >= aabb.minX && entity.position.x <= aabb.maxX &&
           entity.position.z >= aabb.minZ && entity.position.z <= aabb.maxZ))
       continue;
-    moveEntityByPiston(world, movement, entity, deltaProgress, movement);
+    moveEntityByPistonImpl(world, movement, entity, deltaProgress, movement);
   }
 }
 } // namespace
+
+void moveEntityByPiston(World &world, Direction pistonDirection,
+                        redstone::Entity &entity, double delta,
+                        Direction movement) {
+  moveEntityByPistonImpl(world, pistonDirection, entity, delta, movement);
+}
 
 void pistonTickBlockEntities(World &w) {
   // Level.tickBlockEntities: fold the deferred tickers in, walk the flat list
@@ -612,6 +621,8 @@ void pistonTickBlockEntities(World &w) {
     // position lookup is needed: the ticker is bound to its entity.
     PistonMovingBlockEntity &e = *slot.entity;
     if (!e.live || !w.isLoaded(e.pos))
+      continue;
+    if (w.blockTickPositionReady && !w.blockTickPositionReady(e.pos))
       continue;
     e.lastTicked = w.gameTime();
     e.progressO = e.progress;
@@ -648,6 +659,8 @@ void pistonTickBlockEntities(World &w) {
       moveCollidedEntities(w, e.pos, next, e);
       moveStuckEntities(w, e.pos, next, e);
       e.progress = std::min(1.0f, next);
+      if (w.pistonEntityMutationObserver)
+        w.pistonEntityMutationObserver(e.pos);
     }
   }
   w.sweepPistonTickers();
@@ -657,6 +670,7 @@ void pistonPreRemoveSideEffects(World &w, Pos p) {
 }
 void pistonForgetWorld(World &w) {
   w.pistonEntities.clear();
+  w.pistonPositionsByChunk_.clear();
   w.pistonTickerSlots.clear();
   w.pistonTickers.clear();
   w.pendingPistonTickers.clear();

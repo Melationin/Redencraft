@@ -2,10 +2,13 @@
 #include "redstone/entity.hpp"
 #include "redstone/piston.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <climits>
 #include <cmath>
+#include <cerrno>
 #include <cstring>
+#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <optional>
@@ -226,6 +229,10 @@ void chunk(LoadedWorld &w, const Tag &root, int cx, int cz) {
   if (status != "minecraft:full" && status != "full")
     throw nbt::Error("chunk is not fully generated: " + status);
   w.chunks.emplace_back(cx, cz);
+  const auto *lightOnTag = root.get("isLightOn");
+  const bool isLightOn = lightOnTag && lightOnTag->type == 1 && lightOnTag->number != 0;
+  PersistedChunkLight persistedLight;
+  persistedLight.isLightOn = isLightOn;
   if (auto sections = root.get("sections")) {
     if (sections->type != 9)
       throw nbt::Error("invalid sections");
@@ -233,6 +240,29 @@ void chunk(LoadedWorld &w, const Tag &root, int cx, int cz) {
       if (sec.type != 10)
         throw nbt::Error("invalid section");
       auto sy = required(sec, "Y", 1).number;
+      if (isLightOn) {
+        auto readNibble = [&](const char *key)
+            -> std::optional<std::array<std::uint8_t, 2048>> {
+          const Tag *t = sec.get(key);
+          if (!t)
+            return std::nullopt;
+          if (t->type != 7 || t->bytes.size() != 2048)
+            throw nbt::Error(std::string("invalid ") + key + " nibble array");
+          std::array<std::uint8_t, 2048> arr{};
+          for (std::size_t i = 0; i < 2048; ++i)
+            arr[i] = static_cast<std::uint8_t>(t->bytes[i]);
+          return arr;
+        };
+        auto bl = readNibble("BlockLight");
+        auto sl = readNibble("SkyLight");
+        if (bl || sl) {
+          PersistedLightSection pls;
+          pls.sectionY = static_cast<int>(sy);
+          pls.blockLight = bl;
+          pls.skyLight = sl;
+          persistedLight.sections.push_back(std::move(pls));
+        }
+      }
       auto bs = sec.get("block_states");
       if (!bs)
         continue;
@@ -273,6 +303,12 @@ void chunk(LoadedWorld &w, const Tag &root, int cx, int cz) {
                     cz * 16 + ((i >> 4) & 15)}] = s;
       }
     }
+  }
+  if (isLightOn) {
+    const std::uint64_t key =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cx)) << 32) |
+        static_cast<std::uint32_t>(cz);
+    w.persistedLights[key] = std::move(persistedLight);
   }
   for (auto [name, fluid] :
        {std::pair{"block_ticks", false}, std::pair{"fluid_ticks", true}})
@@ -336,6 +372,10 @@ void importEntity(World &world, const Tag &tag) {
     if (stack.empty())
       return;
     auto entity = std::make_shared<ItemEntity>(world, pos, stack);
+    if (auto uuid = tag.get("UUID");
+        uuid && uuid->type == 11 && uuid->ints.size() == 4)
+      entity->uuid = {uuid->ints[0], uuid->ints[1], uuid->ints[2],
+                      uuid->ints[3]};
     entity->age = shortOr(tag, "Age", 0);
     entity->pickupDelay = shortOr(tag, "PickupDelay", 0);
     entity->health = shortOr(tag, "Health", 5);
@@ -456,6 +496,278 @@ void readRegions(const std::filesystem::path &regionDir, Keep keep,
   }
 }
 } // namespace
+std::filesystem::path ticketDataPath(const std::filesystem::path &regionDirectory) {
+  return regionDirectory.parent_path() / "data" / "minecraft" /
+         "chunk_tickets.dat";
+}
+
+namespace {
+class TemporaryPath {
+public:
+  explicit TemporaryPath(std::filesystem::path path)
+      : path_(std::move(path)) {}
+  ~TemporaryPath() {
+    if (!active_)
+      return;
+    std::error_code ignored;
+    std::filesystem::remove(path_, ignored);
+  }
+  TemporaryPath(const TemporaryPath &) = delete;
+  TemporaryPath &operator=(const TemporaryPath &) = delete;
+  const std::filesystem::path &path() const { return path_; }
+  void release() { active_ = false; }
+private:
+  std::filesystem::path path_;
+  bool active_ = true;
+};
+
+TemporaryPath createExclusiveTemp(const std::filesystem::path &target,
+                                  std::span<const std::uint8_t> bytes) {
+  static std::atomic<std::uint64_t> serial{0};
+  const auto base = target.filename().string();
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    const auto candidate =
+        target.parent_path() /
+        (base + ".tmp." + std::to_string(serial.fetch_add(1)));
+    std::FILE *out = std::fopen(candidate.string().c_str(), "wbx");
+    if (!out) {
+      if (errno == EEXIST)
+        continue;
+      throw nbt::Error("cannot create temporary for " + target.string());
+    }
+    const std::size_t written =
+        std::fwrite(bytes.data(), 1, bytes.size(), out);
+    const bool flushed = std::fflush(out) == 0;
+    const bool closed = std::fclose(out) == 0;
+    if (written != bytes.size() || !flushed || !closed) {
+      std::error_code ignored;
+      std::filesystem::remove(candidate, ignored);
+      throw nbt::Error("cannot write temporary for " + target.string());
+    }
+    return TemporaryPath(candidate);
+  }
+  throw nbt::Error("cannot allocate exclusive temporary for " +
+                   target.string());
+}
+
+// The target is never removed before the replacement file is complete.
+// Existing temporary names are never truncated or followed: fopen "x" creates
+// a fresh same-directory file and fails if the candidate already exists.
+void replaceWithGzip(const std::filesystem::path &target,
+                     std::span<const std::uint8_t> bytes,
+                     const std::filesystem::path *backup = nullptr) {
+  TemporaryPath temp = createExclusiveTemp(target, bytes);
+  std::error_code ec;
+  if (backup && std::filesystem::exists(target)) {
+    const auto backupBytes = file(target);
+    TemporaryPath backupTemp = createExclusiveTemp(*backup, backupBytes);
+    std::filesystem::rename(backupTemp.path(), *backup, ec);
+    if (ec)
+      throw nbt::Error("cannot replace backup " + backup->string() + ": " +
+                       ec.message());
+    backupTemp.release();
+  }
+  std::filesystem::rename(temp.path(), target, ec);
+  if (ec)
+    throw nbt::Error("cannot replace " + target.string() + ": " +
+                     ec.message());
+  temp.release();
+}
+} // namespace
+
+namespace {
+constexpr std::array<const char *, 2> kClockNames = {
+    "minecraft:overworld", "minecraft:the_end"};
+nbt::RootTag emptyWorldClockDocument() {
+  nbt::RootTag root;
+  root.name.clear();
+  root.value.type = 10;
+  nbt::Tag version;
+  version.type = 3;
+  version.number = 4786;
+  root.value.compound["DataVersion"] = version;
+  root.value.compoundOrder.push_back("DataVersion");
+  nbt::Tag data;
+  data.type = 10;
+  root.value.compound["data"] = std::move(data);
+  root.value.compoundOrder.push_back("data");
+  return root;
+}
+void eraseCompoundField(nbt::Tag &compound, const std::string &name) {
+  compound.compound.erase(name);
+  std::erase(compound.compoundOrder, name);
+}
+void setCompoundField(nbt::Tag &compound, const std::string &name,
+                      nbt::Tag value) {
+  if (!compound.compound.contains(name))
+    compound.compoundOrder.push_back(name);
+  compound.compound[name] = std::move(value);
+}
+std::int64_t wrappingClockAdd(std::int64_t value, int increment) {
+  return static_cast<std::int64_t>(
+      static_cast<std::uint64_t>(value) +
+      static_cast<std::uint64_t>(static_cast<std::int64_t>(increment)));
+}
+} // namespace
+
+WorldClocks::WorldClocks() : document_(emptyWorldClockDocument()) {}
+
+WorldClocks WorldClocks::load(const std::filesystem::path &path) {
+  WorldClocks result;
+  if (!std::filesystem::exists(path))
+    return result;
+  const auto bytes = file(path);
+  const bool gzip =
+      bytes.size() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b;
+  // SavedDataStorage accepts both a compressed SavedData stream and an
+  // uncompressed NBT stream. New writes always use the official gzip form.
+  const auto raw = gzip ? nbt::decompress(bytes, 31) : bytes;
+  result.document_ = nbt::parseRoot(raw);
+  const auto &root = result.document_.value;
+  if (integer(root, "DataVersion") != 4786)
+    throw nbt::Error(
+        "unsupported world_clocks DataVersion (expected 26.1: 4786)");
+  auto &data = const_cast<nbt::Tag &>(required(root, "data", 10));
+  for (std::size_t i = 0; i < kClockNames.size(); ++i) {
+    const nbt::Tag *clock = data.get(kClockNames[i]);
+    if (!clock)
+      continue;
+    if (clock->type != 10)
+      throw nbt::Error(std::string("invalid world clock ") + kClockNames[i]);
+    WorldClockState state;
+    state.totalTicks = required(*clock, "total_ticks", 4).number;
+    if (const nbt::Tag *partial = clock->get("partial_tick")) {
+      if (partial->type != 5)
+        throw nbt::Error(std::string("invalid partial_tick for ") +
+                         kClockNames[i]);
+      state.partialTick = static_cast<float>(partial->real);
+      if (!std::isfinite(state.partialTick))
+        throw nbt::Error(std::string("non-finite partial_tick for ") +
+                         kClockNames[i]);
+    }
+    if (const nbt::Tag *rate = clock->get("rate")) {
+      if (rate->type != 5)
+        throw nbt::Error(std::string("invalid rate for ") + kClockNames[i]);
+      state.rate = static_cast<float>(rate->real);
+      if (!std::isfinite(state.rate) || state.rate <= 0.0f)
+        throw nbt::Error(std::string("non-positive rate for ") +
+                         kClockNames[i]);
+    }
+    if (const nbt::Tag *paused = clock->get("paused")) {
+      if (paused->type != 1 ||
+          (paused->number != 0 && paused->number != 1))
+        throw nbt::Error(std::string("invalid paused for ") + kClockNames[i]);
+      state.paused = paused->number != 0;
+    }
+    result.states_[i] = state;
+  }
+  return result;
+}
+
+const WorldClockState &
+WorldClocks::state(BuiltinWorldClock clock) const {
+  return states_[static_cast<std::size_t>(clock)];
+}
+
+bool WorldClocks::setClock(BuiltinWorldClock clock,
+                           const WorldClockState &state) {
+  if (!std::isfinite(state.partialTick) ||
+      !std::isfinite(state.rate) || state.rate <= 0.0f)
+    throw nbt::Error("invalid world clock state");
+  auto &current = states_[static_cast<std::size_t>(clock)];
+  if (current.totalTicks == state.totalTicks &&
+      current.partialTick == state.partialTick &&
+      current.rate == state.rate && current.paused == state.paused)
+    return false;
+  current = state;
+  dirty_ = true;
+  return true;
+}
+
+void WorldClocks::tick(bool runsNormally, bool advanceTime) {
+  if (!runsNormally || !advanceTime)
+    return;
+  for (WorldClockState &clock : states_) {
+    if (clock.paused)
+      continue;
+    const WorldClockState before = clock;
+    // ServerClockManager.ClockInstance.tick uses float for both operands,
+    // then Mth.floor's float->int narrowing for the carry.
+    const float partial = clock.partialTick + clock.rate;
+    const double floored = std::floor(static_cast<double>(partial));
+    int fullTicks = 0;
+    if (std::isnan(floored))
+      fullTicks = 0;
+    else if (floored <= std::numeric_limits<int>::min())
+      fullTicks = std::numeric_limits<int>::min();
+    else if (floored >= std::numeric_limits<int>::max())
+      fullTicks = std::numeric_limits<int>::max();
+    else
+      fullTicks = static_cast<int>(floored);
+    clock.partialTick = partial - static_cast<float>(fullTicks);
+    clock.totalTicks = wrappingClockAdd(clock.totalTicks, fullTicks);
+    if (clock.totalTicks != before.totalTicks ||
+        clock.partialTick != before.partialTick ||
+        clock.rate != before.rate || clock.paused != before.paused)
+      dirty_ = true;
+  }
+}
+
+bool WorldClocks::saveIfDirty(const std::filesystem::path &path) {
+  if (!dirty_)
+    return false;
+  auto &root = document_.value;
+  auto &data = const_cast<nbt::Tag &>(required(root, "data", 10));
+  for (std::size_t i = 0; i < kClockNames.size(); ++i) {
+    nbt::Tag *clock = data.get(kClockNames[i]);
+    if (!clock) {
+      nbt::Tag created;
+      created.type = 10;
+      setCompoundField(data, kClockNames[i], std::move(created));
+      clock = data.get(kClockNames[i]);
+    }
+    if (clock->type != 10)
+      throw nbt::Error(std::string("invalid world clock ") + kClockNames[i]);
+    const WorldClockState &state = states_[i];
+    nbt::Tag total;
+    total.type = 4;
+    total.number = state.totalTicks;
+    setCompoundField(*clock, "total_ticks", std::move(total));
+    if (state.partialTick == 0.0f) {
+      eraseCompoundField(*clock, "partial_tick");
+    } else {
+      nbt::Tag partial;
+      partial.type = 5;
+      partial.real = static_cast<double>(state.partialTick);
+      setCompoundField(*clock, "partial_tick", std::move(partial));
+    }
+    if (state.rate == 1.0f) {
+      eraseCompoundField(*clock, "rate");
+    } else {
+      nbt::Tag rate;
+      rate.type = 5;
+      rate.real = static_cast<double>(state.rate);
+      setCompoundField(*clock, "rate", std::move(rate));
+    }
+    if (!state.paused) {
+      eraseCompoundField(*clock, "paused");
+    } else {
+      nbt::Tag paused;
+      paused.type = 1;
+      paused.number = 1;
+      setCompoundField(*clock, "paused", std::move(paused));
+    }
+  }
+  const auto encoded = nbt::compress(nbt::writeRoot(document_), 31);
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  if (ec)
+    throw nbt::Error("cannot create world_clocks directory: " + ec.message());
+  replaceWithGzip(path, encoded);
+  dirty_ = false;
+  return true;
+}
+
 std::filesystem::path defaultRegionDirectory(const std::filesystem::path &worldDir) {
   const auto modern = worldDir / "dimensions" / "minecraft" / "overworld" / "region";
   if (std::filesystem::is_directory(modern))
@@ -463,6 +775,72 @@ std::filesystem::path defaultRegionDirectory(const std::filesystem::path &worldD
   const auto legacy = worldDir / "region";
   return std::filesystem::is_directory(legacy) ? legacy : modern;
 }
+WorldGameRules loadWorldGameRules(const std::filesystem::path &path) {
+  WorldGameRules result;
+  if (!std::filesystem::exists(path))
+    return result;
+  auto root = nbt::parse(nbt::decompress(file(path), 31));
+  if (integer(root, "DataVersion") != 4786)
+    throw nbt::Error(
+        "unsupported game_rules DataVersion (expected 26.1: 4786)");
+  const Tag &data = required(root, "data", 10);
+  const auto readBool = [&](const char *name, bool &value) {
+    const Tag *tag = data.get(name);
+    if (!tag)
+      return;
+    if (tag->type != 1 || (tag->number != 0 && tag->number != 1))
+      throw nbt::Error(std::string("invalid game rule ") + name);
+    value = tag->number != 0;
+  };
+  readBool("minecraft:advance_time", result.advanceTime);
+  readBool("minecraft:tnt_explodes", result.tntExplodes);
+  readBool("minecraft:water_source_conversion",
+           result.waterSourceConversion);
+  readBool("minecraft:lava_source_conversion",
+           result.lavaSourceConversion);
+  return result;
+}
+
+WorldMetadata loadWorldMetadata(const std::filesystem::path &worldDir) {
+  WorldMetadata result;
+  auto level = file(worldDir / "level.dat");
+  result.levelRoot = nbt::parseRoot(nbt::decompress(level, 15 + 16));
+  auto &root = result.levelRoot;
+  auto &data = root.value;
+  auto &dataTag = const_cast<Tag &>(required(data, "Data", 10));
+  if (integer(dataTag, "DataVersion") != 4786)
+    throw nbt::Error("unsupported world DataVersion (expected 26.1: 4786)");
+  result.gameTime = required(dataTag, "Time", 4).number;
+  const auto settingsPath =
+      worldDir / "data" / "minecraft" / "world_gen_settings.dat";
+  if (std::filesystem::exists(settingsPath)) {
+    auto settings = nbt::parse(nbt::decompress(file(settingsPath), 31));
+    if (integer(settings, "DataVersion") != 4786)
+      throw nbt::Error(
+          "unsupported world generation DataVersion (expected 26.1: 4786)");
+    result.seed =
+        required(required(settings, "data", 10), "seed", 4).number;
+  } else if (auto settings = dataTag.get("WorldGenSettings")) {
+    result.seed = required(*settings, "seed", 4).number;
+  }
+  result.gameRules = loadWorldGameRules(
+      worldDir / "data" / "minecraft" / "game_rules.dat");
+  result.worldClocks =
+      WorldClocks::load(worldDir / "data" / "minecraft" / "world_clocks.dat");
+  return result;
+}
+
+void setWorldMetadataTime(WorldMetadata &metadata, std::int64_t gameTime) {
+  Tag *data = metadata.levelRoot.value.get("Data");
+  if (!data || data->type != 10)
+    throw nbt::Error("level.dat Data root is missing");
+  Tag *time = data->get("Time");
+  if (!time || time->type != 4)
+    throw nbt::Error("level.dat Data.Time is missing");
+  time->number = gameTime;
+  metadata.gameTime = gameTime;
+}
+
 LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
                            const std::filesystem::path &regionDir, int minY,
                            int maxY) {
@@ -534,8 +912,17 @@ void importWorld(const LoadedWorld &input, World &world) {
   for (auto &[pos, block] : input.blocks)
     world.rawSetBlock(pos, block);
   world.primeHeightmaps();
+  for (auto [x, z] : input.chunks) {
+    const std::uint64_t key =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
+        static_cast<std::uint32_t>(z);
+    if (auto it = input.persistedLights.find(key);
+        it != input.persistedLights.end())
+      world.setChunkPersistedLight(x, z, it->second);
+  }
   // If lighting was enabled before import, loadChunk's pre-write snapshots are
-  // superseded by one complete post-import snapshot per chunk.
+  // superseded by one complete post-import snapshot per chunk (with persisted
+  // Anvil light when isLightOn=true).
   world.refreshLightSnapshots();
   // LevelChunkTicks.unpack assigns -N..-1 in saved-list order per chunk.
   // Its scheduleUnchecked path preserves duplicate saved entries. Unknown
@@ -641,5 +1028,113 @@ void importWorld(const LoadedWorld &input, World &world) {
     if (key && world.entities.size() != before)
       importedUuids.insert(*key);
   }
+}
+
+std::vector<PersistentTicketRecord>
+loadPersistentTickets(const std::filesystem::path &path) {
+  std::vector<PersistentTicketRecord> result;
+  if (!std::filesystem::exists(path))
+    return result;
+  const auto root = nbt::parseRoot(nbt::decompress(file(path), 31));
+  if (integer(root.value, "DataVersion") != 4786)
+    throw nbt::Error("unsupported chunk_tickets DataVersion");
+  const Tag &data = required(root.value, "data", 10);
+  if (const Tag *tickets = data.get("tickets")) {
+    if (tickets->type != 9)
+      throw nbt::Error("chunk_tickets data.tickets is not a list");
+    for (const Tag &entry : tickets->list) {
+      if (entry.type != 10)
+        throw nbt::Error("chunk_tickets entry is not a compound");
+      const auto &positions = required(entry, "chunk_pos", 11).ints;
+      if (positions.size() != 2)
+        throw nbt::Error("chunk_tickets chunk_pos must be IntArray[2]");
+      // Level.MAX_LEVEL_SIZE is 30,000,000. Flooring that inclusive block
+      // range yields the asymmetric valid chunk range below.
+      constexpr int kMinTicketChunkCoordinate = -1875000;
+      constexpr int kMaxTicketChunkCoordinate = 1874999;
+      if (positions[0] < kMinTicketChunkCoordinate ||
+          positions[0] > kMaxTicketChunkCoordinate ||
+          positions[1] < kMinTicketChunkCoordinate ||
+          positions[1] > kMaxTicketChunkCoordinate)
+        throw nbt::Error("chunk_tickets chunk_pos is outside world bounds");
+      const auto &type = required(entry, "type", 8).text;
+      if (type != ticket_types::Forced.name && type != ticket_types::Portal.name)
+        throw nbt::Error("unsupported persistent ticket type: " + type);
+      const auto level = required(entry, "level", 3).number;
+      if (level < 0 || level > std::numeric_limits<int>::max())
+        throw nbt::Error("chunk_tickets level is out of range");
+      std::int64_t ticksLeft = 0;
+      if (const Tag *ticks = entry.get("ticks_left")) {
+        if (ticks->type != 4)
+          throw nbt::Error("chunk_tickets ticks_left is not a Long");
+        // Persisted countdowns are non-negative in normal 26.1 saves. This
+        // also rejects INT64_MIN before any countdown arithmetic.
+        if (ticks->number < 0)
+          throw nbt::Error("chunk_tickets ticks_left is negative");
+        ticksLeft = ticks->number;
+      }
+      result.push_back({positions[0], positions[1], type,
+                        static_cast<int>(level), ticksLeft});
+    }
+  }
+  // Validate all records before returning; callers can therefore apply as one
+  // batch without leaving partially loaded demand.
+  return result;
+}
+
+void savePersistentTickets(const std::filesystem::path &path,
+                           std::span<const PersistentTicketRecord> tickets) {
+  nbt::RootTag root;
+  root.name = "";
+  root.value.type = 10;
+  Tag &data = root.value.compound["data"];
+  data.type = 10;
+  root.value.compoundOrder.push_back("data");
+  Tag version;
+  version.type = 3;
+  version.number = 4786;
+  root.value.compound["DataVersion"] = std::move(version);
+  root.value.compoundOrder.push_back("DataVersion");
+  Tag list;
+  list.type = 9;
+  list.listElementType = 10;
+  for (const PersistentTicketRecord &record : tickets) {
+    Tag entry;
+    entry.type = 10;
+    Tag pos;
+    pos.type = 11;
+    pos.ints = {record.x, record.z};
+    entry.compound["chunk_pos"] = std::move(pos);
+    entry.compoundOrder.push_back("chunk_pos");
+    Tag type;
+    type.type = 8;
+    type.text = record.type;
+    entry.compound["type"] = std::move(type);
+    entry.compoundOrder.push_back("type");
+    Tag level;
+    level.type = 3;
+    level.number = record.level;
+    entry.compound["level"] = std::move(level);
+    entry.compoundOrder.push_back("level");
+    Tag ticksLeft;
+    ticksLeft.type = 4;
+    ticksLeft.number = record.ticksLeft;
+    entry.compound["ticks_left"] = std::move(ticksLeft);
+    entry.compoundOrder.push_back("ticks_left");
+    list.list.push_back(std::move(entry));
+  }
+  data.compound["tickets"] = std::move(list);
+  data.compoundOrder.push_back("tickets");
+  const auto encoded = nbt::compress(nbt::writeRoot(root), 31);
+  std::filesystem::create_directories(path.parent_path());
+  replaceWithGzip(path, encoded);
+}
+
+void saveWorldMetadata(const std::filesystem::path &worldDir,
+                       const WorldMetadata &metadata) {
+  const auto encoded = nbt::compress(nbt::writeRoot(metadata.levelRoot), 31);
+  const auto current = worldDir / "level.dat";
+  const auto old = worldDir / "level.dat_old";
+  replaceWithGzip(current, encoded, &old);
 }
 } // namespace redstone

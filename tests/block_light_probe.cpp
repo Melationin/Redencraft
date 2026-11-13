@@ -56,7 +56,7 @@ std::vector<int> sample(World &world) {
   std::vector<int> values;
   values.reserve(kCells.size());
   for (const Pos &cell : kCells) {
-    auto snapshot = service->latestChunk(cell.x >> 4, cell.z >> 4);
+    auto snapshot = service->latestLayerChunk(LightLayer::Block, cell.x >> 4, cell.z >> 4);
     if (!snapshot)
       throw std::runtime_error("light chunk was not published");
     const auto *section = snapshot->section(cell.y >> 4);

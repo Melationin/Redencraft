@@ -322,6 +322,28 @@ void tntExplosion() {
   require(dropped, "destroyed blocks produce real item entities");
   require(!world.log.empty(), "explosion is observable");
 }
+void protocolPlayerEntityIdsShareOneMonotonicNamespace() {
+  World world;
+  world.loadChunk(0, 0);
+  const int playerA = world.allocateEntityId();
+  auto first = std::make_shared<ItemEntity>(
+      world, Vec3{0.5, 64.0, 0.5}, itemStack("minecraft:stone", 1));
+  world.addEntity(first);
+  const int playerB = world.allocateEntityId();
+  auto second = std::make_shared<ItemEntity>(
+      world, Vec3{0.5, 64.0, 0.5}, itemStack("minecraft:stone", 1));
+  world.addEntity(second);
+  require(playerA != first->id && playerB != first->id &&
+              playerB != second->id && first->id != second->id &&
+              playerA != playerB,
+          "protocol players and World entities have disjoint live IDs");
+  world.removeEntity(first);
+  const int laterPlayer = world.allocateEntityId();
+  require(laterPlayer != playerA && laterPlayer != playerB &&
+              laterPlayer != first->id && laterPlayer != second->id,
+          "entity and connection churn cannot reuse an allocated ID");
+}
+
 void denseExplosion() {
   // Low-resistance solid in every direction, so the ray shell covers ~1,400
   // distinct cells instead of the handful an air burst touches. Every other
@@ -407,6 +429,22 @@ void minecartExplosion() {
   require(dropped, "destroyed minecart leaves a minecart item entity");
 }
 void fallingBlock() {
+  World rngWorld(-64, 320);
+  const auto rngBefore = [&] {
+    auto probe = rngWorld.random;
+    return probe.nextLong();
+  }();
+  auto restored = std::make_shared<FallingBlockEntity>(
+      rngWorld, Vec3{0.5, 20.0, 0.5}, defaultState("sand"));
+  restored->uuid = {12, 34, 56, 78};
+  rngWorld.addEntity(restored);
+  const auto rngAfter = [&] {
+    auto probe = rngWorld.random;
+    return probe.nextLong();
+  }();
+  require(rngAfter == rngBefore,
+          "falling block install does not consume World random");
+
   World world;
   world.loadChunk(0, 0);
   world.rawSetBlock({0, 60, 0}, defaultState("smooth_stone"));
@@ -725,6 +763,33 @@ void entityTickOrder() {
               removals.entities[1] == last,
           "entity cleanup retains survivors in registration order");
 }
+void persistentUuidGeneratorIsRestartIndependent() {
+  World first;
+  World second;
+  first.setSeed(2614786);
+  second.setSeed(2614786);
+  first.loadChunk(0, 0);
+  second.loadChunk(0, 0);
+  auto firstEntity = std::make_shared<ItemEntity>(
+      first, Vec3{.5, 64.0, .5}, itemStack("minecraft:stone", 3), Vec3{});
+  auto secondEntity = std::make_shared<ItemEntity>(
+      second, Vec3{.5, 64.0, .5}, itemStack("minecraft:stone", 3), Vec3{});
+  first.addEntity(firstEntity);
+  second.addEntity(secondEntity);
+  require(firstEntity->id == secondEntity->id,
+          "restart fixture reuses runtime id 1");
+  require(firstEntity->uuid != secondEntity->uuid &&
+              firstEntity->uuid != std::array<std::int32_t, 4>{} &&
+              secondEntity->uuid != std::array<std::int32_t, 4>{},
+          "same seed/runtime id instances do not reuse persistent UUIDs");
+  auto thirdEntity = std::make_shared<ItemEntity>(
+      first, Vec3{1.5, 64.0, 1.5}, itemStack("minecraft:stone", 1), Vec3{});
+  first.addEntity(thirdEntity);
+  require(thirdEntity->uuid != firstEntity->uuid,
+          "one process allocates distinct persistent UUIDs");
+  std::cout << "persistent_uuid same_seed_same_runtime_id=distinct\n";
+}
+
 void entityHeightBoundaries() {
   World world;
   world.loadChunk(0, 0);
@@ -946,6 +1011,7 @@ int main() {
     tntDisabledRule();
     tntExplosion();
     denseExplosion();
+    protocolPlayerEntityIdsShareOneMonotonicNamespace();
     explosionRayRandomConsumption();
     tntChain();
     itemExplosionDamage();
@@ -964,6 +1030,7 @@ int main() {
     railPistonSupport();
     railJunctionPowerSwitch();
     entityTickOrder();
+    persistentUuidGeneratorIsRestartIndependent();
     entityHeightBoundaries();
     storageEntityImport();
     clipTraversal();

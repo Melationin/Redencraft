@@ -196,7 +196,7 @@ combinedForTesting(LightService &service, int x, int z) {
   const auto block = service.latestLayerChunk(LightLayer::Block, x, z);
   const auto sky = service.latestLayerChunk(LightLayer::Sky, x, z);
   if (!block || !sky)
-    return block ? block : service.latestChunk(x, z);
+    return block ? block : sky;
   auto merged = std::make_shared<LightChunkSnapshot>(*block);
   const std::size_t skyIndex = static_cast<std::size_t>(LightLayer::Sky);
   for (std::size_t i = 0; i < merged->sections.size(); ++i) {
@@ -320,8 +320,6 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
   auto stale = std::make_shared<LightChunkSnapshot>(*cleared);
   stale->revision = cleared->revision + 100;
   stale->deltaBaseRevision = cleared->revision;
-  stale->blockLayerSnapshot.reset();
-  stale->skyLayerSnapshot.reset();
   auto changedSection = std::make_shared<LightSectionSnapshot>(
       *stale->sections[1]);
   changedSection->layers[static_cast<std::size_t>(LightLayer::Block)] =
@@ -530,6 +528,82 @@ void evictedReadyBaseFallsBack(const ProtocolData &data) {
   service->resumeForTesting();
 }
 
+void managedResidencyProviderDuringHandshake(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.loadChunk(2, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(),
+          "handshake provider light batch");
+  service->drainPublished();
+  ServerOptions options;
+  options.chunks = {{0, 0}};
+  options.spawn = {8.5, 70, 8.5};
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  session.setManagedResidencyProvider(
+      [](int x, int z) { return x == 0 && z == 0; },
+      [] { return std::vector<std::pair<int, int>>{{0, 0}}; });
+  session.managedChunkResidency(1, 0, true);
+  session.managedChunkResidency(1, 0, false);
+  session.managedChunkResidency(2, 0, true);
+  require(drain(session).empty(),
+          "provider install and configuration residency emit no Play packet");
+  world.lightPublicationObserver =
+      [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        session.lightPublished(std::move(snapshot));
+      };
+  auto joined = join(session, data);
+  require(!joined.empty(), "managed join emits packets");
+  Reader first(joined.front());
+  require(first.varInt() == data.packet("play", "clientbound", "login"),
+          "Play login is the first managed join packet");
+  bool sawCenter = false, sawChunk = false;
+  int joinedChunks = 0;
+  for (const auto &body : joined) {
+    Reader packet(body);
+    const int id = packet.varInt();
+    sawCenter |= id == data.packet("play", "clientbound",
+                                   "set_chunk_cache_center");
+    if (id == data.packet("play", "clientbound", "level_chunk_with_light"))
+      ++joinedChunks;
+    sawChunk |= joinedChunks != 0;
+  }
+  require(sawCenter && sawChunk,
+          "managed join sends center and chunk after login");
+  require(joinedChunks == 2,
+          "join includes the provider snapshot and configuration residency");
+}
+
+void managedResidencyAvailability(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.enableLighting(LightWorkerOptions{1000, 4096, false, true});
+  auto *service = world.lightService();
+  require(service && service->waitIdleForTesting(),
+          "managed residency light batch");
+  service->drainPublished();
+  ServerOptions options;
+  options.chunks = {{0, 0}};
+  options.spawn = {8.5, 70, 8.5};
+  options.viewDistance = 2;
+  Session session(world, data, options);
+  world.lightPublicationObserver =
+      [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        session.lightPublished(std::move(snapshot));
+      };
+  auto initial = join(session, data);
+  require(!packetOf(initial,
+                    data.packet("play", "clientbound",
+                                "level_chunk_with_light")).empty(),
+          "already resident managed option chunks enter initial view");
+
+  session.managedChunkResidency(1, 0, false);
+  require(!session.hasManagedChunk(1, 0),
+          "nonresident unload is an idempotent availability erase");
+}
+
 void explicitWorldLifecycleIsolation(const ProtocolData &data) {
   World world;
   world.loadChunk(0, 0);
@@ -668,8 +742,6 @@ denseSnapshot(const LightChunkSnapshot &base, std::uint64_t revision,
   auto result = std::make_shared<LightChunkSnapshot>(base);
   result->revision = revision;
   result->deltaBaseRevision = base.revision;
-  result->blockLayerSnapshot.reset();
-  result->skyLayerSnapshot.reset();
   result->sections.clear();
   result->changedSections.clear();
   std::array<std::uint8_t, kLightVolume> values{};
@@ -756,8 +828,6 @@ void noSkyUsesExplicitZero() {
 
   auto withSky = std::make_shared<LightChunkSnapshot>(*zero);
   withSky->revision = zero->revision + 1;
-  withSky->blockLayerSnapshot.reset();
-  withSky->skyLayerSnapshot.reset();
   auto skySection = std::make_shared<LightSectionSnapshot>(*withSky->sections[1]);
   skySection->layers[static_cast<std::size_t>(LightLayer::Sky)] =
       LightLayerSnapshot::mixedPacked(std::array<std::uint8_t, kLightLayerBytes>{});
@@ -765,8 +835,6 @@ void noSkyUsesExplicitZero() {
   withSky->changedSections = {{skySection->sectionY, true, false}};
   auto withoutSky = std::make_shared<LightChunkSnapshot>(*withSky);
   withoutSky->revision = withSky->revision + 1;
-  withoutSky->blockLayerSnapshot.reset();
-  withoutSky->skyLayerSnapshot.reset();
   auto missingSection = std::make_shared<LightSectionSnapshot>(*skySection);
   missingSection->layers[static_cast<std::size_t>(LightLayer::Sky)] =
       LightLayerSnapshot::missing();
@@ -881,18 +949,15 @@ void independentLayerDeltaUsesWriteMetadata() {
     view->blockLightComplete = true;
     view->protocolReady = true;
     for (int sectionY = -1; sectionY <= 1; ++sectionY)
-      view->sections.push_back(std::make_shared<LightSectionSnapshot>(
-          sectionY, true,
-          std::vector<BlockLightProperties>{BlockLightProperties{}},
-          std::vector<std::uint16_t>{}));
+      view->sections.push_back(
+          std::make_shared<LightSectionSnapshot>(sectionY, true));
     return view;
   };
   auto first = makeView(1);
   std::array<std::uint8_t, kLightVolume> values{};
   values[lightIndex(3, 4, 5)] = 9;
   values[lightIndex(6, 7, 8)] = 1;
-  auto mixed = std::make_shared<LightLayerSnapshot>(
-      LightLayerSnapshot::mixed(values));
+  auto mixed = LightLayerSnapshot::mixed(values);
   auto firstSection =
       std::make_shared<LightSectionSnapshot>(*first->sections[1]);
   firstSection->layers[static_cast<std::size_t>(LightLayer::Block)] = mixed;
@@ -912,13 +977,13 @@ void independentLayerDeltaUsesWriteMetadata() {
   second->sections[1] = first->sections[1];
   second->deltaBaseRevision = 1;
   second->changedSections = {{0, false, true}};
-  mixed->writeCell(lightIndex(3, 4, 5), 2);
+  mixed.writeCell(lightIndex(3, 4, 5), 2);
   const auto firstVersion = lightLayerVersion(*first);
   auto delta =
       prepareLayerLightUpdate(second, LightLayer::Block, &firstVersion);
   require(second->section(0)
                   ->layers[static_cast<std::size_t>(LightLayer::Block)]
-                  .shared() == mixed &&
+                  .shared() == mixed.packedPtr() &&
               delta.block.dataSections == std::vector<int>{0} &&
               delta.sky.dataSections.empty() &&
               delta.sky.emptySections.empty(),
@@ -950,6 +1015,8 @@ int main(int argc, char **argv) {
     strictInitialDynamicClearAndReload(data);
     readyIncompleteReadyDelta(data);
     evictedReadyBaseFallsBack(data);
+    managedResidencyProviderDuringHandshake(data);
+    managedResidencyAvailability(data);
     explicitWorldLifecycleIsolation(data);
     protocolFailureIsConnectionLocal(data);
     noSkyUsesExplicitZero();

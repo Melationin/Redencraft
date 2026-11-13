@@ -189,9 +189,21 @@ Bytes encodeCommandTree(const redstone::command::Node &root) {
         out.u8(3);     // ArgumentUtils.createNumberFlags(true, true)
         out.f32(static_cast<float>(node->minimum));
         out.f32(static_cast<float>(node->maximum));
-      } else {
+      } else if (node->argumentKind ==
+                 redstone::command::Node::ArgumentKind::Time) {
         out.varInt(43); // minecraft:time
         out.i32(static_cast<std::int32_t>(node->minimum));
+      } else if (node->argumentKind ==
+                 redstone::command::Node::ArgumentKind::Resource) {
+        // Official 26.1 ArgumentTypeInfos / BuiltInRegistries probe:
+        // minecraft:resource=46 and ResourceArgument.Info writes its registry
+        // ResourceKey as an Identifier.
+        out.varInt(46); // minecraft:resource
+        out.string(node->resourceRegistry);
+      } else {
+        out.varInt(36); // minecraft:resource_location
+        // SingletonArgumentInfo.contextFree(IdentifierArgument::id) has no
+        // network payload.
       }
     }
   }
@@ -469,9 +481,7 @@ std::size_t lightSnapshotBytes(const LightChunkSnapshot &snapshot) noexcept {
                           sizeof(LightChunkSnapshot::LayerChange);
   for (const auto &section : snapshot.sections)
     if (section) {
-      bytes += sizeof(*section) + section->palette.capacity() *
-                                     sizeof(BlockLightProperties) +
-               section->cells.capacity() * sizeof(std::uint16_t);
+      bytes += sizeof(*section);
       for (const auto &layer : section->layers)
         bytes += layer.packedByteCount();
     }
@@ -543,19 +553,8 @@ void appendLightSections(
     const auto layer = static_cast<std::size_t>(type);
     const LightChunkSnapshot *source =
         type == LightLayer::Sky ? skySourceOverride : blockSourceOverride;
-    if (!source && update.snapshot->layer &&
-        *update.snapshot->layer == type)
+    if (!source)
       source = update.snapshot.get();
-    if (!source && !update.snapshot->layer) {
-      // Explicit compatibility path for hand-built combined test snapshots.
-      // Production layer views always set layer and never reach this branch.
-      source = type == LightLayer::Sky && update.snapshot->skyLayerSnapshot
-                   ? update.snapshot->skyLayerSnapshot.get()
-                   : type == LightLayer::Block &&
-                             update.snapshot->blockLayerSnapshot
-                         ? update.snapshot->blockLayerSnapshot.get()
-                         : update.snapshot.get();
-    }
     if (!source && !sections.empty())
       throw ProtocolError("light update has no source for its layer");
     for (int sectionY : sections) {
@@ -774,13 +773,7 @@ ProtocolLightUpdate prepareLightUpdate(
   const auto append = [&](int sectionY, LightLayer layer, bool changed) {
     if (!changed)
       return;
-    const LightChunkSnapshot *source =
-        layer == LightLayer::Sky && result.snapshot->skyLayerSnapshot
-            ? result.snapshot->skyLayerSnapshot.get()
-            : layer == LightLayer::Block && result.snapshot->blockLayerSnapshot
-                  ? result.snapshot->blockLayerSnapshot.get()
-                  : result.snapshot.get();
-    const auto *now = source->section(sectionY);
+    const auto *now = result.snapshot->section(sectionY);
     if (!now)
       throw ProtocolError("light delta references a missing section");
     const auto &nowLayer = now->layers[static_cast<std::size_t>(layer)];

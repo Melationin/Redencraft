@@ -101,7 +101,10 @@ def main():
             generate_cpp.main()
         finally:
             __import__('sys').argv = old_argv
-        if generated.read_bytes() != pathlib.Path(args.source).read_bytes():
+        # Compare generated C++ as text: a checkout may use LF or CRLF.
+        # The exported assets above still require exact manifest hashes.
+        if generated.read_text(encoding='utf-8') != pathlib.Path(
+                args.source).read_text(encoding='utf-8'):
             raise SystemExit('src/light_metadata.inc is stale')
         generated_faces = pathlib.Path(temporary) / 'light_occlusion.inc'
         try:
@@ -111,8 +114,8 @@ def main():
             generate_light_occlusion.main()
         finally:
             __import__('sys').argv = old_argv
-        if generated_faces.read_bytes() != pathlib.Path(
-                args.faces_source).read_bytes():
+        if generated_faces.read_text(encoding='utf-8') != pathlib.Path(
+                args.faces_source).read_text(encoding='utf-8'):
             raise SystemExit('src/light_occlusion.inc is stale')
     print(f'optical metadata valid: {len(rows)} states, {len(face_rows)} face states')
 

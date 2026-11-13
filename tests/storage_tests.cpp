@@ -173,6 +173,143 @@ static void regionFixture(const std::filesystem::path &directory,
     std::copy(payload.begin(), payload.end(), region.begin() + 8197);
   write(directory / (orphan ? "r.0.0.mca" : "r.-1.-1.mca"), region);
 }
+static void metadataFixture(const std::filesystem::path &directory) {
+  std::filesystem::create_directories(directory);
+  auto b = root();
+  tag(b, 10, "Data");
+  integer(b, "DataVersion", 4786);
+  longtag(b, "Time", 42);
+  tag(b, 10, "WorldGenSettings");
+  longtag(b, "seed", 77);
+  b.push_back(0);
+  b.push_back(0);
+  b.push_back(0);
+  write(directory / "level.dat", compressed(b, 31));
+  WorldMetadata metadata = loadWorldMetadata(directory);
+  assert(metadata.gameTime == 42 && metadata.seed == 77);
+  const auto original = defaultRegionDirectory(directory);
+  assert(ticketDataPath(original) ==
+         directory / "dimensions" / "minecraft" / "overworld" / "data" /
+             "minecraft" / "chunk_tickets.dat");
+  const auto unchanged = metadata.levelRoot;
+  setWorldMetadataTime(metadata, 84);
+  saveWorldMetadata(directory, metadata);
+  assert(unchanged.value.get("Data") &&
+         unchanged.value.get("Data")->get("Time")->number == 42);
+  WorldMetadata saved = loadWorldMetadata(directory);
+  assert(saved.gameTime == 84 && saved.seed == 77);
+  assert(std::filesystem::exists(directory / "level.dat_old"));
+  assert(loadWorldMetadata(directory).gameTime == 84);
+  // Normal save retains the untouched Data subfields and an existing backup
+  // is the prior readable level.dat, rather than a new ad-hoc format.
+  assert(std::filesystem::exists(directory / "level.dat_old"));
+
+  const auto ticketPath = ticketDataPath(original);
+  const std::vector<PersistentTicketRecord> tickets{
+      {-13, -16, "minecraft:forced", 31, 0},
+      {-14, -16, "minecraft:portal", 33, 257}};
+  savePersistentTickets(ticketPath, tickets);
+  const auto stableBytes = [&] {
+    std::ifstream in(ticketPath, std::ios::binary);
+    return Bytes(std::istreambuf_iterator<char>(in),
+                 std::istreambuf_iterator<char>());
+  }();
+  auto roundTrip = loadPersistentTickets(ticketPath);
+  savePersistentTickets(ticketPath, roundTrip);
+  const auto rewrittenBytes = [&] {
+    std::ifstream in(ticketPath, std::ios::binary);
+    return Bytes(std::istreambuf_iterator<char>(in),
+                 std::istreambuf_iterator<char>());
+  }();
+  assert(stableBytes == rewrittenBytes);
+  assert(roundTrip.size() == 2 && roundTrip[0].x == -13 &&
+         roundTrip[1].ticksLeft == 257);
+  Bytes malformed;
+  {
+    std::ifstream in(ticketPath, std::ios::binary);
+    malformed.assign(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
+  }
+  malformed.at(malformed.size() / 2) ^= 0x5a;
+  write(ticketPath, malformed);
+  const auto corruptBytes = malformed;
+  bool rejectedTickets = false;
+  try {
+    (void)loadPersistentTickets(ticketPath);
+  } catch (const nbt::Error &) {
+    rejectedTickets = true;
+  }
+  assert(rejectedTickets && [&] {
+    std::ifstream in(ticketPath, std::ios::binary);
+    return Bytes(std::istreambuf_iterator<char>(in),
+                 std::istreambuf_iterator<char>()) == corruptBytes;
+  }());
+
+  const auto badVersionPath =
+      ticketPath.parent_path() / "bad-version" / "chunk_tickets.dat";
+  std::filesystem::create_directories(badVersionPath.parent_path());
+  auto badVersion = root();
+  tag(badVersion, 10, "data");
+  stringtag(badVersion, "DataVersion", "wrong-type");
+  badVersion.push_back(0);
+  badVersion.push_back(0);
+  write(badVersionPath, compressed(badVersion, 31));
+  bool rejectedVersion = false;
+  try {
+    (void)loadPersistentTickets(badVersionPath);
+  } catch (const nbt::Error &) {
+    rejectedVersion = true;
+  }
+  assert(rejectedVersion);
+
+  const auto noTemporaryFiles = [](const std::filesystem::path &directory) {
+    for (const auto &entry : std::filesystem::directory_iterator(directory))
+      if (entry.path().filename().string().find(".tmp.") != std::string::npos)
+        return false;
+    return true;
+  };
+  assert(noTemporaryFiles(ticketPath.parent_path()));
+
+  const auto boundsPath =
+      ticketPath.parent_path() / "bounds" / "chunk_tickets.dat";
+  savePersistentTickets(
+      boundsPath,
+      std::vector<PersistentTicketRecord>{
+          {-1875000, 1874999, "minecraft:forced", 31, 0},
+          {1874999, -1875000, "minecraft:portal", 33,
+           std::numeric_limits<std::int64_t>::max()}});
+  const auto bounds = loadPersistentTickets(boundsPath);
+  assert(bounds.size() == 2 && bounds[0].x == -1875000 &&
+         bounds[1].ticksLeft == std::numeric_limits<std::int64_t>::max());
+  const auto rejectsTicketRecord = [&](std::vector<PersistentTicketRecord> bad) {
+    savePersistentTickets(boundsPath, bad);
+    try {
+      (void)loadPersistentTickets(boundsPath);
+    } catch (const nbt::Error &) {
+      return true;
+    }
+    return false;
+  };
+  assert(rejectsTicketRecord(
+      {{-1875001, 0, "minecraft:forced", 31, 0}}));
+  assert(rejectsTicketRecord(
+      {{1875000, 0, "minecraft:forced", 31, 0}}));
+  assert(rejectsTicketRecord({{0, 0, "minecraft:portal", 33,
+                               std::numeric_limits<std::int64_t>::min()}}));
+
+  const auto renameTarget =
+      ticketPath.parent_path() / "rename-failure" / "chunk_tickets.dat";
+  std::filesystem::create_directories(renameTarget);
+  bool rejectedRename = false;
+  try {
+    savePersistentTickets(renameTarget, tickets);
+  } catch (const nbt::Error &) {
+    rejectedRename = true;
+  }
+  assert(rejectedRename && std::filesystem::is_directory(renameTarget));
+  assert(noTemporaryFiles(renameTarget.parent_path()));
+}
+
 static void levelFixture(const std::filesystem::path &directory,
                          bool embedded = true) {
   std::filesystem::create_directories(directory);
@@ -334,6 +471,11 @@ public:
 int main() try {
   const StorageFixture fixture;
   const auto &p = fixture.path;
+  {
+    const auto metadataOnly = p / "metadata-only";
+    std::filesystem::create_directories(metadataOnly);
+    metadataFixture(metadataOnly);
+  }
   std::filesystem::create_directories(p / "region");
   Bytes level = root();
   tag(level, 10, "Data");
@@ -741,6 +883,31 @@ int main() try {
   }
   entityStorageFixtures(p / "entity_world");
   entityNumericImport();
+  {
+    const auto exportDir = std::filesystem::path{
+        "/home/zhddsj/.local/state/redstone-cpp/wsl-w3c1-export/cpp"};
+    std::filesystem::remove_all(exportDir);
+    std::filesystem::create_directories(exportDir);
+    auto exportedMetadata = root();
+    tag(exportedMetadata, 10, "Data");
+    integer(exportedMetadata, "DataVersion", 4786);
+    longtag(exportedMetadata, "Time", 42);
+    tag(exportedMetadata, 10, "WorldGenSettings");
+    longtag(exportedMetadata, "seed", 77);
+    exportedMetadata.push_back(0);
+    exportedMetadata.push_back(0);
+    exportedMetadata.push_back(0);
+    write(exportDir / "level.dat", compressed(exportedMetadata, 31));
+    WorldMetadata metadata = loadWorldMetadata(exportDir);
+    setWorldMetadataTime(metadata, 84);
+    saveWorldMetadata(exportDir, metadata);
+    const auto ticketPath = ticketDataPath(exportDir / "region");
+    savePersistentTickets(
+        ticketPath,
+        std::vector<PersistentTicketRecord>{
+            {-13, -16, "minecraft:forced", 31, 0},
+            {-14, -16, "minecraft:portal", 33, 257}});
+  }
   return 0;
 } catch (const std::exception &failure) {
   std::fprintf(stderr, "storage test failure: %s\n", failure.what());

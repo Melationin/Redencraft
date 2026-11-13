@@ -1,6 +1,7 @@
 #include "redstone/net/session.hpp"
 #include "redstone/piston.hpp"
 #include "redstone/shapes.hpp"
+#include "redstone/storage.hpp"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -247,7 +248,9 @@ ProtocolData::ProtocolData(const std::filesystem::path &directory)
     if (!line.empty() && line.back() == '\r')
       line.pop_back();
     auto f = fields(line);
-    if (f.size() == 3 && f[0] == "minecraft:dimension_type" &&
+    if (f.size() != 3)
+      continue;
+    if (f[0] == "minecraft:dimension_type" &&
         f[2] == "minecraft:overworld") {
       dimensionId = std::stoi(f[1]);
       overworld = true;
@@ -273,6 +276,12 @@ ProtocolData::ProtocolData(const std::filesystem::path &directory)
   Bytes bytes((std::istreambuf_iterator<char>(config)), {});
   if (bytes.size() > 16 * 1024 * 1024)
     throw ProtocolError("configuration data too large");
+  const auto registryDataId = packetIds.find(
+      key("configuration", "clientbound", "registry_data"));
+  if (registryDataId == packetIds.end())
+    throw ProtocolError("missing registry_data packet ID");
+  bool worldClockRegistryFrame = false;
+  bool timelineRegistryFrame = false;
   Reader reader(bytes);
   while (!reader.empty()) {
     int length = reader.i32();
@@ -281,8 +290,57 @@ ProtocolData::ProtocolData(const std::filesystem::path &directory)
     auto body = reader.raw(length);
     Reader packetReader(body);
     int id = packetReader.varInt();
+    if (id == registryDataId->second) {
+      Reader registry(body.subspan(packetReader.pos));
+      const std::string registryName = registry.string();
+      if (registryName == "minecraft:timeline") {
+        if (timelineRegistryFrame)
+          throw ProtocolError("duplicate timeline registry_data frame");
+        timelineRegistryFrame = true;
+      }
+      if (registryName == "minecraft:world_clock") {
+        if (worldClockRegistryFrame)
+          throw ProtocolError("duplicate world_clock registry_data frame");
+        worldClockRegistryFrame = true;
+        const int count = registry.varInt();
+        if (count != 2)
+          throw ProtocolError("world_clock registry must contain two entries");
+        std::array<bool, 2> seen{};
+        for (int holderId = 0; holderId < count; ++holderId) {
+          const std::string entry = registry.string();
+          int target = -1;
+          if (entry == "minecraft:overworld")
+            target = 0;
+          else if (entry == "minecraft:the_end")
+            target = 1;
+          else
+            throw ProtocolError("unsupported world_clock registry entry: " +
+                                entry);
+          if (seen[target])
+            throw ProtocolError("duplicate world_clock registry entry: " +
+                                entry);
+          seen[target] = true;
+          // The current official WorldClock.DIRECT_CODEC is an empty compound.
+          // Optional<Tag> is present and encoded as TAG_Compound followed by
+          // its immediate TAG_End. Reject richer profiles instead of silently
+          // assigning an ID for a codec this server does not implement.
+          if (!registry.bool_() || registry.u8() != 10 ||
+              registry.u8() != 0)
+            throw ProtocolError("unsupported world_clock registry payload");
+          worldClockIds[target] = holderId;
+        }
+        if (!seen[0] || !seen[1] || !registry.empty())
+          throw ProtocolError("invalid world_clock registry frame");
+      }
+    }
     configuration.push_back(frame(id, body.subspan(packetReader.pos)));
   }
+  if (!worldClockRegistryFrame)
+    throw ProtocolError(
+        "configuration is missing the world_clock registry frame");
+  if (!timelineRegistryFrame)
+    throw ProtocolError(
+        "configuration is missing the timeline registry frame");
 }
 int ProtocolData::packet(std::string_view phase, std::string_view flow,
                          std::string_view name) const {
@@ -355,6 +413,46 @@ Session::Session(World &world, const ProtocolData &data, ServerOptions options)
   availableChunks_.insert(options_.chunks.begin(), options_.chunks.end());
   if (availableChunks_.size() > 64)
     chunksPerBatch_ = chunkBatchLimit_ = 2;
+}
+void Session::setWorldClockSource(const WorldClocks &clocks,
+                                  bool advanceTime) {
+  worldClocks_ = &clocks;
+  advanceTime_ = advanceTime;
+}
+void Session::writeWorldClock(Writer &out,
+                              BuiltinWorldClock clock) const {
+  const std::size_t index = static_cast<std::size_t>(clock);
+  const WorldClockState &state = worldClocks_->state(clock);
+  // ClientboundSetTimePacket / ClockNetworkState: registry holder identity,
+  // VarLong total, partial, then the effective rate. A paused clock and the
+  // global advance_time rule both advertise zero; tick-freeze is represented
+  // separately by the existing ticking-state packet and does not change this.
+  out.varInt(data_.worldClockIds[index]);
+  out.varLong(state.totalTicks);
+  out.f32(state.partialTick);
+  out.f32(state.paused || !advanceTime_ ? 0.0f : state.rate);
+}
+void Session::sendSetTime() {
+  Writer out;
+  out.i64(world_.gameTime());
+  if (!worldClocks_) {
+    out.varInt(0);
+    send("set_time", std::move(out));
+    return;
+  }
+  out.varInt(2);
+  writeWorldClock(out, BuiltinWorldClock::Overworld);
+  writeWorldClock(out, BuiltinWorldClock::TheEnd);
+  send("set_time", std::move(out));
+}
+void Session::sendWorldClockUpdate(BuiltinWorldClock clock) {
+  if (!worldClocks_ || phase_ != Phase::Play)
+    return;
+  Writer out;
+  out.i64(world_.gameTime());
+  out.varInt(1);
+  writeWorldClock(out, clock);
+  send("set_time", std::move(out));
 }
 void Session::packet(int id, const Writer &payload) {
   if (closed())
@@ -532,6 +630,7 @@ void Session::handle(Reader &in) {
       if (!finishSent_ || !in.empty())
         throw ProtocolError("early configuration finish");
       phase_ = Phase::Play;
+      syncManagedResidency();
       join();
     } else if (id != 0 && id != 2 && id != 5)
       throw ProtocolError("unsupported configuration packet");
@@ -622,9 +721,7 @@ void Session::join() {
 void Session::finishJoin() {
   joinPositionPending_ = false;
   Writer out;
-  out.i64(world_.gameTime());
-  out.varInt(0);
-  send("set_time", out);
+  sendSetTime();
   constexpr const char *initial[]{
       "smooth_stone",        "sticky_piston",  "slime_block",
       "white_carpet",        "redstone_block", "observer",
@@ -636,7 +733,7 @@ void Session::finishJoin() {
   positionPacket(out, position_, {}, yaw_, pitch_);
   send("player_position", out);
   broadcastEntities();
-  // TODO: recipes, commands, world clocks, achievements, player avatars and
+  // TODO: recipes, commands, achievements, player avatars and
   // player physics/pushes. This endpoint is a creative editor of loaded chunks.
 }
 void Session::stack(Writer &out, const ItemStack &item) const {
@@ -1154,6 +1251,10 @@ void Session::play(int id, Reader &in) {
   } else if (diagnostic)
     diagnostic("TODO: unsupported play packet ignored");
 }
+bool Session::hasManagedChunk(int chunkX, int chunkZ) const {
+  return availableChunks_.contains({chunkX, chunkZ});
+}
+
 bool Session::hasChunk(Pos p) const {
   return sentChunks_.contains({chunkCoord(p.x), chunkCoord(p.z)});
 }
@@ -1393,7 +1494,7 @@ void Session::lightChunkLifecycle(int chunkX, int chunkZ, bool loaded) {
       sentChunks_.erase(key);
       try {
         Writer out;
-        // FriendlyByteBuf.writeChunkPos: x in the low i32, z in the high i32.
+        // FriendlyByteBuf.writeChunkPos = ChunkPos.toLong, x low bits.
         out.i32(chunkZ);
         out.i32(chunkX);
         send("forget_level_chunk", out);
@@ -1412,7 +1513,8 @@ void Session::lightChunkLifecycle(int chunkX, int chunkZ, bool loaded) {
                                                      chunkX, chunkZ)
                          : nullptr;
   const auto sky = service
-                       ? service->latestLayerChunk(LightLayer::Sky, chunkX, chunkZ)
+                       ? service->latestLayerChunk(LightLayer::Sky, chunkX,
+                                                   chunkZ)
                        : nullptr;
   if (block && block->protocolReady &&
       (!block->skyLightEnabled || (sky && sky->protocolReady)))
@@ -1420,6 +1522,71 @@ void Session::lightChunkLifecycle(int chunkX, int chunkZ, bool loaded) {
   else
     awaitingLightChunks_.insert(key);
 }
+
+void Session::setManagedResidencyProvider(
+    std::function<bool(int, int)> resident,
+    std::function<std::vector<std::pair<int, int>>()> chunks) {
+  managedResidency_ = std::move(resident);
+  managedChunks_ = std::move(chunks);
+  if (closed())
+    return;
+  if (phase_ != Phase::Play) {
+    // Provider installation commonly happens during Handshake. Do not encode
+    // Play packets before the configuration transition. The first join() syncs
+    // the current resident snapshot.
+    return;
+  }
+  syncManagedResidency();
+}
+
+void Session::syncManagedResidency() {
+  if (!managedChunks_)
+    return;
+  std::set<std::pair<int, int>> snapshot;
+  for (const auto &chunk : managedChunks_())
+    if (!managedResidency_ ||
+        managedResidency_(chunk.first, chunk.second))
+      snapshot.insert(chunk);
+  for (const auto &chunk : managedPendingResidency_)
+    snapshot.insert(chunk);
+  managedPendingResidency_.clear();
+  availableChunks_ = std::move(snapshot);
+}
+
+void Session::managedChunkResidency(int chunkX, int chunkZ, bool resident) {
+  if (closed())
+    return;
+  const std::pair key{chunkX, chunkZ};
+  if (phase_ != Phase::Play) {
+    if (resident)
+      managedPendingResidency_.insert(key);
+    else
+      managedPendingResidency_.erase(key);
+    return;
+  }
+  if (resident) {
+    availableChunks_.insert(key);
+    if (chunkCenter_ && chunkVisible(key) &&
+        world_.isChunkLoaded(chunkX, chunkZ))
+      queuePendingChunk(key);
+    return;
+  }
+  availableChunks_.erase(key);
+  expireChunk(key);
+  std::erase(pendingChunks_, key);
+  awaitingLightChunks_.erase(key);
+  if (sentChunks_.erase(key) != 0) {
+    try {
+      Writer out;
+      out.i32(chunkZ);
+      out.i32(chunkX);
+      send("forget_level_chunk", out);
+    } catch (const ProtocolError &) {
+      disconnect("Explicit chunk unload failed for this connection");
+    }
+  }
+}
+
 void Session::sendTickTime(double milliseconds, std::int64_t tick, std::size_t samples) {
   if (phase_ != Phase::Play || !std::isfinite(milliseconds) || milliseconds < 0)
     return;
@@ -1452,9 +1619,7 @@ void Session::runCommand(std::string_view line) {
   if (!commands_ || !commandContext_)
     return;
   command::Source source;
-  // TODO: vanilla checks the op list / permission level per player; this
-  // server has no operator list yet, so the local player is an admin.
-  source.permissionLevel = 4;
+  source.permissionLevel = options_.commandPermissionLevel;
   source.name = username_;
   if (commands_->run(line, source, *commandContext_) < 0) {
     // The client parses against the exported tree before sending, so this is a
@@ -1480,7 +1645,7 @@ void Session::sendSuggestions(int requestId, std::string_view line) {
     const bool slash = !line.empty() && line.front() == '/';
     const std::string_view body = slash ? line.substr(1) : line;
     command::Source source;
-    source.permissionLevel = 4;
+    source.permissionLevel = options_.commandPermissionLevel;
     source.name = username_;
     auto completion = commands_->suggestions(body, source);
     if (slash)
@@ -1816,12 +1981,8 @@ void Session::tick() {
       out.i64(*keepAlive_);
       send("keep_alive", out);
     }
-    if (connectionTicks_ % 20 == 0) {
-      Writer out;
-      out.i64(world_.gameTime());
-      out.varInt(0);
-      send("set_time", out);
-    }
+    if (connectionTicks_ % 20 == 0)
+      sendSetTime();
     refreshChunkView();
     sendChunkBatch();
     if (joinPositionPending_ && !sentChunks_.empty())

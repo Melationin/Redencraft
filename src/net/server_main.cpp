@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -16,6 +17,8 @@
 #include "redstone/net/outbox.hpp"
 #include "redstone/net/tick_timing.hpp"
 #include "redstone/storage.hpp"
+#include "redstone/tickets.hpp"
+#include "redstone/world_chunk_manager.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -23,6 +26,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <tuple>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
@@ -71,6 +75,20 @@ const char *consoleText(const std::string &key) {
       {"commands.tick.step.stop.success",
        "Interrupted the current tick step"},
       {"commands.tick.step.success", "Stepping %s tick(s)"},
+      {"commands.time.pause", "Paused clock %s"},
+      {"commands.time.query.absolute", "Clock %s is at %s tick(s)"},
+      {"commands.time.query.gametime", "The game time is %s tick(s)"},
+      {"commands.time.query.timeline", "Timeline %s is at %s tick(s)"},
+      {"commands.time.query.timeline.repetitions",
+       "Timeline %s has passed %s repetition(s)"},
+      {"commands.time.rate", "Clock %s will now advance at %sx normal rate"},
+      {"commands.time.resume", "Resumed clock %s"},
+      {"commands.time.set.absolute", "Set %s to %s tick(s)"},
+      {"commands.time.set.time_marker", "Set %s to time marker %s"},
+      {"commands.time.no_time_marker_found",
+       "Time marker %s does not exist for clock %s"},
+      {"commands.time.wrong_timeline_for_clock",
+       "Timeline %s is not valid for clock %s"},
   };
   const auto it = table.find(key);
   return it == table.end() ? nullptr : it->second;
@@ -95,11 +113,33 @@ std::string formatConsole(const command::Message &message) {
 // so a blocking read never stalls the tick loop; the loop drains the queue.
 class ConsoleInput {
 public:
-  ConsoleInput() : worker_([this] { run(); }) {}
+  explicit ConsoleInput(bool enabled = true) {
+#ifndef _WIN32
+    if (enabled) {
+      if (::pipe(wakePipe_) != 0)
+        wakePipe_[0] = wakePipe_[1] = -1;
+    }
+#endif
+    if (enabled)
+      worker_ = std::thread([this] { run(); });
+  }
   ~ConsoleInput() {
     done_ = true;
+#ifndef _WIN32
+    if (wakePipe_[1] >= 0) {
+      const char wake = 1;
+      while (::write(wakePipe_[1], &wake, 1) < 0 && errno == EINTR) {
+      }
+    }
+#endif
     if (worker_.joinable())
       worker_.join();
+#ifndef _WIN32
+    if (wakePipe_[0] >= 0)
+      ::close(wakePipe_[0]);
+    if (wakePipe_[1] >= 0)
+      ::close(wakePipe_[1]);
+#endif
   }
   // Returns false when no complete line is pending.
   bool next(std::string &line) {
@@ -112,31 +152,73 @@ public:
   }
 
 private:
+  void pushLine(std::string &buffer) {
+    if (buffer.empty())
+      return;
+    {
+      std::lock_guard lock(mutex_);
+      pending_.push_back(std::move(buffer));
+    }
+    buffer.clear();
+  }
   void run() {
     std::string buffer;
+#ifndef _WIN32
+    if (wakePipe_[0] >= 0) {
+      while (!done_) {
+        struct pollfd fds[2]{
+            {STDIN_FILENO, POLLIN, 0},
+            {wakePipe_[0], POLLIN, 0},
+        };
+        const int ready = ::poll(fds, 2, -1);
+        if (ready < 0) {
+          if (errno == EINTR)
+            continue;
+          break;
+        }
+        if (done_ || (fds[1].revents & (POLLIN | POLLERR | POLLHUP)))
+          break;
+        if (fds[0].revents & (POLLIN | POLLHUP)) {
+          char ch = 0;
+          const ssize_t n = ::read(STDIN_FILENO, &ch, 1);
+          if (n == 0)
+            break;
+          if (n < 0) {
+            if (errno == EINTR)
+              continue;
+            break;
+          }
+          if (ch != '\n' && ch != '\r') {
+            buffer.push_back(ch);
+            continue;
+          }
+          pushLine(buffer);
+          continue;
+        }
+        if (fds[0].revents & (POLLERR | POLLNVAL))
+          break;
+      }
+      pushLine(buffer);
+      return;
+    }
+#endif
     for (int c; !done_ && (c = std::fgetc(stdin)) != EOF;) {
       if (c != 10 && c != 13) {
         buffer.push_back(static_cast<char>(c));
         continue;
       }
-      if (buffer.empty())
-        continue;
-      {
-        std::lock_guard lock(mutex_);
-        pending_.push_back(buffer);
-      }
-      buffer.clear();
+      pushLine(buffer);
     }
-    if (!buffer.empty()) {
-      std::lock_guard lock(mutex_);
-      pending_.push_back(std::move(buffer));
-    }
+    pushLine(buffer);
     // stdin hit EOF (a piped script or a closed console): the server keeps
     // running instead of treating it as a stop request.
   }
   std::mutex mutex_;
   std::deque<std::string> pending_;
   std::atomic<bool> done_{false};
+#ifndef _WIN32
+  int wakePipe_[2]{-1, -1};
+#endif
   std::thread worker_;
 };
 
@@ -393,12 +475,81 @@ int integer(const std::string &value, int lo, int hi) {
 std::filesystem::path utf8Path(const std::string &value) {
   return std::filesystem::path(std::u8string(value.begin(), value.end()));
 }
+class TicketedWorldLock {
+public:
+  explicit TicketedWorldLock(const std::filesystem::path &directory) {
+#if defined(__linux__)
+    const auto path = directory / "session.lock";
+    fd_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
+    if (fd_ < 0)
+      throw ProtocolError("cannot open session.lock: " + path.string());
+    struct flock lock{};
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 0;
+    lock.l_len = 0;
+    if (::fcntl(fd_, F_SETLK, &lock) != 0) {
+      ::close(fd_);
+      fd_ = -1;
+      throw ProtocolError("world is already locked: " + path.string());
+    }
+#else
+    (void)directory;
+    throw ProtocolError(
+        "--ticketed-world write mode is currently supported only on Linux");
+#endif
+  }
+  ~TicketedWorldLock() {
+#if defined(__linux__)
+    if (fd_ >= 0)
+      ::close(fd_);
+#endif
+  }
+  TicketedWorldLock(const TicketedWorldLock &) = delete;
+  TicketedWorldLock &operator=(const TicketedWorldLock &) = delete;
+private:
+#if defined(__linux__)
+  int fd_ = -1;
+#endif
+};
+
+// These callbacks capture the NetworkWriter and connection list. Detach them
+// before either dependency leaves scope on normal shutdown or exception unwind.
+class NetworkTeardownGuard {
+public:
+  NetworkTeardownGuard(World &world, WorldChunkManager *manager)
+      : world_(world), manager_(manager) {}
+  ~NetworkTeardownGuard() { detach(); }
+  NetworkTeardownGuard(const NetworkTeardownGuard &) = delete;
+  NetworkTeardownGuard &operator=(const NetworkTeardownGuard &) = delete;
+  void detach() noexcept {
+    world_.lightPublicationObserver = {};
+    world_.lightChunkLifecycleObserver = {};
+    world_.blockUpdateObserver = {};
+    world_.blockEventObserver = {};
+    world_.blockUpdatesBroadcastObserver = {};
+    world_.entityTrackingBroadcastObserver = {};
+    world_.entityAddedObserver = {};
+    world_.entityRemovedObserver = {};
+    world_.explosionObserver = {};
+    world_.fallingBlockLandObserver = {};
+    if (manager_) {
+      manager_->managedChunkInstalled = {};
+      manager_->managedChunkRemoved = {};
+    }
+  }
+private:
+  World &world_;
+  WorldChunkManager *manager_;
+};
+
 } // namespace
 int runServer(int argc, char **argv) {
   try {
     std::filesystem::path assets = REDSTONE_PROTOCOL_DIR, worldPath,
-                          schematicPath;
+                          schematicPath, ticketedWorldPath;
     int port = 25565, maxTicks = 0, forceMargin = 2;
+    int simulationDistance = 10;
     bool explicitSpawn = false, explicitOffset = false;
     bool consoleEnabled = true, fluidFixture = false;
     LitematicOptions schematicOptions;
@@ -408,15 +559,18 @@ int runServer(int argc, char **argv) {
       const std::string arg = argv[i];
       if (arg == "--help") {
         std::cout
-            << "redstone_vanilla_server [--port 25565] [--assets "
-               "directory] [--world directory | --schematic file]\n"
-               "  [--chunk x,z ...] [--ticks N] [--spawn x,y,z]\n"
-               "  [--offset x,y,z] [--view-distance 3] [--force-margin 2]\n"
+            << "redstone_vanilla_server [--port 25565] [--assets directory] "
+               "[--world directory | --schematic file | "
+               "--ticketed-world directory]\n"
+               "  [--chunk x,z ...] [--ticks N] [--spawn x,y,z] "
+               "[--offset x,y,z] [--view-distance 3] [--force-margin 2]\n"
                "  [--allow-unsupported] [--fluid-basin] [--no-console] "
-               "[--light-workers 1|2]\n"
-               "Local offline protocol 775 creative editor. Fixed loaded "
-               "simulation region; no saving. Litematic: anvils become "
-               "obsidian, signs are omitted. Tick time sent to chat.\n";
+               "[--light-workers 1] [--ticket-view-distance 3] "
+               "[--simulation-distance 10] [--command-permission-level 0]\n"
+               "Offline --world/--schematic modes do not save. "
+               "--ticketed-world opens the overworld region and session.lock "
+               "for writes; entities, block entities, level.dat and tickets "
+               "are not persisted yet.\n";
         return 0;
       }
       if (arg == "--no-console") {
@@ -447,16 +601,23 @@ int runServer(int argc, char **argv) {
         assets = utf8Path(value);
       else if (arg == "--world")
         worldPath = utf8Path(value);
+      else if (arg == "--ticketed-world")
+        ticketedWorldPath = utf8Path(value);
       else if (arg == "--schematic")
         schematicPath = utf8Path(value);
       else if (arg == "--view-distance")
         options.viewDistance = integer(value, 2, maxViewDistance);
+      else if (arg == "--ticket-view-distance")
+        options.ticketViewDistance = integer(value, 2, 32);
+      else if (arg == "--simulation-distance")
+        simulationDistance = integer(value, 2, 32);
       else if (arg == "--force-margin")
         forceMargin = integer(value, 0, 16);
       else if (arg == "--light-workers") {
         if (integer(value, 1, 2) != 1)
           throw ProtocolError("--light-workers only supports one worker");
-      }
+      } else if (arg == "--command-permission-level")
+        options.commandPermissionLevel = integer(value, 0, 4);
       else if (arg == "--offset") {
         std::istringstream in(value);
         char a, b;
@@ -494,12 +655,84 @@ int runServer(int argc, char **argv) {
       } else
         throw ProtocolError("unknown argument " + arg);
     }
-    if (!worldPath.empty() && !schematicPath.empty())
-      throw ProtocolError("choose --world or --schematic");
+    const int sourceModes = int(!worldPath.empty()) +
+                            int(!schematicPath.empty()) +
+                            int(!ticketedWorldPath.empty());
+    if (sourceModes > 1)
+      throw ProtocolError(
+          "choose exactly one of --world, --schematic, --ticketed-world");
+    if (!ticketedWorldPath.empty()) {
+      if (fluidFixture || explicitOffset || !options.chunks.empty())
+        throw ProtocolError(
+            "--ticketed-world is incompatible with --chunk, --offset and "
+            "--fluid-basin");
+    }
     if (schematicPath.empty() && explicitOffset)
       throw ProtocolError("--offset requires --schematic");
     ProtocolData data(assets);
     World world;
+    std::optional<WorldMetadata> ticketedMetadata;
+    std::vector<PersistentTicketRecord> persistentTickets;
+    const auto ticketRecordLess = [](const PersistentTicketRecord &a,
+                                     const PersistentTicketRecord &b) {
+      return std::tie(a.x, a.z, a.type, a.level, a.ticksLeft) <
+             std::tie(b.x, b.z, b.type, b.level, b.ticksLeft);
+    };
+    // The lock outlives the manager so exception unwinding still protects the
+    // manager's best-effort final save.
+    std::unique_ptr<TicketedWorldLock> ticketedLock;
+    std::unique_ptr<WorldChunkManager> ticketedManager;
+    if (!ticketedWorldPath.empty()) {
+      ticketedLock = std::make_unique<TicketedWorldLock>(ticketedWorldPath);
+      const auto region = defaultRegionDirectory(ticketedWorldPath);
+      if (!std::filesystem::is_directory(region))
+        throw ProtocolError("--ticketed-world has no overworld region");
+      ticketedMetadata = loadWorldMetadata(ticketedWorldPath);
+      world.setGameTime(ticketedMetadata->gameTime);
+      world.setSeed(static_cast<std::uint64_t>(ticketedMetadata->seed));
+      world.tntExplodes = ticketedMetadata->gameRules.tntExplodes;
+      world.waterSourceConversion =
+          ticketedMetadata->gameRules.waterSourceConversion;
+      world.lavaSourceConversion =
+          ticketedMetadata->gameRules.lavaSourceConversion;
+      std::cout << "TICKETED_GAME_RULES advanceTime="
+                << ticketedMetadata->gameRules.advanceTime
+                << " tntExplodes=" << world.tntExplodes
+                << " waterSourceConversion=" << world.waterSourceConversion
+                << " lavaSourceConversion=" << world.lavaSourceConversion
+                << std::endl;
+      for (const BuiltinWorldClock clock :
+           {BuiltinWorldClock::Overworld, BuiltinWorldClock::TheEnd}) {
+        const WorldClockState &state = ticketedMetadata->worldClocks.state(clock);
+        std::cout << "TICKETED_WORLD_CLOCK "
+                  << (clock == BuiltinWorldClock::Overworld
+                          ? "minecraft:overworld"
+                          : "minecraft:the_end")
+                  << " total_ticks=" << state.totalTicks
+                  << " partial_tick=" << state.partialTick
+                  << " rate=" << state.rate
+                  << " paused=" << (state.paused ? 1 : 0) << std::endl;
+      }
+      persistentTickets = loadPersistentTickets(ticketDataPath(region));
+      std::sort(persistentTickets.begin(), persistentTickets.end(),
+                ticketRecordLess);
+      ticketedManager = std::make_unique<WorldChunkManager>(
+          world, region, options.ticketViewDistance, simulationDistance);
+      if (!persistentTickets.empty()) {
+        std::vector<std::pair<ChunkTicketPos, Ticket>> restore;
+        restore.reserve(persistentTickets.size());
+        for (const PersistentTicketRecord &record : persistentTickets)
+          restore.emplace_back(
+              ChunkTicketPos{record.x, record.z},
+              Ticket(record.type == ticket_types::Forced.name
+                         ? ticket_types::Forced
+                         : ticket_types::Portal,
+                     record.level, record.ticksLeft));
+        (void)ticketedManager->restorePersistentTickets(restore);
+        std::cout << "TICKETED_TICKETS_LOADED "
+                  << persistentTickets.size() << std::endl;
+      }
+    }
     if (!schematicPath.empty()) {
       if (!options.chunks.empty())
         throw ProtocolError(
@@ -581,6 +814,9 @@ int runServer(int argc, char **argv) {
       for (auto [x, z] : options.chunks)
         if (!world.isChunkLoaded(x, z))
           throw ProtocolError("requested chunk absent from save");
+    } else if (ticketedManager) {
+      // Opt-in async managed world. startup read only metadata; region reads
+      // happen on the lifecycle worker.
     } else {
       if (options.chunks.empty())
         for (int x = -1; x <= 1; ++x)
@@ -672,10 +908,30 @@ int runServer(int argc, char **argv) {
               << " protocol=775 allocator=" << REDSTONE_ALLOCATOR_NAME
               << " workers=1" << std::endl;
     std::vector<std::shared_ptr<Connection>> connections;
+    TicketSourceManager ticketSources(
+        std::clamp(options.ticketViewDistance,
+                   TicketSourceManager::MinViewDistance,
+                   TicketSourceManager::MaxViewDistance),
+        simulationDistance);
     // Payloads/snapshots are collected on the main thread; framing, chunk
     // encoding and socket writes happen on the writer thread.
     NetworkWriter writer;
     writer.start();
+    NetworkTeardownGuard teardown(world, ticketedManager.get());
+    std::size_t ticketedInstalls = 0;
+    if (ticketedManager) {
+      ticketedManager->managedChunkInstalled = [&](const ChunkTicketPos &p) {
+        ++ticketedInstalls;
+        for (auto &c : connections)
+          if (!c->dead)
+            c->session.managedChunkResidency(p.x, p.z, true);
+      };
+      ticketedManager->managedChunkRemoved = [&](const ChunkTicketPos &p) {
+        for (auto &c : connections)
+          if (!c->dead)
+            c->session.managedChunkResidency(p.x, p.z, false);
+      };
+    }
     world.lightPublicationObserver =
         [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
           for (auto &c : connections)
@@ -751,13 +1007,25 @@ int runServer(int argc, char **argv) {
 #ifndef _WIN32
     std::signal(SIGPIPE, SIG_IGN);
 #endif
-    // MinecraftServer's command dispatcher and tick rate manager. /tick is the
-    // first registered command; the rest of the vanilla tree is TODO.
+    // MinecraftServer's command dispatcher and tick rate manager. /tick is
+    // always available; /time is added when the ticketed world owns clocks.
     command::Dispatcher commands;
     command::registerTickCommand(commands);
     TickRateManager tickRate;
     command::Context commandContext;
     commandContext.ticks = &tickRate;
+    if (ticketedMetadata) {
+      command::registerTimeCommand(commands);
+      commandContext.world = &world;
+      commandContext.worldClocks = &ticketedMetadata->worldClocks;
+      commandContext.worldClockChanged = [&](BuiltinWorldClock clock) {
+        for (auto &c : connections)
+          if (!c->dead && !c->session.closed()) {
+            c->session.sendWorldClockUpdate(clock);
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+    }
     std::array<std::int64_t, 100> tickTimes{};
     std::int64_t aggregatedTickNanos = 0;
     std::int64_t tickCount = 0;
@@ -769,11 +1037,13 @@ int runServer(int argc, char **argv) {
     double totalTickMilliseconds = 0, maxTickMilliseconds = 0;
     // Console front end: the same dispatcher the client uses, with a source at
     // owner level so the local operator can drive /tick without an op list.
-    ConsoleInput console;
+    ConsoleInput console(consoleEnabled);
     if (consoleEnabled)
       std::cout << "CONSOLE ready: type /tick ... (stop to shut down)"
                 << std::endl;
     while (!stopRequested && (!maxTicks || ticks < maxTicks)) {
+      if (ticketedManager)
+        ticketedManager->pump();
       // Console commands run on the server thread between ticks, so they can
       // never interleave with a running simulation.
       if (consoleEnabled)
@@ -790,6 +1060,12 @@ int runServer(int argc, char **argv) {
             std::cout << "Commands: /tick query | /tick rate <1..10000> | "
                          "/tick step [<time>|stop] | /tick sprint "
                          "<time>|stop | /tick freeze | /tick unfreeze"
+                      << (ticketedMetadata
+                              ? " | /time set <duration|marker> | /time add "
+                                "<duration> | /time pause|resume|rate <rate> | "
+                                "/time query time|gametime|<timeline> "
+                                "[repetition] | /time of <clock> ..."
+                              : "")
                       << std::endl;
             continue;
           }
@@ -840,12 +1116,26 @@ int runServer(int argc, char **argv) {
         if (socket.get() != invalidSocket && connections.size() < 8) {
           nonblocking(socket.get());
           auto sessionOptions = options;
-          sessionOptions.playerId +=
-              ticks * 8 + static_cast<int>(connections.size());
+          sessionOptions.playerId = world.allocateEntityId();
           connections.push_back(std::make_shared<Connection>(
               std::move(socket), world, data, std::move(sessionOptions)));
           writer.add(connections.back());
           connections.back()->session.attachCommands(&commands, &commandContext);
+          if (ticketedMetadata)
+            connections.back()->session.setWorldClockSource(
+                ticketedMetadata->worldClocks,
+                ticketedMetadata->gameRules.advanceTime);
+          if (ticketedManager) {
+            auto *manager = ticketedManager.get();
+            auto *session = &connections.back()->session;
+            session->setManagedResidencyProvider(
+                [manager](int x, int z) {
+                  return manager->isManaged({x, z});
+                },
+                [manager]() {
+                  return manager->managedChunks();
+                });
+          }
         }
       }
       for (auto &c : connections) {
@@ -862,8 +1152,41 @@ int runServer(int argc, char **argv) {
         if (c->session.closed())
           c->closing = true;
       }
-      std::erase_if(connections, [](const auto &c) {
-        return c->dead.load() || (c->closing.load() && c->flushed.load());
+      for (const auto &connection : connections) {
+        const bool present = ticketPlayerDemandActive(
+            connection->session.phase() == Phase::Play,
+            connection->dead.load(), connection->closing.load(),
+            connection->session.closed());
+        const auto position = connection->session.playerPosition();
+        const ChunkTicketPos center{
+            static_cast<int>(std::floor(position.x)) >> 4,
+            static_cast<int>(std::floor(position.z)) >> 4};
+        if (ticketedManager)
+          (void)ticketedManager->setPlayer(
+              static_cast<std::uint64_t>(connection->session.playerId()),
+              present, center);
+        else
+          (void)ticketSources.setPlayer(
+              static_cast<std::uint64_t>(connection->session.playerId()),
+              present, center);
+      }
+      // One bounded manager pump per socket iteration keeps completed I/O and
+      // a large frozen-world ticket-removal queue moving without doing work
+      // once per connection. Held autosave remains server-tick-only.
+      if (ticketedManager)
+        ticketedManager->pump();
+      std::erase_if(connections, [&](const auto &c) {
+        const bool remove =
+            c->dead.load() || (c->closing.load() && c->flushed.load());
+        if (remove) {
+          if (ticketedManager)
+            (void)ticketedManager->removePlayer(
+                static_cast<std::uint64_t>(c->session.playerId()));
+          else
+            (void)ticketSources.removePlayer(
+                static_cast<std::uint64_t>(c->session.playerId()));
+        }
+        return remove;
       });
       auto now = std::chrono::steady_clock::now();
       // MinecraftServer.run: a sprinting iteration ticks immediately and
@@ -877,9 +1200,15 @@ int runServer(int argc, char **argv) {
       if (now >= nextTick) {
         const auto tickStart = now;
         tickRate.tick();
+        if (ticketedMetadata)
+          ticketedMetadata->worldClocks.tick(
+              tickRate.runsNormally(),
+              ticketedMetadata->gameRules.advanceTime);
         // TickRateManager.runsNormally: a frozen server skips level ticking but
         // keeps connections alive.
-        if (tickRate.runsNormally())
+        if (ticketedManager)
+          ticketedManager->serverTick(true, tickRate.runsNormally());
+        else if (tickRate.runsNormally())
           world.tick();
         else
           world.drainLightPublications();
@@ -969,11 +1298,88 @@ int runServer(int argc, char **argv) {
           }
       }
     }
+    if (ticketedManager) {
+      ChunkShutdownResult shutdown = ticketedManager->close();
+      std::cout << "TICKETED_WORLD_CLOSED complete="
+                << (shutdown.complete ? 1 : 0)
+                << " saved=" << shutdown.savedChunks.size()
+                << " unsaved=" << shutdown.unsavedChunks.size()
+                << " worker_stopped=" << (shutdown.workerStopped ? 1 : 0)
+                << " resident_installs=" << ticketedInstalls << std::endl;
+      if (!shutdown.fatalError.empty())
+        std::cerr << "TICKETED_WORLD_FATAL " << shutdown.fatalError
+                  << std::endl;
+      for (const ChunkShutdownIssue &issue : shutdown.unsavedChunks)
+        std::cerr << "UNSAVED_CHUNK " << issue.position.x << " "
+                  << issue.position.z << " dirty=" << issue.dirtyVersion
+                  << " saved=" << issue.savedDirtyVersion
+                  << " error=" << issue.error << std::endl;
+      if (!shutdown.complete)
+        return 1;
+      // Terrain has settled under the same world lock. Metadata and tickets
+      // follow as separate observable files; no cross-file crash transaction
+      // is claimed.
+      bool metadataSaved = false;
+      if (world.gameTime() != ticketedMetadata->gameTime) {
+        setWorldMetadataTime(*ticketedMetadata, world.gameTime());
+        saveWorldMetadata(ticketedWorldPath, *ticketedMetadata);
+        metadataSaved = true;
+      }
+      const bool clocksSaved = ticketedMetadata->worldClocks.saveIfDirty(
+          ticketedWorldPath / "data" / "minecraft" / "world_clocks.dat");
+      const auto tickets = ticketedManager->ticketSources()
+                               .tickets()
+                               .storage()
+                               .persistentTickets();
+      std::vector<PersistentTicketRecord> ticketRecords;
+      ticketRecords.reserve(tickets.size());
+      for (const auto &[position, ticket] : tickets)
+        if (ticket.type().name == ticket_types::Forced.name ||
+            ticket.type().name == ticket_types::Portal.name)
+          ticketRecords.push_back({position.x, position.z,
+                                   std::string(ticket.type().name),
+                                   ticket.level(), ticket.ticksLeft()});
+      std::sort(ticketRecords.begin(), ticketRecords.end(), ticketRecordLess);
+      // Missing and empty persisted data both serialize as no tickets. Avoid
+      // materialising a new file merely because no persistent tickets exist.
+      const bool noTicketFile =
+          !std::filesystem::exists(ticketDataPath(
+              defaultRegionDirectory(ticketedWorldPath)));
+      const auto sameTickets = [](const auto &left, const auto &right) {
+        if (left.size() != right.size())
+          return false;
+        for (std::size_t i = 0; i < left.size(); ++i) {
+          const auto &a = left[i];
+          const auto &b = right[i];
+          if (a.x != b.x || a.z != b.z || a.type != b.type ||
+              a.level != b.level || a.ticksLeft != b.ticksLeft)
+            return false;
+        }
+        return true;
+      };
+      const auto ticketPath =
+          ticketDataPath(defaultRegionDirectory(ticketedWorldPath));
+      const bool ticketsChanged =
+          !(noTicketFile && ticketRecords.empty()) &&
+          !sameTickets(persistentTickets, ticketRecords);
+      if (ticketsChanged &&
+          (!ticketRecords.empty() || std::filesystem::exists(ticketPath))) {
+        savePersistentTickets(ticketPath, ticketRecords);
+      }
+      std::cout << "TICKETED_METADATA_SAVED metadata="
+                << (metadataSaved ? 1 : 0)
+                << " tickets=" << (ticketsChanged ? 1 : 0)
+                << " clocks=" << (clocksSaved ? 1 : 0) << std::endl;
+    }
+    teardown.detach();
     writer.stop();
     std::cout << "STOPPED ticks=" << ticks
               << " mean_ms=" << (ticks ? totalTickMilliseconds / ticks : 0)
               << " max_ms=" << maxTickMilliseconds
               << " backpressure_disconnects=" << writer.backpressureDisconnects() << '\n';
+    // NetworkWriter owns connection handles until its final join. Release
+    // Session/World references before the manager and World leave scope.
+    connections.clear();
     return 0;
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

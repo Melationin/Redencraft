@@ -49,6 +49,10 @@ bool pistonIsPushable(World &, Pos, const BlockState &, Direction, bool,
 void pistonNeighborChanged(World &, Pos, const BlockState &);
 void pistonOnPlace(World &, Pos, const BlockState &, const BlockState &);
 bool pistonBlockEvent(World &, Pos, const BlockState &, int, int);
+// Shared piston entity movement path. It updates entity-section state and the
+// managed persistence observer before control returns to World::tick.
+void moveEntityByPiston(World &world, Direction pistonDirection, Entity &entity,
+                        double delta, Direction movement);
 void pistonTickBlockEntities(World &);
 void pistonPreRemoveSideEffects(World &, Pos);
 void pistonForgetWorld(World &);

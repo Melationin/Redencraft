@@ -87,7 +87,8 @@ def handshake(s, state, port):
 
 def run(server):
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    process = subprocess.Popen([str(server), "--port", "0", "--ticks", "160"],
+    process = subprocess.Popen([str(server), "--port", "0", "--ticks", "160",
+                                "--command-permission-level", "4"],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, creationflags=flags)
     try:

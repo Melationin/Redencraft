@@ -43,6 +43,8 @@ public:
   const EntityType &type() const { return *type_; }
   const std::string &typeName() const { return type_->name; }
   int id = 0;
+  // Persistent UUID; never used as the runtime protocol/tracking id.
+  std::array<std::int32_t, 4> uuid{};
   // EntitySectionStorage: SectionPos.asLong of the section this entity is
   // bucketed in (maintained by World, like the vanilla entity section callback).
   std::uint64_t entitySection = 0;
@@ -60,7 +62,7 @@ public:
   bool verticalCollisionBelow = false;
   bool noPhysics = false;
   int remainingFireTicks = 0;
-  float fallDistance = 0;
+  double fallDistance = 0.0;
 
   Aabb boundingBox() const;
   Vec3 eyePosition() const { return position + Vec3{0, eyeHeight(), 0}; }
@@ -138,6 +140,9 @@ private:
 class PrimedTnt : public Entity {
 public:
   explicit PrimedTnt(World &world, Vec3 pos);
+  // Managed install supplies the persisted direction and therefore does not
+  // consume World::random's ignition mixture.
+  PrimedTnt(World &world, Vec3 pos, Vec3 motion);
   void tick(World &world) override;
   bool fireImmune() const override { return true; }
   bool isPickable() const override { return !isRemoved(); }

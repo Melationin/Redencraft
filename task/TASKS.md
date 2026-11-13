@@ -1473,7 +1473,6 @@ L-2a 要保留已完成的同加载代可见结果直至后续发布，用生命
 
 固定世吞五组 × 1000 刻，相对 WSL 重建的前光照基线，配对中位 CPU +7.90%、平均刻墙钟 +13.27%、P95 +11.08%；相对当前关光 CPU +13.01%、墙钟 +16.13%。主/worker CPU 2/4，实际接收双层更新，模拟指纹一致，结束后排空等待 0.67–1.06 s。独立 CPU 采样显示 worker 栈 91.5% 在天空光路径，优先减少传播时的区段哈希/缺层寻址。详见 `docs/wsl-light-performance.md` 和仓库外日志。L-4b 未验收；L-4c、基础加载票、Anvil 顺序不变，后续验证改用 WSL/Linux 的同平台基线。
 
-任务通过
 
 ### L-4b 天空光工作层索引实验（coder，未验收）
 
@@ -1704,7 +1703,7 @@ Final affected validation (no CTest):
 
 Evidence directory: /home/zhddsj/.local/state/redstone-cpp/wsl-stage1-final-20261112/
 Hashes:
-- build-final.log 8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794
+- build-final.log 91f6171ced6a92db6c5b855c3aac01cd56966088d4401f0767b8c84fc7bb1197
 - light-tests.log b86aadb158f06b0dd32dea42c8c0cdf30f0548920b553ab0e75b061855b0022d
 - light-protocol.log d15646170c5d13e0b748eead5b6a03c0adc08d60aeea7391f4f37dc62438f8bc
 - sky-golden.log d771cfbdf6604fe53ae363aaed3b93c725b4dc774a1fa6ecd98dd293f25d7468
@@ -1838,8 +1837,2225 @@ Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-batch20-pairs-rerun-2026111
 
 The fixed geometry and result rings were replaced with segmented SPSC queues. The first geometry segment remains 10 MiB and the first result segment remains 4 MiB. When a segment fills, the producer allocates and links a same-size successor without moving queued values; the consumer frees a segment after draining it. One producer and one consumer preserve FIFO order across segment boundaries, and the per-record path remains lock-free.
 
-This removes capacity-based geometry drops and prevents the worker from spinning when a burst of layer results exceeds the initial result segment. The control queue remains bounded by maxQueuedCommands. Focused light tests cover a four-entry initial geometry segment, close-time drain across segments, and four result publications with a two-entry initial result segment. A host allocation failure still increments droppedGeometryTasks; ordinary capacity exhaustion does not.
+This removes capacity-based geometry drops and prevents the worker from spinning when a burst of layer results exceeds the initial result segment. The control queue grows as well, while maxQueuedCommands remains its initial segment size and per-batch control budget. Focused light tests cover a four-entry initial geometry segment, close-time drain across segments, and four result publications with a two-entry initial result segment. A host allocation failure still increments droppedGeometryTasks; ordinary capacity exhaustion does not.
 
 Final affected validation: light_tests passed; light_protocol_tests passed with 206 packets; sky golden matched 243 observations + 72 raw-layer flags; block golden matched 225 observations. Final benchmark binary SHA-256 is e7e5e2069624b9f90596e2ac876b6698724499d25c0164c04881dbddc1715948. A 1000-tick diagnostic accepted 2,630,119 geometry tasks with rejected=0 and dropped_geometry=0; mean tick was 3.193 ms, median 2.334 ms, P95 6.862 ms, max 36.449 ms and over50=0, with pending zero after a 932.365 ms final wait. This is only a single diagnostic run, not a new performance claim. No CTest was run.
 
 Evidence is in /home/zhddsj/.local/state/redstone-cpp/wsl-growable-ring-20261112-*.log. Build log SHA-256 6e5c7d459bec3710b94bb50e3f7fb559b0ebd8c04590822f94bf49de78aaf0d0; light tests b86aadb158f06b0dd32dea42c8c0cdf30f0548920b553ab0e75b061855b0022d; protocol d15646170c5d13e0b748eead5b6a03c0adc08d60aeea7391f4f37dc62438f8bc; sky golden d771cfbdf6604fe53ae363aaed3b93c725b4dc774a1fa6ecd98dd293f25d7468; block golden d4430f685abc610d762409cb198c7b50cc6db7796a624cabefe05e71d09d85bb; final probe c3b8a18051083f12449be4972aca81824872fac31d1197ec348acd90ccba795f.
+
+
+### Light queue review correction (2026-11-12)
+
+Focused fixes on top of eb5d5b2, without changing propagation:
+
+- GrowableSpscRing::front now re-reads the current segment head after acquiring its next link. Until that confirmed head equals the consumer tail, it returns the unread old slot and does not unlink or delete the segment. This fixes a rollover race where an early empty observation could discard final records. The logical published count is stored before the slot head release; size reads consumed before published and saturates at zero for an in-flight producer.
+- drainCellChangesLocked samples geometry before controls. If the control is the next candidate, it re-reads geometry after the control acquire and only pops the control if no lower-sequence geometry is now visible. The opposite branch is safe because the control sample follows the geometry acquire. This provides strict sequence order across the two SPSC queues without a mutex.
+- Lifecycle controls now use GrowableSpscRing<PendingChunk>. maxQueuedCommands remains the initial control segment and the per-batch budget, but capacity no longer causes World load, unload, refresh, section-status, or compatibility block-change rejection. Close, invalid input, and inactive lifecycle rejection remain explicit.
+
+Focused regressions cover a two-entry geometry/control/result initial capacity, 48 concurrent lifecycle loads, 12 alternating geometry/refresh barriers across segment rollover, and a real World with eight loads plus unload/reload/refresh under a two-entry control segment. Final direct checks passed once after the final patch: light_tests; light_protocol_tests (206 packets); sky golden (243 observations + 72 raw-layer flags); block golden (225 observations). No CTest, performance campaign, commit, push, client launch, or unrelated dirty-file modification was performed.
+
+Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-light-review-fix-20261112-*.log. Build log SHA-256 e9152777ebc09917d98921442c1ca26283f78d132dd69a801bf95a2e014601c8; light tests b86aadb158f06b0dd32dea42c8c0cdf30f0548920b553ab0e75b061855b0022d; protocol d15646170c5d13e0b748eead5b6a03c0adc08d60aeea7391f4f37dc62438f8bc; sky golden d771cfbdf6604fe53ae363aaed3b93c725b4dc774a1fa6ecd98dd293f25d7468; block golden d4430f685abc610d762409cb198c7b50cc6db7796a624cabefe05e71d09d85bb. The uncommitted T-1 handoff file remains untouched with SHA-256 41e44b879d921b2dcabf3fcafc3fc491bde14b66b22b0145b6ed3cd531244684.
+
+## T-3 / T-4b-2 reviewer review (2026-11-12)
+
+恢复说明：先前上下文已压缩；当前 coder 为 01a1c9d4-b3f7-7772-9e55-e9ab9251774e。已等待其明确完成后才审查，未改产品代码、未重复运行 CTest。原文件末行缺少裸状态，按 AGENTS.md §3.5 记录此修正；本次结论为需返工。审查源码 hash 与 T4B2 交接一致，现有日志结果已读取。
+
+T-3 两项内存修复接受：实体探测结果随 StoreReadResult/安装消息 move，失败/旧代释放；readiness 只保存 managed resident 中心，局部刷新不插入缺失邻居。测试常量 entityReadMetadataCountForTest 不是运行时泄漏证据，但该修复可从所有权结构确认。
+
+1. **阻塞 / P1：managed 入口首次 accept 会抛出协议异常，且配置期间漏驻留更新。** src/net/server_main.cpp:912 在新 Session 的 Handshake 阶段调用 setManagedResidencyProvider；src/net/session.cpp:1437 无条件 refreshChunkView，内部 :1196 send set_chunk_cache_center 按当前阶段查询 packet，:289-291 必然抛 unknown handshake/clientbound 包，异常直接到 runServer 外层导致整服退出。另 :1436 再次 move 已移走的 resident 参数清空 predicate；:1435 丢弃 snapshot provider；:1442 忽略非 Play 期间的 resident/unresident。改成安装 provider 仅记录或同步可用集合，不发包；进入 Play 才同步当前驻留/发送，配置期间保留变化或 join 重新取快照。补：Handshake 安装 provider 不发 Play 包、不抛；配置期间加载/卸载后 join 集合正确；已有 resident 连接正常发送；真正 native TCP 客户端登录、收到真实磁盘 chunk 后编辑、断开、保存/重启读回。当前 tests/light_protocol_tests.cpp:533-560 没有调用 setManagedResidencyProvider，且 ignoredUnknownNonresident=true 是恒真断言，不能验收新入口。
+
+2. **阻塞 / P1：写世界缺少跨进程独占锁。** src/net/server_main.cpp:525-533 创建可写 manager 前未获取世界 session.lock，两个 native 实例不同端口或 Java+native 可以同时修改同一 region，其各自的单 worker 串行不能防止跨实例扇区表破坏。原版 ../net/minecraft/util/DirectoryLock.java:18-40 以 FileChannel.tryLock 持有 session.lock，LevelStorageSource.java:501 创建锁。在 metadata/region 读取前以 RAII 获得并持有覆盖 close 的同一文件锁，至少当前 WSL Linux 实现必须与 Java FileLock 互斥（不要仅用与 POSIX record lock 不互通的 flock）；其他平台支持或明确拒绝此写模式。隔离目录验证同 native 第二实例拒绝、Java FileChannel 锁持有时拒绝、释放后可再打开。
+
+3. **应修 / P1：玩家票 ID 会在同刻断开重连时重复。** src/net/server_main.cpp:896-897 用 ticks*8 + connections.size() 作为 session/playerId；例如同刻 A/B 初次连接后 A 离开，size 降到 1，再连接 C 得到和仍在线 B 相同的 ID。新代码把该 ID 当唯一玩家票键（:947），二人覆盖/移除彼此票，可能卸载另一人正在访问的区块。用服务端生命周期内单调且有范围保护的唯一连接 ID，票键不受 connections 压缩影响；协议 playerId 也保持活跃唯一。补同行进服/移除/重连的 ticket 覆盖断言。
+
+4. **应修 / P2：帮助与实作不符。** server_main.cpp:414-423 没列 --ticketed-world，反而宣称 no saving，交接称帮助已注明写 region，但实际没有。补 opt-in 用法、实际写盘以及此阶段无实体/BE/level.dat/持久票支持边界；light-workers 用实际只接受的 1。shutdown.fatalError 应打印，不能只给 complete=0 而丢原因。
+
+返工限上述入口/隔离/生命周期正确性，保持已收尾光照传播和无关 dirty files。coder 做新增行为必要的 direct tests 与隔离 native TCP / Java lock 探针，reviewer 仅复核证据，不跑 CTest、不做新性能活动。完成后更新本文件和 T4B2 交接，保留阶段尚未完成的持久票/level.dat/entity/BE，勿声称完整原版重启等价。
+
+
+### T-3 / T-4b-2 reviewer repair result (2026-11-12 coder)
+
+完成上述四项有界返工，保留此前工作区改动，未提交、未运行 CTest。
+
+- Session 的 managed residency provider 在 Handshake 只安装回调，不编码 Play 包；进入 Play 时同步 provider 快照与配置期间累积的 pending residency。协议测试覆盖 Handshake 安装、配置期间增删、join 发送已驻留区块；hasManagedChunk 现在用于真实非驻留 idempotent erase 断言。
+- --ticketed-world 在读取 metadata/region 前用 Linux fcntl(F_SETLK) 持有 session.lock，到 manager close 后才释放；非 Linux 明确拒绝该写模式。隔离目录验证第二 native 实例退出 1，Java FileChannel.tryLock 持有时 native 退出 1，Java 释放后原生锁探针成功。
+- 玩家/协议 id 改为服务器生命周期内单调唯一值，并有同 chunk 双玩家、断开、重连、最终移除的 ticket 覆盖测试。
+- 帮助列出 --ticketed-world 的写盘范围及 entity/BE/level.dat/持久票限制，且关闭时输出 fatal 原因。
+- managed_world_smoke.py 不再依赖临时环境变量或主线程 sleep：真实加载磁盘 chunk，第一轮移除 stone，第二轮重启后放置 smooth stone并收到目标更新；两轮均要求 complete=1、unsaved=0、无 fatal，重启读回是核心证据。显式 close 可能因先断线已隐式保存而显示 saved=0，该模式为合法结果。
+
+最终聚焦验证：light_protocol_tests assets/protocol775 通过 249 包；tickets_tests 通过；storage_tests 退出 0；world_chunk_manager_tests 带真实 terrain/tick region 夹具通过。最终 native smoke 通过并回放重启编辑；Java 26.1 用 RegionFile/NbtIo 读回结果 JAVA_MANAGED_CHUNK_OK DataVersion=4786 sections=1。原始日志与哈希见 task/T4B2-NATIVE-OPT-IN-HANDOFF.md 的 reviewer repair round；最终受影响测试日志见 wsl-reviewfix-20261112-*-final5/final6/final3。此前 29/29 CTest 记录仍是上一候选结果，本轮没有重跑 CTest；仍不声称完整原版重启等价。
+
+返工完成。
+
+最终清理后 binary SHA-256 6adb99b21d295c8d9ac0eba098191cc9e33af1f92426b4163bc3aa5c54d9e6d3；最终 smoke log SHA-256 eb990ffe4f1eb4a076651480b6488ce71806ff21db31a4eac292a1c3a4fb1c4c。
+
+### T-4b-2 返工审查：仍有两个阻塞（reviewer）
+
+已复核 coder 书面返工交付，未重复运行测试。T-3 内存修复、玩家票唯一 ID、同进程/Java 世界锁互斥证据、正式 region 格式读写证据均接受。T-4b-2 原生入口仍不能判为通过。
+
+1. **阻塞 P1，Play 登录包必须先于任何区块中心或区块。** src/net/session.cpp:534-536 在 join 前调用 syncManagedResidency，后者 :1458-1459 执行 refreshChunkView/sendChunkBatch。此处会先发 cache center 94，而 login 49 直到 :581。原版 PlayerList.java:171 先发 ClientboundLoginPacket；客户端 ClientPacketListener.java:511 初始化 level，:2439 才能更新它的缓存中心。把 join 前的 sync 改为只同步可用集合，join 已有顺序发 login 后再发 center/chunks。协议回归必须断言 login 首包；native 脚本不能把 94 当作首包。避免 accept 和 join 两次拷贝全量 resident 集合；有 join 快照就足够覆盖握手/配置期间变更。
+2. **阻塞 P1，异常退出必须有安全的锁与回调顺序，冒烟不能把 SIGKILL 当正常退出。** src/net/server_main.cpp:563-564 声明 manager 再声明 lock，展开栈时 lock 先析构，兜底保存可能无锁。:760+ 及 World 光照回调捕获稍后定义的 connections/writer；异常展开后 manager 析构 close 可能读取已析构对象。调整 RAII 生命周期，确保所有保存（正常/异常）有锁，明确在依赖析构前拆下托管及 World 网络观察回调；可用内部 scope guard。validation/protocol775/managed_world_smoke.py:43-59 捕获超时后 kill，既不失败也不检查退出码，不能作为 clean exit 证据。脚本两轮均要求 exit 0，超时退出失败并只做清理；保存完成日志和真正退出分别检查。如存在挂起，先定位，避免大改光照。清除 TICKETED_LOCK_HELD / TICKETED_MANAGER_READY 临时调试行。
+
+补丁只改这两个阻塞，提供最小受影响的协议顺序回归及一次真正两轮 native TCP 正常退出证据；此前 region/Java/票测试不必重复，禁止 CTest。reviewer 记录详见 task/T4B2-FINAL-REVIEW.md。请及时交付剩余失败原因，不为整理重复跑无关用例。
+
+
+### T-4b-2 最终两阻塞返工结果（2026-11-12 coder）
+
+已只修 reviewer 指定的两项阻塞，未改动光照传播，未重复票/存储/manager/Java 锁/CTest。
+
+- Configuration finish 现在只调用 syncManagedResidency 更新 availableChunks_，不再 refreshChunkView/sendChunkBatch。join() 仍以 login(49) 为第一个 Play 包，随后发送 set_chunk_cache_center(94) 与区块。protocol 夹具直接断言 login 首包、随后 center 和两个 resident chunk；native smoke 用 packet 映射断言 Play 首包为 login，不再硬编码 94。
+- 关服路径已在正常的 ticketedManager->close() 后执行 teardown.detach() 拆掉所有捕获 connections/writer 的 World 及 manager 网络回调，再 writer.stop() 和清 connections。网络 teardown guard 的析构也会在异常脱离前拆除这些回调。TicketedWorldLock 声明早于 manager，因此异常展开时 manager 先 close，lock 最后释放；锁覆盖所有保存路径。移除 TICKETED_LOCK_HELD/TICKETED_MANAGER_READY 调试输出。
+- smoke 的 wait_for_close 超时现在失败，只有正常 communicate 和 returncode==0 才通过；两轮都要求 complete=1、unsaved=0、无 fatal。一次从交互 shell 后台启动的旧探针曾处于 Tl（作业控制暂停）并表现为超时；非交互 PTY 的真实 smoke 两轮均打印 STOPPED，smoke 返回 0。
+
+最终定向证据：light_protocol_tests assets/protocol775 通过 249 包；managed_world_smoke 两轮真实 TCP 编辑/保存/重启读回通过，exit 0，日志 /home/zhddsj/.local/state/redstone-cpp/wsl-reviewfix-final4-smoke.log（SHA-256 2a39236154bc6fec1fceede9b664dee63ec1b326e8fe986bd2fbc4400897bd78）；最终 binary SHA-256 d6eec6fbbdfffc8f316f7c680b65df3202a86a4eeac776db1058111466aa79a3。未运行 CTest。
+
+### T-4b-2 回归收口（reviewer）
+
+上轮两个阻塞已接受：Play 先发 login，退出观察回调有析构 guard，世界锁早于 manager 构造。脚本明确检查自然退出 0；官方 codec、锁与上一轮 manager/票证据继续有效。没有重跑 CTest。
+
+**P1，需修复玩家与 World 实体使用同一数字 ID。** src/net/server_main.cpp:890、974 从 1 分配协议 playerId，World::addEntity 同样从 1 分配（include/redstone/engine.hpp:398，src/entity.cpp:1174）；Session 给客户端直接发送实体 id，落沙/TNT/物品可抢占本地玩家编号。旧原生路径使用高位 playerId，因此当前变更是兼容性回归。应统一使用 World 的单调实体 ID 分配器给已接受连接和 World 实体分配（或明确的可证明不重叠分区），保留同刻重连不复用。不要按连接数/刻号生成。做一个有关 ID 不碰撞的最小验证。
+
+**同批两项简单收口，不改行为范围。** 把 teardown guard 放到安装第一个 manager 回调之前（两项回调赋值间/启动 writer 抛异常也受保护）。accept 的 sessionOptions.chunks=managedChunks() 和 join 快照重复：保留 join 的单次状态快照即可，或能保证相同功能的可见域取样。后者是坐标列表，不涉及 terrain/光页；仍不应在仅握手的连接复制全列表。若改动测试脚本日志，保留两轮独立结果，别覆盖/重复上一轮；无需为日志再跑完整测试。请仅编译改动和执行必要的窄验证，无需再跑此前已通过的完整 smoke/其他套件/CTest。完成后回报。
+
+
+### T-4b-2 回归收口结果（2026-11-12 coder）
+
+只处理以下三项，未重跑完整 smoke、Java、manager、票/存储或 CTest。
+
+- World::allocateEntityId() 成为 World 实体与已接受协议玩家的统一单调 ID 源。addEntity 和 server accept 的 playerId 都从它分配，删除实体或连接后也不复用。移除了 server 的独立 nextConnectionId。
+- NetworkTeardownGuard 已前移到第一个 manager residency 回调之前；因此任一回调赋值或 writer 启动抛异常时，World/manager 网络回调都会在依赖析构前拆除。
+- accept 不再预取 managedChunks() 到 sessionOptions.chunks；Join 的 provider 状态快照是唯一初始可见集合采集，握手连接不复制全区块列表。
+
+最小验证：entity_tests 通过，覆盖 player/entity 交错分配、移除后继续分配均不碰撞；native redstone_vanilla_server 与 entity_tests 编译成功。日志 /home/zhddsj/.local/state/redstone-cpp/wsl-idclose-entity.log（SHA-256 947d333a71d0a7c984d761d76d984490e16726286a8e35dd429670e723ce9485）；最终 binary SHA-256 3fd5d1fb3fa9a13ae5a43668379c708adedc4981847f71c7e54f754d15e78f95。未运行 CTest。
+
+### T-4b-2 审查结论（reviewer）
+
+T-3 两项内存修复和 T-4b-2 有界原生入口通过。最终源码确认 login 先于 cache center/chunk、POSIX 世界锁覆盖 manager 生命周期、异常路径在 writer/connections 析构前拆回调、统一实体/玩家 ID 分配、握手无重复驻留快照。沿用 coder 的 249 包定向协议、两轮隔离 native TCP 写盘与重启（退出码要求 0）、Java RegionFile/NbtIo 读回、Java/native 锁互斥和 World manager 实盘卸载验证。最后 ID/接线收口只构建 native 并跑 entity_tests；不把上轮 smoke 说成最终 ID 补丁后重跑。无 CTest 重复运行，未改光照传播。
+
+此结论只覆盖支持的 26.1 FULL overworld 地形与计划刻。实体/方块实体、持久票、level.dat 保存、按预算在线 autosave、生成和完整原版重启仍是后续阶段；不能把托管模式作为任意原版世界的完整写回路径。下一阶段验收依据见 CHUNK-TICKETS-ANVIL-HANDOFF.md。
+
+## W-3c1：持久加载票与 level.dat 时间（reviewer 下发，2026-11-12）
+
+在已验收的 WSL /home/zhddsj/cpp/redstone-cpp 托管入口继续做。仅做启动恢复与显式关服保存，在线 autosave、实体/方块实体、World Clocks、gamerules 修改、世界生成和光照另分后续任务。实现前按本记录领取，保留所有无关 dirty files。要求如下：
+
+1. 依据本地 ../net/minecraft 的 ServerChunkCache、DimensionType、SavedDataStorage、TicketStorage、Ticket/TicketType/ChunkPos：按当前 region 父目录下 data/minecraft/chunk_tickets.dat 定位；现代布局是 dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat，legacy 目录仍按实际 region 父目录，不混合读。用原版 gzip NBT envelope（DataVersion=4786、data、可省略 tickets）；chunk_pos IntArray[2]、type 名称、level 非负 int、ticks_left 可省略 long 默认 0。只写 persistent forced/portal，保存当前 ticks_left，不为每 tick 重建持久快照。读取先整体验证再批量应用，重启加载票进入 loading/simulation，恢复后 setForced(false) 能正确清除；未知版本/字段布局/损坏拒绝开启写模式且原文件不动。不要假设 decoded nonpersistent 就应该静默保存/覆盖；明确支持边界并记录原版行为。
+2. level.dat 保留原 NBT root/未知 metadata，仅更新 Data.Time。原版 LevelStorageSource.saveLevelData 先写同目录 gzip 临时文件并保留 level.dat_old；落地采用安全替换，正常 I/O/rename 失败应保持可读的现用文件，不用删除当前后再试写。不要更新/创建 clocks 或 gamerules。原 level.dat 已由 metadata-only 路径读取，尽可能复用单份 root，避免重复大拷贝或再次扫 region。时间无变化不写。持久票无变化不写（缺文件且没有票也不新建）。
+3. 仅 --ticketed-world 启动/关服接线；启动读验证完成才接入票，关服 terrain dirty save 成功后再保存 metadata，单项失败可观测、非零退出；不要承诺三文件跨崩溃事务。世界锁覆盖读、写、清理。常规 server loop 不做元数据 I/O，不引入每 tick I/O/全量序列化。较大拷贝或特殊内存开销请尽早报告。不要改 legacy --world 行为或已收尾光照。
+4. 定向证据：官方 26.1 jar 用 TicketStorage.CODEC / NbtOps 生成负坐标 forced 与非默认剩余时长 portal；C++ 恢复并用官方 codec 读回 C++ 产出，验证不存玩家票。使用隔离目录两次启动，证明无客户端时恢复的票使已存在 FULL chunk 真正驻留，Time 续接且 level.dat_old 保留前一版；可以复用现有 WorldManager 事件或定向验证方式，无需外部可写存档。覆盖损坏不覆盖、临时文件/替换失败和稳定无变更不写。计划与细节见 CHUNK-TICKETS-ANVIL-HANDOFF.md W-3c。只跑受影响定向用例，禁止 CTest，不重复 T-4b-2 测试矩阵。交接列关键文件、直接日志、未覆盖边界，勿提交/推送。
+
+
+### W-3c1 持久票与 level.dat 时间交付（2026-11-12 coder）
+
+已领取并完成 W-3c1，保留光照传播、legacy --world 和其他未提交改动。未提交、未推送、未运行 CTest、未启动客户端、未写原存档。
+
+- 新增 level.dat 单份模板读取、仅 Data.Time 更新、gzip 临时文件 + level.dat_old 备份 + rename；失败不先删除当前文件。
+- 新增维度本地 data/minecraft/chunk_tickets.dat 严格读取和保存；只持久化 forced/portal，保留 level/ticks_left；缺文件且无票不创建，内容无变化不写。
+- 启动使用 applyBatch 一次安装全部票；forced 只登记来源，避免重复票。关服在 terrain close 成功后、同一世界锁内保存 metadata 和票，失败为非零退出。
+- Java 26.1 TicketStorage.CODEC 生成并读取负坐标 forced/portal；两次隔离 native 启动 exit 0，均恢复 2 票；Time 52->62，level.dat_old 保留 52；manager 真实磁盘夹具证明恢复 forced 后驻留及 setForced(false) 清除。
+- 大拷贝：仅保留已有 level root 与每次保存的 NBT/gzip 临时缓冲；没有 terrain/光页/region 复制，也没有每 tick I/O。
+- 日志：wsl-w3c1-final2-run1.log SHA-256 9e741ab0138147a1eae8b004509fb3e41b20993e47f5731684fa2476970b5ddd；wsl-w3c1-final2-run2.log 47333d48793b2fe6b70a213ea271d35a8d111ba9206e183be1a824e86e6afdc3；wsl-w3c1-java/java-read-final2.log 66abdd0ea3609d88d69b7a5dce053dae268e17a526c49a24fe307fa8e14b9a27。最终 binary SHA-256 78784c986ff981483cb9d19038f8bee26dd0184da5e5d71b799b28ff7d9e6e71。
+
+未覆盖：World Clocks/gamerules、autosave budget、生成、实体/方块实体、完整原版重启等价。
+
+### W-3c1 审查返工（reviewer）
+
+**P1 实际读盘未接线。** src/net/server_main.cpp:631 丢弃 applyBatch 返回 TicketSystemUpdate，未传 manager.applyTicketUpdate，启动不会为持久票请求 terrain。tests/world_chunk_manager_tests.cpp:411 手动补调用，绕过实际入口。把持久恢复封成 manager 的同一个 API，由生产入口和 fixture 共用，一次批量 apply 并交付 loading changes。要有实际原生无客户端仅凭 forced 安装目标 FULL 的证据（可用已有启动/退出时诊断计数或明确坐标回调、不要在每刻扫描）。只报恢复票数量不够。保留 World::enableLighting 时序，若恢复导致立即 install，之后首次 enable 应只提交一次初始快照。
+
+**P1 存档输入/保存边界。** src/storage.cpp:753-769 接受任意 IntArray[2] 和 long；World managed readiness/邻域和 terrain 安装有 int 坐标运算。先验证可支持的 Minecraft 世界范围和 timeout 值（至少拒绝会触发 C++ 有符号溢出的 INT64_MIN，Java 正常持久 portal 的 ticks_left 非负）；坏文件在启用写模式前拒绝。src/net/server_main.cpp:617-623 同位置只留第一张 forced，但 TicketStorage 身份包含 level；src/tickets.cpp:1063-1077 setForced(false) 只移除硬编码 31。保留合法票的完整 identity 并正确移除，或明确拒绝此阶段不能正确管理的非规范 forced 记录，禁止静默吞票。相同持久状态比较与文件顺序无关，避免多票官方无序存盘无变化却重写。明确处理重复同 identity，避免意外重置 portal timeout。去掉未使用的 restore vector 与重复目录解析。
+
+**保存临时文件。** src/storage.cpp:491-494 固定 .tmp 路径，删除失败被忽略且 writeGzipFile 不在清理作用域。用独占同目录临时文件/RAII 全路径清理，不能截断预先存在文件或跟随同名 symlink。保留 current 文件安全替换，最好 level.dat_old 同样先写/链接临时再 rename，失败可报告；不要求跨文件 crash 原子。仅做小范围加固。
+
+原版格式/codec 已通过的证据保留，无需重复 Java 矩阵。验证必要的小范围 direct tests；新增或更新一次无客户端真实 native 恢复，用隔离目录。reviewer 另外已准备官方 DedicatedServer 真实生成平坦夹具做 W-4，不需 coder 重复。不要跑 CTest，不改光照，不扩范围。
+
+**W-4 实盘对照发现的独立小修。** 官方 DedicatedServer 实际生成的 stone 平坦夹具 `/home/zhddsj/.local/state/redstone-cpp/wsl-w4-official-stone-ha8xrh9n/interop-world` 的 overworld/entities/r.-1.-1.mca 是正常的零字节 .mca。原版 RegionFile.java:73-77 在 readHeaderBytes==-1 (EOF) 不报 truncated，offset 全空；C++ src/region.cpp 现在任何 size<8192 都判 Corrupt，托管入口因此拒绝整个合法 terrain chunk。零字节既存 .mca 按空 region：读返回 Missing、首次写按空 header 初始化；1..8191 字节仍是 Corrupt，不能放宽非空损坏头。补这一窄回归，不重复整套验证；测试只用副本。
+
+
+
+### W-3c1 rework delivery (2026-11-12 coder)
+
+Rejected the prior count-only evidence and exercised the production restoration
+path. WorldChunkManager::restorePersistentTickets now owns the one-batch ticket
+restore and immediately forwards its loading-changes to the lifecycle
+controller. Native startup calls that API rather than discarding the update.
+
+The apparent ticket restore failure was a bad test arrangement, not a graph
+loss: forced level 31 at (-13,-16) was adjacent to portal level 9, so vanilla
+Chebyshev propagation correctly made the forced cell level 10. The focused test
+now uses separated positions and asserts exact duplicate levels and ticks:
+portal records (level 9, ticks_left 257/123) remain distinct. setForced(false)
+removes all forced identities at the restored position and leaves portal demand.
+
+Persistent input is fully validated before demand is installed. Coordinates are
+limited to the real 30,000,000-block extent, including the asymmetric floor
+boundary [-1875000, 1874999]. INT64_MIN and all negative timeout values are
+rejected before countdown arithmetic. Unsupported types/version/layout and
+corrupt gzip remain fatal. Ticket and level writes use exclusive same-directory
+temporary files with no pre-existing-name truncation/symlink follow; level.dat
+retains a readable level.dat_old. Canonical sorted comparison makes unchanged
+tickets order-independent, while duplicate identities and exact ticks are kept.
+
+Zero-byte region compatibility is implemented at both boundaries: read returns
+Missing and requireHeader resets the first write to the two-sector empty header.
+Nonempty sizes below 8192 remain Corrupt; focused tests cover 1, 4095, 4096 and
+8191 bytes. A copied official stone fixture retained four zero-byte entities
+regions, loaded one forced ticket from a fresh Java 26.1 codec file, installed
+real FULL terrain without a client, and exited naturally with code 0:
+TICKETED_TICKETS_LOADED 1; TICKETED_WORLD_CLOSED complete=1 saved=0 unsaved=0
+worker_stopped=1 resident_installs=23. This is residency evidence beyond the
+ticket count (the manifest also caught a first attempt at absent chunk
+coordinates and the test was corrected to an actually present FULL chunk).
+
+Final affected direct tests after the last source/test edit all exited 0:
+tickets_tests, region_tests, storage_tests and world_chunk_manager_tests (with
+the existing real terrain/tick region fixtures). Official TicketStorage.CODEC
+read the current C++ export: forced=-13,-16 level31/31 and portal=-14,-16
+level33/33. No CTest, client, original-save write, commit or push was run.
+
+Binary SHA-256 d8336249103e6114d691cb70e26f1badb532351df57501a2ef40552aeb0927f4.
+Evidence directory:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3c1-reviewfix-0tJYxI
+native-forced-only-zero-entities-final.log SHA-256
+fc50178fc0088c92a318751a2949d740f3487a71cbabf974728ef0669726f1b9;
+tickets-final2.log 4b34b208967a1a6650afa5a51edcea8cecbe7c62c837752fcdd3aa9825a1e85e;
+region-final2.log 6ab3390c58e39bee2b83cf611e56461469be0ebebfdd50b6b6377a34208667e0;
+storage-final2.log e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 (silent success);
+manager-final2.log 936988b0ec2318a17af306fa3c424709237a2d37a0567434b2dee3796f1ce543;
+java-read-current-cpp.log 0fa0b327581c47656f13439cddc67735aa8a55d631decd2a96c335badb9e869d.
+
+Files in this rework: include/redstone/storage.hpp, include/redstone/tickets.hpp,
+include/redstone/world_chunk_manager.hpp, src/storage.cpp, src/tickets.cpp,
+src/world_chunk_manager.cpp, src/net/server_main.cpp, src/region.cpp, plus the
+four focused tests above. Existing unsupported boundaries remain unchanged:
+nonpersistent tickets, World Clocks/gamerules, autosave, generation,
+entities/block entities and complete vanilla restart equivalence.
+
+### W-3c1 验收（reviewer）
+
+通过。源码已核对：原生启动与 fixture 共用 restorePersistentTickets 并向 lifecycle 交付 loadingChanges；位置/剩余时长先验证，forced 撤销清除全部恢复等级，比较使用有序记录；metadata 替换使用独占临时文件，备份与现用文件都在写完后替换；零字节官方 region 为 Missing，非空短头仍拒绝。官方 codec、无客户端实盘 resident_installs=23、Time/level.dat_old 与定向构建测试证据见 CHUNK-TICKETS-ANVIL-HANDOFF.md。普通保存的票没有重复同 identity；本阶段对异常重复记录保留而不是按 Java 激活时续期折叠，后续若需要差分再收口。没有运行 CTest。W-4 跨真实 DedicatedServer 独立验证另记，不阻塞开始在线保存。
+
+## W-3c2 有预算的在线保存（reviewer 下发）
+
+在 WSL 同一工作树领取。详细验收见 W3C2-AUTOSAVE-REVIEW-PLAN.md。Java ChunkMap.java:214, :497–515, :714–749 依据：脏坐标有序候选、per tick 和在途上限、可用时间、每区块 10s cooldown。先完成有界 autosave + 当前 pump 退化与运行时阻塞，不改区域格式、光照、实体/方块实体 codec 或持久票文件。要求：
+
+1. 仍有票的脏区块可后台保存、保持驻留；预算同时限每真实 server tick 的候选尝试、提交、在途量。空闲和每连接 unchanged setPlayer 不能扫描所有 managed；尽量从版本、需求边及 I/O 完成推进队列。网络 pump 继续非阻塞，只处理必要结果/撤票，不把 held autosave 预算变成每 socket poll。候选遇 cooldown 或暂时失败时不能饿死其他 chunk。关闭继续排空并报告失败。不要扩大到全部历史 entries/tombstone 回收，后续单列。
+2. 写期间新编辑仍独立记录；v1 失败、v2 再提交时显式保留/合并旧 patch，后写优先，不能假定 worker 在失败前已修改 NBT 模板。避免三份相同 edit 向量；小共享 immutable patch 或移动，有大快照先报告。保留不同 epoch 的隔离和 savedVersion 正确性。
+3. runtime piston / entities blocker 改为局部和动态：仅影响对应 chunk，消失后可恢复保存，原有不支持的 on-disk NBT/状态仍明确拒绝。利用已有 section 索引或局部计数，不能全世界实体扫描乘驻留块数。保留 tick delay 持久化和排序。区分 save dependencies 与 dirty 版本，至少修正 dirty resident 不能使 portal timeout 无限停滞；源码/差异记录在 PLAN。先不要大改 tick 语义。
+4. 直接测试覆盖 held ticket autosave、预算饱和与空闲无扫描、write 被挡时 pump 仍返回、v1失败+v2后写优先、暂时 blocker 恢复及邻块不受影响、关服排空。沿用原版夹具，不重复 Java/全矩阵/CTest，不碰原档、不提交。若范围较大先交付有界 autosave 核心，可后续单独接动态 blocker；提前告知真实剩余。
+
+
+
+### W-3c2 bounded online autosave delivery (2026-11-12 coder)
+
+Implemented the complete bounded autosave core and the local dynamic blocker
+part in one stage. No region-format, light, persistent-ticket, entity/BE codec,
+generation, or tick-ordering change was made. Nothing was committed or pushed,
+no CTest was run, and all tests used isolated scratch/fixture copies.
+
+- WorldChunkManager now maintains dirty, demand-edge, in-flight, cooldown and
+  dynamic-blocker sets. Normal pump never walks every resident chunk; server
+  tick processes a bounded queue. Defaults are 64 candidate checks, 4 accepted
+  saves, 32 active writes, a 2 ms candidate window, 10 s success cooldown and
+  1 s failure backoff.
+- Held dirty chunks autosave while resident. Blocked/failed/cooldown positions
+  leave the immediate queue; dynamic blockers are appended after the next
+  tick's eligible candidates, so a blocked prefix cannot starve useful work.
+  Idle ticks leave the candidate queue empty, and an unchanged setPlayer call
+  does not enumerate managed chunks.
+- Save payload edits are one shared immutable vector. A failed v1 retains that
+  exact patch; edits received while in flight remain in the position map. For
+  retry v2 the retained vector is copied once, pending positions are appended
+  last, and the successful ack then drops it. The worker applies from the
+  shared snapshot, so correctness does not depend on whether a failed store
+  mutated its NBT template.
+- World moving-piston entities, piston tickers and entity sections now maintain
+  per-chunk counts. Persistence lookup is O(1) and local; one blocked chunk
+  cannot block another. Removing the runtime blocker makes the retained dirty
+  chunk eligible on a later tick. Unsupported saved block entity/entity data
+  remains an explicit install rejection.
+- ChunkHolder-style readyForSaving now tracks completed installation rather
+  than dirty==saved. Timed tickets age on Resident/Saving/EvictPending holders;
+  eviction still waits for every dirty version to be written. Existing tick
+  delay/order tests remain green.
+
+Focused coverage added to tests/world_chunk_manager_tests.cpp:
+
+- held-ticket dirty write saves within budget, returns while the fake store is
+  blocked, stays resident, and idle ticks perform zero candidate checks/writes;
+- three dirty chunks with a blocked prefix and max one submission still save
+  the unblocked neighbor; moving-piston and runtime-entity blockers are local
+  and both save after removal;
+- a failed v1 with a v2 edit during the blocked write retries with both block
+  changes present in the final payload;
+- updated timeout fixture proves an installed dirty/in-flight holder ages.
+
+Direct binaries after the final source edit all exited 0:
+chunk_lifecycle_tests (real disk fixture), entity_tests, and
+world_chunk_manager_tests (real terrain/tick fixtures). No CTest was run.
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3c2-core-20261112
+build-final.log SHA-256
+8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794;
+chunk-lifecycle.log 0f1e8020c8cdef75b48e47504de4b14a507f29447511345344c304faa0ef3c0c;
+entity.log 947d333a71d0a7c984d761d76d984490e16726286a8e35dd429670e723ce9485;
+manager.log 936988b0ec2318a17af306fa3c424709237a2d37a0567434b2dee3796f1ce543.
+redstone_vanilla_server SHA-256
+a156c365fb11e703a2402bfa4f279e2db95efa61107f2e8d01b25306f72ffe4a.
+
+Changed files: include/redstone/chunk_lifecycle.hpp, src/chunk_lifecycle.cpp,
+include/redstone/world_chunk_manager.hpp, src/world_chunk_manager.cpp,
+include/redstone/engine.hpp, src/engine.cpp, src/entity.cpp and
+tests/world_chunk_manager_tests.cpp. Larger retained allocation is unchanged:
+the level template remains worker-owned; terrain/tick snapshots are copied only
+for the one accepted save version. A v2 merge allocates one new edit vector;
+there is no per-pump or per-publish full-chunk copy.
+
+Remaining boundaries: runtime entities/moving pistons still have no durable
+codec, so their chunks remain resident/unsaved and are reported on explicit
+close. Online entity/BE persistence, W-3b1, full unsupported-NBT handling,
+generation, and the reviewer's real vanilla restart fixture remain separate.
+
+### W-3c2 有预算保存审查（reviewer）
+
+核心安全路径与 coder 的 manager/lifecycle/entity 直接日志接受：held dirty 按时保存、版本/失败保留、局部 runtime blocker、安装完成的 dirty holder 仍让票正常老化。预算本身还不能验收，需要以下窄返工。
+
+**P1 热路径能绕过预算。** src/world_chunk_manager.cpp:259–297 每次 unchanged setPlayer（原生每轮每连接调用）仍 applyTicketUpdate→pump；observeTickTime 会遍历全部 tickTimeSensitive_ 后才逐个跳过相同时间。:412–464 每次 pump 整批搬并扫描 demandSaveCandidates_/evictionRetries_，即使在途已满仍逐项重插，且 :419–439 未重新检查 status->demand，撤票候选可在重新有票后绕开 held autosave gate。:466–477 在预算前不限量 promote cooldown；:539–550 stale/在途直接 continue 不计检查，:564 时间检查只在 scheduleSave 后。:333–336 也不能每刻整批搬/重试 blocker。让候选队列增量有界前进，计算真实取出的 entry（包括 stale、重试、到期 promotion）；不能在预算尽时扫描或整批重排。每轮 socket poll 只 drain/处理明确有界的撤票推进，held 仍只能真实 server tick。对空 loading/simulation update 直接略过 readiness/pump；同一 gameTime 只观察一次 time-sensitive 集合，实际 tick delay 语义保留。撤票仍应有机会落盘，即使冻结/网络泵反复运行；重新获得需求时按 held 路径。无须在本阶段重做 load completion 或历史 tombstone，重点是保存/驱逐候选和每连接重复工作。
+
+**P2 反复失败可把同一块位置追加多次。** src/world_chunk_manager.cpp:1200–1209 retained patch + pending 直接 append；同一 cell 每次失败/修改累积到任意长度。合并时按 (sectionY,localIndex) 后写覆盖，独有旧 edit 不丢，重复失败内存受实际脏 cell 数限制；保留共享 immutable payload。关服动态 blocker 原因应使用 errors_ 的真实原因，不必大改关服。
+
+定向用例：同一真实 tick 多次 unchanged setPlayer/pump 不重复扫 N 项；队列大于预算且全部 cooldown/stale/inflight 时原始检查仍有限；撤票后重新加票不旁路；同一个位置连续失败和新编辑多次最终 patch 不增长并保持最后值。只跑触及的 manager 定向用例并构建 native，无需 Java/光照/CTest；不要扩大到 BE。通过后立即领 W-3b1。
+
+
+
+### W-3c2 review rework delivery (2026-11-12 coder)
+
+Closed the two remaining substantive budget/patch issues. No CTest, Java,
+lighting, BE codec, original-save write, commit, or push was performed.
+
+- Empty loading/simulation updates now return before readiness work or pump.
+  lastObservedTickTime_ also makes tick-sensitive time observation happen at
+  most once per actual gameTime.
+- Demand-save and eviction candidate sets are now FIFO deques with queued-set
+  deduplication. Every nonblocking pump advances at most four entries; it never
+  swaps the whole collection. Entries carry residency epoch, so eviction does
+  not scan queues to erase them and a stale old-generation entry is ignored.
+  If demand returns before a removed chunk is saved, the entry is moved to the
+  held autosave queue and cannot submit outside a real server tick. The native
+  socket loop invokes one manager pump after reconciling all connections, so a
+  frozen world still advances at most four removal/eviction entries per poll.
+- Autosave processes cooldown expiry and ordinary queue entries through the same
+  counter. Missing/stale entries, in-flight residents, cooldown expiries and
+  failed retries all consume one raw candidate check. Work stops before the next
+  pop when candidate, submission, active-write or monotonic-time budget is
+  exhausted.
+- Failed patch merge now keys edits by (sectionY, localIndex): retained values
+  are inserted first, pending values overwrite them, then one immutable vector
+  is emitted. Repeated failure of one cell therefore retains one entry; distinct
+  dirty cells remain and the latest value wins.
+
+Added focused manager coverage:
+
+- three tick-sensitive chunks advance one gameTime exactly once, while 20
+  unchanged setPlayer plus pump calls cause 0 additional time-sensitive scans
+  and 0 writes;
+- a save blocked by max-in-flight plus ticket remove/re-add does not submit the
+  reacquired chunk from pump; only the following real server tick saves it;
+- three due success-cooldown entries with a one-entry budget report exactly
+  candidateChecks=1, submissions=1, queued=2;
+- three repeated write failures for one cell keep
+  retainedPatchEntriesForTest == 1, then the final successful payload contains
+  the last value.
+
+Final affected command built world_chunk_manager_tests and native
+redstone_vanilla_server; manager fixture passed against the existing real
+terrain and tick regions. Evidence directory:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3c2-reviewfix-final-UZhTza
+
+build.log SHA-256
+8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794;
+manager.log SHA-256
+1f6c7d6728a9df44c021ab4e66aee639114ed18b20411848b0f994ff02f54ba8.
+Final native binary SHA-256
+391b43db0eacb24001ec5c50cf51def0bfdbb4a233bb1605044db7414b0453af;
+build-native.log SHA-256
+c9d50d04b24f7b6d553f108a6134c42e3aaee7449d19f538e6ec6965ec761343.
+
+Observed manager log:
+autosave held checks=1 submissions=1 inflight=1
+autosave idle checks=0 writes=1
+autosave blocked-prefix checks=3 submissions=1 inflight=1
+autosave retry writes=2 successes=1
+autosave repeated-pump checks=0 writes=0
+autosave reacquired writes=1 dirty=1 saved=0
+autosave cooldown checks=1 submissions=1 queued=2
+autosave deduplicated retained=1
+world chunk manager tests passed (with real World disk fixture)
+
+Remaining phase boundaries are unchanged: runtime entities/BE persistence and
+the real vanilla restart fixture are separate.
+
+### W-3c2 冷却与动态队列最后收口（reviewer）
+
+已接受 no-op/player、同一 gameTime、stale 计数、持票重新取得与重复失败后写优先的修复/证据。当前只剩上轮要求的两个明确遗漏：
+
+- src/world_chunk_manager.cpp:466–471 把撤票 pending dirty 放进 saveCooldowns_ 后从 demand queue 移除；只有 :333–334 runsNormally 下的 autosave 才消费这个 map，因此冻结时即使 wall cooldown 到期也永久停留，直到手工解冻/关闭。同样，:333–340 仍整批 move/requeue dynamicBlockedCandidates_，该集合可从每轮 eviction/pump 继续累积。用有界到期/重试队列，明确区分 held 与 no-demand：撤票脏区块冷却/失败后能在 frozen 的 pump 里按预算落盘，暂时 blocker 消失后也能继续；持票仍只能 autosave tick。转移候选按预算，不搬整批；检查当前需求与 epoch。
+- :1263–1279 无 retainedPatch 的普通保存也复制所有 pendingEdits 到第二棵 std::map 再拷进 vector，最多同一个区块 98304 distinct cells，额外节点可能是数 MiB 且全在主线程。普通路径 pending 已唯一，直接 reserve/push 到 immutable vector；仅失败 + 有新编辑做去重合并，尽量避免第二棵全量节点表。注明单个最大 snapshot 超出 soft 时间窗的限制，不能宣称硬上限。
+
+补两个窄行为反例：冻结 + 撤票后 cooldown/失败到期，无 World::tick 也保存驱逐；阻塞积压超过预算，实际回填有界并可恢复。只构建 native 和跑必要 manager 定向，其他用例、Java、CTest 无须重跑；不触及活塞或实体 codec。
+
+
+
+### W-3c2 final cooldown/dynamic-queue closure (2026-11-12 coder)
+
+Completed the final narrow review items without touching CTest, Java, lighting,
+or entity/BE codecs.
+
+- Held and no-demand cooldowns are separate. Ticket removal/re-add reclassifies
+  an existing cooldown in O(log n). Held cooldown is consumed only by a real
+  server tick; no-demand cooldown/backoff is consumed by bounded pump work even
+  when World::tick is frozen. A successful/ failed no-demand save with a newer
+  edit now leaves the retry in that pump-visible class instead of parking it
+  forever in the held map.
+- Held and no-demand dynamic blockers are epoch-tagged FIFO deques. Demand
+  changes reclassify queue membership without scanning or copying either queue.
+  A stale old-class entry checks membership before acting. Held retries are
+  alternated with normal autosave work so a blocked prefix cannot starve it.
+  No-demand dynamic retries advance at most one per socket pump and are capped
+  by the same four-entry pump budget.
+- The normal save snapshot now reserves and fills one immutable vector directly
+  from the already position-keyed pendingEdits map. Only failure retry with a
+  new edit builds the temporary cell-dedup map. The temporary merge may exceed
+  the soft candidate-time window for a huge snapshot; no hard memory or
+  wall-time bound is claimed.
+
+Focused added cases:
+
+- ticket removal followed by a newer edit: first save enters no-demand
+  cooldown; after 40 ms, repeated manager.pump calls with no World::tick save
+  and evict the chunk;
+- the same frozen-pump shape covers an injected v1 I/O failure and backoff;
+- five no-demand chunks with moving-piston blockers build a retry backlog; all
+  retain dirty data without writes, then repeated pumps recover and save/evict
+  all five with maximum observed pump candidate checks = 1 (limit 4).
+
+Final manager log hashes and output are recorded below. No CTest was run.
+
+Evidence directory:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3c2-final-contract-closure-VbeXQ7
+
+build.log SHA-256
+8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794;
+manager.log SHA-256
+f1bba4dc8c8d4a4e29aad80a50d05bc77994bfbad6e3b73398b14a3389c75e30.
+Native binary SHA-256
+606e6d70476df1d262679ade961e42c37d11c4a8fa33cf115ebf8b33c66394b7.
+
+Observed log:
+autosave held checks=1 submissions=1 inflight=1
+autosave idle checks=0 writes=1
+autosave blocked-prefix checks=3 submissions=1 inflight=1
+autosave retry writes=2 successes=1
+autosave repeated-pump checks=0 writes=0
+autosave reacquired writes=1 dirty=1 saved=0
+autosave cooldown checks=1 submissions=1 queued=2
+autosave deduplicated retained=1
+autosave frozen-pump max-checks=1 successes=3
+autosave dynamic-backlog max-checks=1 successes=5
+world chunk manager tests passed (with real World disk fixture)
+
+### W-3c2 审查结论（reviewer）
+
+通过。冷却按持票/撤票分流，冻结的 pump 仍推进撤票到期项和动态 blocker；普通/过期/stale 检查计入各自预算，no-op 玩家更新和同 gameTime 不重扫，失败 patch 后写优先并受 distinct cell 数限制。保存的 2 ms 是候选软预算，不是单个大型脏区块快照的硬上限；正常路径只建一份 immutable edits，不复制完整区块或光页，失败合并的临时结构仍可能与脏 cell 数同阶。最终 manager 日志 f1bba4dc8c8d4a4e29aad80a50d05bc77994bfbad6e3b73398b14a3389c75e30、native binary 606e6d70476df1d262679ade961e42c37d11c4a8fa33cf115ebf8b33c66394b7 均已核对。没有重跑 CTest。历史生命周期内存、普通实体另阶段。
+
+## W-3b1 移动活塞方块实体（reviewer 下发）
+
+在 WSL 领取，验收细节和官方真夹具见 W3B1-MOVING-PISTON-REVIEW-PLAN.md。只支持现有模拟可继续推进的 active minecraft:piston / minecraft:moving_piston：原版 progressO/FLOAT、facing/Byte、blockState、extending/source、keepPacked=false，空 components；未知或未支持的 packed/BE 明确拒绝。双向校验 moving block 和对应 BE，避免安装缺失/重复/跨坐标记录。worker 持 NBT 模板，只传 compact 记录；主线程不复制整个区块。安装前建立 ticker，按原版模拟票门槛可刻；拆卸不调用 finalTick/邻居更新；恢复、动态生成/完成保持现有 ticker 顺序。BE 变更和同版 block/tick patch 一起保存，失败保留，普通实体持久化后做。先交付窄 codec/接线与定向验证，再有余地做真实 Java 夹具副本的继续运动/落盘；无需重复此前 Java 世界/票矩阵或 CTest。任何大快照尽早报告，保留光照传播、无关工作区改动，不提交、不改真实原档。
+
+
+
+### W-3b1 moving-piston block entity delivery (2026-11-12 coder)
+
+Implemented the bounded moving-piston persistence stage. No CTest, lighting,
+ordinary entity persistence, original-save write, commit, or push was run.
+
+- Online decode now emits compact MovingPistonEntity records and does not copy
+  the block_entities DOM unless a fixture explicitly requests it. It validates
+  id minecraft:piston, x/y/z, blockState, facing 0..5, finite progress,
+  extending/source bytes, active keepPacked=false, empty components, and rejects
+  unknown BE fields.
+- The decoder cross-checks every moving_piston terrain cell against exactly one
+  BE position in the same chunk. Missing, duplicate, cross-chunk and nonmoving
+  pairs are rejected. Other persisted BE types remain explicitly unsupported.
+- World gains a per-chunk piston position index. Loaded compact records become
+  PistonMovingBlockEntity values and tickers before loadChunk publishes the
+  light/lifecycle installation. Failure rolls back BE/ticker/index and terrain.
+- Piston tickers now require blockTickPositionReady, so simulation read/freeze
+  gates preserve the entity until the chunk becomes block-ticking. Progress and
+  create/remove events mark only the owning chunk dirty.
+- Save payloads carry one exact block_entities list with terrain edits and tick
+  lists. The worker applies block states, then the BE list, then ticks and
+  encodes once. No snapshotChunk/full-chunk copy is used; only compact piston
+  records and the target chunk section scan for pair validation are allocated.
+- Completion removes the runtime BE and emits an empty persisted BE list in the
+  same terrain save. Unload cleanup passes notify=false to avoid dirtying an
+  evicting chunk and never invokes finalTick/neighbor updates.
+
+Focused verification:
+
+- terrain_codec_tests covers moving-piston round-trip, progressO, missing/
+  duplicate/cross-chunk pairing, unknown fields, keepPacked=true and nonempty
+  components;
+- chunk_lifecycle_tests and world_chunk_manager_tests pass with the real terrain,
+  tick and official moving-piston fixture. The manager test covers no-simulation
+  pause, progress 0.5, mid-save/reload, completion, and stale-BE removal;
+- the official Java NBT probe reads the C++ mid and completed copies;
+- the fixture's official DedicatedServer restart probe exits 0, reports
+  VANILLA_READ_COMPLETED_CPP_PISTON and JAVA_CPP_JAVA_PISTON_RESTART_OK.
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b1-final-ZGfVs5
+terrain.log SHA-256
+cc05022144745a6738bca0cb9a52c32306f41c406b28bee811a81a67f11b7303;
+lifecycle.log 0f1e8020c8cdef75b48e47504de4b14a507f29447511345344c304faa0ef3c0c;
+manager.log d4b9befa4b5b661bebdc1e9c01c428f442c7971c403a1c2281b65daea5035ef7;
+java/java-mid.log b4d2f1bd2d555151f02b41bc2959919d3e54f68542806220be6efec4c8d4f4a3;
+java/java-complete.log 9cd538489b8521a796c7c71aee83fe010d89c67d9f323a2d720926220390ac02.
+Official restart:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b1-official-restart.log,
+SHA-256 e0b9b0bf98e42b4a781ae42200f9865496bffb4ffa6f7f7ad8d94871dcbaae98.
+Native binary SHA-256
+00d32ef6ee3fe8b2e4615d7b2750a98809ceab3fc069da26b4b3fd5dbd143f4d.
+
+Copies: no online BE DOM or whole chunk is copied. The normal save copies only
+the small per-chunk compact piston list into the payload; the one extra list is
+required for the immutable worker request. Pair validation scans cell values
+in sections whose palette contains moving_piston, without copying section
+storage. The existing failure merge remains the only distinct-cell temporary
+map path.
+
+Remaining boundaries: only active minecraft:piston BEs with keepPacked=false and
+empty components are supported; ordinary entities, other BE types, lazy-loaded
+keepPacked entities, generation, and client behavior remain outside this stage.
+
+### W-3b1 审查（reviewer）
+
+官方 mid/completed NBT 与真实 DedicatedServer 复验接受；日志 wsl-w3b1-official-restart.log 显示两个 BE 完成并由原版确认完整末态。源码确认独立 compact payload、progressO、同版列表清空和 unload notify=false。仍有两个小范围阻塞需收口，不重跑整个矩阵：
+
+1. src/world_chunk_manager.cpp:117–118 文件路径构造接了 pistonEntityMutationObserver，但注入 RawChunkStore 的另一个构造 :131–174 没有。因此注入 manager 下 BE 进度改变不会记脏，测试容易被同时方块/计划刻变化掩盖。统一两个构造的回调安装/拆除（小公共 helper 即可），加一个 terrain/ticks 完全不变、仅 BE progressO 变了也会变 dirty 并可存的反例；close 后 observer 清空。
+2. src/terrain_codec.cpp:259、262、957、959 在读取 NBT xPos/zPos 后直接 int *16，输入可为 INT_MAX/MIN；load raw 在 rootMatchesPosition 之前先 decode，故即使实际请求位置合法，损坏槽内极端坐标也先触发 UB。decode/validateEditableRoot 提前验证所支持世界坐标或用 checked int64 计算，未知越界明确拒绝；同样覆盖 patch pair validation。补极端坐标的窄 decode/save 拒绝测试。
+3. 非阻塞顺带清理：pistonForgetWorld 直接 clear 表而未清新 pistonPositionsByChunk_，给集中 reset 方法或删除无用 helper，防后续复用留下 stale index。无需扩大 ticker 语义。
+
+只编译受影响 native + codec/manager 必要 direct tests，沿用真实 Java 复验，不运行 CTest/Java/光照；别为文档重复跑无关用例。完成后直接交付；reviewer 下一步发 W-3b2 item entities。
+
+
+
+### W-3b1 review fix delivery (2026-11-12 coder)
+
+Closed the three reviewer items only. The accepted Java mid/completed and
+DedicatedServer restart evidence was reused; Java was not rerun.
+
+- Both WorldChunkManager constructors now call the same installWorldCallbacks
+  helper, so the injected RawChunkStore path installs the piston mutation
+  observer too. close uses one detachWorldCallbacks helper to clear all five
+  World callbacks.
+- A FakeStore regression installs a moving-piston chunk and changes only
+  progress/progressO. Block state and scheduled ticks stay unchanged; the
+  manager lifecycle dirty version increases and its next held autosave writes
+  progressO=0.25. The test also confirms close removed the piston observer.
+- NBT chunk coordinates are validated against [-1875000,1874999] immediately
+  after xPos/zPos decode and again in validateEditableRoot. Coordinate scaling
+  in moving-piston terrain scans/patch uses int64 before a checked int result.
+  Direct tests reject INT_MAX xPos decode/validation and INT_MIN zPos patch
+  attempt before scaling.
+- pistonForgetWorld now clears pistonPositionsByChunk_ together with the
+  entity/ticker indexes, preventing a reset World from retaining stale
+  per-chunk membership.
+
+Final affected tests all exited 0:
+terrain_codec_tests, chunk_lifecycle_tests with real disk fixture, and
+world_chunk_manager_tests with the real terrain/tick/official piston regions.
+Native redstone_vanilla_server rebuilt.
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b1-reviewfix
+build.log SHA-256
+8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794;
+terrain.log cc05022144745a6738bca0cb9a52c32306f41c406b28bee811a81a67f11b7303;
+lifecycle.log 0f1e8020c8cdef75b48e47504de4b14a507f29447511345344c304faa0ef3c0c;
+manager.log 5033c6adbdebb1b77b9c94f9f465ccb82653f6de482ac574599578391c6ecc75.
+Native binary SHA-256
+26c4656bf56cc090326dbcbe1cc4ea92f59074cfadc2071db93d41e025459b26.
+
+Manager log additionally reports moving_piston injected-store progressO=0.25,
+mid_records=2 and completed_records=0. No CTest, Java, lighting or full matrix
+was rerun for this review fix.
+
+### W-3b1 审查结论（reviewer）
+
+通过。两个构造统一 installWorldCallbacks，close/异常统一 detach，BE-only progressO 变更有直接反例；NBT 极端坐标在 decode/save 验证前拒绝且配对乘法改为 int64；reset 新索引已清理。保留此前真实 DedicatedServer 夹具由 C++ 完成、原版重启确认的证据，不重跑；本次 native binary 26c4656bf56cc090326dbcbe1cc4ea92f59074cfadc2071db93d41e025459b26。当前只支持 active piston、无额外 components/未知字段，其它 BE 明确拒绝。没有 CTest。
+
+## W-3b2a 掉落物实体持久化（reviewer 下发）
+
+按 W3B2-ENTITY-REVIEW-PLAN.md，当前目标是常用 item 实体实际读盘/模拟/存盘/卸载。先做 compact codec 再接相同 lifecycle；如范围过大可先交付 codec 后继续，禁止静默缩成只读示例。TNT、落沙、矿车另阶段。要求：
+
+- 官方 EntityStorage 的维度 entities region 与 terrain 同一个 I/O worker 串行访问；根 DataVersion=4786, Position IntArray[2], Entities list。原版真实夹具已在 W3B2 文档给出，留母本只读，只用副本。原版 Entity.saveWithoutId 当前 fall_distance 是 TAG_Double，不是旧版 FallDistance；ItemEntity Health/Age/PickupDelay 是 TAG_Short；Item count 是 TAG_Int。按源码处理字段，Pos/Motion 三 Double、Rotation 两 Float、UUID IntArray[4]。motion/坐标/数值先验证，未知类型或不支持字段布局拒绝而不覆盖。
+- 最小范围支持 minecraft:item 无额外 item components；基础 health/age/pickupDelay、位置/速度/旋转/onGround/Fire/fall_distance 持久化；Air/PortalCooldown/Invulnerable 等当前未模拟字段若仅默认可接受并正确再写，非默认明确拒绝；Owner/Thrower/Passengers/custom data 未实现不 silently drop。既有未知/坏 entity data 不冒充空，外部槽 .mcc 缺失是错误而非 Missing。保留持久 UUID；运行 ID 继续统一分配，不复用 UUID 为数字 ID。重复 UUID 或跨 chunk 错位先明确失败。
+- worker 解析紧凑记录，NBT root 归 I/O；主线程原子安装 terrain/tick/BE/item 后发布可见与 readiness。rollback 不残留 entity/ticker/UUID 映射。运行 item 增/改/移除和每次实际实体 tick 后记本 chunk 脏；不能每轮网络扫全世界实体。复用 section/per-chunk 索引，小快照一起附在保存版本，terrain 和 entity 两份必要写都成功才确认 savedVersion/驱逐；任何一份失败仍保留版本/数据/可重试。空实体列表真正清掉旧内容（region 清槽，或本阶段用可被原版加载为空的根并明确物理清槽后续），不能旧 entity 复活。
+- 第一交付若暂时不能安全处理跨 chunk 迁移，必须检测并阻止相关源/目标卸载和不完整写回，明确报告待保存原因，保持内存与原盘不丢数据；不得全世界永久 blocker。下一阶段马上补迁移顺序/UUID 重复恢复。不要碰光照或世界生成。
+- 定向证据：官方真实 item 夹具 C++ 加载，保留 UUID，暂停无 tick 不改变 Age，实际 tick 正确推进并保存；保存失败不卸载且仍可重试；移除最后一个 item 后重启不复活；未知实体/组件拒绝，原文件不变。官方 Java NBT/真实 server 读取结果可以在 codec/manager 定向后做一次窄验证，不重跑前面完整矩阵/CTest，不提交。主动报告新大拷贝与存储大小；模型/角色不变。
+
+
+
+### W-3b2a item entity persistence delivery (2026-11-12 coder)
+
+Implemented the first ordinary entity persistence stage, limited to
+minecraft:item. No CTest, lighting change, original-save write, commit or push
+was performed.
+
+- Added a standalone entity-region codec for DataVersion=4786,
+  Position=IntArray[2], Entities list, and item entities. It strictly validates
+  required Position/Motion/Rotation/UUID/Item/base fields, exact 26.1 field
+  types, finite values, chunk placement, nondefault unsupported Air/PortalCooldown/
+  Invulnerable, unknown entity fields, nonempty item components and duplicate
+  UUIDs. Unknown entity data is rejected before the slot is overwritten.
+- Added RegionEntityStore for the dimension entities directory. The lifecycle
+  controller owns one worker and performs terrain and entity reads/writes
+  serially on it. Entity roots remain worker-owned; the main thread receives only
+  compact item records.
+- Managed install validates UUID uniqueness against the live World and inside
+  the entity list, constructs item entities before touching World, then installs
+  terrain, ticks, BEs and item entities before publishing light/lifecycle
+  readiness. Rollback removes inserted sections/tickers/items and UUID state.
+- Runtime add/tick/remove reports old/current positions and dirties only those
+  chunks; no network poll scans all entities. Missing/unsupported/corrupt entity
+  data fails explicitly and does not create an empty chunk.
+- A save version carries terrain edits, ticks, moving pistons and the exact item
+  list. The worker patches and validates all payloads first, writes terrain and
+  entities on the same worker, and advances savedDirtyVersion only when both
+  writes succeed. Entity failure leaves the chunk resident/dirty and retryable.
+- An existing entity slot with zero items is rewritten as a compatible empty
+  Entities list, preventing resurrection. Physical empty-slot removal remains a
+  later optimization. Cross-chunk item movement marks source and target blocked
+  and rejects eviction/save until the next safe migration stage.
+- Runtime protocol IDs still come from World::allocateEntityId; persistent UUIDs
+  are independent. Runtime items receive deterministic unique UUIDs without
+  consuming simulation randomness.
+
+Focused tests cover official item load/UUID/fields, loading-only pause without
+Age change, entity-ready Age/PickupDelay advance, mid-save/reload, dual-region
+write failure and retry, empty-list deletion/no resurrection, duplicate UUID,
+cross-chunk block and unknown data preservation.
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2a-final-g8T0U8
+entity-codec.log SHA-256
+ac9f5da0612c50f4d98d5ad15cc9cea4ecab8d36cb371bb9d2c3e7886946fb6a;
+lifecycle.log 0f1e8020c8cdef75b48e47504de4b14a507f29447511345344c304faa0ef3c0c;
+manager.log 93531a1e888a2caa8cdd8fc266f1c386171d5a1124fef0adc0e1a9429b5db1c8;
+build.log 8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794.
+Java mid/empty logs:
+java/java-mid.log 8948da81611ae694c0d7e3395e74aab0c1eb3c6c3a0dfe0563cdae48946183c5;
+java/java-empty.log 6e7d25133c599b2229ae9f2de968276c08b294a3567a9cd495392f6e4b1aa954.
+Official DedicatedServer restart:
+official-restart.log SHA-256
+5d9d9b12abc83c4fd3a0856c1db286bf5aa17a020666d2a9b7274d0c06d0af71.
+Native binary SHA-256
+cca14b4a1f6dcc2540025e3c2620cb0f4124762f85820297b19b752d5b362170.
+
+Manager log includes:
+item_entity failure_retry=1 age=25
+item_entity cross_chunk_blocked=1 unsaved=2
+item_entity duplicate_uuid_rejected=1
+item_entity saved_age=18 uuid_preserved=1 removed=1
+world chunk manager tests passed (with real World disk fixture)
+
+Copies/limits: online entity root is moved to the worker; only compact item
+records cross to main. A save allocates one compact item vector and encoded
+entity-region bytes for the target chunk. No full chunk, entity DOM, light page
+or global entity list is duplicated. Cross-chunk migration is intentionally
+blocked; empty entity roots are used rather than physical slot deletion; item
+components, Owner/Thrower/Passengers, nondefault Air/PortalCooldown/Invulnerable
+and all non-item entity types remain unsupported.
+
+
+### W-3b2a final verification and limits (2026-11-12 coder)
+
+Final build after UUID indexing, world move and item-store wiring:
+entity_codec_tests, chunk_lifecycle_tests, world_chunk_manager_tests and native
+redstone_vanilla_server all built. No CTest, lighting suite, Java full matrix,
+commit or push was run.
+
+Final manager fixture output:
+official_item age=17 pickup=200
+item_entity failure_retry=1 age=25
+item_entity cross_chunk_blocked=1 unsaved=2
+item_entity duplicate_uuid_rejected=1
+item_entity saved_age=18 uuid_preserved=1 removed=1
+world chunk manager tests passed (with real World disk fixture)
+
+The official Java NBT probes accepted both the mid entity file and the empty
+entity file. A copied official DedicatedServer restart accepted the completed
+world and reported ITEM_EMPTY_AFTER_CPP, confirming the removed item does not
+resurrect.
+
+Final evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2a-current-qa7KZq
+build.log SHA-256
+8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794;
+entity-codec.log ac9f5da0612c50f4d98d5ad15cc9cea4ecab8d36cb371bb9d2c3e7886946fb6a;
+lifecycle.log 0f1e8020c8cdef75b48e47504de4b14a507f29447511345344c304faa0ef3c0c;
+manager.log 93531a1e888a2caa8cdd8fc266f1c386171d5a1124fef0adc0e1a9429b5db1c8;
+java/java-mid.log 6d6dbb36e06438269d2323eff472d9b1f1081cf4b51ba83cdd158140136721ff;
+java/java-empty.log 22cb3cac6e6730935ac55e30eab3fc3b63c0cf38f8e443b24ffba3f119155c8f;
+official-restart.log e958f0750a3c143ee4bedfcd9d1079cd292f56976949f0f358208b7870b9f883.
+Native binary SHA-256
+647f7889019f28d2efd5384c0e2840cbb7d319c64fb8dd65db2e96f9bad0aaa2.
+
+The only newly introduced snapshots are compact per-chunk item vectors and
+worker-owned entity-root encodings. No full chunk, entity DOM, light page or
+global entity list is copied in normal load/save. Cross-chunk migration remains
+explicitly blocked and is not claimed as safely persisted.
+
+### W-3b2a 存档安全审查（reviewer）
+
+Coder 已交付；接受真实 item age/UUID、写失败重试、官方重启不复活的现有证据，不重跑。跨块迁移当前明确为局部阻塞，另阶段处理。当前只补三个可复现的安全问题：
+
+1. P1 src/entity.cpp:1178–1196 生成持久 UUID 仅依赖 world seed 和每进程从 1 开始的 runtime id，同一世界重启后必然重用生成序列；旧实体在内存会抛 generated duplicate，旧槽尚未加载则可能把重复 UUID 写到磁盘。用独立于模拟随机的每进程熵/UUID v4 生成，已知冲突重试；不要修改已存 UUID，也不要把此随机数接入模拟 World::random。补同 seed、同运行序号的两个实例不复用持久 UUID 的反例。避免每次实体生成重新获取系统随机，可一次初始化独立生成器。
+2. P1 src/region.cpp:389 已分配 external slot 缺 .mcc 返回 Missing；RegionEntityStore (src/chunk_lifecycle.cpp:90–109) 直传后 worker 当空可写。按用户/阶段约束，已分配外部流缺失必须 Corrupt，不可覆盖；真正无 region、零字节 region、slot 为零仍 Missing。做一个 external entity missing 故障，断言不安装不写原槽；若 region 共用语义变更，更新对应窄测试，不跑完整历史矩阵。
+3. P1 src/entity_codec.cpp:57、decodeItem/patchEntityItems 在 floor→int32 前没有保证坐标可表示；decode 只检查有限，1e300 也有限，patch 则在 finite 之前先调用 floorDiv16。X/Z/Y 先校验世界/引擎安全边界（保留正常高度外但仍可安全推进的实体），Motion 拒绝超范围或按本地 Java Entity.load 超限分量规则归零，避免极端有限值导致下游 move/collision 的 floor UB。load/save 两方向共享验证，补 NaN/大有限坐标或速度反例；正常 26.1 fixture 不受影响。顺带同 chunk 的 mutation 不必重复 dirty 两次（可省略，非阻塞）。
+
+严格限定以上三点，先不做迁移、其它类型或光照；仅受影响 codec/entity/region 或一项真实注入 manager 定向及 native 构建，沿用原版证据，不跑 CTest、Java 全矩阵，不提交。完成回报。
+
+
+
+### W-3b2a 存档安全审查返工结果（2026-11-12 coder）
+
+已只处理审查列出的三项，保留现有未提交改动；未改光照、未跑 CTest/Java、
+未提交或推送。
+
+1. 持久 UUID：World 新实体的零 UUID 现在由独立于 World::random 的一次性
+   std::random_device 种子生成器产生 UUIDv4，已有实体/已知 UUID 不会被改写；
+   冲突重试，非零重复 UUID 继续明确拒绝。同 seed、同 runtime id 的两个 World
+   实例与同进程连续分配均有反例。
+2. 缺失外部实体流：region 已分配 external slot 但对应 .mcc 不存在时返回
+   Corrupt；覆盖写会在修改 region 表项前拒绝，测试验证原 region 字节不变。
+   未分配槽、零字节 region 和空槽的 Missing 语义未改。
+3. 极端数值：item entity load/save 共用归一化，先拒绝 NaN/Inf，再将 Pos
+   X/Z 限为 +/-30000512、Y 限为 +/-20000000，将绝对值大于 10 的 Motion
+   分量按 Entity.load 规则归零；之后才执行 floor/整数与 chunk 校验。大有限
+   坐标不会进入 int 转换或碰撞，正常官方 item fixture 的 Age/PickupDelay
+   仍为 17/200。
+
+改动文件：src/entity.cpp、tests/entity_tests.cpp、src/region.cpp、
+tests/region_tests.cpp、src/entity_codec.cpp、tests/entity_codec_tests.cpp。
+未新增 chunk/entity DOM/光照页或全局实体列表复制；本次只新增小 UUID 记录、
+窄归一化和既有拒绝路径。跨区块迁移仍阻塞，空实体根仍未改成物理删槽。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2a-reviewfix-BKLsBM
+build.log SHA-256 8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794;
+entity.log 8078ca10f75cf630d05c4a25faefdbeb5fea9d1c298836755fd6a6c79320f54a;
+entity-codec.log 481293f39c8820663b46e1ecb2a12b2cb61782238381bcdee01d30a2544a20c2;
+region.log 0fec8bb09ab61119d2e43789e80409ef1dd95c9db2104d802efeeea8adca8045;
+manager.log 93531a1e888a2caa8cdd8fc266f1c386171d5a1124fef0adc0e1a9429b5db1c8.
+redstone_vanilla_server SHA-256
+c16448363238cbada0573d374d0690a4991bad90077e8520fe124e2df6e0b095.
+
+Direct outputs include persistent_uuid same_seed_same_runtime_id=distinct,
+region external_missing=corrupt overwrite=refused, entity_codec
+motion_clamped=1 huge_position=rejected nan=rejected, and all four affected
+tests passed. Native target rebuilt. This closes the three review blockers
+pending reviewer acceptance.
+
+### W-3b2a 审查结论（reviewer）
+
+通过。新 UUID 使用独立于模拟随机数的 UUIDv4 生成器；已分配外部实体槽缺失文件时拒绝加载和覆盖；实体位置/速度先归一化和校验再进入整数转换。接受 coder 的四项定向测试与前一轮官方 26.1 重启读回证据，没有重复运行。覆盖受支持的 minecraft:item 单区块持久化；跨区块迁移仍显式阻止相关区块不完整保存/卸载，其它实体与物品组件仍未实现。最新用户要求先等 coder；已等到返工完成，本轮不派发新任务。
+
+## W-3b2b：掉落物跨区块迁移（reviewer 下发，2026-11-13）
+
+在 WSL 同一工作树继续，范围仅为现有受支持 item 实体。原版依据 PersistentEntitySectionManager.java:179–222、EntityStorage.java:46–109；参见 W3B2-ENTITY-REVIEW-PLAN.md。W-3b2a 已通过，当前永久 blockedEntityMigrations_ 仅是临时保护，本阶段以可推进的局部状态替代。
+
+1. 以 UUID 及明确的源/目标保存代号追踪。目标实体槽确认读完且数据可兼容前，不能把未知槽当空写。若目标尚未就绪，可暂缓跨区边界、或暂存移交并维持两端的必要驻留；不得静默吞物品、覆盖未知实体、把本地暂时问题扩大到全世界。不做新地形生成。按块交接，沿用单 I/O worker 和保存预算，主线程不等盘、不扫描全世界或每网络轮询复制实体列表。
+2. 有效迁移先写含该 UUID 的目标实体数据并收到同代成功确认，再允许源移除旧记录；迟到确认不能释放新的迁移或未保存版本。目标写失败时旧盘源仍可恢复；源清理失败时保留可重试状态、报告未完成，不能把两次独立 region 写说成原子提交。两个槽可能暂时含同一 UUID；记录普通进程失败、重启及掉电边界，别用“先读到谁就删除谁”清理任意历史重复。若本阶段无法安全处理特定连环或交换迁移，请局部阻止/串行化并让普通双向移动不永久卡死，明确记录限制。未持久化的新实体、返回源、继续跨第三块、移除和关服都要有明确的保守语义。
+3. 核对活塞/爆炸等实体移动入口；凡当前支持的移动可以绕开迁移通知，必须统一处理或明确挡住危险路径。UUID 不因移动变化，运行实体不重复安装。成功后可实际驱逐，重开两块只出现一次；失败不能静默清脏。保持 stock 26.1 entity NBT 和 region 文件；若需要额外持久恢复机制，先作为独立后续交付说明，不擅自引入私有格式。
+4. 重点测试：目标已有另一物品时双向合并并保留旧数据，目标未加载/坏数据不覆盖、目标失败时源不被清掉、目标确认后源清理失败可重试、同一 UUID 保留、撤票和重开、负坐标跨 region、重新获得票与过时结果。用定向 fake store/隔离实盘用例，真实 26.1 夹具只用副本；不重跑之前的 Java 验证矩阵、CTest 或光照测试。大拷贝尽早报告，不复制整个 chunk/DOM；不提交不推送。
+
+协作：接到派发后在本文件末行设置进行中；完成写结果、范围、证据，再设置完成并结束子代理回合。reviewer 在此阶段等待期间不读文件、不另开工作。
+
+
+W-3b2b status: 进行中 (coder; target-first item migration)
+
+
+### W-3b2b 掉落物跨区块迁移交付（2026-11-13 coder）
+
+已完成受支持 minecraft:item 的普通区块边界迁移最小闭环，未改光照、未运行
+CTest、未重跑 Java 验证矩阵、未提交或推送，也未写原存档。
+
+实现：
+- 实体观察回调现在携带持久 UUID 和移除标志。跨块事件按 UUID 建立局部迁移
+  状态，记录目标区块、目标 epoch、目标保存版本，以及待清理源区块。
+- 目标实体列表必须先成功写盘；只有精确匹配目标保存版本且 epoch 一致的成功
+  确认，才允许对应源区块写空实体列表。旧目标/迟到结果不会确认新目标。
+- 源清理失败保留源版本和重试状态；不会先删源再依赖尚未确认的目标。目标失败
+  时源记录及源驻留保持，关闭流程可重试且返回真实完成状态。
+- 目标已有物品由目标块当前完整 item 列表合并保留。UUID 不随迁移变化；实体
+  不重复安装。
+- 返回源会撤销该源待清理项；继续跨第三块会把旧目标加入待清理集。移动后删除
+  会保持源清理账本，直到最终位置和旧源的实体列表均已持久化。
+- 目标未驻留或坏实体槽时不写目标，源保持 pinned；不会把未知目标槽当空。未
+  持久化的新区块运行时 item 仍由普通 chunk dirty/保存路径处理。
+- 只维护每个迁移 UUID 的小型位置/版本账本和 item 记录，不复制 chunk、完整
+  NBT DOM、光照页或全局实体列表。
+
+验证（最终受影响测试和 native 构建）：
+world_chunk_manager_tests 使用 fake store 和隔离的真实官方 26.1 item region
+副本，输出包括：
+item_entity migration negative=1 merged=1 source_cleared=1
+item_entity migration return_to_source=1
+item_entity migration removed_before_commit=1
+item_entity migration_failure=1 source_retained=1
+item_entity migration reload=1 uuid_preserved=1
+item_entity duplicate_uuid_rejected=1
+item_entity migration real_region=1 target_then_source=1
+world chunk manager tests passed (with real World disk fixture)
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2b-final-YqhGuN
+build.log SHA-256 c9d50d04b24f7b6d553f108a6134c42e3aaee7449d19f538e6ec6965ec761343;
+manager.log SHA-256 030e8099d02c9294de5024d2edab484dfa9c597efba7bca6aa69ad0fbf822d49.
+world_chunk_manager_tests SHA-256
+15161bdf90554599df1af398251fbb54133ad54b12ea8311d0bc986803e06e16.
+redstone_vanilla_server SHA-256
+6e8c3b847546d31dc6114a14009cd5416b838708d5ab39de011f4f8270c5f808.
+
+边界：目标写和源清理仍是两个独立 region 写，不声明跨文件/掉电原子性；普通
+进程内失败和关闭重试已覆盖。若在目标成功后、源清理前崩溃，两个槽可能暂时
+保留同一 UUID；加载路径仍拒绝重复 UUID，不做“先读到谁就删谁”的任意历史修复。
+同时交叉的多 UUID 迁移若形成相互等待，会保持相关块驻留并报告未完成；同一
+UUID 的正常回源路径已覆盖，不永久卡死。
+
+
+
+Final implementation note (2026-11-13 coder): the migration ledger now keys by
+persistent UUID and gates every source write behind an exact target snapshot
+acknowledgement carrying the same epoch. Target failures leave source storage
+and residency pinned; source-cleanup failures remain queued through the normal
+bounded retry path. Returning to the original chunk cancels that source cleanup,
+and removal before commit retains cleanup ownership until both sides no longer
+list the UUID. Normal tick/add/remove/explosion/piston-driven movement reaches
+the observer; UUID is unchanged by movement.
+
+The final focused run covered target-before-source ordering, target merge with an
+existing item, source failure retry, target failure retention, return-to-source,
+removal before commit, unload/reopen with one UUID, and a negative-coordinate
+cross-region cycle against an isolated copy of the official 26.1 item fixture.
+The existing malformed entity-slot test continues to prove rejected target data
+is not overwritten. No CTest or Java rerun was performed.
+
+Evidence: /home/zhddsj/.local/state/redstone-cpp/wsl-w3b2b-final-YqhGuN
+build.log 8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794;
+manager.log 030e8099d02c9294de5024d2edab484dfa9c597efba7bca6aa69ad0fbf822d49.
+world_chunk_manager_tests 15161bdf90554599df1af398251fbb54133ad54b12ea8311d0bc986803e06e16;
+redstone_vanilla_server 6e8c3b847546d31dc6114a14009cd5416b838708d5ab39de011f4f8270c5f808.
+
+Limits: two independent region writes are not a cross-file atomic transaction.
+A crash after target confirmation and before source cleanup can leave the same
+UUID in both slots; loading rejects duplicate UUIDs rather than deleting one by
+read order. A simultaneous dependency cycle involving different UUIDs remains
+conservatively pinned and reported; the normal same-UUID return path completes.
+
+
+Final rerun: world_chunk_manager_tests and redstone_vanilla_server built; focused manager suite passed with fake and isolated official-region fixtures. No CTest, Java, lighting suite, commit, or push.
+
+### W-3b2b 严重问题审查（reviewer，2026-11-13）
+
+现有定向测试证据保留，不重跑。当前不通过，限以下实质问题返工：
+
+1. **P1 遍历失效/不安全确认。** src/world_chunk_manager.cpp:1688–1734：driveEntityMigrations 对 entityMigrations_ range-for，内部 entityMigrationSaveCompleted 可以 erase 当前 map 节点，随后继续读 migration；同一个函数还直接 erase 正在 range-for 的 clearSources 元素。移除从状态轮询推断精确 ACK 的后备逻辑，改用实际接受的 save 请求和对应完成事件；安全迭代/两段处理，禁止在回调后持有已失效引用。:1553–1585 只在确实提交成功后登记，并要求目标 payload 实际包含同一 UUID（移除路径用独立、明确的无此 UUID 确认）；:1614–1660 不能用任意 >= 版本或仅“dirty 已清”断言此 UUID 已在某源擦除。已确认目标的成功状态不能被以后无关保存失败回滚；目标/源均核对 epoch + version + UUID 意图。用失败、过时确认和多跳反例验证，别以不可达的代码或测试跳过掩盖。
+2. **P1 迁移的推进违反主线程预算。** :287 / :1688 每 pump 全扫迁移、每保存/驱逐再扫同一全量集合，目标未加载的账本可长期存在；:1502 每个实体每 tick 也构造 std::set 只为最多两个坐标。用 per-chunk 关联索引及事件触发（目标安装/实际写完成/需求边），或有明确上限的增量工作队列；没有事件时不遍历卡住迁移，不需要为此重做整个 autosave。避免 per-item 常规 tick 的小容器分配。验证批量未就绪的迁移不增加每次空闲 pump 的扫描。
+3. **P1 真实运动入口与关服。** src/entity.cpp:1381–1397 仅在自身 tick 前后观测位置，活塞/其它实体造成的移动若发生在自身 tick 之外，oldPosition 可能已是新块，而 section 仍旧；跨界后同 tick 删除也仅以新块标脏。追踪旧的已索引位置/统一 World movement hook，补真实运动路径（不用 fixture 人工调用 observer 来代替唯一验证）。未就绪目标应明确使 close 返回未完成；不能因源脏版本或无已存在实体槽恰好相等而遗忘待迁移物品。允许保守局部延迟或阻止复杂迁移，维持已说明的跨 region 崩溃边界。
+
+请先做最小正确闭环。必须保持既有 stock 格式与不复制大块的约束；只做受影响定向 manager/build，无 CTest/Java/光照/提交。完成后末行使用项目规定的裸状态“任务已完成”（不是带前缀的状态行），并结束 coder 回合；我等待期间不读文件。
+
+`审查结束`（历史状态）
+
+
+### W-3b2b 严重问题审查返工（2026-11-13 coder）
+
+已仅处理审查列出的三项阻塞。保留既有未提交改动；未改光照，未运行 CTest、
+Java 或光照测试，未提交、推送或写原存档。
+
+1. 迁移状态改为按 chunk 的正向 target 索引和反向 source 索引。确认事件从对应
+   索引取 UUID 后先复制受影响集合，再完成状态更新和删除，不再在遍历 map/set
+   时擦除当前元素。移除了从当前 dirty/status 推断目标 ACK 的轮询逻辑；只有
+   save payload 被 controller 接受后才登记意图，且目标确认要求持久 UUID 确实
+   出现在目标 payload（删除确认使用明确的 absent intent），完成时精确匹配
+   epoch 与 save version。后续无关保存失败不会回滚已确认目标。源清空同样要求
+   对应 epoch/version 的精确成功完成。
+2. pump 不再全扫迁移表；目标安装、实体变化和保存完成只入有界事件队列，空闲
+   pump 不访问长期卡住的迁移。实体位置只更新 UUID 到原区块的索引，普通 tick
+   不再为源/目标构造临时 std::set。批量 8 个未就绪迁移的测试验证队列排空后
+   128 次空闲 pump 的迁移访问计数不增长。
+3. WorldChunkManager 持续记录实体上次索引位置，因此其它实体或运行阶段在自身
+   tick 前移动、以及跨块后同 tick 移除，都能用旧索引区块识别。新增真实
+   world.tickEntities() 路径和实体速度跨块测试，未用人工 observer 作为唯一
+   验证。目标未驻留时保持源驻留，close 返回未完成且源记录仍在。
+
+最终定向输出：
+item_entity migration negative=1 merged=1 source_cleared=1
+item_entity migration real_tick=1 target_first=1
+item_entity migration velocity_crossing=1
+item_entity migration stale_ack=0 multi_hop=1
+item_entity migration return_to_source=1
+item_entity migration removed_before_commit=1
+item_entity migration_failure=1 source_retained=1
+item_entity migration unready_batch=8 idle_scans=0
+item_entity migration reload=1 uuid_preserved=1
+item_entity duplicate_uuid_rejected=1
+item_entity migration real_region=1 target_then_source=1
+world chunk manager tests passed (with real World disk fixture)
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2b-review-final-pFNlF3
+build.log SHA-256 c9d50d04b24f7b6d553f108a6134c42e3aaee7449d19f538e6ec6965ec761343;
+manager.log SHA-256 4f1c15a8a5a15ceed51f19bad4e5444e0a08488105226170bc0b33508e00e852.
+world_chunk_manager_tests SHA-256
+8981904e8db11633c8dc64cb42f80bf9a4b999b5e15b88cafa4dbcd63eaea058.
+redstone_vanilla_server SHA-256
+55caed5fffdba4aee8fc4e9a82b68b736f3c24599b545a44c6568c51abb75a27.
+
+仍保留的边界：跨文件目标写与源清理不是掉电原子事务；目标成功后、源清理前
+崩溃可能留下两个槽的同一 UUID，加载路径拒绝重复 UUID，不做任意删除。不同
+UUID 形成相互依赖的复杂迁移仍保守驻留；同一 UUID 的返回与多跳顺序已完成。
+
+`任务已完成`（历史状态）
+
+
+### W-3b2b 严重问题审查返工结果（2026-11-13 coder）
+
+仅处理审查列出的三个阻塞，保留工作区其余改动。
+
+- 迁移确认：仅在实际 requestSavePayload 被 controller 接受后登记目标意图。
+  目标成功必须同时匹配持久 UUID 确实出现在 payload、目标 epoch 和精确保存
+  版本；删除使用明确的 absent intent。源擦除也要求该源 epoch、精确版本和
+  payload 不含 UUID。已移除从 dirty/status 推断 ACK 的后备路径。迟到目标
+  完成不能释放新目标；已确认目标不会被之后无关保存失败回滚。
+- 迭代安全：每 chunk 建立 target/source UUID 索引；保存完成和 pump 都先复制
+  受影响 UUID/源位置列表，再修改或擦除 map/set，不再擦除正在遍历的元素。
+- 热路径：删除每 pump 全扫 entityMigrations_。推进仅由实体变化、目标安装、
+  save 完成或失败事件加入有界队列；空闲 pump 不访问长期未就绪的迁移。普通
+  实体 tick 不再构造临时 std::set，仅更新上次位置和最多两个既有 chunk。
+- 真实移动：Manager 跟踪每个 UUID 上一次已索引位置；活塞或其它实体在自身
+  tick 前移动、以及跨块后同 tick 删除，都从旧索引位置识别。新增真实
+  world.tickEntities() 和实体速度跨界验证。
+- 关服：目标未加载/不可读或尚未收到精确确认时，源保持驻留，close 返回
+  未完成并保留源记录；不会因源 dirty/无实体槽状态而跳过迁移。
+
+最终定向测试全部通过：
+item_entity migration negative=1 merged=1 source_cleared=1
+item_entity migration real_tick=1 target_first=1
+item_entity migration velocity_crossing=1
+item_entity migration stale_ack=0 multi_hop=1
+item_entity migration return_to_source=1
+item_entity migration removed_before_commit=1
+item_entity migration_failure=1 source_retained=1
+item_entity migration unready_batch=8 idle_scans=0
+item_entity migration reload=1 uuid_preserved=1
+item_entity duplicate_uuid_rejected=1
+item_entity migration real_region=1 target_then_source=1
+world chunk manager tests passed (with real World disk fixture)
+
+改动文件：include/redstone/engine.hpp、src/entity.cpp、
+include/redstone/world_chunk_manager.hpp、src/world_chunk_manager.cpp、
+tests/world_chunk_manager_tests.cpp。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2b-review-final-w1q9B0
+build.log SHA-256 51ab8d58678195d8f915e482692c779520012fec1c559c535fa7fd5d5a8b7c18;
+manager.log SHA-256 4f1c15a8a5a15ceed51f19bad4e5444e0a08488105226170bc0b33508e00e852.
+world_chunk_manager_tests SHA-256
+d7f0b97e1fcbdd8238076573b3f440086dde2df1533699df74286b5266531f08.
+redstone_vanilla_server SHA-256
+809d58719928793e6f4eecc2b29eb37e7cdcd44bd2dcc4f0d1530069d404ec9c.
+
+边界：两次 region 写仍不是跨文件/掉电原子事务。目标成功后、源清理前崩溃可能
+暂时在两槽保留同一 UUID；加载拒绝重复 UUID，不做任意删除。复杂多 UUID
+依赖环仍保守驻留并报告；同一 UUID 回源、多跳及迟到确认已覆盖。
+
+### W-3b2b 最终阻塞（reviewer）
+
+已接受事件化工作队列、按区块索引、精确已提交版本和定向证据，不重跑。仍有一个可丢失/错存活实体的时间窗口：World::tick 在 tickEntities 之后才跑 pistonTickBlockEntities（src/engine.cpp:2319–2328）。活塞通过 Entity::move(world,...,true) 立刻改 position，但 src/entity.cpp 当前仍只在自身 tick 结束才更新 section/通知。manager 在 World::tick 返回后可以保存或驱逐；下一刻 tickEntities 又先按新的物理位置检查 readiness，若目标未就绪可能无限跳过。上次已索引位置只能修复下一次自己成功 tick，不能修复本刻窗口。请让真实受管实体的外部移动在其发生时或 World::tick 返回前更新 section 并记录迁移；覆盖活塞后、未等下一次实体 tick 就 pump/撤票的反例，包含目标未就绪。用真实 Entity::move piston 或 piston ticker，不仅用 fixture 回调。普通 tick 保持原顺序并避免每位移做重复通知；离线无 manager 的路径不要加全世界扫描。
+
+同批两个极小但必要的生命周期收口：
+- entityLastPositions_ 在实体卸载时不擦（只在 tick removal 擦）；让真实 unload 清除相应记录，或改用已有 section 索引，无需第二份永久 UUID 表；加卸载重载的账本不增长断言。
+- noteEntityMigrationSave :1957 被无条件调用，presentUuids 为空也可能是没有提交 itemEntities 的 terrain-only save。仅在实际包含实体 payload 时登记缺失/包含 UUID 意图；对于已确认目标，源清理推进不能要求目标继续 resident（:1738 的早退限于未确认目标），或者在源清理完成前明确 pin 目标。测试目标撤票与源写失败回退。
+
+只改这些，必要定向 manager + native 构建即可，不重跑 CTest/Java/光照，不提交。结束时写唯一裸状态 任务已完成；reviewer 期间只等，不读文件。
+
+`审查结束`（历史状态）
+
+
+### W-3b2b 最终阻塞返工结果（2026-11-13 coder）
+
+仅修复审查列出的最终阻塞，未改光照、未运行 CTest/Java/光照测试、未提交或推送。
+
+- 活塞在自身实体 tick 之后调用 Entity::move 时，生产移动路径立即更新实体 section
+  并向 manager 发送旧/新位置；不再等待下一次实体 tick。普通实体 tick 的原顺序
+  保持，每个实际位移只同步一次。
+- manager 初始化并维护 UUID 到上次索引位置的映射；真实卸载成功后擦除该 chunk
+  的 item UUID 位置记录。新增 ledger-size 断言确认卸载后不残留。
+- 只有本次保存实际包含 itemEntities payload 时才登记 UUID present/absent 迁移
+  意图；terrain-only 保存不再影响迁移确认。
+- 目标确认只在对应 save 被 controller 接受且完成事件精确匹配 epoch/version 与
+  UUID 意图后成立。已确认目标卸载后，迁移工作不再提前返回，源清理仍继续。
+- pump 仅消费有界事件队列；target/source 使用按 chunk 索引，空闲时不扫描所有
+  迁移，普通实体 tick 不构造临时 set。遍历均使用先复制的受影响集合。
+
+窄测试最终通过：
+item_entity migration negative=1 merged=1 source_cleared=1 target_unloaded=1
+item_entity migration real_tick=1 target_first=1
+item_entity migration velocity_crossing=1
+item_entity migration piston_after_tick=1
+item_entity migration stale_ack=0 multi_hop=1
+item_entity migration return_to_source=1
+item_entity migration removed_before_commit=1
+item_entity migration unready_batch=8 idle_scans=0
+item_entity migration reload=1 uuid_preserved=1
+item_entity duplicate_uuid_rejected=1
+item_entity migration real_region=1 target_then_source=1
+world chunk manager tests passed (with real World disk fixture)
+
+改动文件：include/redstone/engine.hpp、include/redstone/piston.hpp、
+include/redstone/world_chunk_manager.hpp、src/entity.cpp、src/piston.cpp、
+src/world_chunk_manager.cpp、tests/world_chunk_manager_tests.cpp。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2b-final-blockers-xFymXB
+build.log SHA-256 0a8ecf94fc1fba7197c7eb9c97944539cde1963f65c0501db169000c79a4928b;
+manager.log SHA-256 c1c7fab9ba9587c0175e5ff4493293ae6b88f1963a35eea1a0ca086014b5d6ae.
+world_chunk_manager_tests SHA-256
+432c5d378b0202bebd5afd65957637ac3658cd1c5b58a3fd109b7d453050c28c.
+redstone_vanilla_server SHA-256
+9a0faa2e5f445058ea5ff44272ba92cfd695e1051cd26ac31c894698befa8799.
+
+未新增 chunk、NBT DOM、光照页或全局实体列表复制；新增状态是 compact UUID 位置
+账本和按 chunk 的迁移索引。既有两个 region 写的非原子崩溃窗口保持不变。
+
+### Reviewer 结论：W-3b2b 通过
+
+- 核对了 src/piston.cpp 的活塞移动路径：坐标变动后立即经 World::synchronizeEntityAfterMove 更新实体索引及迁移观察者。
+- 核对了 src/world_chunk_manager.cpp 的真实卸载账本清理、实体 payload 保存意图和目标卸载后继续清理源。保留按位置索引及每 pump 有界工作。
+- 沿用 coder 的定向日志：真刻、速度过界、实体刻后活塞过界、版本错配、多跳、目标先卸载、真实 region 先目标后源、重复 UUID 拒绝均已覆盖；reviewer 未运行 CTest。跨两个 region 的写入不具备崩溃原子性，重复 UUID 明确拒绝，后续若需自动修复另行设计。
+- 交接状态纠正：按原末行进入审查，将正文内 3 条历史裸状态改成带说明的引用。
+
+### 下一项：W-3b2c1，持久化已点燃 TNT
+
+范围仅限原版同版本实体 region 中受支持的 minecraft:tnt，与已有 item 共存。依据上级原版源码 world/entity/item/PrimedTnt.java、world/entity/Entity.java、world/level/chunk/storage/EntityStorage.java；复用 W-3b2b 的 UUID 跨区块归属、实际保存版本确认和有界工作，勿另建第二套迁移。目标文件为 entity_codec、entity、engine 的存取边界、world_chunk_manager 及定向验证。
+
+- 核实 fuse（short，读默认 80）、block_state（BlockState.CODEC，读默认 TNT）、explosion_power（float，读默认 4、原版 clamp）、owner（实体引用）以及基类状态。只接入 C++ 能忠实恢复的状态；owner、特殊 block state 或其它未支持语义必须显式拒绝并保全整个实体槽，禁止丢字段或部分安装。usedPortal 不是独立存档字段，不能写私有 tag；如果 C++ 活对象存在该态且无法忠实恢复，按不支持处理。
+- 保存和装载应与掉落物共享单区块 compact 类型记录与统一 UUID 存在性检查。装载 TNT 不消耗 World RNG，不触发生成/点燃副作用，不改物理、爆炸或光照逻辑；真实 fuse 刻进后保存，爆炸/消失后不会复活。
+- 验收：构建实际目标，跑定向实体 codec 和 manager 或等价单项验证，覆盖同槽 item+TNT、装载后 fuse/速度/UUID、RNG 不变、实际卸载/再加载、未知状态不覆盖、TNT 消失后空槽。加入同版本官方 codec/读档证据，实际服务器重启与 codec 探针分别标明。只用 WSL 和 scratch 存档，原档只读。禁止重复跑 CTest 或扩大到下落方块/矿车，不要提交。除 compact 单区块实体记录外如需大拷贝，先报 reviewer 再做。
+
+`任务通过`（历史状态）
+
+
+### W-3b2c1 持久化已点燃 TNT 交付（2026-11-13 coder）
+
+已实现受支持 minecraft:tnt 与 item 共用单个 entity-region compact 记录、
+UUID 检查和 Entities 列表，未另建迁移系统；未改光照，未运行 CTest、Java
+全矩阵或真实服务器重开，未提交或推送，未写原档。
+
+实现：
+- entity_codec 新增 TntEntityData；读取 fuse（short，缺省 80）、默认
+  minecraft:tnt block_state、explosion_power（float，限 0..128）、UUID、
+  Pos/Motion/Rotation 和受支持基类字段。owner、block_state Properties、
+  自定义 state、未知根/实体字段整槽显式拒绝。usedPortal 无存档 tag，活对象
+  该状态在保存时拒绝。
+- chunk_lifecycle / WorldChunkManager 的 load/save payload 与现有 item
+  共用同一 worker、同一 Entities 记录和保存版本。TNT 安装不调用
+  World::random，不触发点燃或爆炸；代码安装 fuse、motion、UUID 后才进入普通
+  实体 tick。
+- TNT 消失标记所在 chunk dirty；保存时写空 Entities（与其它实体一起），
+  不会复活。未知/不支持实体或 TNT 数据仍不允许覆盖原槽。
+
+验证：
+entity_codec_tests 覆盖 stock-style TNT 字段、round-trip、owner/custom
+state 拒绝；world_chunk_manager_tests 覆盖同槽 item+TNT、真实 tick 后
+fuse/motion 保存、加载时 World random 不变、卸载重开保留 UUID/fuse/motion、
+TNT 消失后空槽，以及既有 item 迁移和真实 region 回归。
+
+输出：
+entity_codec tnt_stock_fields=1 unsupported_relation=1
+entity_codec tnt_roundtrip=1 owner=unsupported custom_state=unsupported
+tnt_entity mixed_install=1 rng_unchanged=1 saved_fuse=18 reload=1 disappearance=1
+world chunk manager tests passed (with real World disk fixture)
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2c1-tnt-final-20261113
+codec.log；manager.log；build.log。
+
+限制：没有官方 26.1 TNT 实盘重启证据，只有与本地 Java 26.1
+PrimedTnt.addAdditionalSaveData 对照的 stock-shape codec 测试；owner 和
+自定义 block state 按范围拒绝。生产装载/保存仍是单 worker 的 region 写，
+不声明跨 region 崩溃原子性。除 compact 单区块记录外未增加大拷贝。
+
+### Reviewer：W-3b2c1 阻塞，返工
+
+- **阻塞：拒绝普通原版 TNT。** src/entity_codec.cpp:291–302 对任何 Properties 拒绝，src/entity_codec.cpp:545–548 写出只含 Name 的 state。26.1 PrimedTnt.java:141–148 对 TNT 用 BlockState.CODEC；StateHolder.java:148–160 对有属性的定义会编码 Properties（Optional::of），TntBlock.java:42–44,148–151 注册 unstable 默认 false。接受原版实际输出的 `block_state: {Name:"minecraft:tnt", Properties:{unstable:"false"}}`，同时支持合法缺省；C++ 写原版同形。非默认或未知语义仍整槽拒绝。现有测试自行组装 Name-only 不能证明原版兼容。补一个官方 26.1 可执行 codec 探针（用官方 PrimedTnt 序列化/加载默认记录或实际 scratch server）；至少让官方生成字节进 C++，并让官方读回 C++ 产物的 UUID/fuse/速度与默认 state。以实际结果区分 codec 和服务器重启。保留真实命令和日志。
+- **阻塞：混合槽被按类型重排。** src/entity_codec.cpp:416–447 解为两批，:588–639 固定 item 先于 TNT 写，src/world_chunk_manager.cpp:1251–1311 固定 item 先于 TNT 安装。Java PersistentEntitySectionManager.java:236 按载入列表插入，EntityTickList 用 LinkedOpenHashMap；本项目实体也按插入次序 tick。附近 TNT 爆炸会查实体并造成伤害/推力，因此异类实体相对次序会影响谁先执行自身刻。用单个有序 compact variant 列表（或等价轻量顺序标记）贯穿载入、安装、快照、保存；验证 TNT/item 交错顺序跨往返不变，不需要复制额外 DOM 或全世界列表。
+- **应修：TNT 卸载后账本残留。** src/world_chunk_manager.cpp:1399–1410 真卸载只擦 item UUID，TNT 安装已经写入 entityLastPositions_。同一实体记录遍历两个类型；在已有卸载测试断言 UUID 账本回收。TNT 存活 tick 目前自身和外层各调用一次持久化观察者（src/entity.cpp:789–791,1423–1427），删除重复通知，仍覆盖到达另一 chunk 时当刻消失的路径。
+
+只做以上返工，不碰光照，不重复跑 CTest，不提交。以后写状态时替换已有裸状态行，禁止再追加第二个。
+
+### W-3b2c1 返工交付（2026-11-13 coder）
+
+只处理末尾审查的三项，未改光照、未运行 CTest、未写原档、未提交或推送。
+
+- 默认 TNT state：decodeTnt 同时接受合法缺省的 Name-only state 和 26.1
+  实际输出的 Name + Properties{unstable:"false"}；unstable:true、额外属性或
+  自定义 Name 仍整槽拒绝。写出固定采用官方默认形状。新增
+  PrimedTntCodecProbe.java，由官方 26.1 BlockState.CODEC 生成默认 state，
+  比对 C++ NBT，再写回官方 state 产物；C++ --decode-tnt 独立解回
+  item,TNT,item 顺序、UUID、fuse、Motion 与默认 state。
+- 混合顺序：decode 只生成一个按 Entities 列表顺序追加的
+  vector<EntityRecord>；保存走 patchEntitySequence；manager 按该列表一次
+  安装。TNT-first/item-second 夹具断言 World 安装顺序、保存字节顺序和
+  retained 顺序一致，不再按类型分批重排。
+- 账本与通知：真实卸载同时擦除 item 和 TNT UUID；混合夹具覆盖 ledger
+  2→0。删除 PrimedTnt::tick 内重复移动观察者，普通移动和同一 tick 消失
+  由 World::tickEntities 的移动/移除路径唯一通知，仍用上次索引区块识别
+  跨块后立即消失。
+- 编译收口：移除 chunk save payload 中重复的 entityRecords 成员，公开
+  manager EntityUuid 测试别名，并修正安装错误键被实体 Vec3 同名遮蔽的
+  两处编译错误；均为本阶段路径的直接阻塞。
+
+定向输出：
+entity_codec tnt_stock_fields=1 properties_default=1 unsupported_relation=1
+entity_codec tnt_roundtrip=1 owner=unsupported custom_state=unsupported
+entity_codec mixed_order=1
+entity_codec motion_clamped=1 huge_position=rejected nan=rejected
+entity codec tests passed
+tnt_entity mixed_install=1 rng_unchanged=1 saved_fuse=18 reload=1 disappearance=1 order=1 ledger_clear=1
+world chunk manager tests passed
+JAVA_26_1_TNT_CODEC_OK official={Name:"minecraft:tnt",Properties:{unstable:"false"}} order=item,tnt,item uuid/fuse/motion=1
+entity_codec official_codec_input=1 order=item,tnt,item
+
+改动文件：include/redstone/chunk_lifecycle.hpp、
+include/redstone/world_chunk_manager.hpp、src/entity.cpp、
+src/entity_codec.cpp、src/world_chunk_manager.cpp、tests/entity_codec_tests.cpp、
+tests/world_chunk_manager_tests.cpp、validation/vanilla26_1/PrimedTntCodecProbe.java、
+validation/vanilla26_1/run_tnt_codec_probe.sh、task/TASKS.md。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2c1-reviewfix-20261113
+GCC 13.3, Ninja Release, -O3 -DNDEBUG -g, jemalloc prefix.
+configure.log SHA-256 37c62bf1f3abd23deb2dce96de15ad0197eebee3480f48a9dfcddd7d809fe6b2；
+build.log SHA-256 9400c3072738b434f3a7c89bcb1eeca470301db2aee6343544f23165cd6c59eb；
+entity-codec.log SHA-256 78ea91de8c9511efe6c1eda26a9a5e156c4f8df0513a3ef5683bfb2978d7fe81；
+manager.log SHA-256 09b97ae6530cddb81f6f8b80aa15720dea883580c3d3fbba3d3497d8d708a132；
+tnt-codec-probe.log SHA-256 7c0f39baf46118c77e333beb81211e908863ff5f8deaeb64717020851589b640；
+official-input-decode.log SHA-256 106dee4c5c8cbfa915fa960f27ebbd05390719feead0198a1629009441ca968e。
+entity_codec_tests SHA-256 4aa6d9ca8d0c0e839fbc759219b991ecdcb16682e68de896228a6166e35d747e；
+world_chunk_manager_tests SHA-256 ade99e7e905c143f06a8db2308cf2ca54664c1076353e72fcedf5224579cb7b5；
+redstone_vanilla_server SHA-256 93b3a364a35a542a7c7b2ef466beef108cb484ee7c1c69b3dea669668048a823。
+
+边界：官方证据是可执行 26.1 codec 互读，不是实际服务器停机/重启；没有新增
+大拷贝，仍只有每 chunk compact EntityRecord 列表和原保存边界。
+
+### Reviewer 结论：W-3b2c1 通过
+
+已核对实际默认 TNT state、解码到安装再到保存的混合实体顺序、真实卸载清理 TNT UUID 账本，以及 World 实体移动/消失的统一通知。沿用 coder 的定向构建与日志，没有重跑 CTest。官方 BlockState.CODEC 与 NbtIo 证据在 wsl-w3b2c1-reviewfix-20261113/java/tnt-codec-probe.log；它验证 NBT 与默认状态，不是官方 PrimedTnt 整体保存或服务器重启的证明。保留 owner、非默认方块状态和未支持基类状态的安全拒绝。
+
+附带发现：src/world_chunk_manager.cpp:1973–1975 为测试顺序在每个保存过的驻留区块额外常驻一整份实体快照；src/entity.cpp:1350–1412、include/redstone/entity_codec.hpp 的 ordered/typed 平行记录也复制 compact 数据。均不是全世界/section 大拷贝，但额外成本会随区块实体数增长；下一项接新类型前移除生产侧这些重复记录。
+
+### 下一项：W-3b2c2，持久化受支持的下落方块
+
+- 只接入普通、已实际支持行为的 falling_block，例如普通沙/红沙/砾石（逐一核对 C++ 行为）。依据上级原版 world/entity/item/FallingBlockEntity.java:282–307 和 Entity.java。核实 BlockState、Time、DropItem、HurtEntities、FallHurtAmount、FallHurtMax、CancelDrop、TileEntityData；只还原引擎能忠实推进的合法组合，未知数据、TileEntityData、有伤害行为或未经支持的方块状态整槽拒绝并原样保全，不改变下落/落地逻辑。不要写 startPos 私有字段，不触发落沙生成回调或移除源方块；安装不消费 World RNG。
+- 沿用有序单区块实体记录、统一 UUID 和迁移确认。先把 EntityRecord 改为实打实的 variant 或等价的共享基类字段与单 payload，使用唯一有序快照。移除运行时仅为测试保留的 retainedEntityOrder 全记录副本；以实际持久化字节、安装后顺序或 test observer 验证。不得为新类型添一个重复数组。老测试可本地投影视图，不在生产端做。不得引入 chunk、section、光照页或全世界实体列表复制；如确需大拷贝先告知 reviewer。
+- 验收：定向 codec/manager 验证包括原版块状态形状、item/TNT/falling_block 交错顺序和共用 UUID、只卸载本区块、续跑后沙实际落地、重载不复活、TileEntityData 与 unsupported 块整槽不覆盖、移除后账本释放。优先用官方 26.1 原版 save 或能真的执行实体写出和读入的 fixture，比只手拼 NBT 更强；如只做官方 BlockState/NBT codec，明确记下证据范围。只在 WSL 和 scratch 档，原档只读；不碰光照、不做矿车、不重复跑 CTest、不提交。完成时替换唯一裸状态行。
+
+### W-3b2c2 持久化受支持下落方块交付（2026-11-13 coder）
+
+只接入 C++ 已实现普通沙下落行为的 minecraft:sand；未接入红沙、砾石、复杂
+BlockState、TileEntityData、HurtEntities/伤害参数或其它未支持的 falling_block。
+未改光照，未运行 CTest，未写原档，未提交或推送。
+
+实现：
+- EntityRecord 改为单个 std::variant<ItemEntityData,TntEntityData,
+  FallingBlockEntityData> payload；DecodedEntityChunk、LifecycleLoadedChunk、
+  ItemEntitySnapshotResult 的生产路径不再各自保存 item/tnt 平行数组。
+- 删除 ManagedChunk.retainedEntityOrder 及其测试专用全记录副本；保存直接
+  move 当前唯一有序快照到 ChunkSavePayload，生产发布路径没有额外实体记录
+  副本。测试只在本地投影需要的类型。
+- FallingBlockEntityData 支持 BlockState、Time、DropItem、CancelDrop 及默认
+  非伤害参数；保存写 Time/DropItem/HurtEntities/FallHurtAmount/FallHurtMax/
+  CancelDrop。缺省 BlockState 为默认 sand。TileEntityData、非 sand state、
+  HurtEntities=true 或非默认伤害参数整槽拒绝，原 payload 不覆盖。
+- manager 按唯一记录序列安装 item/falling/tnt 顺序，使用统一 UUID 与迁移
+  账本；安装不消费 World RNG。卸载只清理本 chunk 的位置账本；falling 续跑后
+  落地且删除实体，重载不会复活。
+- C++ falling-block persistence 将其纳入支持实体集合；未知实体仍拒绝。
+
+定向输出：
+entity_codec falling_stock=1 tile_data=unsupported unsupported_state=rejected damage=rejected
+entity_codec mixed_falling_order=1
+entity_codec official_falling_input=1 order=item,falling,tnt,item
+entity tests passed
+falling_block mixed_order=1 unload_scoped=1 resume_land=1 reload_no_revive=1 ledger_clear=1
+falling_block tile_data=refused payload_unchanged=1
+world chunk manager tests passed
+
+官方证据是 26.1 BlockState.CODEC/NbtIo 互读：官方生成
+official={Name:"minecraft:sand"}，读取 C++ 的
+item,falling,tnt,item 顺序、UUID、Time、DropItem、CancelDrop、Motion、伤害
+默认字段，并重写同一 NBT 供 C++ 独立解码。该范围不是实际服务器停机重启，
+但没有声称更广的原版实体解析覆盖。
+
+改动文件：include/redstone/chunk_lifecycle.hpp、include/redstone/engine.hpp、
+include/redstone/entity_codec.hpp、include/redstone/world_chunk_manager.hpp、
+src/chunk_lifecycle.cpp、src/engine.cpp、src/entity.cpp、src/entity_codec.cpp、
+src/world_chunk_manager.cpp、tests/entity_codec_tests.cpp、
+tests/entity_tests.cpp、tests/world_chunk_manager_tests.cpp、
+validation/vanilla26_1/FallingBlockCodecProbe.java、
+validation/vanilla26_1/run_falling_codec_probe.sh、task/TASKS.md。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2c2-review-20261113
+GCC 13.3, Ninja Release, -O3 -DNDEBUG -g, jemalloc prefix.
+configure.log SHA-256 4e55b3367a17d0d29d7c9fc4c1e9cdfb1cfa61aafda87bec99c5cbcff9e2e9f8；
+build.log SHA-256 cb7ec8a29588c638472bc9a08a371177f7aa971ec0e26e4c03253241c5f73c75；
+entity-codec-final.log SHA-256 f280f684f1ee8b904f480f21baeaca38b631948b452d5c225a5a623f63c78544；
+entity-final.log SHA-256 8078ca10f75cf630d05c4a25faefdbeb5fea9d1c298836755fd6a6c79320f54a；
+manager-final.log SHA-256 03c5dd59c11f665a1fca2941941f0c4186210094efb7f624c3bd46242a650b67；
+emit-falling.log SHA-256 956955eb47927bf6faec881af6d1fed7d72094a4c9b192555aef0fd0a050911e；
+java-falling-probe.log SHA-256 14cfd4768da3546b0cfa3bfb6cbe90afbf4ffb654cdde723c5e905e9469c28f9；
+official-falling-decode.log SHA-256 3fba2b620407c3f7f1502988dd9ba108e05f1b254901df53ded4c18592f0ea74。
+entity_codec_tests SHA-256 9e13b1692d87382a3f886c92867fc235f71d57ef0f1b0731a025d2b478273ea7；
+entity_tests SHA-256 2146936f8695fb3d037e1373438895f2bf3472151ea4aa12a4c12e55b2119e6b；
+world_chunk_manager_tests SHA-256 e1b84082ff7e297db75820319ec532325983c9eec4242a41fecc597b35aaa2ba；
+redstone_vanilla_server SHA-256 766d237e31707d00212b38dc6ccc53375fe84117cb85d360bbb5b8493ccaf7b2。
+
+边界：只持久化默认 sand falling_block；红沙/砾石和未支持状态仍安全拒绝。
+无新增 section/chunk/光照页或全世界实体列表复制。跨 region 写入仍不是掉电
+原子事务。
+
+### Reviewer：W-3b2c2 阻塞，窄返工
+
+- **阻塞：下落方块读档丢弃 Motion。** src/world_chunk_manager.cpp:1298–1313 构造了 FallingBlockEntity 并恢复其它字段，未将 decoded.motion 应用于新实体；src/entity.cpp:802–811 的构造器只设位置和 startPos。原版 Entity.java 从 Motion 读回速度。实际存档恢复后将从静止开始，落点、时序、跨块迁移都可改变。按已有 TNT/掉落物路径恢复三轴速度。扩展已有 manager 卸载重载夹具：首次安装、保存、再加载都要在下一次 tick 前断言同一 UUID 的非零 Motion（应有横向和纵向分量；也保留 Time 与落地不复活断言）。只重建和直跑受影响的定向 manager；不用重跑 CTest、Java 或不受影响的测试。除此之外，定向记录、拒绝未知数据和移除生产重复快照已核对。
+
+### W-3b2c2 Motion 窄返工结果（2026-11-13 coder）
+
+仅修复 falling_block 安装遗漏 Motion：构造 FallingBlockEntity 后立即
+setDeltaMovement(decoded.motion)。测试夹具改为三轴非零
+{0.125,-0.04,0.0625}，并在首次安装、保存后的快照、重载后下一次 tick 前
+分别断言同一 UUID 的 Motion；保留 Time、落地和重载不复活断言。未改其它逻辑。
+
+定向结果：
+falling_block mixed_order=1 unload_scoped=1 resume_land=1 reload_no_revive=1 ledger_clear=1
+falling_block tile_data=refused payload_unchanged=1
+world chunk manager tests passed
+
+只重建并直接运行 world_chunk_manager_tests；未跑 CTest、Java、entity codec/
+entity 测试或其它未受影响测试，未提交。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2c2-review-20261113
+build-motion2.log SHA-256 b0a6b5cad1b281b7cfa5b3ffeeb0dbea0d70c9f8479b34fa4e805818d80b7d3b；
+manager-motion2.log SHA-256 03c5dd59c11f665a1fca2941941f0c4186210094efb7f624c3bd46242a650b67；
+world_chunk_manager_tests SHA-256 4d9ee6003eabb68e180e425093ae05276e952fe47e116fd996dd3742b9c50a45。
+
+### Reviewer 结论：W-3b2c2 通过
+
+World 安装已恢复三轴 Motion，沿用 coder 的 WSL manager 定向结果。核对了默认沙、同槽交错顺序、唯一 compact variant 快照、异区块不受卸载影响及落地后不复活。未知字段、TileEntityData、带伤害或未经支持的下落方块整槽拒绝；26.1 官方证据仅为 BlockState/NBT codec 互读，未做实际服务端重启。Reviewer 未重跑 CTest。
+
+### 下一项：W-3b2c3，普通空矿车存读盘
+
+只接入现有普通空 minecraft:minecart 的旧行为；源码依据上级 world/entity/vehicle/minecart/AbstractMinecart.java:476–493、Minecart.java、world/entity/Entity.java。对照 FlippedRotation、HasTicked（原版直接映射到 firstTick，不能按名字猜反）、DisplayState、DisplayOffset 默认值及 VehicleEntity 额外字段。普通空车才支持；乘客、变体、非默认显示、未知状态按安全策略整槽拒绝；损伤/轨道相关字段只依原版是否保存，不加私有 NBT。不得新增实验 NewMinecartBehavior、改物理/光照或读取原档写回。
+
+沿用单个有序 compact variant、实际存读盘和 UUID 迁移；不保留额外生产快照。安装前检查组合，不消费 World RNG 或触发生成副作用；恢复 Pos/Motion/Rotation/UUID 和受支持 minecart 字段。定向验收：非零三轴速度在安装及重载后第一刻前一致、混合实体顺序、在轨道继续实际运行、卸载账本清理与拒绝未知形态、混合列表消失不复活。优先用真实 26.1 Scratch 保存或官方完整实体读写来证明；否则明确证据边界。仅 WSL，禁止重复跑 CTest，不提交。若需要大拷贝先报 reviewer。结束时替换唯一裸状态行。
+
+### W-3b2c3 普通空矿车存读盘交付（2026-11-13 coder）
+
+仅接入普通空 minecraft:minecart，沿用单一有序 EntityRecord variant、UUID 与
+迁移账本；未改物理、光照、客户协议或原档，未运行 CTest，未提交或推送。
+
+实现：
+- 新增 MinecartEntityData，恢复 Pos/Motion/Rotation/UUID、基础实体字段、
+  FlippedRotation 和 HasTicked（直接映射 C++ firstTick，未按名称猜测反转）。
+- 保存普通空车时写 FlippedRotation/HasTicked；默认 DisplayOffset=6 和缺失
+  DisplayState 不写私有字段。
+- DisplayState、非默认 DisplayOffset、Passengers、非 minecraft:minecart id、
+  未知字段或非默认基础状态整槽拒绝；乘客/变体和实验 NewMinecartBehavior 不接。
+- manager 安装时恢复三轴 Motion、flipped、firstTick，不消费 World RNG；
+  rail/载入/保存/卸载走既有 manager 生命周期，账本按统一 UUID 清理。
+
+定向结果：
+entity_codec minecart_roundtrip=1 display=unsupported offset=unsupported passengers=unsupported
+entity_codec mixed_minecart_order=1
+minecart empty_install=1 motion=1 rail_run=1 reload=1 ledger_clear=1
+world chunk manager tests passed
+
+官方 26.1 NbtIo 探针读取 C++ 产物并重写同一 NBT，C++ 再读回
+item,minecart,tnt,falling 顺序、UUID、FlippedRotation/HasTicked 和三轴 Motion。
+该证据是官方 NBT 实体记录读写，不是实际服务器停机重启。
+
+改动文件：include/redstone/entity_codec.hpp、include/redstone/engine.hpp、
+include/redstone/world_chunk_manager.hpp、src/entity_codec.cpp、src/entity.cpp、
+src/engine.cpp、src/world_chunk_manager.cpp、tests/entity_codec_tests.cpp、
+tests/world_chunk_manager_tests.cpp、
+validation/vanilla26_1/MinecartCodecProbe.java、
+validation/vanilla26_1/run_minecart_codec_probe.sh、task/TASKS.md。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2c3-minecart-20261113
+GCC 13.3, Ninja Release, -O3 -DNDEBUG -g, jemalloc prefix.
+build-manager.log SHA-256 764c816a2542819594381a2452bb354777f24205edcd1bf13c8b0abb2144e873；
+build-native.log SHA-256 0a8ecf94fc1fba7197c7eb9c97944539cde1963f65c0501db169000c79a4928b；
+codec.log SHA-256 e491af0b3c2975d97347e33e6300fadee77acc2fd48d00a8dc32b31d7f786021；
+manager.log SHA-256 bc270fbafda7f3e0103e417872b32861f3f829d1f534be8188b5ce55a1c3ad6d；
+emit-minecart.log SHA-256 0602b4d56d7ebcc3319b525e2c2bd2e62d8c65e9309e2d657aca4fc6bf07b31b；
+java/minecart-codec-probe.log SHA-256 bb90e25a04924305ae08a4e218b1350c5504e33a1b94cced27ce3b72e2dbc0b8；
+official-minecart-decode.log SHA-256 c0cc899e9c44081a6f7731219b1da4580a420c031ff6d02c94a872ed88f2b017。
+entity_codec_tests SHA-256 998972591f9bfe4249bd73db1dd9b8f080cf54862d4c11f74225138fbce28642；
+world_chunk_manager_tests SHA-256 c92c0c163d79dae06b88e8ed066ef16a16d2c586aaef6dd4e1a54681c64b1730；
+redstone_vanilla_server SHA-256 403385ba4f6e55ea38c67b88b57e131004fb9803e154620051df6e4d9b845641。
+
+边界：只持久化普通空 minecart；DisplayState、DisplayOffset 非默认、乘客和
+变体安全拒绝。没有新增 section/chunk/光照页或全世界实体列表复制。
+
+### Reviewer 结论：W-3b2c3 通过
+
+核对了普通空矿车 UUID、Motion、FlippedRotation、HasTicked 的安装与编码，原版默认 DisplayOffset=6 的识别，以及未知变体/状态整槽拒绝。沿用 WSL 定向 manager、codec 与官方 NbtIo 日志。原版探针确认 NBT 结构，不等同实际服务器重启；未重跑 CTest。四类已支持实体均使用单个区块局部有序 variant，不新增常驻副本。
+
+### 下一项：W-4b，官方 26.1 三类实体实盘重启
+
+- 只验证 W-3b2c 的普通 TNT、下落沙、空矿车。复用此前 W-4 item/moving-piston Scratch 夹具与已支持的 terrain、force ticket 配置。在 WSL 用原版 26.1 真正启动世界并生成实体，由原版停服写盘；C++ native ticketed-world 实际读、推进若干刻、持久化并停服；原版再重启，命令读取实体 UUID 与有效字段。三类实体可分位置或分夹具，保证区块实际 entity ticking，安全隔离爆炸，不访问真实世界。固定种子/时间、控制推进刻数或用冻结读回，输出可复现命令和真实日志。
+- 明确断言三类均由原版生成/保存、C++ 真实载入和推进、官方重新载入 UUID 与 C++ 最终存档状态（TNT fuse、落沙 Time/位移或实际落地且无实体、空车运动/方向）。确认失败不是 fixture 没加载、实体在比较前自己已走刻，或用了已预先手改的 Entity NBT。不同阶段的状态变化证据都保留，必要时用已有 codec 仅读辅助诊断。
+- 这是验证阶段。发现真实阻塞先把最短复现和源头记录；只允许很小的兼容修复，大改和大拷贝先报 reviewer。不要为了开跑擅自重写原版生成数据或静默剥离未知字段；若支持边界限制，精确报告，必要时使用原版可启动的同版本既有 Scratch terrain，原档只读。前几阶段的定向测试不重跑；禁止重复跑 CTest，不改光照，不提交。结束时替换唯一裸状态行。
+- 后续候选：T-4 实际长期漫游内存。src/chunk_lifecycle.cpp:940–946 保留 Absent Entry，workerEpochs_ 和 manager lightEpochs_ 也有按历史坐标增长的风险；另行设计和测量，先不做。
+
+### W-4b 官方 26.1 三类实体实盘重启（2026-11-13 coder）
+
+复用既有 official-stone Scratch 世界、原生 --ticketed-world 和 TCP Play 会话
+流程，在隔离副本中完成原版生成/保存 -> C++ 实际读入并推进 -> 原版重启读取。
+未运行 CTest、旧定向测试或光照测试，未写原档，未提交或推送。
+
+夹具：
+- 原版 26.1 启动平坦世界，tick freeze 后 forceload -16 -16 15 15，
+  setblock east_west rail，随后用官方 summon 生成 TNT（UUID 201..）
+  fuse=1200、falling_block sand（UUID 211..）Time=7/Motion、minecart
+  （UUID 221..）Motion/Rotation/FlippedRotation/HasTicked；save-all flush
+  后停服。
+- 原生二进制使用 --ticketed-world --port 0 --ticks 40 --spawn
+  -13,-58,-10，连接真实 Play/位置/chunk 会话，读取 36 个 resident chunk，
+  entities=3，输出 TICKETED_WORLD_CLOSED complete=1 saved=1 unsaved=0。
+- 原版再次启动同一隔离世界，通过 data get entity 读取 UUID/有效字段，
+  并对落点执行 execute if block。
+
+官方重启结果：
+- TNT UUID [I;201,202,203,204]，fuse 从 1200 变为 1160，位置由
+  y=-58 落到 y=-59，字段和默认 block_state 可读。
+- falling_block 已无实体；官方 execute if block 在
+  (-15,-59,-11) 读到 minecraft:sand，证明已实际落地且没有复活实体。
+- minecart UUID [I;221,222,223,224]，Motion/Pos 已由 C++ 推进，
+  FlippedRotation/HasTicked 字段可读，并非预先手改 Entity NBT。
+- 原版生成日志有三个 Summoned new 记录；C++ 日志有 complete=1 saved=1；
+  官方重启日志有上述 data get 和 SAND_LANDED。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-w4b-three-entities-20261113
+build-clean-native.log SHA-256 f5c1f7dabb2d3da45d5d886bda86c30e6976567c9a71d384c666dece423a2bfb；
+final-combined/official-generate.log SHA-256 7310a450bf90ab22000bf7a24a16e68b3759bc961d5f59ca0a1e3b8fcb76977d；
+final-combined/cpp-player.log SHA-256 125e99a8292edf19ee293e4ed1a1d0855ffb62afdd15b2e3f2504f655355fc25；
+final-combined/official-query.log SHA-256 eb920a11a385e00d7a346c9f4dc5ab811cdb8c86bbcf254cc5e1aba8c920aff7；
+combined_fixture.py SHA-256 f2b8e0efd09cb7fca3c59f039caf3e6792ab3acd15d2c5d7157c70ff8ad4640f；
+cpp_player.py SHA-256 c8d9d17e343911b117877685d1f69f239def50c9da80b800c6ebf865f126a895；
+query_final.py SHA-256 520719e53f0a9f329e94ac7e89771ede3a925d290c5b0346fa84f61762a81d8a；
+redstone_vanilla_server SHA-256 403385ba4f6e55ea38c67b88b57e131004fb9803e154620051df6e4d9b845641。
+
+边界：这是原版 26.1 DedicatedServer 实际启动/停服与 native 实际 session；
+使用固定种子和时间、冻结首轮写入，未访问原档。没有新增生产代码修改。
+
+### Reviewer 结论：W-4b 通过
+
+直接核对三个官方 Summoned new、C++ 真 Play 会话和关闭记录（36 installs、complete=1、saved=1、unsaved=0），以及官方重启冻结后实体查询。TNT 原 UUID、fuse=1160；矿车原 UUID、推进后 Pos/Motion/Rotation/flags；落沙无实体且落点有 sand。是同一隔离世界的官方 26.1 → C++ → 官方 26.1 真停服重启，覆盖三类受支持子集。未重跑任何测试，未改生产代码。
+
+### 下一项：T-4b3，实际卸载后的生命周期账本回收
+
+- 严重长期问题：src/chunk_lifecycle.cpp:940–946 的成功卸载保留 Absent Entry；读取消/已释放的失败坐标也不回收；:963–967 两个 worker 账本长期按历史坐标累积。按原版 ChunkMap 活跃 holder/pending unload 生命周期处理，历史坐标不是永久 holder。采用控制器单调递增的实例代号（不是每位置重置），按 FIFO 命令结束生命周期，并把 worker written version 归到活代状态。仅在没有 demand、真实节点、未完成写或保全责任时清理。过期回报不能创建 entry 或覆盖后来同坐标生命周期；drop 只能删除同代模板/状态，不影响新一代。失败状态在仍有真实需求时保持可诊断，撤票后可释放。无需求的无效变化不应新建 entry。禁止靠全图每刻扫描清理。
+- manager 的 lightEpochs_ 同为无界历史坐标。可用单调全局实例号取代，但先核实 World::loadChunk 和 light service 的版本契约；不要修改传播/算法/发布结构，不在本阶段扩到 light service 自身账本。若必须跨越该范围，在交接中明确边界并先报。核对 manager 其它位置索引是否确有同类历史增长，范围只修与本项同生命周期的严重问题。
+- 定向验收：模拟跨大量不同坐标反复取消、未找到、成功卸载，完成排空后主/worker 活状态随在途及驻留数量收敛，不以 RSS 单样本代替容器计数。真实卸载后同位置快速重新 demand；阻塞读后撤票重加、旧回报与模板清除交错、拒绝旧写或保全失败脏写。兼顾已有保存确认和迁移，不做大拷贝。定向 lifecycle/manager 测试即可，不跑 CTest，不重跑 Java，不提交。仅 WSL。完成时替换唯一裸状态行。
+
+### T-4b3 生命周期账本回收交付（2026-11-13 coder）
+
+仅处理真实卸载/撤票后的历史坐标增长与旧代隔离，未改光照传播、发布结构
+或算法；未运行 CTest/Java，未提交或推送。
+
+实现：
+- 主生命周期 Entry 只在真实 demand 时创建。无 demand 的无关坐标变化不建
+  entry。
+- 控制器使用全局单调实例 epoch，不再从每位置 0 递增。读取消、失败读取和
+  成功卸载通过 FIFO Invalidate/Drop 精确回收同代 main/worker/template 状态。
+  旧代回报只丢弃同代项，不能创建 entry 或覆盖后来同位置新一代。
+- worker written version 与 lifecycle epoch 配对保存；旧代保存回报不能作为
+  新代写入版本。成功卸载/取消后 DropDone 才释放条目，保留在途保存、脏数据、
+  migration pin 等保全责任。
+- 失败状态在真实 demand 下保持可诊断；撤票后经显式更新回收。真正卸载后
+  同位置快速重新 demand 使用新的全局代次。
+- manager light lifecycle 改为全局单调 token，坐标值在真实 unload 时擦除；
+  未修改 LightService/传播/发布。
+- 新增仅测试可见的容器计数，不以 RSS 判断收敛。
+
+定向输出：
+chunk lifecycle tests passed
+lifecycle_history unload_clear=1 no_demand_no_entry=1
+world chunk manager tests passed
+
+定向验收覆盖：大量不同坐标取消/未找到/成功卸载后排空计数归零；同位置
+阻塞读撤票重加只安装新代；旧 Drop/回报不删除新模板；既有保存确认、失败
+脏写和实体迁移测试沿用通过。
+
+改动文件：include/redstone/chunk_lifecycle.hpp、
+include/redstone/world_chunk_manager.hpp、src/chunk_lifecycle.cpp、
+src/world_chunk_manager.cpp、tests/chunk_lifecycle_tests.cpp、
+tests/world_chunk_manager_tests.cpp、task/TASKS.md。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-t4b3-lifecycle-20261113
+build-final2.log SHA-256 2ba44e782a6471a57a879866d962bbd65898a9a23182888d6478ac9bac7c7b57；
+lifecycle-final2.log SHA-256 9dbdc5951fad56645d21a2f534aab74bf7be25785807092ef022a3ea47763098；
+manager-final2.log SHA-256 409640fd29a82811ef20c20794374402cc8777c0daa47c50e251f32e76f05acd。
+chunk_lifecycle_tests SHA-256 44c91de0aaee848e406bf07a0835fe50c4ab6716bf71d6db11117260ff0b1cb2；
+world_chunk_manager_tests SHA-256 40a83d20703cb155987b77fa55c06dae55febf4931a306da7420db13556d6d40。
+
+边界：使用既有定向 lifecycle/manager 测试二进制；未重跑完整 CTest、Java
+或光照矩阵。历史坐标回收基于容器计数而非 RSS。
+
+### Reviewer：T-4b3 窄返工
+
+- **阻塞：容器计数测试存在数据竞争且可过早通过。** src/chunk_lifecycle.cpp:372–377 的测试 getter 从主线程直接读取 worker 正在写的 std::map；tests/chunk_lifecycle_tests.cpp:364–395 在读命令未排空时轮询，且循环中直接修改正在被 BlockingStore::readChunk 查找的 statuses。使用 worker 自己在 FIFO 栅栏命令上采样并回传，或等确认的队列栅栏/线程所有权转交后再读；不要每个生产命令为了测试去加锁。夹具经锁设置读状态。定向验证要求先明确到达 Missing/Failed 状态再撤票（当前那一组立即取消，覆盖的是取消而非失败）；也要保留同坐标重入和脏写结果。
+- **应修：撤票后的非驻留失败仍有坐标账本。** src/world_chunk_manager.cpp:254–256 看到 managed_ 未驻留直接 continue，但 installLoaded 的错误已存 errors_，未成功 install/evict 不会被清理；:1346–1362 在安装成功之前就写 lightEpochs_，同样会因 install 返回 false/抛出而滞留。只在真实成功需要时保留 token（可直接使用单调 token 无需 per-position map，或成功后再登记），非驻留撤票时清除不再有 demand、实体保全责任的错误，仍有 demand 的失败保持可诊断；补一次真实的 install-rejected 撤票计数或等价证据。不要改光照传播结构。
+
+仅定向 lifecycle/manager，禁止重跑 CTest、Java 或其它测试，不提交。替换唯一裸状态行。
+
+### T-4b3 计数与撤票历史窄返工结果（2026-11-13 coder）
+
+只处理审查的两个阻塞：
+
+- worker ledger 计数不再从主线程读取 worker 的 std::map。新增 FIFO
+  LedgerSample 命令，由 worker 在命令队列末尾采样 epoch/version/template
+  数量并回传，测试 getter 等待该栅栏；无生产每命令锁。
+- 测试的 BlockingStore 读状态改为锁内设置；先让失败读到达 Missing/Failed，
+  再撤票；取消组使用阻塞读后释放，同位置重入仍走新单调生命周期号。
+- 非驻留撤票时清除不再有 demand 且无 entity/migration 保全的 errors_，
+  真实 install-rejected 撤票后 status/坐标账本清空。成功 demand 的失败仍
+  保持可诊断。
+- manager light lifecycle 改为单一全局单调 token，不再在安装成功前登记
+  per-position map；失败 install 不留下 light 坐标历史。
+
+定向结果：
+chunk lifecycle tests passed
+lifecycle_history unload_clear=1 no_demand_no_entry=1
+world chunk manager tests passed
+
+只使用既有定向 lifecycle/manager 测试；未跑 CTest、Java、光照矩阵，未提交。
+
+Evidence:
+/home/zhddsj/.local/state/redstone-cpp/wsl-t4b3-lifecycle-20261113
+build-final3.log SHA-256 8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794；
+lifecycle-final3.log SHA-256 9dbdc5951fad56645d21a2f534aab74bf7be25785807092ef022a3ea47763098；
+manager-final3.log SHA-256 409640fd29a82811ef20c20794374402cc8777c0daa47c50e251f32e76f05acd。
+chunk_lifecycle_tests SHA-256 44c91de0aaee848e406bf07a0835fe50c4ab6716bf71d6db11117260ff0b1cb2；
+world_chunk_manager_tests SHA-256 40a83d20703cb155987b77fa55c06dae55febf4931a306da7420db13556d6d40。
+
+边界：沿用定向测试，不新增全图扫描；worker 计数由 FIFO sample 取得，
+不是测试线程直接访问 worker map。
+
+### Reviewer 结论：T-4b3 通过
+
+检查了 FIFO worker 采样、失败在需求存在时可诊断、无保全义务时撤票回收、单调代次和精确 Drop、旧回报不能创建活状态、未保存的写保持旧保全责任。manager 直接使用单调光照 token，去掉历史 map，不改光照内部。沿用 coder 的定向 lifecycle/manager 最终日志，未重跑 CTest。LightService 自身状态不在此次范围。
+
+### 下一项：W-3d1，读取原版存档中现有模拟支持的游戏规则
+
+- 严重语义缺口：原版允许关闭 TNT 爆炸、关闭水源转换、开启熔岩源转换；当前 ticketed-world 加载只读 Time/seed 等，模拟静默采用默认。只接入现有 World 的 tntExplodes/waterSourceConversion/lavaSourceConversion。原版依据上级 world/level/storage/LevelStorageSource.java:202–219、world/level/gamerules/GameRuleMap.java 的 TYPE/codec、GameRules.java 默认。路径世界根 data/minecraft/game_rules.dat（SavedData gzip、DataVersion=4786、data 下注册键和对应 NBT 布尔）。用官方真实规则文件确认完整键写法和缺省。不要把旧 GameRules/level.dat 当成当前格式。
+- 这一步仅读取、启动前应用（不得在第一批票/模拟以后应用）。现有 C++ 无线上变更游戏规则入口，文件应保留字节原样，不为了对齐格式重新写文件；后续原生命令/写入可单独做。不改变 projection 或其它旧入口。缺失文件按原版默认；支持字段类型坏、gzip/外层坏须明确拒绝或按经核实的原版等价失败处理，不能静默采用错误默认。其它规则原样保留，不宣称已实现，不做 World Clocks/advance_time 或新增功能。
+- 验收：官方 26.1 scratch server 修改三条默认值后保存，用真实 game_rules.dat 验证 C++ 读取三值并在 native 启动应用；定向行为可至少证明关闭 TNT 后已点燃 TNT 到期不爆炸，另两条用现有流体逻辑或配置断言。验证缺失默认、坏文件不产生对世界的写、未知规则及合法文件本身原样保留。仅 WSL scratch，不写原档，不重复跑 CTest，不提交，不改光照。大拷贝先报。结束时替换唯一裸状态行。
+
+### W-3d1 游戏规则读取交付（2026-11-13 coder）
+
+完成 ticketed-world 启动前的三条现有原版游戏规则读取与应用：
+
+- `include/redstone/storage.hpp`：新增 `WorldGameRules`，默认值严格对应
+  26.1 的 `tnt_explodes=true`、`water_source_conversion=true`、
+  `lava_source_conversion=false`；`WorldMetadata` 持有这三个值，并提供只读
+  `loadWorldGameRules`。
+- `src/storage.cpp`：读取世界根
+  `data/minecraft/game_rules.dat` 的 gzip SavedData。要求
+  `DataVersion=4786` 和 compound `data`；三个目标键若存在，只接受精确的
+  NBT byte bool `0/1`。缺失文件返回原版默认；gzip、外层、版本或目标类型坏
+  均抛错。其它 57 个合法规则键不解释，规则文件从不回写。
+- `src/net/server_main.cpp`：`--ticketed-world` 在持久票恢复和
+  `WorldChunkManager` 构造前把三值写入 `World`，并输出
+  `TICKETED_GAME_RULES`；不会等到第一批票、chunk 安装或模拟开始后再应用。
+- 生产路径没有新增 chunk/section/光值大拷贝。规则 load 只解压 822B 夹具并
+  短暂解析本地 NBT，返回三个 bool；没有新增 persistent NBT 副本。
+
+官方夹具与定向结果：
+
+- 官方 26.1 scratch server 将三值改为 `false/false/true` 后
+  `save-all flush`、`stop`；真实规则文件
+  SHA-256 `8d5168012d730417ed5610885487e57b98dd46f287d5a7eccd7b5d97a3fd3426`。
+  官方 `NbtIo.readCompressed` 读到 `DataVersion=4786`、60 个规则键，目标值
+  为 `tnt_explodes=0b`、`water_source_conversion=0b`、
+  `lava_source_conversion=1b`。
+- native 真连接、50 刻运行输出：
+  `TICKETED_GAME_RULES tntExplodes=0 waterSourceConversion=0 lavaSourceConversion=1`，
+  `TICKETED_WORLD_CLOSED complete=1 saved=1 unsaved=0 worker_stopped=1`。
+- 官方 26.1 `RegionFile`/NbtIo 行为探针在 native 保存前后验证：目标
+  `(-13,-59,-10)` 均仍为 `minecraft:stone`；已点燃 TNT 从 1 个降为 0；
+  周围 8x6x8 方块语义摘要均为
+  `a9162e1fc1d778ca2486eec24ef03a715a9e99d1976831e4af803808db81d406`。
+  即 `tnt_explodes=false` 下 TNT 到期消失但没有爆炸破坏；另外两值由启动
+  应用日志和 World 配置断言。
+- 删除规则文件的隔离副本按默认
+  `tntExplodes=1 waterSourceConversion=1 lavaSourceConversion=0` 启动并正常
+  关闭。将文件替换成坏 gzip 后 native 在 manager/票安装前以 exit 1 报
+  `invalid compressed NBT`；整棵隔离世界文件哈希在失败前后相同。
+- 正常运行的源规则文件与测试副本规则文件 SHA-256 都仍为
+  `8d5168012d730417ed5610885487e57b98dd46f287d5a7eccd7b5d97a3fd3426`。
+  未知规则因此保持原字节，没有被忽略后重写。
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w3d1-game-rules-20261113`
+`SHA256SUMS` 包含夹具、脚本、全部原始日志和 binary；binary SHA-256
+`c9fddc5b78b52a89273fa9703d8df66c9c7d2b53298d4a359dda38270ef8c4df`。
+关键日志：
+`official-rules-dump.log` `d2340ac2d3435ceac79d91fa3abb057254f43906a88a92bab20cae2249af945c`；
+`build.log` `e261c62624741aedd30be4da6972dbde4ac466966b9dbe101e43b8495080b68d`；
+`verify.log` `27d20c18db0282742eed2e15cfab3340bcd579bbbc374b5e5a2eb551d57ff496`；
+`behavior-probe.log` `96ae572b8ec2f476ec09ff65583061262116ed56b4c01b6921f3a69dd67460c0`；
+`verify/normal-native.log` `c0300262b785e453540529391a949a7762621ac5861fc4cf8742f9f7bac70e76`；
+`verify/missing-native.log` `0e673719e54ed0dd22ccebdb5b2e7342452be967018023336644883f8915b873`；
+`verify/corrupt-native.log` `cae7b9629a8ff76957eb381faaab2051853d73400d0dd8d8b245b69922ba1fe1`。
+
+边界：只接 `--ticketed-world`；旧 `--world`/schematic/projection 行为不变。
+没有线上规则修改、World Clocks/advance_time 或其它规则实现。未运行 CTest，
+未改光照，未提交或推送，未写原存档母本，未启动客户端。
+
+### Reviewer 结论：W-3d1 通过
+
+核对了 26.1 命名空间键、只读解析、在票/模拟前应用，及真实官方 game_rules.dat 的 native 启动和行为证据。关闭爆炸时 TNT 到期消失但地形不变；两个流体规则验证为已应用配置，未重新做流体差分。缺失文件按默认，坏 gzip 不启动管理器，文件保持原字节；未重跑 CTest。
+
+### 下一项：W-1a，原版 World Clocks 内核与 26.1 存读盘
+
+- 只做 `--ticketed-world` 内核：依据 MinecraftServer.java:388、:1127，world/clock/{WorldClocks,ServerClockManager,PackedClockStates,ClockState}.java，先核对官方 Scratch `data/minecraft/world_clocks.dat` 实际形态。实现官方内置 overworld/the_end 时钟默认值与受支持 SavedData 的 load/save。Time 仍按现有 gameTime 独立推进，另有世界时钟（long total_ticks, float partial_tick, float rate, bool paused，原版默认与可选字段），禁止用 gameTime 代替时钟。读现有 game_rules.dat 的 minecraft:advance_time，默认 true；冻结或时钟自身暂停时保留状态，正常含 step 时按原版同一服务端模拟边界前进。不要加每区块/每实体工作，不改光照。
+- 只接真实存档关闭保存（与当前 metadata 的提交边界配合）；不在客户端/主线程 tick 上同步写盘。若原版文件含自定义时钟或未知字段，保留其 NBT，不影响已支持时钟，或明确拒绝 writable 启动/覆盖，按源码和范围选取；禁止静默丢掉内容。无变化时不为时间未推进的已有文件重写字节。写入失败明确传播。保持原档只读。
+- 下一阶段再接 set_time 同步、/time、睡眠和自定义维度；本项不假装实现这些功能。定向测试覆盖两个时钟、不同速率与小数进位、暂停/advance_time=false 独立于 gameTime、freeze/step 正确、失败/未知不覆盖；官方 26.1 Scratch 生成的 world_clocks.dat 经 native 推进保存后原版可读，优先官方实际启动和读回，否则标明 codec 边界。仅 WSL，不重复跑 CTest，不提交。若需大拷贝先报。完成替换唯一裸状态行。
+
+### W-1a World Clocks 内核与 26.1 存读盘交付（2026-11-13 coder）
+
+只实现 `--ticketed-world` 的官方内置 `minecraft:overworld` /
+`minecraft:the_end` World Clocks 内核、关闭时持久化和
+`minecraft:advance_time` 接线；未接 `/time`、set-time 同步、睡眠或
+自定义维度。
+
+源码依据与实现：
+
+- `MinecraftServer.java:388,1127`：时钟 SavedData 在启动时加载，每个正常
+  服务端 tick 在 level tick 前调用 `clockManager.tick()`；
+  `ServerClockManager.tick` 再受 `GameRules.ADVANCE_TIME` 控制。
+- `ClockState.java` / `PackedClockStates.java`：根为 gzip NBT
+  `DataVersion=4786,data`；每个 clock 的 `total_ticks` 必填 Long，
+  `partial_tick=0`、正有限 `rate=1`、`paused=false` 可省略。
+- `ServerClockManager.ClockInstance.tick`：各自执行
+  `partial += rate; floor(carry); partial -= carry; total += carry`；暂停只
+  影响该 clock。这里的 `WorldClockState` 使用 float 并按 Java float->int
+  narrowing 实现。
+- `include/redstone/storage.hpp` / `src/storage.cpp`：新增两个内置时钟的
+  默认态、加载/保存、独立状态设置、tick 与 dirty 管理。保留原 NBT 文档，
+  只更新两个受支持 clock 的已知字段；未知顶部字段、未知 clock 和未知 clock
+  字段原样保留。坏 gzip/DataVersion/已知字段类型、非法 rate 或非有限
+  partial 明确拒绝。
+- `src/net/server_main.cpp`：`advance_time` 先从现有 game_rules SavedData
+  读取；ticketed 主循环在 `tickRate.runsNormally()` 含 step 的边界推进
+  clocks，然后才进入 world；frozen tick 不推进。`gameTime` 仍由原有
+  `World::tick` 独立增加。关闭顺序为 terrain close 完成后保存 metadata、
+  clocks、tickets；clocks 只在 dirty 时写，失败抛错使进程非零退出。
+- `tests/world_clock_tests.cpp` 与 CMake 目标：覆盖双时钟、不同 rate、小数
+  进位、暂停、advance_time=false 与 gameTime 独立、freeze/step、未知字段
+  和 clock 保留、无改写的 clean save、坏文件拒绝、保存失败保持 dirty。
+
+官方 26.1 与定向结果：
+
+- 官方 world_clocks.dat 实际形态为
+  `{DataVersion:4786,data:{"minecraft:overworld":{total_ticks:48L},
+  "minecraft:the_end":{total_ticks:48L}}}`。native 真实 ticketed-world 运行
+  50 刻后，官方 `NbtIo.readCompressed` 读回两个 clock 均为
+  `total_ticks=98L`，`TICKETED_METADATA_SAVED ... clocks=1`。
+- 官方 scratch 将 overworld rate 设为 `1.25`、暂停 the_end 后保存；native
+  运行 3 刻，官方 NbtIo 读回
+  `overworld={partial_tick:0.75f,rate:1.25f,total_ticks:52L}`、
+  `the_end={paused:1b,total_ticks:49L}`。官方 26.1 实际重启成功读回并查询
+  （overworld 54、the_end 49；启动到查询之间官方自身多推进了 overworld）。
+- 官方 `advance_time=false` 夹具经 native 10 刻：
+  `TICKETED_GAME_RULES advanceTime=0`、
+  `TICKETED_METADATA_SAVED metadata=1 tickets=0 clocks=0`，即 gameTime 已
+  推进而两个 clocks 未推进；world_clocks.dat 前后 SHA-256 均为
+  `4bfd1a46ccc2526ae7b0f2639ecdaadacac8aa8b9feef1b8988088ad36de3d15`。
+- 定向测试输出 `world clock tests passed`。没有新增 chunk/section 拷贝；
+  为保留未知内容只常驻该小型 SavedData NBT 文档（官方样例约百字节）。
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w1a-world-clocks-20261113`
+`SHA256SUMS` 包含日志、脚本和 binary。最终 binary SHA-256
+`26dd839276848815f868e71e86c0eb4dfe30ef859c1198f00dfa15f8193a3afb`；
+`build-final.log` `d6481e434ef72a491f317c812695dcddcfded729cfaba90a7235c1e695098aaf`；
+`world-clock-tests-final.log` `9789a8d05fab85a75171e4af18c759b2357bedf9cfac7f4c11387dd68fe1b1ed`；
+`native-options.log` `41b2d05f97967f01e3bed31a98fee0a749206485aa74e8743a98667a9d02ac05`；
+`native-no-advance.log` `19720c70b8aaf96a465c81fb43bb774d02a1175be4a0d2fc3b41b45d37aacf11`。
+
+边界：未知 clock/字段会被保留但不参与 C++ 推进；下一阶段的命令、同步和
+睡眠尚未实现。未运行 CTest，未改光照，未提交/推送，未写原存档母本。
+
+### Reviewer 结论：W-1a 通过
+
+核对了两个内置时钟、float 进位、gameTime 分离、正常 tick/step gate、关闭时只写脏 SavedData、未知 NBT 保留。沿用 coder 的定向测试及官方真实重启证据。官方重启查询前自己的刻会推进，精确 52+0.75 来自关服落盘后的官方 NbtIo；暂停的 End 仍为 49。advance_time=false 时 gameTime 写回而时钟原文件未改。未重跑 CTest。
+
+### 下一项：W-1b，775 协议 World Clocks 同步
+
+- 只实现 `--ticketed-world` 的加入与周期 full sync。依据原版 ClientboundSetTimePacket.java（i64 gameTime + clock map）、WorldClock.java（registry holder）、ClockNetworkState.java（VarLong totalTicks + f32 partialTick + f32 effectiveRate）、ServerClockManager.packNetworkState / MinecraftServer.tickChildren。现有 src/net/session.cpp 的两个 set_time 空 map 入口使用统一编码。Registry ID 必须来自实际发给该连接的 26.1 registry 顺序/官方导出，不猜编号。若 vanilla 客户端在 Configuration 未收到 world_clock registry，修最小缺口并对照官方发包；不要动其它 registry 的顺序。两内置时钟；未实现的自定义世界仍在既有边界。
+- 暂停或 advance_time=false 时 effectiveRate=0，保留 total 和 partial。官方 tick freeze/step 通过 tick-rate 包协调，不能误当单时钟暂停写回。保持不启用时旧投影/离线行为。只传两个小记录，不每帧/每区块复制，不改光照、命令或睡眠。
+- 定向验收：真实 native 协议会话解 Configuration + Play 帧，验证 ID/数值映射、join 与 20 tick 同步、paused/advance_time=false 的速率以及独立 gameTime；核实官方协议号 775，测试证据区分原版源码/真实抓帧。仅 WSL scratch，禁止重复跑 CTest 和无关旧测试，不提交。完成替换唯一裸状态行。
+
+### W-1b 775 World Clocks 协议同步交付（2026-11-13 coder）
+
+只实现 `--ticketed-world` 的加入初始同步与连接每 20 刻 full sync；未接
+命令、睡眠、自定义维度或新的 tick-rate 语义。
+
+原版契约与 registry：
+
+- `ClientboundSetTimePacket.java`：payload 为 `i64 gameTime`，随后是
+  VarInt 数量的 map；每项为 `WorldClock` registry holder VarInt、VarLong
+  `total_ticks`、f32 `partial_tick`、f32 effective rate。
+- `ClockNetworkState.packNetworkState`：clock 自身 paused 或全局
+  `advance_time=false` 时 rate 为 0，但 total/partial 照常发送。tick freeze
+  仍在现有 ticking-state 包中协调，不伪装成 clock pause。
+- registry ID 从官方 `assets/protocol775/registry_ids.tsv` 读取并校验，
+  不是猜写：`minecraft:overworld=0`、`minecraft:the_end=1`。同时校验
+  本服务器实际发送的官方 `configuration.bin` 包含
+  `minecraft:world_clock` registry。775 packet ID 从官方
+  `packet_ids.tsv` 读取；真实值为 `set_time=113`。
+
+实现：
+
+- `include/redstone/net/session.hpp` / `src/net/session.cpp`：
+  `ProtocolData` 保存两个官方 world-clock registry ID；新增
+  `setWorldClockSource` 与统一 `sendSetTime`。初始 join 和
+  `connectionTicks_ % 20` 都发送同一格式。有效 rate 按 paused /
+  advance_time 计算，total/partial 不改变。
+- `src/net/server_main.cpp`：只在 ticketed session 上绑定当前
+  `WorldClocks` 与读取的 `advance_time`。离线 `--world`/schematic 会话
+  仍发送原来的空 clock map。
+- `tests/world_clock_protocol_tests.cpp` 与 CMake：直接解码 join 和周期
+  `set_time`，覆盖 ID/数值、paused、advance_time=false、独立 gameTime、
+  20 刻间隔和离线空 map。没有每帧或每区块数据复制，每包固定两个小记录。
+
+定向验证：
+
+- `world_clock_protocol_tests` 输出
+  `world clock protocol tests passed ids=0,1`。
+- 证据区分：字段顺序/registry 编号来自原版源码与官方导出；下列 frame 是
+  本次 native server 的真实 TCP Configuration/Play 抓取，不冒充官方服务器抓帧。
+- 真实会话在 Configuration 收到带 `minecraft:world_clock` 的官方
+  `registry_data` frame（id 7，payload 67B），Play 首包仍为 login 49。
+- advance=true 夹具（overworld rate=1.25，End paused）：join
+  `gameTime=51, overworld=(total=51,partial=.5,rate=1.25),
+  the_end=(49,0,0)`；20 刻后 `gameTime=69, overworld=74`，End 仍 49。
+- freeze 后连续两个 20 刻同步均为 `gameTime=69,
+  overworld=(74,0,1.25), the_end=(49,0,0)`：world/clock 状态停住，但
+  effective rate 没有被 tick freeze 错误清零。unfreeze 后恢复为
+  `gameTime=89, overworld=99`。
+- `advance_time=false` 夹具：`gameTime 51 -> 69`，两个 clock 始终
+  `total=49,partial=0,rate=0`，证明 gameTime 与 clock gate 分离。
+- raw set_time 保留在 `verify-protocol-raw.log`，例如首次 advance frame：
+  `00000000000000330200333f0000003fa0000001310000000000000000`，可逐字节
+  对应 `game=51,count=2,id=0,total=51,partial=.5,rate=1.25,
+  id=1,total=49,partial=0,rate=0`。
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w1b-clock-protocol-20261113`
+`SHA256SUMS` 包含 build、直接测试、两轮 native 日志、raw-frame 日志和
+binary。最终 server SHA-256
+`191a160e15aa9d9ced281860c0ca3d0649c7d8d3b0fb0eaf21bb1ac7a774d7ef`；
+`world-clock-protocol-tests-final.log`
+`98d4694b85c12bc6a11ab7a511a29307e6e8fe4290772ae240fd2126780131a6`；
+`verify-protocol-raw.log`
+`c39277b8772f54ede76338b4e2b3259bfc3ea0f07ccda14248844a228ba8f1ae`；
+`frame-advance-native.log`
+`e8897a97a219724f760b11204652b66c2a9365d679923916207a2734d6a10ccd`；
+`frame-no-advance-native.log`
+`829c2f051e799c44fe5331847dc5d301d8f291be4042ba65ffca7c9bbd634892`。
+
+边界：仅同步两个内置 clock；未知自定义 clock 仍未进入 C++ tick/网络 map。
+未运行 CTest，未改光照、命令或睡眠，未提交/推送，未写原存档母本。
+
+### Reviewer：W-1b 窄返工
+
+- **阻塞：线上 holder 编号与实际发送的 registry 未交叉核对。** src/net/session.cpp:258–270 从 registry_ids.tsv 取编号，:288–293 仅在 configuration.bin 的整个字节流查找一个字符串。其它注册表引用 world_clock 字样、缺实际 registry_data 帧，或 TSV 与该帧次序不同仍可通过，从而发送错误 holder ID。当前官方 binary 已独立核对确实顺序为 overworld/the_end，正常夹具通过；需要修的是资源不匹配时的错误行为。按现有帧读取找到真正的 configuration/clientbound/registry_data minecraft:world_clock，读取其顺序并直接导出 holder IDs，或明确与 TSV 交叉核对。实际官方 WorldClock.DIRECT_CODEC 是空 compound（0a 00），本阶段不支持自定义时钟，因此可以最小化校验两条官方内置 entry 和有效 payload，无需引入完整通用配置/registry parser。正常资源/旧投影行为维持。加一个真实帧存在但顺序/TSV 不匹配的夹具（若以线上顺序为唯一来源则断言反序输出 ID 正确；若交叉校验则明确拒绝），或者确认把字符串移到非 registry 帧不能误通过。仅定向 world_clock_protocol，当前官方真 TCP 已证成功无需重跑整套，不跑 CTest，不提交。
+
+`审查结束`（历史状态）
+
+### W-1b 窄返工结果（2026-11-13 coder）
+
+只修正线上 world_clock holder ID 的来源与交叉验证，取代上一交付中
+“从 registry_ids.tsv 取 ID、用全二进制字符串确认配置”的描述。
+
+实现：
+
+- `ProtocolData` 仍从 `packet_ids.tsv` 取得官方
+  `configuration/clientbound/registry_data` 包号，但 world_clock holder ID
+  现在只从实际发送的 `configuration.bin` 帧解析。
+- 对 registry key 精确等于 `minecraft:world_clock` 的帧，读取 VarInt entry
+  数量、每项 Identifier、present bool 和 NBT tag。当前官方两个内置 entry
+  必须是 `minecraft:overworld` / `minecraft:the_end`，payload 必须是官方
+  `WorldClock.DIRECT_CODEC` 的空 compound（`0a 00`）。
+- entry 列表位置直接成为 holder ID：`worldClockIds[entryName] = index`。
+  因此线上顺序若和旧 TSV 不同，编码会跟随线上顺序。缺帧、重复帧、未知
+  entry、重复/未知 payload 或尾部多余数据明确拒绝。
+- 删除 `configuration.bin` 全字节流字符串搜索，也删除从
+  `registry_ids.tsv` 派生 world_clock ID 的路径。其他 registry 未改。
+
+定向验证：
+
+- 当前官方 configuration frame 解析为 `ids=0,1`。
+- 测试从真实官方 configuration 帧中只交换 world_clock 两条 entry，得到
+  `reversed=1,0`；随后 create Play session 并解码 set_time，确认
+  overworld 使用 holder ID 1、the_end 使用 holder ID 0。
+- 另一个 fixture 在非-world-clock registry payload 中放入
+  `minecraft:world_clock` 字符串，但不提供真正的 world_clock registry
+  帧；构造明确失败，证明字符串不能误通过。
+- 最终定向输出：
+  `world clock protocol tests passed ids=0,1 reversed=1,0 marker_only_rejected=1`。
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w1b-clock-protocol-20261113`
+`rework-build-final.log` SHA-256
+`c8061a3b5b86b866b6a213f24b4aee554bb94841dd49fcb6e1dd60fd2f2c649b`；
+`rework-tests-final.log` SHA-256
+`6b463e030855feca69d506ed9e8abe8a894a8db3887e9e3271575cb9b73c9459`；
+最终 server SHA-256
+`96c6d1bdf6633925399a5e3c521b5e757beb0ff76677914d4c62f0fd444c2dac`。
+另见 `rework-SHA256SUMS`。
+
+边界：只支持官方两个内置 world clock；自定义 clock/非空 DIRECT_CODEC
+明确拒绝。未重跑完整 TCP 矩阵或旧测试，未跑 CTest，未改光照/命令/睡眠，
+未提交或推送。
+
+### Reviewer 结论：W-1b 通过
+
+核对了真正的 configuration registry_data 帧解析、holder ID 取实际线上顺序、join/周期复用同一编码和有效速率。沿用 coder 的反序及假标记定向验证，以及前一版正常官方资源的真实 native TCP 抓帧（最后返工未重跑 TCP 矩阵）。未重跑 CTest。正文历史裸状态已改为引用，保留末尾唯一裸状态。
+
+### 下一项：W-1c1，原版核心 /time 命令
+
+- 只做现有 Overworld ticketed-world 的 `time query gametime` 和针对默认/显式内置 clock 的 `set <duration>`、`add <duration>`、`pause`、`resume`、`rate <float>`、`query time`（原版 `time of <clock> ...`）。依据上级 server/commands/TimeCommand.java、commands/arguments/TimeArgument.java 和 world/clock/ServerClockManager.java。核实权限 2、默认钟、单位 d/s/t/无后缀及 float 四舍五入、rate 界、set 清 partial、add 保留 partial 且最小归零、查询结果取模与 Time 独立。不得把原版 26.1 已更改的旧命令拼写猜作兼容；时间标记、timeline query/repetition 和睡眠留下一项，未支持的不挂树。
+- 通过现有 Dispatcher、console 和经授权的 Play 命令树接入；非 operator 不可执行，console 正常。只公开正确的协议 775 参数描述（必要时官方导出实际 parser ID/payload，禁止猜）。时钟变更即时同步在线玩家，参考官方单钟增量包；原生 set_time 的 join/周期 full sync 保持。状态同 W-1a 落盘，禁止用一次命令同步写盘或做大拷贝。
+- 定向验证包含权限、parse 边界、query 与 gameTime 分离、即时包字段、最终落盘与 C++/官方读回。仅 WSL scratch，不写原档，不改光照，不重复跑 CTest、不提交。请替换末行，别保留旧的裸状态行；完成后通知。
+
+### W-1c1 核心 /time 交付（2026-11-13 coder）
+
+只实现现有 Overworld ticketed-world 的核心 `/time`；时间标记、timeline
+query/repetition、睡眠和自定义 world clock 未挂入命令树。
+
+原版语义：
+
+- 权限为 `Commands.LEVEL_GAMEMASTERS`（level 2）。本地 console 使用
+  owner level 4；Play 连接现在默认 level 0，只有显式授权的 Play 测试/
+  后续 op 接线可达到 level 2。非 operator 的命令不会执行或改动时钟。
+- 默认 clock 是 `minecraft:overworld`；显式语法为
+  `time of <world_clock> ...`。clock 参数使用官方的
+  `ResourceArgument(minecraft:world_clock)`。
+- 支持 `query gametime`、默认/显式 clock 的 `set <duration>`、
+  `add <duration>`、`pause`、`resume`、`rate <float>`、`query time`。
+- TimeArgument 支持 `d=24000`、`s=20`、`t=1`、无单位；乘法和
+  `Math.round(float)` 使用 float 语义及 int 饱和。`set` 清 partial，
+  `add` 保留 partial 且 total 下限为 0。rate 范围为
+  inclusive `1e-5..1000`。query total 返回原版模
+  `2147483647` 的结果；gameTime 独立查询。
+- 官方 26.1 注册表探针确认命令参数 parser ID：
+  `brigadier:float=1`、`minecraft:time=43`、
+  `minecraft:resource=46`；resource payload 是
+  Identifier `minecraft:world_clock`。
+
+实现文件：
+
+- `include/redstone/command.hpp` / `src/command.cpp`：增加 Resource
+  argument、Java float/time 解析、默认与显式 clock 的完整 action 子树、
+  query 权限和 mutation callback。
+- `include/redstone/net/wire.hpp` / `src/net/wire.cpp`：导出 resource
+  parser 46 与世界时钟 registry payload。
+- `include/redstone/net/session.hpp` / `src/net/session.cpp`：Play
+  Source 使用配置的 permission level（默认 0）；新增单 clock
+  `set_time` 更新，复用 join/周期 full sync 的同一字段编码。
+- `src/net/server_main.cpp`：仅 ticketed-world 注册 `/time`，console
+  source 为 level 4；状态变化立即向在线玩家广播该单 clock 记录。命令不写盘，
+  dirty 状态继续由现有关闭提交边界保存。
+- `tests/command_tests.cpp` / `tests/world_clock_protocol_tests.cpp`：
+  覆盖权限、units/四舍五入、rate 边界、set/add/pause/resume/query、
+  显式 clock、parser 46 payload、非 operator 拒绝及单记录即时更新。
+
+定向结果：
+
+- 官方参数探针：`float=1`、`time=43`、`resource=46`。
+- `command tests passed`。
+- `world clock protocol tests passed ids=0,1 reversed=1,0
+  marker_only_rejected=1 time_command_update=1`：授权 level 2 Play 命令产生
+  单 clock packet；level 1 被拒绝且 clock 不变。
+- 真实 console（冻结状态）：
+  `time query gametime` 返回 49；`time set 1d` -> 24000；
+  `time add 1.5s` -> 24030；`time rate 1.25`；
+  pause/query/resume 均正确；显式
+  `time of minecraft:the_end set 2d` -> 48000，
+  `time of the_end add -1s` -> 47980，query 返回 47980。
+- 关服输出 `clocks=1`。官方 `NbtIo.readCompressed` 读回
+  `overworld={rate:1.25,total_ticks:24030}`、
+  `the_end={paused:1b,total_ticks:47980}`；随后 native 重载启动日志读回
+  相同 total/partial/rate/paused。
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w1c1-time-command-20261113`
+`SHA256SUMS` 包含探针、build、两组直接测试、真实 console、官方 NBT 读回
+和 native reload 原始日志。最终 server SHA-256
+`412c4f15c6473ea38cefd60433a85cb91dc1b765dc7782cf6267b155d021b7d0`；
+`command-tests-final.log`
+`a25941c9c53ab13faf07f9b01606805758510024b14a413ce9c3bc2fb08580bb`；
+`protocol-tests-final.log`
+`cd7b9bab40c4c21dace27c97ff5a2a8a642dfd5354791f9ddc13b457646b088b`；
+`console-time-final.log`
+`f9e0510476064604df5401d65f1987f8b765fece846498f48b3419ec69646346`。
+
+边界：当前 native 没有 op-list，因此真实 Play 玩家默认 level 0；console
+可执行。未实现时间标记、timeline 查询/repetition、睡眠或自定义 clock。
+未运行 CTest，未改光照，未提交/推送，未写原存档母本。
+
+### Reviewer 结论：W-1c1 通过
+
+核对默认/显式 clock、权限 2、set/add 的 partial 与 wrap 行为、即时单钟广播和关服保存。沿用定向 command/protocol 和真实 console/官方 NbtIo 读回。生产 native 没有 op-list，Play 默认 level 0，console 可用；并未声称生产客户端可授 op。未重跑 CTest。边界发现：src/command.cpp:22–62 用 strtof 也会接受 Brigadier readFloat 不接受的科学计数/十六进制等写法；下一项随参数分支收紧。
+
+### 下一项：W-1c2，原版内置时间标记与 timeline 查询
+
+- 依据上级 server/commands/TimeCommand.java、world/clock/{ClockTimeMarker,ClockTimeMarkers}.java、world/timeline/{Timeline,Timelines}.java，接 `time set <timemarker>` 与 `time [of <clock>] query <timeline> [repetition]`。只支持官方内置数据，来源与定义明确，不读取/改写自定义 datapack；unknown 与 wrong-clock 返回原版对应错误。区分可建议标记和可直接输入标记；周期标记当前位置同值仍跳到下一周期；set marker 清 partial，沿用即时广播、权限和脏保存。核对四条原版 timeline 与所属 clock、周期、没有周期时绝对值和 repetition 0；原版 repetition long→int narrowing。睡眠仍不做。
+- 接正确 775 参数 ID、registry 字段和字面量优先级；若 `minecraft:timeline` 的 registry 未同步，按官方命令树实际协议机制处理，不能猜 ID 或擅改 unrelated registry。收紧 W-1c1 数值 grammar（Brigadier StringReader.readFloat 只扫描数字、减号和小数点）与原版单位匹配。不能把浮点规范误拒成小数时间；如共享 /tick parser，保持合法 /tick 语义。无条件不加光照/每刻工作和大拷贝。
+- 定向验收覆盖同标记下一周期、非整周期、显式 End 不可使用 Overworld timeline、repetition、建议与权限、正确参数及即时包、存档读回。优先同官方原版 26.1 console 用相同冻结脚本核对，禁止重跑旧矩阵/CTest，不提交，只用 WSL Scratch。完成替换唯一裸状态行。
+
+### W-1c2 内置时间标记、timeline 查询与 grammar 收紧交付（2026-11-13 coder）
+
+只接入官方内置 marker/timeline 和 Brigadier 数字词法；未接自定义 datapack、
+自定义 clock 或睡眠。
+
+原版内置数据：
+
+- 四个 timeline 均属于 `minecraft:overworld`：
+  `minecraft:day` period 24000、`minecraft:moon` period 192000、
+  `minecraft:villager_schedule` period 24000、`minecraft:early_game`
+  无 period（返回绝对 total、repetition=0）。
+- 六个 `minecraft:clock_time_marker`：`day=1000`、`noon=6000`、
+  `night=13000`、`midnight=18000`、`wake_up_from_sleep=0`、
+  `roll_village_siege=18000`，均由 overworld day timeline 提供并周期 24000。
+  前四个 `show_in_commands=true`，后两个可直接输入但不进入建议。
+- marker 移动使用原版 forward-only
+  `duration=(to-from)>0 ? diff : period+diff`，因此相同 marker 仍前进一整
+  周期；移动清 partial 并即时广播对应 clock。
+- timeline current 为 total 或 total%period；repetition 先执行官方
+  long->int narrowing，再由命令包装为 int-mod；wrong-clock 返回
+  `commands.time.wrong_timeline_for_clock`，无 marker 返回
+  `commands.time.no_time_marker_found`，错误参数保留原版 ResourceKey 文本。
+
+协议与 grammar：
+
+- 官方 26.1 probe 确认：`float=1`、`resource_location=36`、
+  `time=43`、`resource=46`。timemarker 导出为 parser 36 且无 payload；
+  timeline 导出为 parser 46 + `minecraft:timeline`，clock 仍为 parser 46 +
+  `minecraft:world_clock`。配置解析同时要求实际 `registry_data` 中存在
+  `minecraft:timeline` registry 帧，缺失或重复明确拒绝。
+- `time set` 先尝试 TimeArgument，再回退到 IdentifierArgument；`query time`
+  字面量优先于 timeline resource。
+- 数字读取收紧为 Brigadier `StringReader.readFloat` 的数字、减号、小数点
+  扫描：拒绝指数、十六进制、`+`、NaN/Infinity 和嵌入符号；保留 `.5s`、
+  `1.d` 等合法形式。TimeArgument 仍使用 float 乘法及 Java
+  `Math.round(float)`；共享 `/tick` time parser 同步收紧。
+- marker 和 timeline completion 按实际选中的 clock 过滤；End 不显示
+  overworld marker/timeline。rate 消息改用 Java float 文本（如 `1.0`、
+  `1.0E-5`）。
+
+实现文件：
+
+- `include/redstone/command.hpp` / `src/command.cpp`：Identifier argument、
+  string argument handoff、动态 suggestions、内置 marker/timeline 数据与
+  query/set 执行、ResourceKey 错误和数字 grammar。
+- `include/redstone/net/wire.hpp` / `src/net/wire.cpp`：parser 36/46
+  编码。
+- `src/net/server_main.cpp`：timeline/marker 的 console 文案。
+- `tests/command_tests.cpp` / `tests/world_clock_protocol_tests.cpp`：
+  marker 周期/隐藏项、timeline current/repetition/periodless/wrong-clock、
+  long->int narrowing、动态建议、权限、parser/registry payload、数字边界及
+  单 clock 即时包。
+
+定向结果：
+
+- `command tests passed`。
+- `world clock protocol tests passed ids=0,1 reversed=1,0
+  marker_only_rejected=1 time_command_update=1 time_marker_update=1`。
+- native 与官方 26.1 console 使用同一冻结序列得到一致结果：
+  noon 两次后为 30000；wake marker 到 48000；roll village 到 66000；
+  day current=18000/repetition=2，moon current=66000/repetition=0，
+  early_game current=66000/repetition=0。
+- End 对 day 返回 wrong-timeline；End 对 noon 返回包含
+  `ResourceKey[minecraft:clock_time_marker / minecraft:noon]` 的 no-marker。
+  官方 console 同样拒绝 `1e0`、`0x1p0`、`+1`、`1e2t`、`0x1p2t` 和
+  `1-2t`。
+- 最终 overworld 为 `total_ticks=24000`、partial=0、rate=1；End 保持
+  `49,paused=true`。官方 NbtIo 和 native 重载均读回相同值。
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w1c2-time-markers-20261113`
+`SHA256SUMS` 包含官方参数探针、build、直接测试、native/official console、
+官方 grammar 对照、官方 NBT 读回及 native reload。最终 server SHA-256
+`c20ffcaabb5dfd7de7c2f4c30c641418b0b9816ff72dd7e9870d3453becf5567`；
+`command-tests-final4.log`
+`a25941c9c53ab13faf07f9b01606805758510024b14a413ce9c3bc2fb08580bb`；
+`protocol-tests-final4.log`
+`33e5f5d356f0451dec23cdd99849bf60c22273374a234485e0177381639c5558`；
+`console.log`
+`0ff4e361ee33692af8d9e9ec01ee85fac9147f01e0b448cef68b1c14d7fff84f`；
+`official-console.log`
+`3ba85586ef964466b0846b70e36999a2fee4c0a16ecc0fa022f9db043fc3669f`。
+
+边界：只支持四个官方内置 timeline 与六个内置 marker；自定义 datapack、
+非空时间标记和睡眠仍未支持。未运行 CTest，未改光照、每刻逻辑或大块数据，
+未提交/推送，未写原存档母本。
+
+### Reviewer：W-1c2 窄返工
+
+- **阻塞：合法 long 边界在 marker 跳转时触发 C++ 有符号溢出。** src/command.cpp:276–282 直接 `totalTicks + offset`。原版 ClockTimeMarker.java resolveTimeToMoveTo 使用 Java long 回绕；WorldClocks 按官方 Codec.LONG 可加载 INT64_MAX 附近。沿用本项目已有 wrappingClockAdd 的位模式方案或等价 unsigned 加法，不修改普通周期行为。用现有 command 定向夹具设接近 INT64_MAX 的钟，断言回绕后与 Java 一致且 partial 清零；只重建/直跑受影响的 command tests，其他正常官方对照证据已通过审查，无需重跑。禁止 CTest，不提交，末尾替换唯一裸状态行。
+
+`审查结束`（历史状态）
+
+### W-1c2 marker long 回绕窄返工结果（2026-11-13 coder）
+
+只修复 `ClockTimeMarker.resolveTimeToMoveTo` 对应的 marker 加法边界：
+
+- `src/command.cpp` 的 `moveToMarker` 先计算原版 forward-only offset，
+  再用 `uint64_t` 做 total+offset 的位模式和，最后转回 int64；保持 Java
+  `long` 的 modulo-2^64 回绕，消除 C++ signed overflow UB。
+- 普通周期行为、wrong-clock、partial 清零和即时广播路径未改。
+- `tests/command_tests.cpp` 新增 command 定向断言：overworld total 设为
+  `INT64_MAX`、partial=0.5，执行 `time set noon` 后命令返回
+  `-2147461457`，clock total 为
+  `-9223372036854753616`（与 Java long 位模式一致），partial 为 0。
+
+定向验证仅重建并直接运行受影响的 command tests：
+
+```text
+command tests passed
+```
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w1c2-marker-wrap-20261113`
+`build-final.log` SHA-256
+`f05e55bb64b0b8a62f576bebf58b6d1d5892171abbaf9795fd11913128885941`；
+`command-tests-final.log` SHA-256
+`a25941c9c53ab13faf07f9b01606805758510024b14a413ce9c3bc2fb08580bb`；
+新增断言的 command_tests SHA-256
+`ff3ceea0b10d46a90233fbecb5ba59ad326a677e61f763a1f1541cf5b9eb4c3f`。
+按审查要求未重跑 protocol/native、未重跑 CTest，也未重建先前已封存的
+server binary；未提交或推送。
+
+### Reviewer 结论：W-1c2 通过
+
+核对了时间标记周期、timeline 所属 clock、同步/权限、Brigadier grammar 及 long 边界回绕。沿用 coder 的真实原版控制台对照、定向协议与窄返工 command tests；最终窄返工未重新构建封存 server。没有重跑 CTest。睡眠依赖玩家睡眠状态和原版资格判断，当前未实现；不要只做表面时钟跳转。
+
+### 下一项：W-3c3，保存的区块脏编辑紧凑交接
+
+- 依据 task/W3C2-AUTOSAVE-REVIEW-PLAN.md 的 ABI 和量化证据，限定 src/world_chunk_manager.cpp 的 pending/retained/in-flight 编辑传输和 src/chunk_lifecycle.cpp/terrain_codec 的接收。用本区块 section/cell 紧凑键与稳定 BlockState ID，目标单条 8 B 或更少，避免在主线程重建大 BlockEdit 数组。pending 只在实际写变化时记录，避免引入每次 setBlock 高开销、全 section copy 或整图扫。失败保留 patch 与更新合并用有序线性合并，最新编辑胜出，不能重新临时建整棵树。允许一次按实际脏 cell 生成紧凑队列，需记录触发频率、最坏字节数与主线程开销。
+- 版本、世代、保存确认、加载/撤票/失败重试、未知状态/缺 section 安全拒绝和 NBT 格式完全保留。禁止以重写根 NBT、全 chunk copy 或给 worker 共享可变 World 实现。适配 worker 时按局部键直接分组，尽量不另构大数组。若设计不得不超过一份 compact payload 或把构建挪进 setBlock 热路径造成可疑开销，先告知 reviewer。避免重构无关存档、光照、流体。
+- 验收：定向测试实际密集修改、同格多次修改、写失败后新编辑覆盖与旧 ACK 不混、负 section、未知状态拒绝、闲置时没有工作。给出结构大小和真实可复现主线程计时的对照（稀疏与接近改满至少两种；如时窗不是硬上限明说），以及无额外大拷贝证据。仅 WSL，不重复跑 CTest、不提交。完成时替换唯一裸状态行。
+
+### W-3c3 区块脏编辑紧凑交接交付（2026-11-13 coder）
+
+只收紧保存快照的脏编辑表示和传输路径；未改 NBT 格式、ticket/lifecycle 版本规则、
+光照或流体。
+
+实现：
+
+- `include/redstone/terrain_codec.hpp` 新增 `CompactBlockEdit`：
+  `sectionY:int8 + localIndex:uint16 + stateId:uint32`，
+  `static_assert(sizeof(CompactBlockEdit)==8)`；并提供
+  `compactCellKey` 与 `compactEdit` 适配函数。
+- `src/terrain_codec.cpp` 抽出 `EditView`：
+  既有 `patchBlockStates(BlockEdit)` 保留给夹具/兼容调用，
+  生产 `patchBlockStatesCompact(CompactBlockEdit)` 直接按稳定
+  `BlockState::Id` 应用；未知 ID 显式返回
+  `unknown block state id`，不会让 `BlockState::fromId` 退化成空气。
+- `src/world_chunk_manager.cpp` 的 `pendingEdits` 改为
+  `std::map<std::uint32_t, BlockState::Id>`（section/local 紧凑键）。
+  普通保存只生成一份 `shared_ptr<const vector<CompactBlockEdit>>`；
+  失败后的新编辑与 retained patch 用有序双指针线性合并，同 cell 以 pending
+  最新值覆盖，没有临时整棵 BlockEdit 树。
+- `include/redstone/chunk_lifecycle.hpp` / `src/chunk_lifecycle.cpp` 的
+  `ChunkEditPatch` 改为紧凑 vector；仅兼容 `requestSave(vector<BlockEdit>)`
+  夹具入口做一次规范化去重，生产 manager 不走该入口。
+- retained/in-flight patch 仍是 shared immutable vector；版本、epoch、
+  保存确认、失败重试、撤票/重载和 NBT 模板完全沿用既有逻辑。
+
+拷贝/内存量化：
+
+- 单条有效编辑为 8B；同格连续修改只保留一条。
+- 单 section 真正改满时 pending compact payload 为
+  `4096 * 8 = 32768 B`；理论整区块 24 个 section 全改满时 compact
+  payload 为 768 KiB。这是实际编辑载荷，不是整个 chunk/NBT 复制。
+- `pendingEdits` 仍是 `std::map`，因此未把 map 节点的实现开销算入 8B
+  记录；当前每次普通保存会生成一份最多同实际脏 cell 数大小的 compact
+  vector。失败重试会额外保留旧 retained vector，并生成一份合并 vector；
+  没有同时复制世界、整 chunk、整 section 或根 NBT。
+- worker 仍使用已验证的 palette 重打包路径；`patchBlockStatesCompact`
+  的 section scratch 仍为每个受影响 section 8 KiB 的 `uint16_t[4096]`，
+  这是既有 worker 计算缓冲，不是主线程 BlockEdit 快照。
+
+定向验证（仅受影响测试，无 CTest）：
+
+- `terrain codec tests passed`，覆盖 compact 同格最后写、稳定 ID 解析、
+  未知 ID 拒绝、缺 section 拒绝。
+- `world chunk manager tests` 的 compact 模式输出：
+  `compact_edits record_bytes=8 sparse_calls=64 sparse_us=50
+  dense_calls=4096 dense_us=401 pending_bytes=32768`。
+  这是一轮 WSL 实测样本，不是正式性能基线；2 ms 候选时窗也不是硬上限。
+- 同格三次失败编辑 retained 条目保持 1；失败后两格旧 retained 加新编辑
+  合并后旧独有 cell 保留、新值胜出；负 section 的 compact key 能定位到
+  `-4` section；密集 4096 格 pending 恰为 32768B；卸载后 idle pump
+  不增加 save work/candidate。
+- 最终 server binary SHA-256
+  `e320d6aa69e683112f4c86507621b873790e0b0bb94f1a2b81c49e59c010b808`。
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w3c3-compact-edits-20261113`
+`terrain.log` SHA-256
+`cc05022144745a6738bca0cb9a52c32306f41c406b28bee811a81a67f11b7303`；
+`manager.log` SHA-256
+`2cfa8ae00e69365e83503847021e1b4851421794b47faedbb2b032c87e92a157`；
+`build.log` SHA-256
+`dd01b703424183f483d3cd22f7d13785d277c4c2c500a8cb68dec1b1e162dab1`。
+
+边界：没有提交或推送；未写原存档母本；未改 CTest 覆盖外的无关路径。
+
+### Reviewer：W-3c3 仅补性能证据
+
+正确性审查已核对 8 B、旧/新线性合并、未知 ID/缺 section 拒绝、版本与负 section。验收缺口：tests/world_chunk_manager_tests.cpp:2237–2265 只测了一次 rawSetBlock 循环（后面的 setForced/save 没在计时内），只密集写了单 section，也没有旧版对照。因此无法判断主线程生成 patch 的收益或极端单 chunk 超出 2 ms 的程度。请只补可复现 A/B，优先用项目原先的 snapshot/merge 算法作为独立微基准对照，标明不是整服 A/B；分别隔离普通快照构建与失败合并，准备相同稀疏（例如 64）和接近整 chunk（约 98k）有效编辑输入，对照相同输出，绑定可用的同一个 CPU、Release、预热、交错多轮、记录中位数与尾部以及旧/新 payload/临时容器字节，排除磁盘/后台。若直接以生产边界探针更简洁则优先。保留命令、证据和限制。无须改生产代码，不重跑已通过测试、CTest 或 Java，不提交，替换唯一裸状态行。
+
+`审查结束`（历史状态）
+
+### W-3c3 性能证据补测（2026-11-13 coder）
+
+正确性实现未改。新增仓库外独立微基准
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w3c3-compact-edits-20261113/ab-final.cpp`，
+分别模型化旧/新 snapshot 与失败 merge；同一输入、同一 CPU 2、GCC 13.3 Release
+`-O3 -DNDEBUG -g`，每 case 4 次预热、17 轮交错 A/B，输出最终 cell/state
+checksum 校验一致。计时只包含已准备输入到输出 patch 的纯 CPU 工作，不含磁盘、
+锁、后台线程或整服运行。这是微基准，不是完整服务器 A/B。
+
+结构/allocator 字节：
+
+- 旧 transfer `BlockEdit`：24B；新 `CompactBlockEdit`：8B。
+- 98496 条 dense pending 的 map 实际 allocator 请求：
+  old `7077936 B` / new `3932208 B`。
+- 旧 snapshot 输出 payload allocator 请求：
+  稀疏 `1536 B`、dense `2359296 B`；新 snapshot：
+  稀疏 `512 B`、dense `786432 B`。
+- 失败合并（retained 65536 + newer 65536）：旧临时 tree/vector 请求
+  `9437184 B`、98305 次分配；新线性合并 `1048576 B`、1 次分配。
+  pending copy setup：旧 `4718640 B` / 新 `2621488 B`。
+
+三轮独立运行的中位数（µs）：
+
+| case | old | new 在三轮 |
+|---|---:|---|
+| snapshot sparse（64 条） | 0.169–0.185 | 0.156–0.175 |
+| snapshot dense（98304 条） | 268.394–297.310 | 265.837–293.817 |
+| merge dense | 5813.54–6149.55 | 583.553–678.606 |
+
+对应 P95：snapshot sparse 旧约 `0.197–0.219`、新 `0.185–0.214`；
+dense 旧约 `333.145–456.428`、新 `350.469–439.609`；
+merge 旧 `6705.3–8000.66`、新 `722.282–908.177`。单次最大值已保留在
+`ab-run-final.log`、`ab-round2.log`、`ab-round3.log`。
+
+解读：普通快照主要收益是每 cell 载荷 24B→8B（dense 输出 2.25MiB→0.75MiB）；
+两轮接近整区块纯构建中耗时差异很小，第三轮 new 更慢约 `0.01 µs/cell`，因此
+不能宣称普通 snapshot 一定更快。失败合并在相同 65536 有效位置输入下稳定快约
+`9–10x`，同时分配次数从 98305 降到 1。极端整 chunk 构建约 `0.27–0.29 ms`
+（单次最高 `0.456 ms`），低于 2 ms 候选窗，但该窗不是硬时窗；更大待保存
+状态、其他 section 数或机器负载仍可能超出。
+
+Evidence:
+`/home/zhddsj/.local/state/redstone-cpp/wsl-w3c3-compact-edits-20261113`
+`ab-final.cpp` SHA-256
+`94862aebad47556fcbbb528af748e25aac9b9ffe1d286f424a8d2113e454bee0`；
+`ab-run-final.log`
+`23032fe3284326e07dcab00db19040c023edf8f3d38b0eb22ff04a7a81649841`；
+`ab-round2.log`
+`44a63d67823db575bf47cb1cf679874a2a00f569099c42bba2f1f6122070e6a6`；
+`ab-round3.log`
+`aefd4b350bf59c57c7fdb6be08c2eff56d07f69045789016d7aea8d322a58b78`；
+benchmark binary
+`29980dbda88cc73ae356e63b26aaebb1ee89c0f45208ab9ca81509b6764d4f8a`。
+`SHA256SUMS` 包含这项及先前通过日志。未重跑已通过测试/CTest/Java，未改生产
+代码或封存 binary，未提交或推送。
+
+### Reviewer 结论：W-3c3 通过
+
+沿用 coder 的定向正确性证据及 WSL CPU 2 三轮交错微基准，核对最终 cell/state checksum 一致。单整区块 98304 条输出 2359296 B→786432 B；普通构建速度接近，失败 merge 约 5.81–6.15 ms→0.58–0.68 ms。微基准新 merge reserve 为两输入和，生产路径另以区块最大 cell 数限容量，因此文档里的 1 MiB 是微基准临时分配，不是生产精确上界。无整 chunk/section 复制；仍有待写 map 节点、旧/新版本临时共存、后台 scratch。未重跑 CTest，不把独立算法计时当成世吞或整服收益。
+
+### 下一项：W-4c，区块生命周期集成收口
+
+- 在当前最终 WSL native 产物上，复用原版 scratch terrain 和 `validation/protocol775/managed_world_smoke.py` 的真实 775 会话，验证一次完整票需求→区块实际载入→实际编辑→撤去最后需求→保存确认与真实卸载→同位置新代重读。不要只看到 forget_chunk 或关服写盘就声称实时卸载；需要明确可观察的真实删除证据，可用最小测试夹具或已有安装/卸载观察者，勿加每刻生产 trace。可另在原版 26.1 重启只读命令验证编辑，旧测试不重复跑。保留可复现命令和输出。
+- 更新 README/docs 的目前实现与安全边界（显式 ticketed-world、只支持 26.1 已有 FULL、不会生成缺失 chunk、真实 unload/Anvil、受支持实体/BE/规则/时钟、未知数据拒绝；原版兼容与崩溃原子性边界）。不要误宣称支持自定义维度、完整 vanilla 存档、睡眠等。只做验证与文档，如发现生产阻塞先报最小复现；不改光照、不写原档、不跑 CTest、不提交。不需要大拷贝，完成时替换唯一裸状态行。
+
+2026-11-14 换人交接：见 [新 coder 交接：W-4c](NEW-CODER-HANDOFF-20261114.md)。上一位 coder 的草稿证据已索引，W-4c 尚未交付或通过。
+
+### W-4c 领取（2026-11-14 coder）
+
+- 范围：按 `NEW-CODER-HANDOFF-20261114.md` 与上一节 `下一项：W-4c` 执行区块生命周期集成收口：同一隔离世界、同一 native 进程（或明确标明覆盖范围的辅助探针）串起 775 玩家加载需求 → 区块实际装入 → 真实 775 编辑 → 撤去最后 FULL 需求 → 在线保存并从 `World` 实际移除 → 同坐标新代重读看到编辑 → 原版 26.1 重启服务端/读回验证；同步更新 `README.md` 与 `docs/compatibility.md`。
+- 约束：保留现有脏工作树，不提交/不推送，不跑 CTest，不改光照/协议核心，原档只读。
+
+### W-4c 区块生命周期集成收口交付（2026-11-14 coder）
+
+改动文件（均未提交/推送）：
+
+- [README.md](../README.md)：区分 `--ticketed-world` 写回模式与只读 `--world`/`--schematic`/`redstone_cli` 入口，更新当前已实现子集与安全边界。
+- [docs/compatibility.md](../docs/compatibility.md)：按代码核对 `--ticketed-world` 加载票、真卸载、Anvil 写回、支持实体/BE/时钟/持久票及未知数据拒绝、无世界生成、无跨文件崩溃原子性、无睡眠/自定义维度/Anvil 光照读写边界。
+- `task/TASKS.md`：本交付记录。
+
+端到端验证（同一隔离世界副本、同一 native 进程，目标 chunk `(-1,-1)`，目标格 `(-13,-58,-16)`，初态 `minecraft:air` → 775 slot 0 `use_item_on` 放置 `minecraft:smooth_stone`）：
+
+1. **封存生产产物 775 端到端**：
+   - 二进制：`/home/zhddsj/.local/state/redstone-cpp/wsl-w3b2c2-review-20261113/build/redstone_vanilla_server`（SHA-256 `e320d6aa69e683112f4c86507621b873790e0b0bb94f1a2b81c49e59c010b808`）。
+   - 命令：`python3 /home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/run_native_e2e.py`（从只读母本 `wsl-w4-official-stone-ha8xrh9n/interop-world` 复制到 `run-native`，删除副本内 `chunk_tickets.dat` 消除持久强加载；`--view-distance 2 --ticket-view-distance 3 --ticks 120`）。
+   - 结果：收到 `(-1,-1)` 初始 `level_chunk_with_light` 与 `player_position` → 移入 `(-12.5,-58.9,-12.5)` 放置 `smooth_stone` 于 `(-13,-58,-16)`，收到 `block_changed_ack=1` 与 `block_update`（`state_id=13480`）→ 移至 `(1000,-58.9,1000)` 收到 `forget_level_chunk(-1,-1)` 并等待 2.5 s 在线保存与驱逐 → 返回 `(-12.5,-58.9,-12.5)` 重新收到 `(-1,-1)` `level_chunk_with_light` → 正常退出 `native_exit=0`，`TICKETED_WORLD_CLOSED complete=1 saved=0 unsaved=0 worker_stopped=1 resident_installs=50`（25 块初装 + 25 块撤票驱逐后重装），`TICKETED_METADATA_SAVED metadata=1 tickets=0 clocks=1`，`STOPPED ticks=120`。
+2. **仓库外临时生命周期探针同进程验证**：
+   - 二进制：`/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/w4c_probe_server`（SHA-256 `4a9dde41711a1aa46c111c4e5a747e16b424d97eb71a493235036ef810051dc3`，由 `w4c_probe_server.cpp` 链接同构建 `libredstone_protocol.a`/`libredstone_core.a` 编译，未改动仓库生产源码）。
+   - 命令：`python3 /home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/run_probe_e2e.py`（同一 775 TCP 流程跑在 `run-probe`）。
+   - `probe.log` 直接记录同进程内 `(-1,-1)` 生命周期转移：`W4C_PROBE_INSTALL chunk=-1,-1 loaded=1 epoch=49 state=1` → 775 编辑并移出视野等待 → `W4C_PROBE_REMOVE chunk=-1,-1 loaded=0 epoch=49 state=4`（`World::isChunkLoaded(-1,-1)==0`）→ 返回视野后 `W4C_PROBE_INSTALL chunk=-1,-1 loaded=1 epoch=324 state=1`（新代重装）→ 断连后 `W4C_PROBE_REMOVE chunk=-1,-1 loaded=0 epoch=324 state=4` → `TICKETED_WORLD_CLOSED complete=1 saved=0 unsaved=0 worker_stopped=1 resident_installs=50`，`native_exit=0`。
+3. **原版 26.1 读回验证**：
+   - 离线 `RegionFile/NbtIo`（`W4cTerrainReadback`）：编辑前母本 `(-13,-58,-16)` 为 `minecraft:air`；`run-native` 写出后为 `minecraft:smooth_stone`。
+   - 真 26.1 服务端重启（`python3 /home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/run_official_verify.py`，将 `run-native` 复制为 `official-host/interop-world` 启动 `net.minecraft.server.Main`）：`forceload add -13 -16` 后 `execute if block -13 -58 -16 minecraft:smooth_stone run say W4C_IS_SMOOTH_STONE` 命中并正常 `stop` 退出 `0`。
+
+发现的既有生产边界/问题记录（未借收口修改生产代码）：
+
+- `src/net/server_main.cpp:113-120,974`：`ConsoleInput` 在 `--no-console` 模式下仍无条件创建后台 `std::getline(std::cin, ...)` 线程；若父进程未将 `stdin` 重定向到 `/dev/null` 或关闭管道写端，服务退出析构 `~ConsoleInput()` 时 `worker_.join()` 会阻塞在 `pipe_read` 上（本次测试脚本已通过 `stdin=subprocess.DEVNULL` 规避）。
+
+Evidence（`/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/SHA256SUMS`）：
+
+- `run_native_e2e.py`：`eb83dbb5e71f4631be579150d8a4b82440cffed76f89c075085d608cba9aa7bf`
+- `native.log`：`f3e2e8a962e7a9f190664856ec94774410989fdaa6416c97841fe4d449d8dfc6`
+- `events.json`：`68bce17e074f722493ff6da3fcad7d503f8ac66e1b72f284e23e8c441743d0d3`
+- `run_probe_e2e.py`：`c6fb2310aac1dea66b59475f30a30058249d1fa5594e4a26f05fa0822743a386`
+- `probe.log`：`126da9e5a40e293a94d24276294dcc6a2b5f8c771811d67e559b5336c8af2a69`
+- `probe-events.json`：`09a9249ab623861a3020758baf09ae67df2d255cdc0680ac85ac8f8974dcb40c`
+- `run_official_verify.py`：`3c4a7207e12059dee9142821002978bd8c5b625c61ee6bd027ca803768dcf2de`
+- `official-readback.log`：`fcfa8d8201e736929d116820a1f8eda4059aaedcae7f3bc04cf60585e640ba03`
+
+未跑 CTest、未修改生产代码/光照/协议、未写原档、未提交或推送。
+
+### W-4c 审查意见（2026-11-14 reviewer）
+
+已核对以下交付项（未改代码、未跑 CTest、未提交/推送）：
+
+1. **文档与边界**（`git diff README.md docs/compatibility.md`）：
+   - 准确区分了显式写回入口 `redstone_vanilla_server --ticketed-world <dir>` 与旧只读入口 `--world` / `--schematic` / `redstone_cli`。
+   - 如实写明了 26.1（协议 775 / DataVersion 4786）已有 FULL 区块、无世界生成、未知/不支持数据拒绝写入、无跨文件崩溃原子性、无玩家睡眠跳转/自定义维度/Anvil 光照读写等边界，未将目标形态写成已完成或跨证据夸大为全量原版等价。
+2. **端到端与生命周期证据**（`/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/`）：
+   - `sha256sum -c SHA256SUMS` 10 项全部 `OK`（含封存生产二进制 `redstone_vanilla_server`、`w4c_probe_server`、3 份脚本及 5 份日志/事件 JSON）。
+   - `run_native_e2e.py`、`native.log`、`events.json`：使用同一 `run-native` 隔离世界（已删 `chunk_tickets.dat`）与同一封存 native 进程，完成 775 握手、初装 `(-1,-1)`、放置 `minecraft:smooth_stone` 于 `(-13,-58,-16)`（`ack=1`、`state_id=13480`）、移远收到 `forget_level_chunk(-1,-1)` 并等待 2.5 s 在线落盘与驱逐、返回收到 `level_chunk_with_light(-1,-1)`，正常退出 `native_exit=0`、`TICKETED_WORLD_CLOSED complete=1 saved=0 unsaved=0 worker_stopped=1 resident_installs=50`（25 块初装 + 25 块驱逐后重装，说明退出前已完成在线保存）。
+   - `run_probe_e2e.py`、`probe.log`、`probe-events.json`：与 `run_native_e2e.py` 相同客户端流程，仅在临时 `w4c_probe_server.cpp` 的 `managedChunkInstalled` / `managedChunkRemoved` 回调为 `(-1,-1)` 增加日志；`probe.log` 直接记录 `W4C_PROBE_INSTALL chunk=-1,-1 loaded=1 epoch=49 state=1` → 移远 `W4C_PROBE_REMOVE chunk=-1,-1 loaded=0 epoch=49 state=4`（`World::isChunkLoaded(-1,-1)==0`）→ 返回 `W4C_PROBE_INSTALL chunk=-1,-1 loaded=1 epoch=324 state=1`（新代重装）→ 断连 `W4C_PROBE_REMOVE ... epoch=324 state=4`。
+   - `run_official_verify.py`、`official-readback.log`：将 `run-native` 复制至 `official-host/interop-world` 启动真 26.1 服务端（`net.minecraft.server.Main`），`forceload add -13 -16` 后 `execute if block -13 -58 -16 minecraft:smooth_stone run say W4C_IS_SMOOTH_STONE` 命中并正常 `stop` 退出 `0`。
+   - 客观记录（非阻塞）：`run_native_e2e.py` 返回视野时校验了 `level_chunk_with_light(-1,-1)` 重发但未在 Python 端解码区块包字节；因同世界随后经真 26.1 服务端重启直接读回 `minecraft:smooth_stone`，且 `saved=0, unsaved=0, resident_installs=50` 与同流程探针 `epoch=49 -> 324` 互证完整，不构成验收缺口。
+3. **既有生产边界核对**：
+   - 核对 `src/net/server_main.cpp:113-120,974`，`ConsoleInput console;` 确实在 `consoleEnabled == false`（`--no-console`）时仍无条件启动 `std::getline(std::cin, ...)` 后台线程，析构 `~ConsoleInput()` 时 `worker_.join()` 会在 `stdin` 未关闭时阻塞。记录属实（建议级，不阻塞 W-4c；后续可在清理 `server_main.cpp` 时改为按 `consoleEnabled` 条件启用或 `std::optional<ConsoleInput>`）。
+
+**结论**：W-4c 区块生命周期集成收口满足 [NEW-CODER-HANDOFF-20261114.md](NEW-CODER-HANDOFF-20261114.md) 全部验收要求，无阻塞项，判定为 `任务通过`。
+
+### W-4c 独立复审（2026-11-14 reviewer，替代上一条通过判定）
+
+- **阻塞：`--no-console` 的服务进程可能在正常停服后不退出，并继续占用存档锁。** `src/net/server_main.cpp:974` 无条件构造 ConsoleInput；`:115–119,132–134` 创建 worker，在 `std::fgetc(stdin)` 阻塞，析构仅设置 done 后 join，无法中断阻塞读。`:617–618` 的锁和 manager 比 console 更早构造，因此正常返回时 console 先析构；即使已打印 `TICKETED_WORLD_CLOSED` 和 `STOPPED`，锁也不会释放。两份本轮 TCP 探针都用 `stdin=subprocess.DEVNULL`，证据只覆盖 EOF 可达的路径。修复限于禁用控制台时根本不创建 reader；用保持 stdin PIPE 写端打开的 WSL scratch 子进程验证：有界 tick 正常退出且可重新获取同一世界锁。启用控制台时的通用取消问题如仍存在，单独记录，勿扩大返工。
+- **应补验收断言：新代已安装，但探针没直接验证新代内存中的目标方块。** `run_native_e2e.py:256–276` 只匹配重发的区块坐标；`w4c_probe_server.cpp:857–865` 只记 loaded/epoch/state。已有证据分别证明了实际驱逐（World 节点删除后触发回调）、49→324 新代安装和最终官方服务端读回 smooth_stone。直接在同一探针的第二次 install 读取 `(-13,-58,-16)` 并断言为 smooth_stone 即可闭环（首次 install 断言 air）；同时把关闭摘要存在且 complete=1/unsaved=0 变成脚本断言，不要无条件打印 OK。
+- **文档小修：** `README.md:18` 仍写“不模拟水和流体刻”，与本页现状自相矛盾。改为当前支持范围；不必重写其他历史文档。
+
+已重新核对现有证据 10 项 SHA-256、探针与生产入口的差异、实际删除回调和原版 26.1 命中日志。无需重跑旧测试、原版重启矩阵或 CTest。由新 coder 只做上述返工；完成后替换唯一裸状态行，附定向验证证据。Reviewer 未改生产代码、未运行测试。
+
+### W-4c 返工领取（2026-11-14 coder）
+
+- 范围：按 `W-4c 独立复审` 三条意见返工：① `src/net/server_main.cpp` 禁用控制台（`!consoleEnabled`）时不创建 `ConsoleInput` 读 `stdin` 后台线程，并用保持 `stdin` PIPE 写端打开的 WSL scratch 子进程验证正常退出且可重新获取同一 `session.lock`；② `w4c_probe_server` 在第一次/第二次 `managedChunkInstalled` 直接读取并断言 `(-13,-58,-16)` 为 `minecraft:air` → `minecraft:smooth_stone`，`run_native_e2e.py` / `run_probe_e2e.py` 把关闭摘要与 `resident_installs` 纳入脚本 `assert`；③ 修复 `README.md:18` 流体刻自相矛盾表述。
+
+### W-4c 返工交付（2026-11-14 coder）
+
+改动文件（未提交/未推送，保留共享脏工作树）：
+
+- `src/net/server_main.cpp:113-121,980`：`ConsoleInput` 增加 `explicit ConsoleInput(bool enabled = true)`，仅在 `enabled` 为真时创建读 `stdin` 的 `worker_` 线程；主循环改为 `ConsoleInput console(consoleEnabled);`，从而在 `--no-console`（`consoleEnabled == false`）时不启动后台 `std::fgetc(stdin)` 线程，正常停服退出时不会阻塞析构并能按序释放 `TicketedWorldLock`（`session.lock`）。单独记录：当启用控制台（`consoleEnabled == true`）时，`ConsoleInput::run()` 仍使用阻塞 `std::fgetc(stdin)`，通用取消问题未在本轮扩大修改。
+- `README.md:18`：删去“本批不模拟水和流体刻”的自相矛盾表述，改为按 F-1…F-8 现状说明水/岩浆状态、独立流体计划刻、传播、参数/反应与含水宿主方块，并指向 `docs/compatibility.md` 的桶/实体推流/`fluid_ticks` 写回边界。
+- `task/TASKS.md`：本返工记录。
+
+仓库外重建与定向验证（`/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/`；原封存产物 `wsl-w3b2c2-review-20261113/build/redstone_vanilla_server` 未覆盖）：
+
+1. **新版 `redstone_vanilla_server` 构建**：
+   - 目录 `/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/build`（CMake Release + Ninja + jemalloc，`-DREDSTONE_BUILD_VANILLA_SERVER=ON`），SHA-256 `f5c2604bbad163f888427c5218ee5f78c598142e03663e2f997b9181f297d377`。
+2. **`--no-console` 保持 `stdin` PIPE 写端开启退出与锁释放验证（`test_noconsole_stdin_pipe.py`）**：
+   - 使用 `stdin=subprocess.PIPE` 且在 `p.wait(timeout=15)` 返回后才关闭 `p.stdin`（不调用会提前关管道的 `communicate()`），在 scratch 副本 `run-stdin-pipe` 上连续跑两次 `--no-console --ticketed-world ... --ticks 5`。
+   - 两次均正常退出 `0` 并打印 `TICKETED_WORLD_CLOSED complete=1 saved=0 unsaved=0 worker_stopped=1` 与 `STOPPED ticks=5`，第二次立即重新获取同一世界 `session.lock`（输出 `RUN1_OK_AND_RUN2_LOCK_REACQUIRED_OK`）。
+3. **新版生产二进制 775 端到端闭环（`run_native_e2e.py`）**：
+   - 同样保持 `stdin=subprocess.PIPE` 打开直至 `p.wait()` 返回；脚本先用 `assert` 校验 `p.returncode == 0`、`TICKETED_WORLD_CLOSED complete=1`、`saved in (0,1)`、`unsaved=0`、`worker_stopped=1`、`resident_installs >= 26` 与 `STOPPED ticks=` 后才输出 `W4C_NATIVE_E2E_OK`。
+   - 实跑通过：`native_exit=0`、`acks=[1]`、`state_id=13480`、`view_forget=true`、`view_resend=true`、`complete=1 saved=0 unsaved=0 worker_stopped=1 resident_installs=50`。
+4. **同进程探针新代内存读回断言（`run_probe_e2e.py` + `w4c_probe_server`）**：
+   - `w4c_probe_server`（链接本次新建 `build` 的 `libredstone_core.a` / `libredstone_protocol.a`，SHA-256 `66d40c17f7bdd38ca6cafd13d0dcc9d896ccb4e7c00d11a3fb9a63819c21c466`）在 `managedChunkInstalled` 回调直接输出 `world.getBlock({-13, -58, -16}).name()`；`run_probe_e2e.py` 断言首次安装与二次新代安装的内存方块及关闭摘要。
+   - 实跑输出 `W4C_PROBE_E2E_OK`：第 1 次安装 `epoch=49, loaded=1, state=1, block=minecraft:air` → 移远驱逐 `epoch=49, loaded=0, state=4` → 第 2 次新代安装 `epoch=324, loaded=1, state=1, block=minecraft:smooth_stone` → 断连移除 `epoch=324, loaded=0, state=4`，`complete=1 saved=0 unsaved=0 resident_installs=50`。
+5. **新版 `run-native` 原版 26.1 重启读回（`run_official_verify.py`）**：
+   - 在新版 `redstone_vanilla_server` 写出的 `run-native` 副本（`official-host/interop-world`）上重跑 `net.minecraft.server.Main`，`forceload add -13 -16` 后 `execute if block -13 -58 -16 minecraft:smooth_stone run say W4C_IS_SMOOTH_STONE` 命中并正常 `stop` 退出 `0`（`W4C_OFFICIAL_READBACK_OK`）。
+
+Evidence（`/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/SHA256SUMS`，`sha256sum -c SHA256SUMS` 13/13 `OK`）：
+
+- `build/redstone_vanilla_server`：`f5c2604bbad163f888427c5218ee5f78c598142e03663e2f997b9181f297d377`
+- `w4c_probe_server`：`66d40c17f7bdd38ca6cafd13d0dcc9d896ccb4e7c00d11a3fb9a63819c21c466`
+- `test_noconsole_stdin_pipe.py`：`a2eed2a0eb9d745973faed601e5f77bf0c2b1e1623c2e434d4ed50d863dc5c20`
+- `stdin-pipe-run1.log`：`e06d37ef1ac53cb1a2e63b99d64ed3d37104cf8f780f660f0bff61e3e47f9b28`
+- `stdin-pipe-run2.log`：`b1492399e2246486d5bd7f1535aa3c0bd24edf50d21d08c0fdd8daaa3b4a3391`
+- `run_native_e2e.py`：`4e08e3ef927fb9c615cffea58245a5bbd62a29a92e3d104182ef0d4085cd5552`
+- `native.log`：`9c356d27e9a7c1b96bdad01168a93940854de41754d262571f96e1e508c94320`
+- `events.json`：`dbb99ba62c328bf763af5d90d551c7347341395c4d5fb2943dc25faf5c80e119`
+- `run_probe_e2e.py`：`5ae0078dc10d4b62c3b2e562e05149f1decab25fc14b7e3848f70950ba753223`
+- `probe.log`：`ba5bf7d0c9a2362258e746262e91f299b4a4ffcafe7a605bac7708b078bc9428`
+- `probe-events.json`：`f3764deb014f90bde96981ee987f3668484132b4ae321596f34de040490c9069`
+- `run_official_verify.py`：`3c4a7207e12059dee9142821002978bd8c5b625c61ee6bd027ca803768dcf2de`
+- `official-readback.log`：`54eb9498ba30a46ba8822b4fa6a5ebaba14355e3c41dbc3eb93d036672ddecfc`
+
+未跑 CTest、未修改光照/协议核心、未写原档、未提交或推送。
+
+### Reviewer 复审结论：W-4c 通过（2026-11-14）
+
+- 禁用控制台时不创建 stdin reader；核对了 `--no-console` 到构造器的接线。定向脚本在 `wait()` 返回前一直保持父端 stdin PIPE 打开，两次退出均为 0，第二次同一隔离存档正常启动，证明进程退出和锁释放。启用控制台时，阻塞 stdin 读的通用停服问题仍在，留独立任务，本次不扩大范围。
+- 核对探针只增加目标区块安装/卸载日志；同一次 775 会话观测到 `(-1,-1)` 首装空气（epoch 49）、撤票实际移除、重装为 smooth_stone（epoch 324）。脚本断言内存目标方块、换代、卸载和关闭摘要。更新后的生产构建正常停服（complete=1 / unsaved=0），官方 26.1 在其隔离副本重启后读到同一格的 smooth_stone。README 已修正流体刻现状。
+- 已核对返工证据目录 `wsl-w4c-verify-20261114` 的 13 项 SHA-256，沿用 coder 已跑的定向验证；reviewer 未改生产代码、未重跑 CTest。本项结论只覆盖受支持的 26.1 区块存档子集和禁用控制台路径。
+
+## L-4b 热路径和积压优化（2026-11-14）
+
+### 任务目标
+
+- **范围**：按照 [PLAN.md](../PLAN.md) 领取 `L-4b 热路径和积压优化`。在保留已有双光层（Block/Sky 独立 4-bit 原子页、单 worker + SPSC 分段队列、`World` 直接构光学几何、`drainLightPublications`、生命周期/协议与全部既有未提交改动）的前提下，基于当前构建对主线程提交、结果接收、worker 批次归并与传播热路径做针对性测量与有界优化，消除不必要的分配/扫描或同步/原子开销，确保启用真实双光层相对前光照基线稳定满足 **<10%** 门槛，同时验证持续运行下的积压行为、初始载入与队列排空。本轮不领取 `L-4c`（Anvil 光照导入/回写与生命周期扩展留下一任务）。
+- **源码依据**：
+  - [PLAN.md](../PLAN.md) 阶段 2 `L-4b` 与性能门槛定义（主线程 CPU、平均刻墙钟相对前光照基线均 `<10%`，至少五组 × 1000 tick 交错，预热完成初照、计时内真实动态传播与发布、另验持续积压与初照成本、最终候选完整 CTest）；
+  - [src/light.cpp](../src/light.cpp)、[include/redstone/light.hpp](../include/redstone/light.hpp)、[src/engine.cpp](../src/engine.cpp) 与 [docs/light-propagation-wsl.md](../docs/light-propagation-wsl.md)；
+  - 只读 26.1 Java 光照参考 `../net/minecraft/world/level/lighting/`（不得改变已有 26.1 传播契约与 golden 行为）。
+- **验收判据**：
+  1. 以 WSL/Linux GCC Release + jemalloc 固定同一编译器/分配器，对最终候选与前光照基线（`22ad0f20...`）、同构建关光对照在分核（主线程与 worker 绑定不同核心）下交错跑至少 5 组 × 1000 tick（含预热初照），有效配对中位相对前光照基线 **主线程 CPU 增幅 <10%** 且 **平均刻墙钟增幅 <10%**。
+  2. 计时内真实触发 block 与 sky 动态提交、传播、发布与接收，四检查点及终态模拟指纹与前光照基线一致，每组两层均有实际变化且队列可排空（`pending_*_after == 0`、`rejected == 0`、`dropped_geometry == 0`）。
+  3. 另测持续高负载/积压推进与初始载入成本，证明不阻塞模拟线程、不发生静默丢更新或退化回阻塞锁。
+  4. `light_tests`、`light_protocol_tests`、官方 243 sky + 72 raw-layer golden、225 block golden 全部通过；最终源码完成一次全量构建与完整 **CTest** 且 100% 通过。
+- **计划改动文件**：`src/light.cpp`、`include/redstone/light.hpp`、`src/engine.cpp`（如有必要）、`tests/light_tests.cpp`（如需补充热路径/积压回归测试）、`docs/light-propagation-wsl.md`、`task/TASKS.md`。
+
+任务进行中

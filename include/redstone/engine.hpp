@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "redstone/block.hpp"
+#include "redstone/entity_codec.hpp"
 #include "redstone/fluid.hpp"
 #include "redstone/flat_hash_map.hpp"
 #include "redstone/heightmap.hpp"
@@ -136,6 +137,10 @@ struct ScheduledTick {
   std::int64_t order = 0;
   bool operator==(const ScheduledTick &) const = default;
 };
+struct ChunkTickSnapshot {
+  std::vector<ScheduledTick> blockTicks;
+  std::vector<std::pair<ScheduledTick, FluidRef>> fluidTicks;
+};
 // ScheduledTick.DRAIN_ORDER / ScheduledTick.INTRA_TICK_DRAIN_ORDER: both are
 // min-heap comparators (std::priority_queue puts the "greatest" last).
 struct ScheduledTickDrainOrder {
@@ -169,6 +174,7 @@ struct PistonTickerSlot {
   bool removed = false;
 };
 class Entity;
+class WorldChunkManager;
 // Chunk data exported for the network encoder: palette + index copies and the
 // moving piston block entities, so wire encoding can run off the tick thread.
 struct SectionSnapshot {
@@ -237,6 +243,7 @@ public:
   // Replaces any queued pre-import snapshots after raw writes with the current
   // authoritative chunk state. No-op when lighting is disabled.
   void refreshLightSnapshots();
+  void setChunkPersistedLight(int x, int z, PersistedChunkLight persisted);
   // Copy of one chunk's paletted sections (mutable state is never exported).
   ChunkSnapshot snapshotChunk(int chunkX, int chunkZ) const;
   bool setBlock(Pos pos, BlockState state, int flags = 3, int limit = 512);
@@ -281,6 +288,13 @@ public:
   std::size_t scheduledTickCount() const;
   // Deterministic snapshot in drain order, for logs, tools and tests.
   std::vector<ScheduledTick> scheduledTicks() const;
+  std::vector<PistonSnapshot> snapshotChunkPistons(int chunkX,
+                                                    int chunkZ) const;
+  // Per-chunk access for online persistence. These visit only the target
+  // chunk's containers; they do not enumerate the dimension.
+  ChunkTickSnapshot snapshotChunkTicks(int chunkX, int chunkZ) const;
+  ChunkTickSnapshot takeChunkTicks(int chunkX, int chunkZ);
+  std::size_t chunkTickCount(int chunkX, int chunkZ) const;
   // ServerLevel.fluidTicks: a separate LevelTicks container per fluid identity.
   // Scheduling is deduplicated by (pos, fluid) exactly like block ticks, and the
   // two queues never share container state.
@@ -327,6 +341,31 @@ public:
   std::function<void(const Entity &)> entityAddedObserver;
   std::function<void(int)> entityRemovedObserver;
   std::function<void(Vec3, float, int)> explosionObserver;
+  // Opt-in WorldChunkManager hook. Every successful state-changing write,
+  // including nested setBlock calls, reports the previous and final state.
+  std::function<void(Pos, const BlockState &, const BlockState &)>
+      managedBlockMutationObserver;
+  // Tick schedule/restore/execute/removal reports the affected block position.
+  std::function<void(Pos)> tickMutationObserver;
+  // Moving-piston progress/creation/removal invalidates the owning chunk's
+  // persisted block-entity view.
+  std::function<void(Pos)> pistonEntityMutationObserver;
+  // Runtime entity tick/add/remove observer. Old and current positions let the
+  // manager dirty only the source and destination chunks; the persistent UUID
+  // identifies a cross-chunk handoff independently of the runtime entity id.
+  std::function<void(Vec3, Vec3, const std::array<std::int32_t, 4> &, bool)>
+      managedEntityMutationObserver;
+  // Updates the entity-section index immediately after a world mechanism moves
+  // an entity outside its own tick. The manager receives the original indexed
+  // position, so section and persistence cannot lag until the next entity tick.
+  void synchronizeEntityAfterMove(Entity &entity, Vec3 previousPosition);
+  // Fixture-only: simulates an explicit bucket move between ticks and sends
+  // the production boundary observer with the same stable persistent UUID.
+  void moveEntityForManagedTest(const Entity &entity, Vec3 to);
+  // Empty hooks preserve legacy offline behavior. WorldChunkManager installs
+  // cached block/fluid and entity position readiness predicates.
+  std::function<bool(Pos)> blockTickPositionReady;
+  std::function<bool(Pos)> entityTickPositionReady;
   // Diagnostic counters for the direct section-column scan. They are disabled
   // on the production path; tests enable them only for the long-gap fixture.
   struct HeightmapScanStats {
@@ -340,7 +379,7 @@ public:
 
   void setPistonEntity(Pos pos,
                        std::shared_ptr<PistonMovingBlockEntity> entity);
-  void removePistonEntity(Pos pos);
+  void removePistonEntity(Pos pos, bool notify = true);
   // LevelChunk.blockEntities: the position table is authoritative for queries
   // (getBlockEntity) and never consulted while ticking.
   PosMap<std::shared_ptr<PistonMovingBlockEntity>> pistonEntities;
@@ -365,6 +404,9 @@ public:
   // therefore tick on the following tick. tickEntities() uses a snapshot of
   // this vector and skips any entry marked removed.
   std::shared_ptr<Entity> addEntity(std::shared_ptr<Entity> entity);
+  // Server-side protocol players share this monotonic namespace with World
+  // entities. IDs remain unique after entity removal and connection churn.
+  int allocateEntityId();
   void removeEntity(const std::shared_ptr<Entity> &entity);
   // EntitySectionStorage.getEntities: only sections overlapping the box are
   // visited; results keep the previous spawn-order (entity id) ordering.
@@ -374,6 +416,17 @@ public:
   // chunks a player can see instead of the whole world entity list.
   std::vector<Entity *> entitiesInSectionRange(int minX, int maxX, int minZ,
                                                int maxZ) const;
+  struct ItemEntitySnapshotResult {
+    std::vector<entity_codec::EntityRecord> records;
+    bool hasUnsupported = false;
+    std::string detail;
+  };
+  ItemEntitySnapshotResult snapshotChunkItemEntities(int chunkX,
+                                                      int chunkZ) const;
+  // Test-only view of the ordered compact entity sequence in one chunk.
+  std::vector<std::array<std::int32_t, 4>>
+  chunkEntityOrderForTest(int chunkX, int chunkZ) const;
+  bool hasEntityUuid(const std::array<std::int32_t, 4> &uuid) const;
   std::vector<std::shared_ptr<Entity>> entities;
   int nextEntityId = 1;
   Random random;
@@ -517,9 +570,15 @@ private:
   };
   struct Chunk {
     bool loaded = true;
+    bool hasPendingLightCell = false;
     // LightService generation token for this loaded lifetime. A reload at the
     // same address advances it, so queued old-lifetime cells are discarded.
     std::uint64_t lightLifecycleEpoch = 1;
+    // Latest LightService sequence produced by a main-thread optical block
+    // write on this chunk. Persistence checks require published snapshot
+    // generation >= requiredLightGeneration before marking isLightOn=1.
+    std::uint64_t requiredLightGeneration = 0;
+    std::optional<PersistedChunkLight> persistedLight;
     // The sections live inline: one pointer step from the chunk to the section
     // header, no per-section allocation, and every header of a chunk is
     // contiguous. A default Section is a single air value with no storage, so
@@ -573,6 +632,12 @@ private:
   // EntitySectionStorage: 16^3 sections keyed by SectionPos.asLong (vanilla
   // entity section storage); queries visit only the sections a box overlaps.
   std::map<std::uint64_t, std::vector<Entity *>> entitySections_;
+  // Managed-save blocker indexes. They turn the former per-candidate full
+  // scans into local lookups and are maintained by the same insert/remove
+  // paths as their authoritative tables.
+  std::unordered_map<std::uint64_t, std::size_t> entityCountsByChunk_;
+  std::unordered_map<std::uint64_t, std::vector<Pos>> pistonPositionsByChunk_;
+  std::set<std::array<std::int32_t, 4>> entityUuids_;
   void entitySectionAdd(Entity &entity);
   void entitySectionRemove(Entity &entity);
   void entitySectionUpdate(Entity &entity);
@@ -598,6 +663,27 @@ private:
   // collected and drained after blockTicks and before the chunk stage.
   std::unique_ptr<FluidTickQueue> fluidTickQueue_;
   std::unique_ptr<LightService> lightService_;
+  const LightOpticalTable *lightOptical_ = nullptr;
+  bool inWorldTick_ = false;
+  std::vector<LightCellUpdate> pendingLightCells_;
+  std::vector<std::uint64_t> pendingLightChunkKeys_;
+  void flushPendingLightCells();
+
+  friend class WorldChunkManager;
+  friend void pistonForgetWorld(World &);
+  bool installManagedChunk(
+      int x, int z, Chunk &&chunk,
+      const std::vector<ScheduledTick> &blockTicks,
+      const std::vector<std::pair<ScheduledTick, FluidRef>> &fluidTicks,
+      std::span<const std::shared_ptr<PistonMovingBlockEntity>> pistons = {},
+      std::span<const std::shared_ptr<Entity>> itemEntities = {},
+      std::span<const std::shared_ptr<Entity>> tntEntities = {});
+  bool removeManagedChunk(int x, int z, std::string &error,
+                          bool allowTransientDrop = false);
+  bool managedChunkPersistenceState(int x, int z, std::string &reason) const;
+  bool managedChunkTransientUnloadState(int x, int z,
+                                        std::string &reason) const;
+  std::function<void(int, int)> managedLightPublishedObserver;
 
   // ServerLevel.blockEvents (ObjectLinkedOpenHashSet) + reschedule list.
   struct BlockEventQueue;

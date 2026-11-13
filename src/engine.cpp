@@ -563,9 +563,9 @@ template <class Target> struct TickQueueOf {
       return QueuedIntraOrder<Target>{}(*left, *right);
     }
   };
-  // Containers live in a deque so their addresses stay stable; the maps only
-  // store the packed chunk key.
-  std::deque<ChunkTicks> storage;
+  // Each container has a stable heap address while mapped. Removal clears
+  // transient references and then erases this owning pointer immediately.
+  std::deque<std::unique_ptr<ChunkTicks>> storage;
   FlatChunkMap<ChunkTicks *> containers;
   FlatChunkMap<std::int64_t> nextTickForContainer;
   std::vector<Entry> containersToTick; // min-heap under EntryOrder
@@ -576,8 +576,39 @@ template <class Target> struct TickQueueOf {
   void addContainer(std::uint64_t key) {
     if (containers.find(key))
       return;
-    storage.emplace_back();
-    containers.set(key, &storage.back());
+    storage.emplace_back(std::make_unique<ChunkTicks>());
+    containers.set(key, storage.back().get());
+  }
+  // removeContainer clears all transient references and erases the owning
+  // unique_ptr, so the container storage is released immediately.
+  void removeContainer(std::uint64_t key) {
+    auto existing = containers.find(key);
+    if (!existing)
+      return;
+    ChunkTicks *removing = *existing;
+    nextTickForContainer.erase(key);
+    containersToTick.erase(
+        std::remove_if(containersToTick.begin(), containersToTick.end(),
+                       [key](const Entry &entry) { return entry.key == key; }),
+        containersToTick.end());
+    std::make_heap(containersToTick.begin(), containersToTick.end(),
+                   EntryOrder{});
+    std::erase_if(toRunThisTick, [key](const QueuedTick<Target> &entry) {
+      const std::uint64_t entryKey =
+          (static_cast<std::uint64_t>(
+               static_cast<std::uint32_t>(entry.tick.pos.x >> 4))
+           << 32) |
+          static_cast<std::uint32_t>(entry.tick.pos.z >> 4);
+      return entryKey == key;
+    });
+    containers.erase(key);
+    auto storageIt =
+        std::find_if(storage.begin(), storage.end(),
+                     [removing](const auto &candidate) {
+                       return candidate.get() == removing;
+                     });
+    if (storageIt != storage.end())
+      storage.erase(storageIt);
   }
   void updateContainerScheduling(std::uint64_t key, std::int64_t trigger) {
     nextTickForContainer.set(key, trigger);
@@ -674,6 +705,13 @@ template <class Target> struct TickQueueOf {
       // registered (pending ticks resume when the chunk ticks again).
       if (!world.isChunkLoaded(head->tick.pos.x >> 4, head->tick.pos.z >> 4))
         continue;
+      if (world.blockTickPositionReady &&
+          !world.blockTickPositionReady(head->tick.pos)) {
+        // Keep the due tick at the head. It becomes runnable when manager
+        // readiness changes; no queue rebuild or per-world scan is needed.
+        updateContainerScheduling(key, head->tick.trigger);
+        continue;
+      }
       nextTickForContainer.erase(key);
       pushContainer(Entry{key, *container});
     }
@@ -806,6 +844,10 @@ void World::setPistonEntity(Pos pos,
   // LevelChunk.setBlockEntity: replacing an entry marks the previous one
   // removed, so a stale owner can never be ticked again.
   auto &current = pistonEntities[pos];
+  if (!current) {
+    const auto chunk = chunkKey(pos.x >> 4, pos.z >> 4);
+    pistonPositionsByChunk_[chunk].push_back(pos);
+  }
   if (current && current != entity)
     current->live = false;
   current = std::move(entity);
@@ -813,6 +855,8 @@ void World::setPistonEntity(Pos pos,
   // this position (same list slot, same order) instead of appending a new one.
   if (auto it = pistonTickerSlots.find(pos); it != pistonTickerSlots.end()) {
     it->second->entity = current;
+    if (pistonEntityMutationObserver)
+      pistonEntityMutationObserver(pos);
     return;
   }
   auto slot = std::make_unique<PistonTickerSlot>();
@@ -824,13 +868,22 @@ void World::setPistonEntity(Pos pos,
   // the pending list and first ticks on the following pass.
   (tickingPistonBlockEntities ? pendingPistonTickers : pistonTickers)
       .push_back(std::move(slot));
+  if (pistonEntityMutationObserver)
+    pistonEntityMutationObserver(pos);
 }
-void World::removePistonEntity(Pos pos) {
+void World::removePistonEntity(Pos pos, bool notify) {
   // LevelChunk.removeBlockEntity: the position table drops the entity at once.
   if (auto it = pistonEntities.find(pos); it != pistonEntities.end()) {
     if (it->second)
       it->second->live = false;
     pistonEntities.erase(pos);
+    const auto key = chunkKey(pos.x >> 4, pos.z >> 4);
+    auto positions = pistonPositionsByChunk_.find(key);
+    if (positions != pistonPositionsByChunk_.end()) {
+      std::erase(positions->second, pos);
+      if (positions->second.empty())
+        pistonPositionsByChunk_.erase(positions);
+    }
   }
   // removeBlockEntityTicker: rebind the ticker to nothing. The list slot stays
   // until sweepPistonTickers(), and it keeps owning the entity until then, so
@@ -839,6 +892,8 @@ void World::removePistonEntity(Pos pos) {
     it->second->removed = true;
     pistonTickerSlots.erase(pos);
   }
+  if (notify && pistonEntityMutationObserver)
+    pistonEntityMutationObserver(pos);
 }
 void World::mergePendingPistonTickers() {
   if (pendingPistonTickers.empty())
@@ -965,6 +1020,173 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
     --nonEmpty;
   return previous;
 }
+bool World::installManagedChunk(
+    int x, int z, Chunk &&chunk,
+    const std::vector<ScheduledTick> &blockTicks,
+    const std::vector<std::pair<ScheduledTick, FluidRef>> &fluidTicks,
+    std::span<const std::shared_ptr<PistonMovingBlockEntity>> pistons,
+    std::span<const std::shared_ptr<Entity>> itemEntities,
+    std::span<const std::shared_ptr<Entity>> tntEntities) {
+  const std::uint64_t key = chunkKey(x, z);
+  if (chunks_.contains(key))
+    return false;
+  chunk.loaded = false;
+  auto inserted = chunks_.emplace(key, std::move(chunk));
+  try {
+    tickQueue_->addContainer(key);
+    fluidTickQueue_->addContainer(key);
+    for (const ScheduledTick &tick : blockTicks) {
+      if (!tickQueue_->restore(key, tick, tick.block.block()))
+        throw std::logic_error("failed to restore block tick");
+    }
+    for (const auto &[tick, fluid] : fluidTicks) {
+      if (!fluidTickQueue_->restore(key, tick, fluid.fluid()))
+        throw std::logic_error("failed to restore fluid tick");
+    }
+    // Block entities and tickers are installed before loadChunk publishes the
+    // optical snapshot and lifecycle edge.
+    for (const auto &piston : pistons) {
+      if (!piston)
+        throw std::logic_error("null moving piston entity");
+      setPistonEntity(piston->pos, piston);
+    }
+    for (const auto &entity : itemEntities) {
+      if (!entity)
+        throw std::logic_error("null persisted item entity");
+      if (!entityUuids_.insert(entity->uuid).second)
+        throw std::logic_error("duplicate entity UUID during install");
+      entity->id = allocateEntityId();
+      entity->removalObserved_ = false;
+      entities.push_back(entity);
+      entitySectionAdd(*entity);
+    }
+    for (const auto &entity : tntEntities) {
+      if (!entity)
+        throw std::logic_error("null persisted tnt entity");
+      if (!entityUuids_.insert(entity->uuid).second)
+        throw std::logic_error("duplicate entity UUID during install");
+      entity->id = allocateEntityId();
+      entity->removalObserved_ = false;
+      entities.push_back(entity);
+      entitySectionAdd(*entity);
+    }
+    loadChunk(x, z);
+  } catch (...) {
+    std::vector<std::shared_ptr<Entity>> insertedEntities;
+    insertedEntities.reserve(itemEntities.size() + tntEntities.size());
+    insertedEntities.insert(insertedEntities.end(), itemEntities.begin(),
+                            itemEntities.end());
+    insertedEntities.insert(insertedEntities.end(), tntEntities.begin(),
+                            tntEntities.end());
+    for (const auto &entity : insertedEntities) {
+      if (!entity ||
+          std::find(entities.begin(), entities.end(), entity) == entities.end())
+        continue;
+      entityUuids_.erase(entity->uuid);
+      entitySectionRemove(*entity);
+      std::erase(entities, entity);
+    }
+    for (const auto &piston : pistons)
+      if (piston)
+        removePistonEntity(piston->pos, false);
+    sweepPistonTickers();
+    tickQueue_->removeContainer(key);
+    fluidTickQueue_->removeContainer(key);
+    chunks_.erase(inserted.first);
+    blockReadCache_.reset();
+    throw;
+  }
+  return true;
+}
+
+bool World::managedChunkTransientUnloadState(
+    int x, int z, std::string &reason) const {
+  if (handlingTick_) {
+    reason = "chunk lifecycle cannot evict during the World tick";
+    return true;
+  }
+  const std::uint64_t key = chunkKey(x, z);
+  for (const BlockEvent &event : blockEventQueue_->order) {
+    if (chunkKey(event.pos.x >> 4, event.pos.z >> 4) == key) {
+      reason = "chunk has a transient pending block event";
+      return true;
+    }
+  }
+  for (const BlockEvent &event : blockEventsToReschedule_) {
+    if (chunkKey(event.pos.x >> 4, event.pos.z >> 4) == key) {
+      reason = "chunk has a transient deferred block event";
+      return true;
+    }
+  }
+  return false;
+}
+
+bool World::managedChunkPersistenceState(int x, int z,
+                                         std::string &reason) const {
+  const std::uint64_t key = chunkKey(x, z);
+  if (entityCountsByChunk_.contains(key)) {
+    for (const Entity *entity : entitiesInSectionRange(x, x, z, z)) {
+      if (!dynamic_cast<const ItemEntity *>(entity) &&
+          !dynamic_cast<const PrimedTnt *>(entity) &&
+          !dynamic_cast<const FallingBlockEntity *>(entity) &&
+          !dynamic_cast<const Minecart *>(entity)) {
+        reason =
+            "chunk contains an entity type outside supported persistence";
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool World::removeManagedChunk(int x, int z, std::string &error,
+                               bool allowTransientDrop) {
+  if (managedChunkPersistenceState(x, z, error) ||
+      (!allowTransientDrop &&
+       managedChunkTransientUnloadState(x, z, error)))
+    return false;
+  const std::uint64_t key = chunkKey(x, z);
+  auto found = chunks_.find(key);
+  if (found == chunks_.end()) {
+    error = "managed chunk is not resident in World";
+    return false;
+  }
+  // Invalidate every direct chunk/section pointer before node destruction.
+  blockReadCache_.reset();
+  unloadChunk(x, z);
+  tickQueue_->removeContainer(key);
+  fluidTickQueue_->removeContainer(key);
+  std::erase_if(blockEventQueue_->order, [key](const BlockEvent &event) {
+    return chunkKey(event.pos.x >> 4, event.pos.z >> 4) == key;
+  });
+  blockEventQueue_->index.clear();
+  for (const BlockEvent &event : blockEventQueue_->order)
+    blockEventQueue_->index.insert(event);
+  std::erase_if(blockEventsToReschedule_, [key](const BlockEvent &event) {
+    return chunkKey(event.pos.x >> 4, event.pos.z >> 4) == key;
+  });
+  std::vector<Pos> pistonPositions;
+  if (auto indexed = pistonPositionsByChunk_.find(key);
+      indexed != pistonPositionsByChunk_.end())
+    pistonPositions = indexed->second;
+  for (const Pos &pos : pistonPositions)
+    removePistonEntity(pos, false);
+  if (!pistonPositions.empty())
+    sweepPistonTickers();
+  const std::vector<Entity *> chunkEntities =
+      entitiesInSectionRange(x, x, z, z);
+  for (Entity *entity : chunkEntities) {
+    entityUuids_.erase(entity->uuid);
+    entitySectionRemove(*entity);
+    std::erase_if(entities, [entity](const std::shared_ptr<Entity> &owned) {
+      return owned.get() == entity;
+    });
+  }
+  chunks_.erase(found);
+  blockReadCache_.reset();
+  return true;
+}
+
 void World::loadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
   const auto key = chunkKey(x, z);
@@ -985,7 +1207,13 @@ void World::loadChunk(int x, int z) {
   tickQueue_->addContainer(chunkKey(x, z));
   fluidTickQueue_->addContainer(chunkKey(x, z));
   if (lightService_) {
-    lightService_->submitChunk(std::move(*makeLightChunkInput(x, z)));
+    flushPendingLightCells();
+    if (auto input = makeLightChunkInput(x, z)) {
+      const std::uint64_t seq = lightService_->submitChunk(std::move(*input));
+      if (seq > 0)
+        c.requiredLightGeneration = std::max(c.requiredLightGeneration, seq);
+      c.persistedLight.reset();
+    }
     if (!wasLoaded && lightChunkLifecycleObserver)
       lightChunkLifecycleObserver(x, z, true);
   }
@@ -997,6 +1225,7 @@ void World::unloadChunk(int x, int z) {
   if (wasLoaded)
     it->second.loaded = false;
   if (lightService_) {
+    flushPendingLightCells();
     // The lifecycle tombstone invalidates both full snapshots and queued owned
     // cell records from this loaded lifetime.
     lightService_->unloadChunk(x, z);
@@ -1019,6 +1248,7 @@ std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const 
   input->lifecycleEpoch = chunk->lightLifecycleEpoch;
   input->minBlockSectionY = minY_ >> 4;
   input->blockSectionCount = sectionCount();
+  input->persistedLight = chunk->persistedLight;
   input->geometrySections.reserve(static_cast<std::size_t>(sectionCount()));
   for (int section = 0; section < sectionCount(); ++section) {
     const Section &data = chunk->sections[section];
@@ -1082,17 +1312,43 @@ void World::enableLighting(LightWorkerOptions options) {
         "lighting requires minY aligned to a 16-block section");
   lightService_ = std::make_unique<LightService>(
       minY_ >> 4, sectionCount(), options);
+  lightOptical_ = lightService_->opticalTable().get();
   lightService_->setPublishCallback(
       [this](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        if (managedLightPublishedObserver && snapshot)
+          managedLightPublishedObserver(snapshot->chunkX, snapshot->chunkZ);
         if (lightPublicationObserver)
           lightPublicationObserver(std::move(snapshot));
       });
   refreshLightSnapshots();
 }
 
+void World::flushPendingLightCells() {
+  if (!lightService_ || pendingLightCells_.empty())
+    return;
+  const std::uint64_t seq =
+      lightService_->reportBlockCells(pendingLightCells_);
+  for (std::uint64_t key : pendingLightChunkKeys_) {
+    if (auto it = chunks_.find(key); it != chunks_.end()) {
+      it->second.hasPendingLightCell = false;
+      if (seq > 0)
+        it->second.requiredLightGeneration =
+            std::max(it->second.requiredLightGeneration, seq);
+    }
+  }
+  pendingLightChunkKeys_.clear();
+  pendingLightCells_.clear();
+}
+
+void World::setChunkPersistedLight(int x, int z, PersistedChunkLight persisted) {
+  if (Chunk *c = chunkAt(x, z))
+    c->persistedLight = std::move(persisted);
+}
+
 void World::refreshLightSnapshots() {
   if (!lightService_)
     return;
+  flushPendingLightCells();
   std::vector<std::uint64_t> keys;
   keys.reserve(chunks_.size());
   for (const auto &[key, chunk] : chunks_)
@@ -1102,12 +1358,26 @@ void World::refreshLightSnapshots() {
   for (std::uint64_t key : keys) {
     const int chunkX = static_cast<int>(key >> 32);
     const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
-    if (auto input = makeLightChunkInput(chunkX, chunkZ))
-      lightService_->submitChunk(std::move(*input));
+    if (auto input = makeLightChunkInput(chunkX, chunkZ)) {
+      const std::uint64_t seq = lightService_->submitChunk(std::move(*input));
+      if (Chunk *c = chunkAt(chunkX, chunkZ)) {
+        if (seq > 0)
+          c->requiredLightGeneration =
+              std::max(c->requiredLightGeneration, seq);
+        c->persistedLight.reset();
+      }
+    }
   }
 }
 
 void World::disableLighting() {
+  for (std::uint64_t key : pendingLightChunkKeys_) {
+    if (auto it = chunks_.find(key); it != chunks_.end())
+      it->second.hasPendingLightCell = false;
+  }
+  pendingLightChunkKeys_.clear();
+  pendingLightCells_.clear();
+  lightOptical_ = nullptr;
   lightService_.reset();
 }
 bool World::isChunkLoaded(int x, int z) const { return chunkAt(x, z) != nullptr; }
@@ -1199,19 +1469,30 @@ ChunkSnapshot World::snapshotChunk(int chunkX, int chunkZ) const {
       }
     }
   }
-  for (const auto &[pos, entity] : pistonEntities)
-    if (pos.x >= chunkX * 16 && pos.x < chunkX * 16 + 16 &&
-        pos.z >= chunkZ * 16 && pos.z < chunkZ * 16 + 16)
-      snapshot.pistons.push_back(
-          PistonSnapshot{pos, entity->movedState, entity->direction,
-                         entity->progressO, entity->extending, entity->source});
-  // The position table is a flat hash and iterates in bucket order; the
-  // snapshot is a wire-visible list, so keep the previous Pos-ascending order.
-  std::sort(snapshot.pistons.begin(), snapshot.pistons.end(),
+  snapshot.pistons = snapshotChunkPistons(chunkX, chunkZ);
+  return snapshot;
+}
+std::vector<PistonSnapshot>
+World::snapshotChunkPistons(int chunkX, int chunkZ) const {
+  std::vector<PistonSnapshot> result;
+  const auto indexed = pistonPositionsByChunk_.find(chunkKey(chunkX, chunkZ));
+  if (indexed == pistonPositionsByChunk_.end())
+    return result;
+  result.reserve(indexed->second.size());
+  for (const Pos &pos : indexed->second) {
+    const auto found = pistonEntities.find(pos);
+    if (found == pistonEntities.end() || !found->second)
+      continue;
+    const auto &entity = *found->second;
+    result.push_back(PistonSnapshot{pos, entity.movedState, entity.direction,
+                                    entity.progressO, entity.extending,
+                                    entity.source});
+  }
+  std::sort(result.begin(), result.end(),
             [](const PistonSnapshot &a, const PistonSnapshot &b) {
               return a.pos < b.pos;
             });
-  return snapshot;
+  return result;
 }
 void World::rawSetBlock(Pos p, BlockState state) {
   if (p.y < minY_ || p.y >= maxY_)
@@ -1223,7 +1504,22 @@ void World::rawSetBlock(Pos p, BlockState state) {
   // no-op in Section::set, so an untouched section never materialises storage.
   Section &section = c->sections[sectionIndex(p.y)];
   const int index = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
-  section.set(index, state.id());
+  const BlockState::Id previous = section.set(index, state.id());
+  if (previous != state.id()) {
+    c->persistedLight.reset();
+    if (managedBlockMutationObserver) {
+      const BlockState old = BlockState::fromId(previous);
+      managedBlockMutationObserver(p, old, state);
+    }
+    if (lightService_ &&
+        lightOptical_->classForState(previous) !=
+            lightOptical_->classForState(state.id())) {
+      const LightCellUpdate update{p.x, p.y, p.z, state.id()};
+      const std::uint64_t seq = lightService_->reportBlockCell(update);
+      if (seq > 0)
+        c->requiredLightGeneration = std::max(c->requiredLightGeneration, seq);
+    }
+  }
 }
 std::map<Pos, BlockState> World::allBlocks() const {
   std::map<Pos, BlockState> result;
@@ -1266,6 +1562,8 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
   if (old == state)
     return false;
   targetSection.set(localIndex, state.id());
+  if (managedBlockMutationObserver)
+    managedBlockMutationObserver(p, old, state);
   if (!changedChunk->heightmaps)
     changedChunk->heightmaps = std::make_unique<ChunkHeightmaps>(
         minY_, sectionCount() * 16);
@@ -1333,8 +1631,25 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
           return firstAvailable;
         });
   }
-  if (lightService_)
-    lightService_->reportBlockCell({p.x, p.y, p.z, state.id()});
+  if (lightService_ &&
+      lightOptical_->classForState(old.id()) !=
+          lightOptical_->classForState(state.id())) {
+    changedChunk->persistedLight.reset();
+    const LightCellUpdate update{p.x, p.y, p.z, state.id()};
+    if (inWorldTick_) {
+      pendingLightCells_.push_back(update);
+      if (!changedChunk->hasPendingLightCell) {
+        changedChunk->hasPendingLightCell = true;
+        pendingLightChunkKeys_.push_back(
+            chunkKey(chunkIndex(p.x), chunkIndex(p.z)));
+      }
+    } else {
+      const std::uint64_t seq = lightService_->reportBlockCell(update);
+      if (seq > 0)
+        changedChunk->requiredLightGeneration =
+            std::max(changedChunk->requiredLightGeneration, seq);
+    }
+  }
   // TODO: reproduce dirty/client notifications, POI, and generic block-entity
   // pre-removal/creation for supported entity blocks.
   // The opt-in L-1 light handoff is below; propagation remains TODO(L-2a/L-2b).
@@ -1787,11 +2102,17 @@ void World::scheduleTick(Pos p, const BlockRef &block, int delay,
 }
 bool World::scheduleTick(const ScheduledTick &tick) {
   const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
-  return tickQueue_->schedule(key, tick, tick.block.block());
+  const bool changed = tickQueue_->schedule(key, tick, tick.block.block());
+  if (changed && tickMutationObserver)
+    tickMutationObserver(tick.pos);
+  return changed;
 }
 bool World::restoreScheduledTick(const ScheduledTick &tick) {
   const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
-  return tickQueue_->restore(key, tick, tick.block.block());
+  const bool changed = tickQueue_->restore(key, tick, tick.block.block());
+  if (changed && tickMutationObserver)
+    tickMutationObserver(tick.pos);
+  return changed;
 }
 bool World::hasScheduledTick(Pos p, const BlockRef &block) const {
   const auto key = chunkKey(chunkIndex(p.x), chunkIndex(p.z));
@@ -1819,6 +2140,63 @@ std::vector<ScheduledTick> World::scheduledTicks() const {
   }
   return ticks;
 }
+ChunkTickSnapshot World::snapshotChunkTicks(int chunkX,
+                                                 int chunkZ) const {
+  ChunkTickSnapshot result;
+  const std::uint64_t key = chunkKey(chunkX, chunkZ);
+  if (const auto *container = tickQueue_->containers.find(key)) {
+    result.blockTicks.reserve((*container)->heap.size());
+    for (const auto &entry : (*container)->heap)
+      result.blockTicks.push_back(entry.tick);
+    std::sort(result.blockTicks.begin(), result.blockTicks.end(),
+              [](const ScheduledTick &a, const ScheduledTick &b) {
+                return std::tie(a.trigger, a.priority, a.order) <
+                       std::tie(b.trigger, b.priority, b.order);
+              });
+  }
+  if (const auto *container = fluidTickQueue_->containers.find(key)) {
+    result.fluidTicks.reserve((*container)->heap.size());
+    for (const auto &entry : (*container)->heap)
+      result.fluidTicks.emplace_back(entry.tick, FluidRef(*entry.target));
+    std::sort(result.fluidTicks.begin(), result.fluidTicks.end(),
+              [](const auto &a, const auto &b) {
+                return std::tie(a.first.trigger, a.first.priority,
+                                a.first.order) <
+                       std::tie(b.first.trigger, b.first.priority,
+                                b.first.order);
+              });
+  }
+  return result;
+}
+
+std::size_t World::chunkTickCount(int chunkX, int chunkZ) const {
+  const std::uint64_t key = chunkKey(chunkX, chunkZ);
+  std::size_t result = 0;
+  if (const auto *container = tickQueue_->containers.find(key))
+    result += (*container)->count();
+  if (const auto *container = fluidTickQueue_->containers.find(key))
+    result += (*container)->count();
+  return result;
+}
+
+ChunkTickSnapshot World::takeChunkTicks(int chunkX, int chunkZ) {
+  ChunkTickSnapshot result = snapshotChunkTicks(chunkX, chunkZ);
+  const std::uint64_t key = chunkKey(chunkX, chunkZ);
+  if (auto *container = tickQueue_->containers.find(key)) {
+    (*container)->heap.clear();
+    (*container)->ticksPerPosition.clear();
+    tickQueue_->nextTickForContainer.erase(key);
+  }
+  if (auto *container = fluidTickQueue_->containers.find(key)) {
+    (*container)->heap.clear();
+    (*container)->ticksPerPosition.clear();
+    fluidTickQueue_->nextTickForContainer.erase(key);
+  }
+  if (tickMutationObserver)
+    tickMutationObserver({chunkX * 16, minY_, chunkZ * 16});
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // ServerLevel.fluidTicks: same LevelTicks structure, keyed on the Fluid
 // identity instead of the Block identity.
@@ -1840,13 +2218,19 @@ bool World::scheduleFluidTick(const ScheduledTick &tick, const FluidRef &fluid) 
   if (fluid.empty())
     return false;
   const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
-  return fluidTickQueue_->schedule(key, tick, fluid.fluid());
+  const bool changed = fluidTickQueue_->schedule(key, tick, fluid.fluid());
+  if (changed && tickMutationObserver)
+    tickMutationObserver(tick.pos);
+  return changed;
 }
 bool World::restoreFluidTick(const ScheduledTick &tick, const FluidRef &fluid) {
   if (fluid.empty())
     return false;
   const auto key = chunkKey(chunkIndex(tick.pos.x), chunkIndex(tick.pos.z));
-  return fluidTickQueue_->restore(key, tick, fluid.fluid());
+  const bool changed = fluidTickQueue_->restore(key, tick, fluid.fluid());
+  if (changed && tickMutationObserver)
+    tickMutationObserver(tick.pos);
+  return changed;
 }
 bool World::hasFluidTick(Pos p, const FluidRef &fluid) const {
   const auto key = chunkKey(chunkIndex(p.x), chunkIndex(p.z));
@@ -1896,6 +2280,8 @@ void World::observerNotify(Pos p, const BlockState &s) {
 // ServerLevel.tickBlock: re-read the position and only dispatch when the block
 // identity still matches. A stale tick silently does nothing.
 void World::tickBlockAt(Pos pos, const Block *expected) {
+  if (tickMutationObserver)
+    tickMutationObserver(pos);
   if (traceUpdates)
     log.push_back({"scheduled_tick", pos,
                    expected ? expected->name() : std::string{}});
@@ -1925,6 +2311,8 @@ void World::tickBlockAt(Pos pos, const Block *expected) {
 // versa. Flow behaviour itself is task F-3; until then a due tick only records
 // itself so the queue can be exercised.
 void World::tickFluidAt(Pos pos, const Fluid *expected) {
+  if (tickMutationObserver)
+    tickMutationObserver(pos);
   ++fluidDispatches_;
   if (!expected)
     return;
@@ -1970,7 +2358,8 @@ void World::runEvents() {
   while (!blockEventQueue_->empty()) {
     BlockEvent e;
     blockEventQueue_->removeFirst(e);
-    if (!isLoaded(e.pos)) {
+    if (!isLoaded(e.pos) ||
+        (blockTickPositionReady && !blockTickPositionReady(e.pos))) {
       blockEventsToReschedule_.push_back(std::move(e));
       continue;
     }
@@ -1995,6 +2384,15 @@ void World::runEvents() {
 }
 // TODO: random ticks, weather, and the remaining world systems are absent.
 void World::tick() {
+  struct TickLightGuard {
+    World &world;
+    ~TickLightGuard() {
+      world.inWorldTick_ = false;
+      world.flushPendingLightCells();
+    }
+  };
+  inWorldTick_ = true;
+  TickLightGuard tickLightGuard{*this};
   ++time_;
   handlingTick_ = true;
   // ServerLevel.tick: blockTicks.tick(gameTime, 65536, this::tickBlock).
