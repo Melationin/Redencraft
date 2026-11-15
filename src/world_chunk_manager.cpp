@@ -1429,6 +1429,9 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
     chunk.persistedLight = std::move(persisted);
   }
   try {
+    // TODO: load/reconcile/save poi/r.x.z.mca asynchronously through
+    // ChunkLifecycleController (World::installManagedChunk currently reconciles
+    // in-memory PoiStorage directly from terrain sections with Valid=true).
     if (!world_.installManagedChunk(position.x, position.z,
                                     std::move(chunk), restoredBlockTicks,
                                     restoredFluidTicks, movingPistons,

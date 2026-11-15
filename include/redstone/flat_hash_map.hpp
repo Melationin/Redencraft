@@ -201,7 +201,7 @@ private:
     while (rounded < capacity)
       rounded <<= 1;
     std::vector<Slot> previous = std::move(slots_);
-    slots_.assign(rounded, Slot{});
+    slots_ = std::vector<Slot>(rounded);
     size_ = 0;
     tombstones_ = 0;
     const std::size_t mask = slots_.size() - 1;

@@ -932,6 +932,7 @@ World::World(int minY, int maxY, int maxNeighborUpdates)
     : minY_(minY), maxY_(maxY), maxUpdates_(maxNeighborUpdates),
       tickQueue_(std::make_unique<BlockTickQueue>()),
       fluidTickQueue_(std::make_unique<FluidTickQueue>()),
+      poiStorage_(std::make_unique<PoiStorage>(minY, maxY)),
       blockEventQueue_(std::make_unique<BlockEventQueue>()) {
   // Chunk section storage is a fixed inline array; reject a taller dimension
   // instead of silently truncating sections or indexing out of bounds.
@@ -1520,6 +1521,7 @@ bool World::installManagedChunk(
       entitySectionAdd(*entity);
     }
     loadChunk(x, z);
+    reconcilePoiFromChunk(x, z, insertedIt->second);
   } catch (...) {
     std::vector<std::shared_ptr<Entity>> insertedEntities;
     insertedEntities.reserve(itemEntities.size() + tntEntities.size());
@@ -1651,6 +1653,8 @@ bool World::removeManagedChunk(int x, int z, std::string &error,
     });
   }
   removeRandomTickingChunk(found->second);
+  if (poiStorage_)
+    poiStorage_->removeChunk(x, z);
   {
     std::unique_lock<std::shared_mutex> resizeLock;
     if (std::shared_mutex *mu = directResizeMutex())
@@ -2103,6 +2107,57 @@ World::snapshotChunkPistons(int chunkX, int chunkZ) const {
             });
   return result;
 }
+void World::reconcilePoiFromChunk(int cx, int cz, const Chunk &chunk) {
+  if (!poiStorage_)
+    return;
+  const int count = sectionCount();
+  std::vector<std::pair<std::uint16_t, PoiTypeId>> found;
+  for (int si = 0; si < count; ++si) {
+    const Section &sec = chunk.sections[static_cast<std::size_t>(si)];
+    if (!sec.storage) {
+      const PoiTypeId singlePoi = fastPoiTypeForState(sec.single);
+      if (singlePoi == PoiTypeId::None) {
+        poiStorage_->markSectionValidEmpty(cx, cz, si);
+        continue;
+      }
+      found.resize(static_cast<std::size_t>(kLightVolume));
+      for (int i = 0; i < kLightVolume; ++i)
+        found[static_cast<std::size_t>(i)] = {
+            static_cast<std::uint16_t>(i), singlePoi};
+      poiStorage_->reconcileSectionFromScan(cx, cz, si, found, false);
+      continue;
+    }
+
+    found.clear();
+    bool hasAnyPoi = false;
+    visitSectionStorage(sec.storage.get(), [&](const auto *typed) {
+      using BlockT = std::remove_pointer_t<decltype(typed)>;
+      std::array<PoiTypeId, BlockT::kPaletteCapacity> palettePoi{};
+      const std::size_t paletteCount =
+          std::min<std::size_t>(typed->paletteSize, BlockT::kPaletteCapacity);
+      for (std::size_t p = 0; p < paletteCount; ++p) {
+        const PoiTypeId poi = fastPoiTypeForState(typed->palette[p]);
+        palettePoi[p] = poi;
+        if (poi != PoiTypeId::None)
+          hasAnyPoi = true;
+      }
+      if (!hasAnyPoi)
+        return;
+      for (int i = 0; i < kLightVolume; ++i) {
+        const PoiTypeId poi =
+            palettePoi[typed->indexAt(static_cast<std::size_t>(i))];
+        if (poi != PoiTypeId::None)
+          found.emplace_back(static_cast<std::uint16_t>(i), poi);
+      }
+    });
+    if (!hasAnyPoi) {
+      poiStorage_->markSectionValidEmpty(cx, cz, si);
+    } else {
+      poiStorage_->reconcileSectionFromScan(cx, cz, si, found, false);
+    }
+  }
+}
+
 void World::rawSetBlock(Pos p, BlockState state) {
   if (p.y < minY_ || p.y >= maxY_)
     return;
@@ -2122,6 +2177,12 @@ void World::rawSetBlock(Pos p, BlockState state) {
     updateChunkRandomTickMask(*c, chunkKey(cx, cz), si,
                               section.isRandomlyTicking());
     c->persistedLight.reset();
+    if (poiStorage_ &&
+        (fastPoiTypeForState(previous) != PoiTypeId::None ||
+         fastPoiTypeForState(state.id()) != PoiTypeId::None)) {
+      poiStorage_->onBlockStateChange(PoiPos{p.x, p.y, p.z}, previous,
+                                      state.id());
+    }
     if (managedBlockMutationObserver) {
       const BlockState old = BlockState::fromId(previous);
       managedBlockMutationObserver(p, old, state);
@@ -2163,8 +2224,11 @@ void World::importSectionBlocks(
   blockReadCache_.sectionIndex = -1;
   if (palette.size() == 1) {
     const BlockState::Id sid = palette[0];
-    if (BlockState::fromId(sid).isAir())
+    if (BlockState::fromId(sid).isAir()) {
+      if (poiStorage_)
+        poiStorage_->markSectionValidEmpty(cx, cz, si);
       return;
+    }
     std::unique_lock<std::shared_mutex> resizeLock;
     if (std::shared_mutex *mu = directResizeMutex())
       resizeLock = std::unique_lock<std::shared_mutex>(*mu);
@@ -2172,6 +2236,18 @@ void World::importSectionBlocks(
     sec.single = sid;
     sec.nonEmpty = static_cast<std::uint16_t>(kLightVolume);
     sec.initSingleRandomTick(sid);
+    if (poiStorage_) {
+      const PoiTypeId singlePoi = fastPoiTypeForState(sid);
+      if (singlePoi == PoiTypeId::None) {
+        poiStorage_->markSectionValidEmpty(cx, cz, si);
+      } else {
+        std::vector<std::pair<std::uint16_t, PoiTypeId>> found(kLightVolume);
+        for (int i = 0; i < kLightVolume; ++i)
+          found[static_cast<std::size_t>(i)] = {
+              static_cast<std::uint16_t>(i), singlePoi};
+        poiStorage_->reconcileSectionFromScan(cx, cz, si, found, false);
+      }
+    }
   } else {
     const std::uint8_t targetBits =
         palette.size() > 256
@@ -2181,17 +2257,24 @@ void World::importSectionBlocks(
     std::uint16_t nonEmpty = 0;
     std::uint16_t tickingCount = 0;
     sec.randomTickByMinisection.fill(0);
+    std::vector<std::pair<std::uint16_t, PoiTypeId>> poiFound;
+    bool hasAnyPoi = false;
     visitSectionStorage(block.get(), [&](auto *typed) {
       using BlockT = std::remove_pointer_t<decltype(typed)>;
       const std::size_t paletteCount =
           std::min(palette.size(), BlockT::kPaletteCapacity);
       typed->paletteSize = static_cast<std::uint16_t>(paletteCount);
       std::array<bool, kLightVolume> isNonAir{};
+      std::array<PoiTypeId, kLightVolume> palettePoi{};
       for (std::size_t p = 0; p < paletteCount; ++p) {
         const BlockState::Id sid = palette[p];
         typed->palette[p] = sid;
         typed->paletteTicking[p] = stateIsRandomlyTickingId(sid) ? 1 : 0;
         isNonAir[p] = !BlockState::fromId(sid).isAir();
+        const PoiTypeId poi = fastPoiTypeForState(sid);
+        palettePoi[p] = poi;
+        if (poi != PoiTypeId::None)
+          hasAnyPoi = true;
       }
       for (int i = 0; i < kLightVolume; ++i) {
         const std::uint16_t pi = indices[static_cast<std::size_t>(i)];
@@ -2203,6 +2286,8 @@ void World::importSectionBlocks(
           ++sec.randomTickByMinisection[static_cast<std::size_t>(i) /
                                         kRandomTickMinisectionSize];
         }
+        if (hasAnyPoi && palettePoi[pi] != PoiTypeId::None)
+          poiFound.emplace_back(static_cast<std::uint16_t>(i), palettePoi[pi]);
       }
     });
     std::unique_lock<std::shared_mutex> resizeLock;
@@ -2215,6 +2300,13 @@ void World::importSectionBlocks(
       sec.single = 0;
     } else {
       sec.storage = std::move(block);
+    }
+    if (poiStorage_) {
+      if (!hasAnyPoi) {
+        poiStorage_->markSectionValidEmpty(cx, cz, si);
+      } else {
+        poiStorage_->reconcileSectionFromScan(cx, cz, si, poiFound, false);
+      }
     }
   }
   updateChunkRandomTickMask(*c, chunkKey(cx, cz), si, sec.isRandomlyTicking());
@@ -2267,6 +2359,11 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
                     directResizeMutex());
   updateChunkRandomTickMask(*changedChunk, chunkKey(targetCx, targetCz),
                             targetSi, targetSection.isRandomlyTicking());
+  if (poiStorage_ &&
+      (fastPoiTypeForState(old.id()) != PoiTypeId::None ||
+       fastPoiTypeForState(state.id()) != PoiTypeId::None)) {
+    poiStorage_->onBlockStateChange(PoiPos{p.x, p.y, p.z}, old.id(), state.id());
+  }
   if (managedBlockMutationObserver)
     managedBlockMutationObserver(p, old, state);
   if (!changedChunk->heightmaps)

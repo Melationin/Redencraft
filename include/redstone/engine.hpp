@@ -26,6 +26,7 @@
 #include "redstone/flat_hash_map.hpp"
 #include "redstone/heightmap.hpp"
 #include "redstone/light.hpp"
+#include "redstone/poi.hpp"
 
 namespace redstone {
 enum class Direction { Down, Up, North, South, West, East };
@@ -285,6 +286,9 @@ public:
   // authoritative chunk state. No-op when lighting is disabled.
   void refreshLightSnapshots();
   void setChunkPersistedLight(int x, int z, PersistedChunkLight persisted);
+  // Per-dimension point-of-interest index (vanilla PoiManager / PoiSection).
+  PoiStorage &pois() { return *poiStorage_; }
+  const PoiStorage &pois() const { return *poiStorage_; }
   // Copy of one chunk's paletted sections (mutable state is never exported).
   ChunkSnapshot snapshotChunk(int chunkX, int chunkZ) const;
   bool setBlock(Pos pos, BlockState state, int flags = 3, int limit = 512);
@@ -966,6 +970,7 @@ private:
   void removeRandomTickingChunk(Chunk &chunk);
   void updateChunkRandomTickMask(Chunk &chunk, std::uint64_t key,
                                  int sectionIdx, bool sectionTicking);
+  void reconcilePoiFromChunk(int cx, int cz, const Chunk &chunk);
   void tickChunks();
   void tickSparseRandomTickHit(int chunkX, int sectionBaseY, int chunkZ,
                                Section &section, int nth,
@@ -1012,6 +1017,7 @@ private:
   // collected and drained after blockTicks and before the chunk stage.
   std::unique_ptr<FluidTickQueue> fluidTickQueue_;
   std::unique_ptr<LightService> lightService_;
+  std::unique_ptr<PoiStorage> poiStorage_;
   const LightOpticalTable *lightOptical_ = nullptr;
   bool lowMemoryMode_ = false;
   mutable std::unique_ptr<std::shared_mutex> lightDirectMutex_ =
