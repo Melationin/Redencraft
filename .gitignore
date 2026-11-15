@@ -3,6 +3,7 @@ __pycache__/
 /build*/
 /third_party/
 /logs/
+/assets/textures/
 /validation/vanilla26_1/server.jar
 /validation/vanilla26_1/world/
 /validation/vanilla26_1/*-world/
