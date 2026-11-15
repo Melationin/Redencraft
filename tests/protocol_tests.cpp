@@ -1780,6 +1780,120 @@ int main(int argc, char **argv) {
     world.tick();
     assert(completed && session.closed());
   }
+  {
+    // Multi-dimension join (0..256 Nether) and live ClientboundRespawnPacket switch to The End.
+    World netherWorld(netherDimensionType());
+    netherWorld.loadChunk(0, 0);
+    netherWorld.rawSetBlock({8, 63, 8}, defaultState("smooth_stone"));
+    World endWorld(endDimensionType());
+    endWorld.loadChunk(0, 0);
+    endWorld.rawSetBlock({8, 63, 8}, defaultState("obsidian"));
+
+    ServerOptions netOpts;
+    netOpts.chunks = {{0, 0}};
+    netOpts.spawn = {8.5, 65.0, 8.5};
+    netOpts.dimensionId = "minecraft:the_nether";
+    netOpts.dimensionTypeId = "minecraft:the_nether";
+    netOpts.availableDimensions = {"minecraft:overworld", "minecraft:the_nether",
+                                   "minecraft:the_end"};
+    netOpts.seaLevel = 32;
+
+    const std::size_t beforePlayIdx = allPlay.size();
+    Session multiSession(netherWorld, data, netOpts);
+    join(multiSession, data);
+    assert(multiSession.currentDimensionId() == "minecraft:the_nether");
+    assert(&multiSession.world() == &netherWorld);
+    assert(data.dimensionTypeId("minecraft:the_nether") !=
+           data.dimensionTypeId("minecraft:overworld"));
+
+    // Verify login frame carried all 3 available dimensions and Nether registry id/seaLevel.
+    bool sawNetherLogin = false;
+    for (std::size_t i = beforePlayIdx; i < allPlay.size(); ++i) {
+      Reader lr(allPlay[i]);
+      if (lr.varInt() != 49)
+        continue;
+      sawNetherLogin = true;
+      (void)lr.i32();   // entityId
+      (void)lr.bool_(); // isHardcore
+      const int dimCount = lr.varInt();
+      assert(dimCount == 3);
+      assert(lr.string() == "minecraft:overworld");
+      assert(lr.string() == "minecraft:the_nether");
+      assert(lr.string() == "minecraft:the_end");
+      (void)lr.varInt(); // maxPlayers
+      (void)lr.varInt(); // viewDistance
+      (void)lr.varInt(); // simulationDistance
+      (void)lr.bool_();  // reducedDebugInfo
+      (void)lr.bool_();  // showDeathScreen
+      (void)lr.bool_();  // limitedCrafting
+      assert(lr.varInt() == data.dimensionTypeId("minecraft:the_nether"));
+      assert(lr.string() == "minecraft:the_nether");
+      (void)lr.i64();    // hashedSeed
+      (void)lr.u8();     // gameMode
+      (void)lr.u8();     // prevGameMode
+      (void)lr.bool_();  // isDebug
+      (void)lr.bool_();  // isFlat
+      assert(!lr.bool_());
+      (void)lr.varInt(); // portalCooldown
+      assert(lr.varInt() == 32);
+    }
+    assert(sawNetherLogin);
+    DimensionStem endStem{"minecraft:the_end", "minecraft:the_end",
+                          endDimensionType()};
+    multiSession.switchDimension(endWorld, endStem, {8.5, 65.0, 8.5}, 90.0f, 0.0f);
+    assert(multiSession.currentDimensionId() == "minecraft:the_end");
+    assert(&multiSession.world() == &endWorld);
+
+    const int respawnId = data.packet("play", "clientbound", "respawn");
+    const int playerPosId = data.packet("play", "clientbound", "player_position");
+    const int chunkId = data.packet("play", "clientbound", "level_chunk_with_light");
+    bool sawRespawn = false, sawPlayerPos = false, sawChunk = false;
+    int respawnDimType = -1;
+    std::string respawnDimName;
+    std::uint8_t respawnKeepMask = 0;
+    for (auto &bytes : multiSession.takeOutput()) {
+      auto body = popFrame(bytes);
+      assert(body && bytes.empty());
+      Reader r(*body);
+      const int pid = r.varInt();
+      if (pid == respawnId) {
+        sawRespawn = true;
+        respawnDimType = r.varInt();
+        respawnDimName = r.string();
+        (void)r.i64();      // hashed seed
+        (void)r.u8();       // game mode
+        (void)r.u8();       // previous game mode
+        (void)r.bool_();    // isDebug
+        (void)r.bool_();    // isFlat
+        assert(!r.bool_()); // no lastDeathLocation
+        assert(r.varInt() == 0);
+        (void)r.varInt();   // seaLevel
+        respawnKeepMask = r.u8();
+        assert(r.empty());
+      } else if (pid == playerPosId) {
+        sawPlayerPos = true;
+      } else if (pid == chunkId) {
+        sawChunk = true;
+      }
+    }
+    assert(sawRespawn && sawPlayerPos && sawChunk);
+    assert(respawnDimType == data.dimensionTypeId("minecraft:the_end"));
+    assert(respawnDimName == "minecraft:the_end");
+    assert(respawnKeepMask == 3);
+
+    // Old teleport id 1 must not unlock post-respawn interaction; id 2 unlocks it.
+    Writer tpOld;
+    tpOld.varInt(1);
+    multiSession.receive(frame(0, tpOld.data));
+    Writer tpNew;
+    tpNew.varInt(2);
+    multiSession.receive(frame(0, tpNew.data));
+    // Place smooth_stone (slot 0) on top of {8, 63, 8} obsidian in endWorld -> affects endWorld only.
+    select(multiSession, 0);
+    use(multiSession, {8, 63, 8}, Direction::Up, 1);
+    assert(endWorld.getBlock({8, 64, 8}).name() == "minecraft:smooth_stone");
+    assert(netherWorld.getBlock({8, 64, 8}).isAir());
+  }
   if (const char *path = std::getenv("REDSTONE_PLAY_FIXTURE")) {
     std::ofstream file(path, std::ios::binary);
     for (const auto &body : allPlay) {

@@ -1,4 +1,5 @@
 #pragma once
+#include "redstone/dimension.hpp"
 #include "redstone/engine.hpp"
 #include "redstone/nbt.hpp"
 #include "redstone/tickets.hpp"
@@ -69,9 +70,12 @@ struct WorldMetadata {
   std::int64_t seed = 0;
   WorldGameRules gameRules;
   WorldClocks worldClocks;
+  std::vector<DimensionStem> dimensions;
   // Parsed level.dat root remains the sole writable metadata template. The
   // read path validates DataVersion/Data.Time before returning it.
   nbt::RootTag levelRoot;
+
+  const DimensionStem *findDimension(std::string_view id) const;
 };
 // Loading is read-only. Updating Time mutates levelRoot in place; persistence
 // uses a temporary gzip file plus rename, retaining level.dat_old when a

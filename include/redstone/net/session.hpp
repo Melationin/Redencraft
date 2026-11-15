@@ -21,6 +21,7 @@ struct ProtocolData {
   std::vector<Bytes> configuration;
   std::map<std::string, int> packetIds, blockIds;
   std::map<std::string, int> explosionEffectIds;
+  std::map<std::string, int> dimensionTypeIds;
   int dimensionId = 0;
   // Official 26.1 world_clock registry IDs from registry_ids.tsv. Order is
   // overworld then the_end; both registries were present in the configuration
@@ -28,6 +29,7 @@ struct ProtocolData {
   std::array<int, 2> worldClockIds{{-1, -1}};
   int packet(std::string_view phase, std::string_view flow,
              std::string_view name) const;
+  int dimensionTypeId(std::string_view id) const;
 };
 using Uuid = std::array<std::uint8_t, 16>;
 Uuid offlineUuid(std::string_view name);
@@ -46,6 +48,12 @@ struct ServerOptions {
   // server has no op-list integration, so players are non-operators by default;
   // the local console constructs an owner-level source separately.
   int commandPermissionLevel = 0;
+  std::string dimensionId = "minecraft:overworld";
+  std::string dimensionTypeId = "minecraft:overworld";
+  std::vector<std::string> availableDimensions;
+  std::int64_t hashedSeed = 0;
+  bool isFlat = true;
+  int seaLevel = 63;
 };
 // One connection's deterministic protocol state machine, independent of socket
 // IO. Every call and World::tick runs on the server thread.
@@ -92,6 +100,18 @@ public:
   // every session.
   void attachCommands(const command::Dispatcher *, const command::Context *);
   void sendCommands();
+  const std::string &currentDimensionId() const noexcept {
+    return currentDimensionId_;
+  }
+  const std::string &currentDimensionTypeId() const noexcept {
+    return currentDimensionTypeId_;
+  }
+  World &world() noexcept { return *world_; }
+  const World &world() const noexcept { return *world_; }
+  // Sends ClientboundRespawnPacket and resets client chunk/entity/light state
+  // to targetWorld (D-2; no portal search/creation).
+  void switchDimension(World &targetWorld, const DimensionStem &stem,
+                       Vec3 spawnPos, float yaw = 0, float pitch = 0);
   // ClientboundTickingStatePacket / ClientboundTickingStepPacket.
   void sendTickingState(const TickRateManager &);
   void sendTickingStep(const TickRateManager &);
@@ -131,6 +151,12 @@ private:
   void play(int, Reader &);
   void join();
   void finishJoin();
+  void finishRespawn();
+  void resetDimensionViewState();
+  void writeCommonPlayerSpawnInfo(Writer &, const std::string &dimId,
+                                    int dimTypeRegistryId,
+                                    std::int64_t hashedSeed, bool isFlat,
+                                    int seaLevel) const;
   void writeWorldClock(Writer &, BuiltinWorldClock) const;
   void sendSetTime();
   void send(std::string_view name, const Writer &payload = {});
@@ -174,9 +200,11 @@ private:
   void containerClose(Reader &);
   void runCommand(std::string_view line);
   void sendSuggestions(int requestId, std::string_view line);
-  World &world_;
+  World *world_;
   const ProtocolData &data_;
   ServerOptions options_;
+  std::string currentDimensionId_;
+  std::string currentDimensionTypeId_;
   const command::Dispatcher *commands_ = nullptr;
   const command::Context *commandContext_ = nullptr;
   const WorldClocks *worldClocks_ = nullptr;
@@ -233,6 +261,8 @@ private:
   std::optional<std::pair<int, int>> chunkCenter_;
   bool awaitingChunkBatch_ = false;
   bool joinPositionPending_ = false;
+  bool respawning_ = false;
+  int pendingTeleportId_ = 1;
   int chunksPerBatch_ = 9;
   int chunkBatchLimit_ = 9;
   int dropSpam_ = 0;

@@ -356,10 +356,14 @@ ProtocolData::ProtocolData(const std::filesystem::path &directory)
     auto f = fields(line);
     if (f.size() != 3)
       continue;
-    if (f[0] == "minecraft:dimension_type" &&
-        f[2] == "minecraft:overworld") {
-      dimensionId = std::stoi(f[1]);
-      overworld = true;
+    if (f[0] == "minecraft:dimension_type") {
+      const int id = std::stoi(f[1]);
+      const std::string normalized = normalizeDimensionId(f[2]);
+      dimensionTypeIds.emplace(normalized, id);
+      if (normalized == "minecraft:overworld") {
+        dimensionId = id;
+        overworld = true;
+      }
     }
   }
   if (!overworld)
@@ -512,8 +516,30 @@ Uuid offlineUuid(std::string_view name) {
   return result;
 }
 
+int ProtocolData::dimensionTypeId(std::string_view id) const {
+  if (!id.empty()) {
+    try {
+      const std::string normalized = normalizeDimensionId(id);
+      if (auto it = dimensionTypeIds.find(normalized);
+          it != dimensionTypeIds.end()) {
+        return it->second;
+      }
+    } catch (const std::invalid_argument &) {
+    }
+  }
+  return dimensionId;
+}
+
 Session::Session(World &world, const ProtocolData &data, ServerOptions options)
-    : world_(world), data_(data), options_(std::move(options)),
+    : world_(&world), data_(data), options_(std::move(options)),
+      currentDimensionId_(options_.dimensionId.empty()
+                                ? world.dimensionId()
+                                : normalizeDimensionId(options_.dimensionId)),
+      currentDimensionTypeId_(
+          options_.dimensionTypeId.empty()
+              ? (world.dimension().id.empty() ? currentDimensionId_
+                                              : world.dimension().id)
+              : normalizeDimensionId(options_.dimensionTypeId)),
       position_(options_.spawn) {
   options_.viewDistance = std::clamp(options_.viewDistance, 2, maxViewDistance);
   availableChunks_.insert(options_.chunks.begin(), options_.chunks.end());
@@ -540,7 +566,7 @@ void Session::writeWorldClock(Writer &out,
 }
 void Session::sendSetTime() {
   Writer out;
-  out.i64(world_.gameTime());
+  out.i64(world_->gameTime());
   if (!worldClocks_) {
     out.varInt(0);
     send("set_time", std::move(out));
@@ -555,7 +581,7 @@ void Session::sendWorldClockUpdate(BuiltinWorldClock clock) {
   if (!worldClocks_ || phase_ != Phase::Play)
     return;
   Writer out;
-  out.i64(world_.gameTime());
+  out.i64(world_->gameTime());
   out.varInt(1);
   writeWorldClock(out, clock);
   send("set_time", std::move(out));
@@ -735,12 +761,12 @@ void Session::handle(Reader &in) {
         if (!body) throw ProtocolError("invalid configuration frame");
         Reader packet(*body);
         const int packetId = packet.varInt();
-        if (world_.customBlockTags() && packetId == data_.packet("configuration", "clientbound", "update_tags"))
-          queue(replaceBlockTagPacket(bytes, data_, *world_.customBlockTags(), packetId));
+        if (world_->customBlockTags() && packetId == data_.packet("configuration", "clientbound", "update_tags"))
+          queue(replaceBlockTagPacket(bytes, data_, *world_->customBlockTags(), packetId));
         else
           queue(bytes);
       }
-      configuredBlockTagRevision_ = world_.blockTagRevision();
+      configuredBlockTagRevision_ = world_->blockTagRevision();
       send("finish_configuration");
       finishSent_ = true;
     } else if (id == 3) {
@@ -749,7 +775,7 @@ void Session::handle(Reader &in) {
       phase_ = Phase::Play;
       syncManagedResidency();
       join();
-      if (configuredBlockTagRevision_ != world_.blockTagRevision())
+      if (configuredBlockTagRevision_ != world_->blockTagRevision())
         sendBlockTagUpdate();
     } else if (id != 0 && id != 2 && id != 5)
       throw ProtocolError("unsupported configuration packet");
@@ -770,30 +796,73 @@ void Session::positionPacket(Writer &out, Vec3 pos, Vec3 motion, float yaw,
   out.f32(pitch);
   out.i32(0); // no relative flags
 }
+void Session::writeCommonPlayerSpawnInfo(Writer &out, const std::string &dimId,
+                                         int dimTypeRegistryId,
+                                         std::int64_t hashedSeed, bool isFlat,
+                                         int seaLevel) const {
+  out.varInt(dimTypeRegistryId);
+  out.string(dimId);
+  out.i64(hashedSeed);
+  out.u8(1);
+  out.u8(255);
+  out.bool_(false);
+  out.bool_(isFlat);
+  out.bool_(false);
+  out.varInt(0);
+  out.varInt(seaLevel);
+}
+
+void Session::resetDimensionViewState() {
+  for (auto &[pos, token] : chunkGenerations_)
+    if (token)
+      token->store(false, std::memory_order_release);
+  chunkGenerations_.clear();
+  trackedEntities_.clear();
+  changedBlocks_.clear();
+  sentChunks_.clear();
+  pendingChunks_.clear();
+  awaitingLightChunks_.clear();
+  availableChunks_.clear();
+  managedPendingResidency_.clear();
+  sentChunkBlockLight_.clear();
+  sentChunkSkyLight_.clear();
+  chunkCenter_.reset();
+  awaitingChunkBatch_ = false;
+  joinPositionPending_ = false;
+}
+
 void Session::join() {
-  if (world_.minY() != -64 || world_.maxY() != 320)
-    throw ProtocolError("network overworld height must be -64..320");
+  const int height = world_->maxY() - world_->minY();
+  if (height < kDimensionMinHeight || (height & 15) != 0 ||
+      (world_->minY() & 15) != 0)
+    throw ProtocolError("network dimension height must be section-aligned");
   Writer out;
   out.i32(options_.playerId);
   out.bool_(false);
-  out.varInt(1);
-  out.string("minecraft:overworld");
+  std::vector<std::string> dims;
+  dims.reserve(options_.availableDimensions.size() + 1);
+  bool hasCurrent = false;
+  for (const auto &raw : options_.availableDimensions) {
+    const std::string normalized = normalizeDimensionId(raw);
+    if (std::find(dims.begin(), dims.end(), normalized) == dims.end())
+      dims.push_back(normalized);
+    if (normalized == currentDimensionId_)
+      hasCurrent = true;
+  }
+  if (!hasCurrent)
+    dims.insert(dims.begin(), currentDimensionId_);
+  out.varInt(static_cast<int>(dims.size()));
+  for (const auto &dim : dims)
+    out.string(dim);
   out.varInt(8);
   out.varInt(options_.viewDistance);
   out.varInt(options_.viewDistance);
   out.bool_(false);
   out.bool_(true);
   out.bool_(false);
-  out.varInt(data_.dimensionId);
-  out.string("minecraft:overworld");
-  out.i64(0);
-  out.u8(1);
-  out.u8(255);
-  out.bool_(false);
-  out.bool_(true);
-  out.bool_(false);
-  out.varInt(0);
-  out.varInt(63);
+  writeCommonPlayerSpawnInfo(
+      out, currentDimensionId_, data_.dimensionTypeId(currentDimensionTypeId_),
+      options_.hashedSeed, options_.isFlat, options_.seaLevel);
   out.bool_(false);
   send("login", out);
   out = {};
@@ -811,7 +880,7 @@ void Session::join() {
   out.f32(0.1f);
   send("player_abilities", out);
   out = {};
-  out.string("minecraft:overworld");
+  out.string(currentDimensionId_);
   out.position({int(std::floor(position_.x)), int(std::floor(position_.y)),
                 int(std::floor(position_.z))});
   out.f32(0);
@@ -839,6 +908,7 @@ void Session::join() {
 }
 void Session::finishJoin() {
   joinPositionPending_ = false;
+  respawning_ = false;
   Writer out;
   sendSetTime();
   constexpr const char *initial[]{
@@ -848,12 +918,96 @@ void Session::finishJoin() {
   for (int i = 0; i < 9; ++i)
     setSlot(i, itemStack(initial[i], 64));
   out = {};
-  out.varInt(1);
+  out.varInt(pendingTeleportId_);
   positionPacket(out, position_, {}, yaw_, pitch_);
   send("player_position", out);
   broadcastEntities();
   // TODO: recipes, commands, achievements, player avatars and
   // player physics/pushes. This endpoint is a creative editor of loaded chunks.
+}
+
+void Session::finishRespawn() {
+  joinPositionPending_ = false;
+  respawning_ = false;
+  Writer out;
+  out.varInt(pendingTeleportId_);
+  positionPacket(out, position_, {}, yaw_, pitch_);
+  send("player_position", out);
+  broadcastEntities();
+}
+
+void Session::switchDimension(World &targetWorld, const DimensionStem &stem,
+                              Vec3 spawnPos, float yaw, float pitch) {
+  const int height = targetWorld.maxY() - targetWorld.minY();
+  if (height < kDimensionMinHeight || (height & 15) != 0 ||
+      (targetWorld.minY() & 15) != 0)
+    throw ProtocolError("network dimension height must be section-aligned");
+  if (openContainer_)
+    closeOpenContainer(true);
+  resetDimensionViewState();
+  world_ = &targetWorld;
+  currentDimensionId_ =
+      stem.id.empty() ? targetWorld.dimensionId() : normalizeDimensionId(stem.id);
+  currentDimensionTypeId_ = !stem.type.id.empty()
+                                ? normalizeDimensionId(stem.type.id)
+                                : (!stem.typeId.empty()
+                                       ? normalizeDimensionId(stem.typeId)
+                                       : normalizeDimensionId(targetWorld.dimension().id));
+  position_ = spawnPos;
+  yaw_ = yaw;
+  pitch_ = pitch;
+  teleportPending_ = true;
+  ++pendingTeleportId_;
+  respawning_ = true;
+  if (phase_ != Phase::Play)
+    return;
+  if (world_->customBlockTags() &&
+      configuredBlockTagRevision_ != world_->blockTagRevision()) {
+    sendBlockTagUpdate();
+    configuredBlockTagRevision_ = world_->blockTagRevision();
+  }
+  Writer out;
+  writeCommonPlayerSpawnInfo(
+      out, currentDimensionId_, data_.dimensionTypeId(currentDimensionTypeId_),
+      options_.hashedSeed, options_.isFlat, options_.seaLevel);
+  out.u8(3); // ClientboundRespawnPacket.KEEP_ALL_DATA
+  send("respawn", out);
+  out = {};
+  out.string(currentDimensionId_);
+  out.position({int(std::floor(position_.x)), int(std::floor(position_.y)),
+                int(std::floor(position_.z))});
+  out.f32(0);
+  out.f32(0);
+  send("set_default_spawn_position", out);
+  out = {};
+  out.u8(15);
+  out.f32(0.05f);
+  out.f32(0.1f);
+  send("player_abilities", out);
+  sendSetTime();
+  out = {};
+  out.varInt(options_.viewDistance);
+  send("set_chunk_cache_radius", out);
+  if (managedResidency_) {
+    syncManagedResidency();
+  } else {
+    const int cx0 = chunkCoord(position_.x);
+    const int cz0 = chunkCoord(position_.z);
+    for (int dx = -options_.viewDistance; dx <= options_.viewDistance; ++dx)
+      for (int dz = -options_.viewDistance; dz <= options_.viewDistance; ++dz)
+        if (world_->isChunkLoaded(cx0 + dx, cz0 + dz))
+          availableChunks_.emplace(cx0 + dx, cz0 + dz);
+  }
+  refreshChunkView();
+  out = {};
+  out.u8(13);
+  out.f32(0);
+  send("game_event", out);
+  sendChunkBatch();
+  if (awaitingLightChunks_.empty())
+    finishRespawn();
+  else
+    joinPositionPending_ = true;
 }
 void Session::stack(Writer &out, const ItemStack &item) const {
   if (item.empty()) {
@@ -873,7 +1027,7 @@ void Session::setSlot(int slot, ItemStack item) {
   send("set_player_inventory", out);
 }
 bool Session::canInteract(Pos p) const {
-  if (teleportPending_ || !world_.isLoaded(p) || !hasChunk(p))
+  if (teleportPending_ || !world_->isLoaded(p) || !hasChunk(p))
     return false;
   Vec3 eye = position_ + Vec3{0, 1.62, 0};
   const auto dx = std::max({double(p.x) - eye.x, eye.x - (p.x + 1.0), 0.0});
@@ -933,7 +1087,7 @@ void Session::flushBlockUpdates() {
       try {
         locals.forEach([&](std::uint16_t local) {
           const auto stateId = data_.registry.stateId(
-              world_.getBlock(unpackSectionBlock(section, local)));
+              world_->getBlock(unpackSectionBlock(section, local)));
           out.varLong((static_cast<std::int64_t>(stateId) << 12) | local);
         });
       } catch (const ProtocolError &) {
@@ -956,7 +1110,7 @@ void Session::sendBlockUpdate(Pos p) {
   try {
     Writer out;
     out.position(p);
-    out.varInt(data_.registry.stateId(world_.getBlock(p)));
+    out.varInt(data_.registry.stateId(world_->getBlock(p)));
     send("block_update", std::move(out));
   } catch (const ProtocolError &) {
     disconnect("Unsupported block state for protocol 775");
@@ -1062,10 +1216,10 @@ void Session::creativeSlot(Reader &in) {
     setSlot(40, item);
   else if (slot == -1) {
     if (!item.empty() && dropSpam_ < 200 && !teleportPending_ &&
-        world_.isChunkLoaded(chunkCoord(position_.x),
+        world_->isChunkLoaded(chunkCoord(position_.x),
                              chunkCoord(position_.z))) {
       dropSpam_ += 20;
-      world_.spawnItemAt(position_ + Vec3{0, 1.3, 0}, item.id, item.count);
+      world_->spawnItemAt(position_ + Vec3{0, 1.3, 0}, item.id, item.count);
     }
   }
 }
@@ -1077,23 +1231,23 @@ void Session::playerAction(Reader &in) {
     throw ProtocolError("invalid action");
   if (action <= 2) {
     if (canInteract(p) && action == 0) {
-      const auto old = world_.getBlock(p);
+      const auto old = world_->getBlock(p);
       // Creative destruction has no drops, including the counterpart base of
       // a piston head. Keep setBlock's normal update/removal paths.
       if (old.is(Blocks::PISTON_HEAD)) {
         const auto basePos =
             p.relative(opposite(directionFromString(old.get("facing"))));
-        const auto base = world_.getBlock(basePos);
+        const auto base = world_->getBlock(basePos);
         if ((old.get("type", "normal") == "sticky"
                  ? base.is(Blocks::STICKY_PISTON)
                  : base.is(Blocks::PISTON)) &&
             base.get("extended") == "true" &&
             base.get("facing") == old.get("facing"))
-          world_.setBlock(basePos, airState());
+          world_->setBlock(basePos, airState());
       }
       // ServerPlayerGameMode.destroyBlock -> Level.removeBlock(pos, false):
       // creative breaking keeps the water of a waterlogged host.
-      world_.removeBlock(p);
+      world_->removeBlock(p);
     }
     sendBlockUpdate(p);
     acknowledge(sequence);
@@ -1104,10 +1258,10 @@ void Session::playerAction(Reader &in) {
   } else if (action == 3 || action == 4) {
     auto item = inventory_[selectedSlot_];
     if (!item.empty() && !teleportPending_ &&
-        world_.isChunkLoaded(chunkCoord(position_.x),
+        world_->isChunkLoaded(chunkCoord(position_.x),
                              chunkCoord(position_.z))) {
       int count = action == 3 ? item.count : 1;
-      world_.spawnItemAt(position_ + Vec3{0, 1.3, 0}, item.id, count);
+      world_->spawnItemAt(position_ + Vec3{0, 1.3, 0}, item.id, count);
       item.count -= count;
       setSlot(selectedSlot_, item);
     }
@@ -1128,7 +1282,7 @@ void Session::useItemOn(Reader &in) {
       std::abs(hitY - .5) > 1.0000001 || std::abs(hitZ - .5) > 1.0000001)
     throw ProtocolError("invalid block hit");
   const Direction face = static_cast<Direction>(faceId);
-  const auto old = world_.getBlock(clicked);
+  const auto old = world_->getBlock(clicked);
   const auto held = inventory_[hand ? 40 : selectedSlot_];
   const bool clickedReplaceable =
       canReplaceForPlacement(old, held, hitY, face, true);
@@ -1143,47 +1297,47 @@ void Session::useItemOn(Reader &in) {
         next = next.with("facing", directionName(playerFacing));
       next = next.with("open", "true");
     }
-    world_.setBlock(clicked, next, 10);
-    (void)world_.random.nextFloat();
+    world_->setBlock(clicked, next, 10);
+    (void)world_->random.nextFloat();
     // TODO: fence gate sound and BLOCK_OPEN/BLOCK_CLOSE game events.
   } else if (canInteract(clicked) && !sneaking_ &&
       old.is(Blocks::NOTE_BLOCK)) {
     auto tuned = old.with(
         "note", std::to_string((std::stoi(old.get("note", "0")) + 1) % 25));
-    world_.setBlock(clicked, tuned, 3);
-    if (isAirState(world_.getBlock(clicked.relative(Direction::Up))))
-      world_.blockEvent(clicked, old.name(), 0, 0);
+    world_->setBlock(clicked, tuned, 3);
+    if (isAirState(world_->getBlock(clicked.relative(Direction::Up))))
+      world_->blockEvent(clicked, old.name(), 0, 0);
   } else if (canInteract(clicked) && !sneaking_ &&
              old.is(Blocks::REDSTONE_WIRE) &&
-             redstoneWireUse(world_, clicked, old)) {
+             redstoneWireUse(*world_, clicked, old)) {
   } else if (canInteract(clicked) && !sneaking_ &&
              old.is(Blocks::REPEATER)) {
-    repeaterUse(world_, clicked, old);
+    repeaterUse(*world_, clicked, old);
   } else if (canInteract(clicked) && !sneaking_ &&
              old.is(Blocks::COMPARATOR)) {
-    comparatorUse(world_, clicked, old);
+    comparatorUse(*world_, clicked, old);
   } else if (canInteract(clicked) && !sneaking_ &&
              old.is(Blocks::LEVER)) {
-    leverUse(world_, clicked, old);
+    leverUse(*world_, clicked, old);
   } else if (canInteract(clicked) && !sneaking_ &&
              old.block().isButton()) {
-    buttonUse(world_, clicked, old);
+    buttonUse(*world_, clicked, old);
   } else if (canInteract(clicked) && !sneaking_ &&
              old.is(Blocks::COMPOSTER)) {
     const int level = std::stoi(std::string(old.getView("level", "0")));
     if (level == 8) {
-      world_.setBlock(clicked, old.with("level", "0"), 3);
-      world_.spawnItemAt(
+      world_->setBlock(clicked, old.with("level", "0"), 3);
+      world_->spawnItemAt(
           {clicked.x + 0.5, clicked.y + 1.01, clicked.z + 0.5},
           "minecraft:bone_meal", 1);
     } else if (level < 7 && !held.empty() && isCompostableItem(held.id)) {
       const float chance = composterChance(held.id);
-      if ((level == 0 && chance > 0.0f) || world_.random.nextDouble() < chance) {
+      if ((level == 0 && chance > 0.0f) || world_->random.nextDouble() < chance) {
         const int nextLevel = level + 1;
-        world_.setBlock(
+        world_->setBlock(
             clicked, old.with("level", std::to_string(nextLevel)), 3);
         if (nextLevel == 7)
-          world_.scheduleTick(clicked, Blocks::COMPOSTER, 20);
+          world_->scheduleTick(clicked, Blocks::COMPOSTER, 20);
       }
     }
   } else if (canInteract(clicked) && !sneaking_ &&
@@ -1193,19 +1347,19 @@ void Session::useItemOn(Reader &in) {
     // AxeItem.getStripped retains the source axis; this endpoint is creative.
     const auto stripped = strippedLog(old)->defaultState().with(
         "axis", old.getView("axis"));
-    world_.setBlock(clicked, stripped, 11);
+    world_->setBlock(clicked, stripped, 11);
     // TODO: axe sound, block-change game event and advancement criterion.
   } else if (canInteract(clicked) && !held.empty() &&
              held.id == "minecraft:minecart") {
     if (isRailBlock(old)) {
       const double raised = railShapeIsSlope(railShapeOf(old)) ? 0.5 : 0;
-      world_.spawnMinecart(
+      world_->spawnMinecart(
           {clicked.x + 0.5, clicked.y + 0.0625 + raised, clicked.z + 0.5});
     }
   } else if (canInteract(clicked) && !held.empty() && isBucketItem(held.id)) {
     // BucketItem uses server-side raycast on use_item, not block placement.
   } else if (canInteract(clicked) && canInteract(target) && !held.empty() &&
-             canReplaceForPlacement(world_.getBlock(target), held, hitY, face,
+             canReplaceForPlacement(world_->getBlock(target), held, hitY, face,
                                     clickedReplaceable)) {
     const std::string placeBlockId(placementBlockNameForItem(held.id));
     if (isSupportedBlock(placeBlockId) && placeBlockId != "minecraft:air" &&
@@ -1214,8 +1368,8 @@ void Session::useItemOn(Reader &in) {
       bool valid = true;
       bool isDoubleSlab = false;
       if (state.is(Blocks::REDSTONE_WIRE)) {
-        state = redstoneWirePlacementState(world_, target);
-        valid = redstoneWireCanSurvive(world_, target);
+        state = redstoneWirePlacementState(*world_, target);
+        valid = redstoneWireCanSurvive(*world_, target);
       } else if (state.is(Blocks::REDSTONE_TORCH)) {
         auto directions = lookingDirections(yaw_, pitch_);
         if (target != clicked) {
@@ -1228,14 +1382,14 @@ void Session::useItemOn(Reader &in) {
           if (d == Direction::Up)
             continue;
           if (d == Direction::Down) {
-            if (redstoneTorchCanSurvive(world_, target)) {
+            if (redstoneTorchCanSurvive(*world_, target)) {
               state = Blocks::REDSTONE_TORCH.defaultState();
               valid = true;
               break;
             }
           } else {
             const Direction facing = opposite(d);
-            if (redstoneWallTorchCanSurvive(world_, target, facing)) {
+            if (redstoneWallTorchCanSurvive(*world_, target, facing)) {
               state = Blocks::REDSTONE_WALL_TORCH.defaultState().with(
                   "facing", directionName(facing));
               valid = true;
@@ -1262,18 +1416,18 @@ void Session::useItemOn(Reader &in) {
             candidate = base.with("face", "wall")
                             .with("facing", directionName(opposite(d)));
           }
-          if (leverCanAttach(world_, target, candidate)) {
+          if (leverCanAttach(*world_, target, candidate)) {
             state = candidate;
             valid = true;
             break;
           }
         }
       } else if (state.is(Blocks::REPEATER)) {
-        state = repeaterPlacementState(world_, target, horizontal(yaw_));
-        valid = diodeCanSurvive(world_, target);
+        state = repeaterPlacementState(*world_, target, horizontal(yaw_));
+        valid = diodeCanSurvive(*world_, target);
       } else if (state.is(Blocks::COMPARATOR)) {
         state = comparatorPlacementState(horizontal(yaw_));
-        valid = diodeCanSurvive(world_, target);
+        valid = diodeCanSurvive(*world_, target);
       } else if (isDeadCoralFan(state)) {
         auto directions = lookingDirections(yaw_, pitch_);
         // BlockPlaceContext prioritizes the clicked face only when placing
@@ -1286,7 +1440,7 @@ void Session::useItemOn(Reader &in) {
         std::optional<BlockState> wall;
         for (Direction d : directions)
           if (d != Direction::Up && d != Direction::Down) {
-            wall = world_.coralPlacementState(target, state, opposite(d));
+            wall = world_->coralPlacementState(target, state, opposite(d));
             if (wall)
               break;
           }
@@ -1296,7 +1450,7 @@ void Session::useItemOn(Reader &in) {
             continue;
           auto candidate =
               d == Direction::Down
-                  ? world_.coralPlacementState(target, state, Direction::Up)
+                  ? world_->coralPlacementState(target, state, Direction::Up)
                   : wall;
           if (candidate) {
             state = *candidate;
@@ -1305,7 +1459,7 @@ void Session::useItemOn(Reader &in) {
           }
         }
       } else if (state.block().isSlab()) {
-        const auto existing = world_.getBlock(target);
+        const auto existing = world_->getBlock(target);
         if (existing.is(state.block())) {
           // SlabBlock.getStateForPlacement: merging into a single slab drops
           // waterlogging (double slabs cannot be waterlogged).
@@ -1324,11 +1478,11 @@ void Session::useItemOn(Reader &in) {
         state = state.with("facing", directionName(horizontal(yaw_)))
                      .with("half", top ? "top" : "bottom");
       } else if (isFenceGate(state)) {
-        const bool powered = world_.hasNeighborSignal(target);
+        const bool powered = world_->hasNeighborSignal(target);
         state = state.with("facing", directionName(horizontal(yaw_)))
                      .with("open", powered ? "true" : "false")
                      .with("powered", powered ? "true" : "false");
-        state = world_.updateFromNeighbourShapes(target, state);
+        state = world_->updateFromNeighbourShapes(target, state);
       } else if (state.block().isRotatedPillar()) {
         // RotatedPillarBlock.getStateForPlacement uses the clicked face axis.
         state = state.with("axis", face == Direction::Up || face == Direction::Down
@@ -1336,7 +1490,7 @@ void Session::useItemOn(Reader &in) {
                                        : face == Direction::East || face == Direction::West
                                              ? "x" : "z");
       } else if (isAnyChestBlock(state)) {
-        state = chestPlacementState(world_, target, state, horizontal(yaw_),
+        state = chestPlacementState(*world_, target, state, horizontal(yaw_),
                                     face, sneaking_);
       } else if (state.is(Blocks::BARREL)) {
         state = barrelPlacementState(state, lookingDirections(yaw_, pitch_)[0]);
@@ -1344,7 +1498,7 @@ void Session::useItemOn(Reader &in) {
         state =
             dispenserPlacementState(state, lookingDirections(yaw_, pitch_)[0]);
       } else if (state.is(Blocks::HOPPER)) {
-        state = hopperPlacementState(world_, target, state, face);
+        state = hopperPlacementState(*world_, target, state, face);
       } else if (state.hasProperty("facing")) {
         const auto dir3d = lookingDirections(yaw_, pitch_)[0];
         const auto candidate =
@@ -1365,11 +1519,11 @@ void Session::useItemOn(Reader &in) {
                                : "north_south");
       }
       if (state.block().isPressurePlate())
-        valid = pressurePlateCanSurvive(world_, target);
+        valid = pressurePlateCanSurvive(*world_, target);
       if (isWoolCarpet(state))
-        valid = !isAirState(world_.getBlock(target.relative(Direction::Down)));
+        valid = !isAirState(world_->getBlock(target.relative(Direction::Down)));
       if (isRailBlock(state))
-        valid = railCanSurvive(world_, target, state);
+        valid = railCanSurvive(*world_, target, state);
       // getStateForPlacement initializes these neighbor-derived properties.
       // Do not call observer.updateShape speculatively: it schedules a pulse
       // before the observer even exists in the world.
@@ -1377,7 +1531,7 @@ void Session::useItemOn(Reader &in) {
           state.block().isFence() || isIronBarsBlock(state) ||
           state.is(Blocks::GRASS_BLOCK) || state.is(Blocks::MYCELIUM) ||
           state.is(Blocks::PODZOL) || state.is(Blocks::NOTE_BLOCK))
-        state = world_.updateFromNeighbourShapes(target, state);
+        state = world_->updateFromNeighbourShapes(target, state);
       // H-01: getStateForPlacement reads the fluid of the cell being replaced,
       // and the two host families ask different questions. BaseRailBlock
       // .java:139-147 and WallBlock.java:112-131 test the exact WATER source;
@@ -1389,7 +1543,7 @@ void Session::useItemOn(Reader &in) {
         // is `target`, not the face that was clicked on (BlockPlaceContext
         // .java:48-51). Water is replaceable, so the two coincide exactly for
         // the water case this rule cares about.
-        const auto replacedFluid = fluidStateOf(world_.getBlock(target));
+        const auto replacedFluid = fluidStateOf(world_->getBlock(target));
         const bool wet =
             isDeadCoralFan(state)
                 ? (fluidHasTag(replacedFluid.getType(), FluidTag::Water) &&
@@ -1399,27 +1553,27 @@ void Session::useItemOn(Reader &in) {
       }
       if (state.is(Blocks::REDSTONE_LAMP))
         state = state.with("lit",
-                           world_.hasNeighborSignal(target) ? "true" : "false");
+                           world_->hasNeighborSignal(target) ? "true" : "false");
       if (valid) {
         const Aabb player{position_.x - .3,  position_.y,
                           position_.z - .3,  position_.x + .3,
                           position_.y + 1.8, position_.z + .3};
-        for (const auto &box : collisionShape(world_, target, state)) {
+        for (const auto &box : collisionShape(*world_, target, state)) {
           const Aabb placed{target.x + box.x0 / 16, target.y + box.y0 / 16,
                             target.z + box.z0 / 16, target.x + box.x1 / 16,
                             target.y + box.y1 / 16, target.z + box.z1 / 16};
           if (placed.intersects(player))
             valid = false;
-          for (Entity *entity : world_.entitiesIn(placed))
+          for (Entity *entity : world_->entitiesIn(placed))
             if (entity->typeName() == "minecraft:tnt" ||
                 entity->typeName() == "minecraft:falling_block" ||
                 entity->typeName() == "minecraft:minecart")
               valid = false;
         }
         if (valid && !isAirState(state)) {
-          world_.setBlock(target, state, 11);
+          world_->setBlock(target, state, 11);
           if (state.is(Blocks::REPEATER) || state.is(Blocks::COMPARATOR))
-            diodeSetPlacedBy(world_, target, state);
+            diodeSetPlacedBy(*world_, target, state);
         }
       }
       // TODO: other players' placement collision, exact Mth trigonometric
@@ -1575,15 +1729,15 @@ void Session::useItem(Reader &in) {
     // Player creative blockInteractionRange = 4.5 + 0.5 = 5.0.
     const Vec3 to = eye + view * 5.0;
     const auto hit = povRaycast(
-        world_, eye, to, held.id == "minecraft:bucket",
-        [&](Pos p) { return world_.isLoaded(p) && hasChunk(p); });
+        *world_, eye, to, held.id == "minecraft:bucket",
+        [&](Pos p) { return world_->isLoaded(p) && hasChunk(p); });
     if (hit.hit && canInteract(hit.pos)) {
       if (held.id == "minecraft:bucket") {
-        const BlockState state = world_.getBlock(hit.pos);
+        const BlockState state = world_->getBlock(hit.pos);
         std::string taken;
         if (state.block().isLiquidContainer() && state.block().isWaterloggedHost() &&
             waterloggedOf(state)) {
-          world_.setBlock(hit.pos,
+          world_->setBlock(hit.pos,
                           state.with(PropertyKind::Waterlogged, std::uint8_t{0}),
                           3);
           taken = "minecraft:water_bucket";
@@ -1592,7 +1746,7 @@ void Session::useItem(Reader &in) {
           if (fluid.isSource() && !fluid.isEmpty()) {
             taken = fluid.is(Fluids::lava()) ? "minecraft:lava_bucket"
                                               : "minecraft:water_bucket";
-            world_.setBlock(hit.pos, airState(), 11);
+            world_->setBlock(hit.pos, airState(), 11);
           }
         }
         if (!taken.empty()) {
@@ -1611,14 +1765,14 @@ void Session::useItem(Reader &in) {
         }
       } else {
         const bool isWater = held.id == "minecraft:water_bucket";
-        const BlockState clickedState = world_.getBlock(hit.pos);
+        const BlockState clickedState = world_->getBlock(hit.pos);
         const Pos initialPos = (isWater && clickedState.block().isLiquidContainer())
                                    ? hit.pos
                                    : hit.pos.relative(hit.face);
         const auto tryEmpty = [&](auto &self, Pos p, bool allowFallback) -> bool {
           if (!canInteract(p))
             return false;
-          const BlockState s = world_.getBlock(p);
+          const BlockState s = world_->getBlock(p);
           const bool mayReplace = isReplaceable(s) || !blocksMotion(s);
           const bool canContainer =
               isWater && s.block().isLiquidContainer() &&
@@ -1629,15 +1783,15 @@ void Session::useItem(Reader &in) {
             return allowFallback && self(self, hit.pos.relative(hit.face), false);
           if (isWater && s.block().isLiquidContainer() &&
               s.block().isWaterloggedHost()) {
-            placeLiquid(world_, p, s, fluidStateOf(defaultState("water")));
+            placeLiquid(*world_, p, s, fluidStateOf(defaultState("water")));
             sendBlockUpdate(p);
             return true;
           }
           if (!s.isAir() && mayReplace && !isLiquidBlock(s))
-            world_.updateOrDestroy(p, s, airState(), 3, 512);
+            world_->updateOrDestroy(p, s, airState(), 3, 512);
           const BlockState fluidBlock =
               defaultState(isWater ? "water" : "lava");
-          const bool ok = world_.setBlock(p, fluidBlock, 11) ||
+          const bool ok = world_->setBlock(p, fluidBlock, 11) ||
                           fluidStateOf(s).isSource();
           if (ok)
             sendBlockUpdate(p);
@@ -1715,7 +1869,7 @@ void Session::sendContainerContent() {
   if (!openContainer_ || phase_ != Phase::Play)
     return;
   ResolvedContainerView view =
-      resolveContainerView(world_, openContainer_->pos, false);
+      resolveContainerView(*world_, openContainer_->pos, false);
   if (!view.valid() || view.size() != openContainer_->slotCount) {
     closeOpenContainer(true);
     return;
@@ -1740,8 +1894,8 @@ void Session::openContainerScreen(Pos pos, const BlockState &state) {
   const auto kind = containerKindForState(state);
   if (!kind)
     return;
-  ensureContainerBlockEntity(world_, pos, state);
-  ResolvedContainerView view = resolveContainerView(world_, pos, false);
+  ensureContainerBlockEntity(*world_, pos, state);
+  ResolvedContainerView view = resolveContainerView(*world_, pos, false);
   if (!view.valid())
     return;
   if (openContainer_)
@@ -1762,7 +1916,7 @@ void Session::openContainerScreen(Pos pos, const BlockState &state) {
   opened.lastSeenModCount = viewModSignature(view);
   openContainer_ = std::move(opened);
 
-  containerUpdateOpenCount(world_, pos, state, +1);
+  containerUpdateOpenCount(*world_, pos, state, +1);
 
   Writer openOut;
   openOut.varInt(cid);
@@ -1779,10 +1933,10 @@ void Session::closeOpenContainer(bool sendPacket) {
   const Pos pos = openContainer_->pos;
   openContainer_.reset();
   carriedItem_ = {};
-  if (world_.isLoaded(pos)) {
-    const BlockState state = world_.getBlock(pos);
+  if (world_->isLoaded(pos)) {
+    const BlockState state = world_->getBlock(pos);
     if (containerKindForState(state))
-      containerUpdateOpenCount(world_, pos, state, -1);
+      containerUpdateOpenCount(*world_, pos, state, -1);
   }
   if (sendPacket && phase_ == Phase::Play) {
     Writer out;
@@ -1797,18 +1951,18 @@ void Session::closeOpenContainer(bool sendPacket) {
 void Session::syncOpenContainer() {
   if (!openContainer_ || phase_ != Phase::Play)
     return;
-  if (!world_.isLoaded(openContainer_->pos) || !hasChunk(openContainer_->pos)) {
+  if (!world_->isLoaded(openContainer_->pos) || !hasChunk(openContainer_->pos)) {
     closeOpenContainer(true);
     return;
   }
-  const BlockState state = world_.getBlock(openContainer_->pos);
+  const BlockState state = world_->getBlock(openContainer_->pos);
   const auto kind = containerKindForState(state);
   if (!kind || *kind != openContainer_->kind) {
     closeOpenContainer(true);
     return;
   }
   const ResolvedContainerView view =
-      resolveContainerView(world_, openContainer_->pos, false);
+      resolveContainerView(*world_, openContainer_->pos, false);
   if (!view.valid() || view.size() != openContainer_->slotCount) {
     closeOpenContainer(true);
     return;
@@ -1847,12 +2001,12 @@ void Session::containerClick(Reader &in) {
 
   if (!openContainer_ || cid != openContainer_->containerId)
     return;
-  if (!world_.isLoaded(openContainer_->pos)) {
+  if (!world_->isLoaded(openContainer_->pos)) {
     closeOpenContainer(true);
     return;
   }
   ResolvedContainerView view =
-      resolveContainerView(world_, openContainer_->pos, false);
+      resolveContainerView(*world_, openContainer_->pos, false);
   if (!view.valid() || view.size() != openContainer_->slotCount) {
     closeOpenContainer(true);
     return;
@@ -1873,7 +2027,7 @@ void Session::containerClick(Reader &in) {
   };
   auto setMenuSlot = [&](int menuSlot, const ItemStack &val) {
     if (menuSlot >= 0 && menuSlot < n) {
-      view.setItem(world_, menuSlot, val);
+      view.setItem(*world_, menuSlot, val);
       containerMutated = true;
     } else if (menuSlot >= n && menuSlot < n + 27) {
       inventory_[9 + (menuSlot - n)] = val;
@@ -1909,10 +2063,10 @@ void Session::containerClick(Reader &in) {
 
   if (input == 0) { // PICKUP
     if (slotNum == -999 && !carriedItem_.empty() &&
-        world_.isChunkLoaded(chunkCoord(position_.x),
+        world_->isChunkLoaded(chunkCoord(position_.x),
                              chunkCoord(position_.z))) {
       const int dropCount = (buttonNum == 0) ? carriedItem_.count : 1;
-      world_.spawnItemAt(position_ + Vec3{0, 1.3, 0}, carriedItem_.id,
+      world_->spawnItemAt(position_ + Vec3{0, 1.3, 0}, carriedItem_.id,
                          dropCount);
       carriedItem_.count -= dropCount;
       if (carriedItem_.count <= 0)
@@ -1992,10 +2146,10 @@ void Session::containerClick(Reader &in) {
              carriedItem_.empty()) { // THROW
     ItemStack s = getMenuSlot(slotNum);
     if (!s.empty() &&
-        world_.isChunkLoaded(chunkCoord(position_.x),
+        world_->isChunkLoaded(chunkCoord(position_.x),
                              chunkCoord(position_.z))) {
       const int dropCount = (buttonNum == 1) ? s.count : 1;
-      world_.spawnItemAt(position_ + Vec3{0, 1.3, 0}, s.id, dropCount);
+      world_->spawnItemAt(position_ + Vec3{0, 1.3, 0}, s.id, dropCount);
       s.count -= dropCount;
       setMenuSlot(slotNum, s.count > 0 ? s : ItemStack{});
     }
@@ -2072,7 +2226,7 @@ void Session::containerClick(Reader &in) {
   }
 
   if (containerMutated)
-    view.setChanged(world_);
+    view.setChanged(*world_);
   ++openContainer_->stateId;
   sendContainerContent();
 }
@@ -2081,7 +2235,7 @@ void Session::play(int id, Reader &in) {
     return id == data_.packet("play", "serverbound", name);
   };
   if (is("accept_teleportation")) {
-    if (in.varInt() == 1)
+    if (in.varInt() == pendingTeleportId_)
       teleportPending_ = false;
     if (!in.empty())
       throw ProtocolError("bad teleport ack");
@@ -2135,7 +2289,7 @@ void Session::play(int id, Reader &in) {
     (void)in.bool_();
     if (!in.empty())
       throw ProtocolError("invalid pick");
-    auto item = blockItem(world_.getBlock(p));
+    auto item = blockItem(world_->getBlock(p));
     if (canInteract(p) && !item.empty())
       setSlot(selectedSlot_, itemStack(item));
   } else if (is("use_item")) {
@@ -2192,7 +2346,7 @@ bool Session::chunkVisible(std::pair<int, int> chunk) const {
 void Session::queuePendingChunk(std::pair<int, int> chunk) {
   if (sentChunks_.contains(chunk) || !availableChunks_.contains(chunk) ||
       !chunkVisible(chunk) ||
-      !world_.isChunkLoaded(chunk.first, chunk.second) ||
+      !world_->isChunkLoaded(chunk.first, chunk.second) ||
       std::find(pendingChunks_.begin(), pendingChunks_.end(), chunk) !=
           pendingChunks_.end())
     return;
@@ -2237,7 +2391,7 @@ void Session::refreshChunkView() {
   awaitingLightChunks_.clear();
   for (auto p : availableChunks_)
     if (visible(p) && !sentChunks_.contains(p) &&
-        world_.isChunkLoaded(p.first, p.second))
+        world_->isChunkLoaded(p.first, p.second))
       pendingChunks_.push_back(p);
   std::sort(pendingChunks_.begin(), pendingChunks_.end(), [&](auto a, auto b) {
     const auto distance = [&](auto p) {
@@ -2255,12 +2409,12 @@ void Session::sendChunkBatch() {
   // A chunk can join after the worker completed but before the next world tick
   // drains publications. This is a nonblocking ownership handoff, never a wait
   // for propagation, and keeps the join packet order chunk-before-position.
-  if (world_.lightingEnabled() && world_.lightService())
-    world_.lightService()->drainPublished();
+  if (world_->lightingEnabled() && world_->lightService())
+    world_->lightService()->drainPublished();
   if (awaitingChunkBatch_ || pendingChunks_.empty() || closed())
     return;
-  if (world_.lightingEnabled()) {
-    const auto *service = world_.lightService();
+  if (world_->lightingEnabled()) {
+    const auto *service = world_->lightService();
     bool ready = false;
     for (const auto chunk : pendingChunks_) {
       const auto block =
@@ -2275,7 +2429,7 @@ void Session::sendChunkBatch() {
     }
     if (!ready) {
       for (const auto chunk : pendingChunks_)
-        if (world_.isChunkLoaded(chunk.first, chunk.second))
+        if (world_->isChunkLoaded(chunk.first, chunk.second))
           awaitingLightChunks_.insert(chunk);
       pendingChunks_.clear();
       return;
@@ -2290,12 +2444,12 @@ void Session::sendChunkBatch() {
          bytes < 2 * 1024 * 1024) {
     const auto [x, z] = pendingChunks_.front();
     pendingChunks_.erase(pendingChunks_.begin());
-    if (!world_.isChunkLoaded(x, z))
+    if (!world_->isChunkLoaded(x, z))
       continue;
     std::shared_ptr<const LightChunkSnapshot> blockLight;
     std::shared_ptr<const LightChunkSnapshot> skyLight;
-    if (world_.lightingEnabled()) {
-      const auto *service = world_.lightService();
+    if (world_->lightingEnabled()) {
+      const auto *service = world_->lightService();
       blockLight = service->latestLayerChunk(LightLayer::Block, x, z);
       skyLight = service->latestLayerChunk(LightLayer::Sky, x, z);
       if (!blockLight || !blockLight->protocolReady ||
@@ -2308,7 +2462,7 @@ void Session::sendChunkBatch() {
     // Snapshot on the tick thread (the world is not thread safe), then let the
     // writer thread run the palette/bit packing. The batch-start ordering is
     // preserved because queue items are drained in order.
-    auto snapshot = prepareChunkSnapshot(world_.snapshotChunk(x, z),
+    auto snapshot = prepareChunkSnapshot(world_->snapshotChunk(x, z),
                                          data_.registry, blockLight, skyLight);
     for (const auto &section : snapshot.sections)
       bytes += section.palette.size() * sizeof(BlockState::Id) +
@@ -2348,7 +2502,7 @@ void Session::lightPublished(
       return;
     const std::pair key{snapshot->chunkX, snapshot->chunkZ};
     if (awaitingLightChunks_.contains(key)) {
-      const auto *service = world_.lightService();
+      const auto *service = world_->lightService();
       const auto block = service
                              ? service->latestLayerChunk(LightLayer::Block,
                                                          key.first, key.second)
@@ -2430,9 +2584,9 @@ void Session::lightChunkLifecycle(int chunkX, int chunkZ, bool loaded) {
     return;
   }
   if (!availableChunks_.contains(key) || !chunkVisible(key) ||
-      !world_.isChunkLoaded(chunkX, chunkZ))
+      !world_->isChunkLoaded(chunkX, chunkZ))
     return;
-  const auto *service = world_.lightService();
+  const auto *service = world_->lightService();
   const auto block = service
                          ? service->latestLayerChunk(LightLayer::Block,
                                                      chunkX, chunkZ)
@@ -2492,7 +2646,7 @@ void Session::managedChunkResidency(int chunkX, int chunkZ, bool resident) {
   if (resident) {
     availableChunks_.insert(key);
     if (chunkCenter_ && chunkVisible(key) &&
-        world_.isChunkLoaded(chunkX, chunkZ))
+        world_->isChunkLoaded(chunkX, chunkZ))
       queuePendingChunk(key);
     return;
   }
@@ -2561,14 +2715,14 @@ void Session::runCommand(std::string_view line) {
     sendCommandMessage(message);
 }
 void Session::sendBlockTagUpdate() {
-  if (phase_ != Phase::Play || !world_.customBlockTags()) return;
+  if (phase_ != Phase::Play || !world_->customBlockTags()) return;
   for (const auto &bytes : data_.configuration) {
     auto copy = bytes;
     const auto body = popFrame(copy);
     if (!body) throw ProtocolError("invalid configuration frame");
     Reader packet(*body);
     if (packet.varInt() == data_.packet("configuration", "clientbound", "update_tags")) {
-      queue(replaceBlockTagPacket(bytes, data_, *world_.customBlockTags(),
+      queue(replaceBlockTagPacket(bytes, data_, *world_->customBlockTags(),
                                   data_.packet("play", "clientbound", "update_tags")));
       return;
     }
@@ -2813,12 +2967,12 @@ void Session::syncEntities() {
   std::vector<Entity *> candidates;
   if (chunkCenter_) {
     const int range = options_.viewDistance;
-    candidates = world_.entitiesInSectionRange(
+    candidates = world_->entitiesInSectionRange(
         chunkCenter_->first - range, chunkCenter_->first + range,
         chunkCenter_->second - range, chunkCenter_->second + range);
   } else {
-    candidates.reserve(world_.entities.size());
-    for (const auto &ptr : world_.entities)
+    candidates.reserve(world_->entities.size());
+    for (const auto &ptr : world_->entities)
       candidates.push_back(ptr.get());
   }
   for (const Entity *candidate : candidates) {
@@ -2826,7 +2980,7 @@ void Session::syncEntities() {
       continue;
     const auto &e = *candidate;
     if (e.isRemoved() ||
-        !world_.isChunkLoaded(chunkCoord(e.position.x),
+        !world_->isChunkLoaded(chunkCoord(e.position.x),
                               chunkCoord(e.position.z)) ||
         !sentChunks_.contains(
             {chunkCoord(e.position.x), chunkCoord(e.position.z)}))
@@ -2867,7 +3021,7 @@ void Session::broadcastEntities() {
 }
 void Session::entityAdded(const Entity &entity) {
   if (phase_ != Phase::Play || entity.isRemoved() ||
-      !world_.isChunkLoaded(chunkCoord(entity.position.x),
+      !world_->isChunkLoaded(chunkCoord(entity.position.x),
                             chunkCoord(entity.position.z)) ||
       !sentChunks_.contains({chunkCoord(entity.position.x),
                              chunkCoord(entity.position.z)}))
@@ -2926,8 +3080,12 @@ void Session::tick() {
     refreshChunkView();
     syncOpenContainer();
     sendChunkBatch();
-    if (joinPositionPending_ && !sentChunks_.empty())
-      finishJoin();
+    if (joinPositionPending_ && !sentChunks_.empty()) {
+      if (respawning_)
+        finishRespawn();
+      else
+        finishJoin();
+    }
   } catch (const ProtocolError &) {
     disconnect("Unsupported entity state for protocol 775");
   }

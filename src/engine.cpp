@@ -938,6 +938,36 @@ World::World(int minY, int maxY, int maxNeighborUpdates)
   if (sectionCount() > kSectionCapacity)
     throw std::invalid_argument(
         "World: vertical range needs more than kSectionCapacity sections");
+  dimension_.minY = minY;
+  dimension_.height = maxY - minY;
+  dimension_.logicalHeight = dimension_.height;
+}
+
+World::World(DimensionTypeSpec dimension, int maxNeighborUpdates,
+             std::string_view dimensionId)
+    : World(dimension.minY, dimension.maxY(), maxNeighborUpdates) {
+  validateEngineDimensionType(dimension, kSectionCapacity);
+  setDimension(std::move(dimension), dimensionId);
+}
+
+void World::setDimension(DimensionTypeSpec dimension,
+                         std::string_view dimensionId) {
+  validateEngineDimensionType(dimension, kSectionCapacity);
+  if (dimension.minY != minY_ || dimension.maxY() != maxY_) {
+    throw std::invalid_argument(
+        "World::setDimension: vertical range does not match world bounds");
+  }
+  const std::string resolvedId = dimensionId.empty()
+                                     ? (dimension.id.empty()
+                                            ? std::string("minecraft:overworld")
+                                            : normalizeDimensionId(dimension.id))
+                                     : normalizeDimensionId(dimensionId);
+  dimension_ = std::move(dimension);
+  if (dimension_.id.empty())
+    dimension_.id = resolvedId;
+  dimensionId_ = resolvedId;
+  waterEvaporates = dimension_.waterEvaporates;
+  fastLava = dimension_.fastLava;
 }
 World::~World() { disableLighting(); }
 World::World(World &&) noexcept = default;
@@ -1859,6 +1889,7 @@ void World::enableLighting(LightWorkerOptions options) {
   if ((minY_ & 15) != 0)
     throw std::invalid_argument(
         "lighting requires minY aligned to a 16-block section");
+  options.hasSkyLight = options.hasSkyLight && dimension_.hasSkyLight;
   if (lowMemoryMode_ && !options.directWorld.context) {
     options.directWorld.context = this;
     options.directWorld.resizeMutex = lightDirectMutex_.get();

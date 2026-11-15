@@ -520,7 +520,7 @@ void readRegions(const std::filesystem::path &regionDir, Keep keep,
 }
 } // namespace
 std::filesystem::path ticketDataPath(const std::filesystem::path &regionDirectory) {
-  return regionDirectory.parent_path() / "data" / "minecraft" /
+  return resolveDimensionDataDirectory(regionDirectory) / "data" / "minecraft" /
          "chunk_tickets.dat";
 }
 
@@ -791,12 +791,152 @@ bool WorldClocks::saveIfDirty(const std::filesystem::path &path) {
   return true;
 }
 
+namespace {
+
+bool readOptionalBoolTag(const Tag &compound, const char *key,
+                         bool defaultValue) {
+  const Tag *tag = compound.get(key);
+  if (!tag)
+    return defaultValue;
+  if (tag->type != 1 || (tag->number != 0 && tag->number != 1))
+    throw nbt::Error(std::string("invalid boolean tag ") + key);
+  return tag->number != 0;
+}
+
+bool readRequiredBoolTag(const Tag &compound, const char *key) {
+  const Tag &tag = required(compound, key, 1);
+  if (tag.number != 0 && tag.number != 1)
+    throw nbt::Error(std::string("invalid boolean tag ") + key);
+  return tag.number != 0;
+}
+
+DimensionTypeSpec parseDimensionTypeCompound(const Tag &tag,
+                                             const std::string &typeId) {
+  DimensionTypeSpec spec;
+  spec.id = typeId;
+  spec.defaultClock.clear();
+  spec.hasFixedTime = readOptionalBoolTag(tag, "has_fixed_time", false);
+  spec.hasSkyLight = readRequiredBoolTag(tag, "has_skylight");
+  spec.hasCeiling = readRequiredBoolTag(tag, "has_ceiling");
+  spec.hasEnderDragonFight = readRequiredBoolTag(tag, "has_ender_dragon_fight");
+  if (const Tag *scale = tag.get("coordinate_scale"))
+    spec.coordinateScale = real(*scale);
+  else
+    throw nbt::Error("missing or invalid coordinate_scale");
+  spec.minY = integer(tag, "min_y");
+  spec.height = integer(tag, "height");
+  spec.logicalHeight = integer(tag, "logical_height");
+  if (const Tag *ambient = tag.get("ambient_light"))
+    spec.ambientLight = static_cast<float>(real(*ambient));
+  else
+    throw nbt::Error("missing or invalid ambient_light");
+  if (const Tag *clock = tag.get("default_clock")) {
+    if (clock->type != 8)
+      throw nbt::Error("invalid default_clock");
+    try {
+      spec.defaultClock = normalizeDimensionId(clock->text);
+    } catch (const std::invalid_argument &e) {
+      throw nbt::Error(e.what());
+    }
+  }
+  if (const Tag *attrs = tag.get("attributes")) {
+    if (attrs->type != 10)
+      throw nbt::Error("invalid dimension attributes");
+    const auto readAttrBool = [&](const char *namespaced, const char *bare,
+                                  bool &out) {
+      if (attrs->get(namespaced))
+        out = readOptionalBoolTag(*attrs, namespaced, out);
+      else if (attrs->get(bare))
+        out = readOptionalBoolTag(*attrs, bare, out);
+    };
+    readAttrBool("minecraft:gameplay/water_evaporates",
+                 "gameplay/water_evaporates", spec.waterEvaporates);
+    readAttrBool("minecraft:gameplay/fast_lava", "gameplay/fast_lava",
+                 spec.fastLava);
+  }
+  try {
+    validateDimensionType(spec);
+  } catch (const std::invalid_argument &e) {
+    throw nbt::Error(e.what());
+  }
+  return spec;
+}
+
+std::vector<DimensionStem>
+parseDimensionsCompound(const Tag &dimensionsTag) {
+  if (dimensionsTag.type != 10)
+    throw nbt::Error("invalid dimensions compound");
+  std::vector<DimensionStem> out;
+  for (const auto &[rawKey, stemTag] : dimensionsTag.compound) {
+    if (stemTag.type != 10)
+      throw nbt::Error("invalid dimension entry " + rawKey);
+    std::string dimId;
+    try {
+      dimId = normalizeDimensionId(rawKey);
+    } catch (const std::invalid_argument &e) {
+      throw nbt::Error(e.what());
+    }
+    const Tag *typeTag = stemTag.get("type");
+    if (!typeTag)
+      throw nbt::Error("missing dimension type for " + dimId);
+    DimensionStem stem;
+    stem.id = dimId;
+    if (typeTag->type == 8) {
+      try {
+        stem.typeId = normalizeDimensionId(typeTag->text);
+      } catch (const std::invalid_argument &e) {
+        throw nbt::Error(e.what());
+      }
+      const auto builtin = findBuiltinDimensionType(stem.typeId);
+      if (!builtin)
+        throw nbt::Error("unsupported builtin dimension type " + stem.typeId);
+      stem.type = *builtin;
+    } else if (typeTag->type == 10) {
+      stem.typeId = dimId;
+      stem.type = parseDimensionTypeCompound(*typeTag, dimId);
+    } else {
+      throw nbt::Error("invalid dimension type tag for " + dimId);
+    }
+    out.push_back(std::move(stem));
+  }
+  sortDimensionStems(out);
+  return out;
+}
+
+std::vector<DimensionStem>
+discoverFallbackDimensions(const std::filesystem::path &worldDir) {
+  std::vector<DimensionStem> out;
+  out.push_back(DimensionStem{"minecraft:overworld", "minecraft:overworld",
+                              overworldDimensionType()});
+  for (const auto &stem : defaultDimensionStems()) {
+    if (stem.id == "minecraft:overworld")
+      continue;
+    if (std::filesystem::is_directory(dimensionRegionDirectory(worldDir, stem.id)))
+      out.push_back(stem);
+  }
+  sortDimensionStems(out);
+  return out;
+}
+
+} // namespace
+
+const DimensionStem *
+WorldMetadata::findDimension(std::string_view id) const {
+  std::string normalized;
+  try {
+    normalized = normalizeDimensionId(id);
+  } catch (const std::invalid_argument &) {
+    return nullptr;
+  }
+  for (const auto &stem : dimensions) {
+    if (stem.id == normalized)
+      return &stem;
+  }
+  return nullptr;
+}
+
 std::filesystem::path defaultRegionDirectory(const std::filesystem::path &worldDir) {
-  const auto modern = worldDir / "dimensions" / "minecraft" / "overworld" / "region";
-  if (std::filesystem::is_directory(modern))
-    return modern;
-  const auto legacy = worldDir / "region";
-  return std::filesystem::is_directory(legacy) ? legacy : modern;
+  return dimensionRegionDirectory(worldDir, "minecraft:overworld");
 }
 WorldGameRules loadWorldGameRules(const std::filesystem::path &path) {
   WorldGameRules result;
@@ -846,11 +986,17 @@ WorldMetadata loadWorldMetadata(const std::filesystem::path &worldDir) {
     if (integer(settings, "DataVersion") != 4786)
       throw nbt::Error(
           "unsupported world generation DataVersion (expected 26.1: 4786)");
-    result.seed =
-        required(required(settings, "data", 10), "seed", 4).number;
+    const Tag &settingsData = required(settings, "data", 10);
+    result.seed = required(settingsData, "seed", 4).number;
+    if (const Tag *dims = settingsData.get("dimensions"))
+      result.dimensions = parseDimensionsCompound(*dims);
   } else if (auto settings = dataTag.get("WorldGenSettings")) {
     result.seed = required(*settings, "seed", 4).number;
+    if (const Tag *dims = settings->get("dimensions"))
+      result.dimensions = parseDimensionsCompound(*dims);
   }
+  if (result.dimensions.empty())
+    result.dimensions = discoverFallbackDimensions(worldDir);
   result.gameRules = loadWorldGameRules(
       worldDir / "data" / "minecraft" / "game_rules.dat");
   result.worldClocks =

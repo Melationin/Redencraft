@@ -11,13 +11,13 @@
 
 | 模块 | 当前已实现边界 | 尚未完成（目标阶段） |
 |---|---|---|
-| **世界与维度** | 单世界容器（默认主世界 `-64..320`，可用 `--region` / `--min-y` / `--max-y` 显式挂载单个其它维度目录），Chunk → 16×16×16 `Section` 组织 | 多维度同服、维度注册与 `dimensions/<ns>/<path>` 自动发现、传送门（`D-1 ~ D-3`）；世界生成（`G-1 ~ G-4`） |
+| **世界与维度** | 支持 26.1 维度类型注册与 `world_gen_settings.dat` / `dimensions/<ns>/<path>` 解析（`D-1`）、`ServerWorldSet` 同服多维度与共享时钟推进、维度 `waterEvaporates` / `fastLava`（`D-2`），以及 `--dimension` 选择目标维度 | 维度传送门切换触发与跨维位置换算（`D-3`）；世界生成（`G-1 ~ G-4`） |
 | **区块加载与存档** | `redstone_cli` 与 `--world` / `--schematic` 为只读导入；`redstone_vanilla_server --ticketed-world <dir>` 支持基于加载票的异步加载/卸载与 Anvil 写回（26.1 FULL 区块、计划刻、移动活塞、简单实体、`level.dat` `Time`、内置 `world_clocks` 与持久票）；不支持内容在写回路径显式拒绝 | 缺失区块不会自动生成；不提供跨文件崩溃事务原子性 |
 | **方块、红石与刻顺序** | 按 `ServerLevel.tick` 阶段分离推进；`NeighborUpdater` / `CollectingNeighborUpdater`、`updateShape`、`neighborChanged`、方块/流体计划刻、方块事件、方块实体（移动活塞等）、容器、随机刻、26.1 方块标签与 16 色羊毛地毯 | 原版全部方块/实验性红石规则持续补齐中，进度见 [BLOCK_TODO.md](BLOCK_TODO.md) |
 | **流体** | 水与岩浆状态、传播/坡度/反应、含水宿主与 `fluid_ticks` 调度（[流体文档](docs/fluid-testing.md)） | 桶交互、实体推流及与真服逐刻全量差分（`F-9a / F-9b`） |
 | **光照** | 双光层（BlockLight + SkyLight）独立 4-bit 压缩快照、后台 worker + SPSC 无锁交接、Anvil 光照读写及协议 775 初始/增量发送（[光照文档](docs/light-engine.md)） | 独立多维度下的逐维度光学实例与全量真服差分 |
 | **实体** | 简单实体（物品、TNT、下落方块、空矿车）、4 种铁轨（`OldMinecartBehavior`）、活塞扫掠推动与粘液/蜂蜜块相互作用（[实体文档](docs/entities.md)） | 生物/玩家 AI 之外的大多数复杂实体仍仅作注册或日志占位 |
-| **网络协议（775）** | 可选原生 TCP 服务端 `redstone_vanilla_server`，支持离线登录、区块/光照分发、放置/破坏方块、容器基础交互、`/tick` 与 `/time`（[协议文档](docs/protocol775.md)） | 多维度 `respawn` 切维、真实客户端渲染完整全链路验证 |
+| **网络协议（775）** | 可选原生 TCP 服务端 `redstone_vanilla_server`，支持离线登录、区块/光照分发、放置/破坏方块、容器基础交互、`/tick`、`/time` 与服务端 `ClientboundRespawnPacket` 会话切维接口 | 传送门触发的真实客户端跨维全链路验证（`D-3`） |
 | **调试客户端** | 可选 Windows 极轻量 3D OpenGL 调试客户端 `redstone_client`（[客户端说明](docs/client.md)） | 非完整游戏客户端 |
 | **内存与分配** | 默认通过 `allocator.hpp` 使用 `jemalloc`；`--low-memory` 开启光影/几何直读共享，计划刻使用 32 B `QueuedTick` / 16 B `TickKey` 紧凑布局并支持排空回收与周期压缩 | 光照快照页进一步压缩与跨页去重 |
 

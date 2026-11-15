@@ -20,6 +20,7 @@
 
 #include "redstone/block.hpp"
 #include "redstone/block_tags.hpp"
+#include "redstone/dimension.hpp"
 #include "redstone/entity_codec.hpp"
 #include "redstone/fluid.hpp"
 #include "redstone/flat_hash_map.hpp"
@@ -240,6 +241,8 @@ class World {
 public:
   explicit World(int minY = -64, int maxY = 320,
                  int maxNeighborUpdates = 1000000);
+  explicit World(DimensionTypeSpec dimension, int maxNeighborUpdates = 1000000,
+                 std::string_view dimensionId = {});
   ~World();
   World(World &&) noexcept;
   World &operator=(World &&) noexcept;
@@ -297,6 +300,10 @@ public:
   std::map<Pos, BlockState> allBlocks() const;
   int minY() const { return minY_; }
   int maxY() const { return maxY_; }
+  const DimensionTypeSpec &dimension() const noexcept { return dimension_; }
+  const std::string &dimensionId() const noexcept { return dimensionId_; }
+  void setDimension(DimensionTypeSpec dimension,
+                    std::string_view dimensionId = {});
   // LevelChunkSection capacity: 24 * 16 = 384 blocks of vertical range, which
   // covers the default -64..320 dimension. Chunk section storage is a fixed
   // inline array of this size, so the constructor rejects taller worlds.
@@ -598,6 +605,7 @@ public:
   bool spreadVines = true;
   int fireSpreadRadiusAroundPlayer = 128;
   bool waterEvaporates = false;
+  bool fastLava = false;
   std::vector<Vec3> fireSpreadPlayerPositions;
   int randomTickSpeed = 3;
   bool traceUpdates = false;
@@ -984,6 +992,8 @@ private:
   void notifyEntityRemoved(Entity &entity);
   void broadcastEntityRemovals();
   int minY_, maxY_, maxUpdates_, updateCount_ = 0;
+  DimensionTypeSpec dimension_ = overworldDimensionType();
+  std::string dimensionId_ = "minecraft:overworld";
   bool handlingTick_ = false;
   bool insideFluidTick_ = false;
   std::uint64_t fluidDispatches_ = 0, fluidWrites_ = 0;

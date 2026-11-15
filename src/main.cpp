@@ -86,8 +86,10 @@ void snapshot(const redstone::World &world) {
 int main(int argc, char **argv) {
   try {
     std::filesystem::path worldDir, regionDir;
+    std::string dimensionId;
     std::set<std::pair<int, int>> forced;
     int ticks = 0, minY = -64, maxY = 320;
+    bool explicitBounds = false;
     bool demo = false, dump = false;
     for (int i = 1; i < argc; i++) {
       std::string arg = argv[i];
@@ -100,13 +102,17 @@ int main(int argc, char **argv) {
         worldDir = next();
       else if (arg == "--region")
         regionDir = next();
+      else if (arg == "--dimension")
+        dimensionId = redstone::normalizeDimensionId(next());
       else if (arg == "--ticks")
         ticks = number(next());
-      else if (arg == "--min-y")
+      else if (arg == "--min-y") {
         minY = number(next());
-      else if (arg == "--max-y")
+        explicitBounds = true;
+      } else if (arg == "--max-y") {
         maxY = number(next());
-      else if (arg == "--force") {
+        explicitBounds = true;
+      } else if (arg == "--force") {
         int x = number(next()), z = number(next());
         forced.emplace(x, z);
       } else if (arg == "--demo")
@@ -115,7 +121,8 @@ int main(int argc, char **argv) {
         dump = true;
       else if (arg == "--help") {
         std::cout
-            << "redstone_cli --world <save> [--region <dimension/region>] "
+            << "redstone_cli --world <save> [--dimension <ns:path>] "
+               "[--region <dimension/region>] "
                "[--force <cx> <cz>] [--ticks N] [--dump]\n"
                "redstone_cli --demo [--ticks N] [--dump]\n"
                "--force may repeat; default loads every chunk found. --dump "
@@ -128,7 +135,33 @@ int main(int argc, char **argv) {
       throw std::runtime_error("invalid tick count or build height");
     if (demo == !worldDir.empty())
       throw std::runtime_error("specify exactly one of --demo or --world");
-    redstone::World world(minY, maxY);
+    std::optional<redstone::DimensionStem> selectedStem;
+    if (!demo && !dimensionId.empty()) {
+      const auto meta = redstone::loadWorldMetadata(worldDir);
+      if (const auto *found = meta.findDimension(dimensionId)) {
+        selectedStem = *found;
+      } else if (const auto builtin =
+                     redstone::findBuiltinDimensionType(dimensionId)) {
+        selectedStem = redstone::DimensionStem{dimensionId, dimensionId, *builtin};
+      } else {
+        throw std::runtime_error("unknown dimension: " + dimensionId);
+      }
+      if (!explicitBounds) {
+        minY = selectedStem->type.minY;
+        maxY = selectedStem->type.maxY();
+      }
+    }
+    redstone::World world =
+        (selectedStem && !explicitBounds)
+            ? redstone::World(selectedStem->type, 1000000, selectedStem->id)
+            : redstone::World(minY, maxY);
+    if (selectedStem && explicitBounds) {
+      auto adjusted = selectedStem->type;
+      adjusted.minY = minY;
+      adjusted.height = maxY - minY;
+      adjusted.logicalHeight = std::min(adjusted.logicalHeight, adjusted.height);
+      world.setDimension(adjusted, selectedStem->id);
+    }
     std::cerr << "allocator=" << redstone::memory::backend() << '\n';
     if (demo) {
       world.loadChunk(0, 0);
@@ -139,8 +172,12 @@ int main(int argc, char **argv) {
       world.rawSetBlock({3, 0, 4}, redstone::defaultState("smooth_stone"));
       world.setBlock({5, 0, 4}, redstone::defaultState("smooth_stone"));
     } else {
-      if (regionDir.empty())
-        regionDir = redstone::defaultRegionDirectory(worldDir);
+      if (regionDir.empty()) {
+        regionDir = selectedStem
+                        ? redstone::dimensionRegionDirectory(worldDir,
+                                                             selectedStem->id)
+                        : redstone::defaultRegionDirectory(worldDir);
+      }
       auto data = redstone::loadAnvilWorld(worldDir, regionDir, minY, maxY);
       if (!forced.empty()) {
         auto wanted = [&](redstone::Pos p) {

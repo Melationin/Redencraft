@@ -12,10 +12,12 @@
 #include <unistd.h>
 #endif
 #include "redstone/command.hpp"
+#include "redstone/dimension.hpp"
 #include "redstone/litematic.hpp"
 #include "redstone/net/session.hpp"
 #include "redstone/net/outbox.hpp"
 #include "redstone/net/tick_timing.hpp"
+#include "redstone/server_worlds.hpp"
 #include "redstone/storage.hpp"
 #include "redstone/tickets.hpp"
 #include "redstone/world_chunk_manager.hpp"
@@ -517,30 +519,37 @@ private:
 // before either dependency leaves scope on normal shutdown or exception unwind.
 class NetworkTeardownGuard {
 public:
-  NetworkTeardownGuard(World &world, WorldChunkManager *manager)
-      : world_(world), manager_(manager) {}
+  NetworkTeardownGuard() = default;
+  void track(World *world, WorldChunkManager *manager) {
+    if (world)
+      worlds_.push_back(world);
+    if (manager)
+      managers_.push_back(manager);
+  }
   ~NetworkTeardownGuard() { detach(); }
   NetworkTeardownGuard(const NetworkTeardownGuard &) = delete;
   NetworkTeardownGuard &operator=(const NetworkTeardownGuard &) = delete;
   void detach() noexcept {
-    world_.lightPublicationObserver = {};
-    world_.lightChunkLifecycleObserver = {};
-    world_.blockUpdateObserver = {};
-    world_.blockEventObserver = {};
-    world_.blockUpdatesBroadcastObserver = {};
-    world_.entityTrackingBroadcastObserver = {};
-    world_.entityAddedObserver = {};
-    world_.entityRemovedObserver = {};
-    world_.explosionObserver = {};
-    world_.fallingBlockLandObserver = {};
-    if (manager_) {
-      manager_->managedChunkInstalled = {};
-      manager_->managedChunkRemoved = {};
+    for (World *world : worlds_) {
+      world->lightPublicationObserver = {};
+      world->lightChunkLifecycleObserver = {};
+      world->blockUpdateObserver = {};
+      world->blockEventObserver = {};
+      world->blockUpdatesBroadcastObserver = {};
+      world->entityTrackingBroadcastObserver = {};
+      world->entityAddedObserver = {};
+      world->entityRemovedObserver = {};
+      world->explosionObserver = {};
+      world->fallingBlockLandObserver = {};
+    }
+    for (WorldChunkManager *manager : managers_) {
+      manager->managedChunkInstalled = {};
+      manager->managedChunkRemoved = {};
     }
   }
 private:
-  World &world_;
-  WorldChunkManager *manager_;
+  std::vector<World *> worlds_;
+  std::vector<WorldChunkManager *> managers_;
 };
 
 } // namespace
@@ -548,6 +557,7 @@ int runServer(int argc, char **argv) {
   try {
     std::filesystem::path assets = REDSTONE_PROTOCOL_DIR, worldPath,
                           schematicPath, ticketedWorldPath;
+    std::string requestedDimension;
     std::vector<std::filesystem::path> blockTagPacks;
     int port = 25565, maxTicks = 0, forceMargin = 2;
     int simulationDistance = 10;
@@ -565,8 +575,9 @@ int runServer(int argc, char **argv) {
             << "redstone_vanilla_server [--port 25565] [--assets directory] "
                "[--world directory | --schematic file | "
                "--ticketed-world directory]\n"
-               "  [--chunk x,z ...] [--ticks N] [--spawn x,y,z] "
-               "[--offset x,y,z] [--view-distance 3] [--force-margin 2]\n"
+               "  [--dimension namespace:path] [--chunk x,z ...] [--ticks N] "
+               "[--spawn x,y,z] [--offset x,y,z] [--view-distance 3] "
+               "[--force-margin 2]\n"
                "  [--allow-unsupported] [--skip-non-full-chunks] [--low-memory]\n"
                "  [--fluid-basin] [--single-platform] [--no-console] "
                "[--light-workers 1] [--ticket-view-distance 3] "
@@ -618,6 +629,8 @@ int runServer(int argc, char **argv) {
         assets = utf8Path(value);
       else if (arg == "--data-pack")
         blockTagPacks.push_back(utf8Path(value));
+      else if (arg == "--dimension")
+        requestedDimension = normalizeDimensionId(value);
       else if (arg == "--world")
         worldPath = utf8Path(value);
       else if (arg == "--ticketed-world")
@@ -691,9 +704,8 @@ int runServer(int argc, char **argv) {
     if (anvilOptions.skipNonFullChunks && worldPath.empty())
       throw ProtocolError("--skip-non-full-chunks requires --world");
     ProtocolData data(assets);
-    World world;
-    if (lowMemory)
-      world.setLowMemoryMode(true);
+    std::unique_ptr<World> standaloneWorld;
+    std::optional<ServerWorldSet> worldSet;
     const auto explicitBlockTagPacks = blockTagPacks;
     auto selectPacks = [&](const std::filesystem::path &path,
                            const nbt::RootTag &root) {
@@ -704,52 +716,81 @@ int runServer(int argc, char **argv) {
       blockTagPacks.insert(blockTagPacks.end(), explicitBlockTagPacks.begin(),
                            explicitBlockTagPacks.end());
     };
-    auto loadBlockTags = [&] {
-      if (blockTagPacks.empty()) return;
-      const auto reload = world.reloadBlockTags(blockTagPacks);
+    auto configureDimensionOptions = [&](const DimensionStem &stem,
+                                         const std::vector<DimensionStem> &all) {
+      options.dimensionId = stem.id;
+      options.dimensionTypeId =
+          stem.type.id.empty() ? stem.typeId : stem.type.id;
+      options.seaLevel = (stem.id == "minecraft:the_nether")
+                             ? 32
+                             : ((stem.id == "minecraft:the_end") ? 0 : 63);
+      options.availableDimensions.clear();
+      for (const auto &entry : all)
+        options.availableDimensions.push_back(entry.id);
+    };
+    auto createStandaloneWorld = [&](const DimensionTypeSpec &spec,
+                                     std::string_view dimId) {
+      standaloneWorld =
+          std::make_unique<World>(spec, 1000000, dimId);
+      if (lowMemory)
+        standaloneWorld->setLowMemoryMode(true);
+    };
+    auto loadBlockTagsInto = [&](World &targetWorld) {
+      if (blockTagPacks.empty())
+        return;
+      const auto reload = targetWorld.reloadBlockTags(blockTagPacks);
       for (const auto &message : reload.diagnostics)
         std::cerr << "BLOCK_TAGS: " << message << std::endl;
-      if (!reload.applied) throw ProtocolError("cannot load block tag packs");
-      std::cout << "BLOCK_TAGS loaded packs=" << blockTagPacks.size() << std::endl;
+      if (!reload.applied)
+        throw ProtocolError("cannot load block tag packs");
+      std::cout << "BLOCK_TAGS loaded packs=" << blockTagPacks.size()
+                << std::endl;
     };
-    if (worldPath.empty() && ticketedWorldPath.empty()) loadBlockTags();
-    std::optional<WorldMetadata> ticketedMetadata;
-    std::vector<PersistentTicketRecord> persistentTickets;
     const auto ticketRecordLess = [](const PersistentTicketRecord &a,
                                      const PersistentTicketRecord &b) {
       return std::tie(a.x, a.z, a.type, a.level, a.ticksLeft) <
              std::tie(b.x, b.z, b.type, b.level, b.ticksLeft);
     };
-    // The lock outlives the manager so exception unwinding still protects the
-    // manager's best-effort final save.
+    // The lock outlives the world set so exception unwinding still protects the
+    // managers' best-effort final save.
     std::unique_ptr<TicketedWorldLock> ticketedLock;
-    std::unique_ptr<WorldChunkManager> ticketedManager;
+    DimensionLevel *primaryTicketedLevel = nullptr;
     if (!ticketedWorldPath.empty()) {
       ticketedLock = std::make_unique<TicketedWorldLock>(ticketedWorldPath);
-      const auto region = defaultRegionDirectory(ticketedWorldPath);
-      if (!std::filesystem::is_directory(region))
-        throw ProtocolError("--ticketed-world has no overworld region");
-      ticketedMetadata = loadWorldMetadata(ticketedWorldPath);
-      selectPacks(ticketedWorldPath, ticketedMetadata->levelRoot);
-      loadBlockTags();
-      world.setGameTime(ticketedMetadata->gameTime);
-      world.setSeed(static_cast<std::uint64_t>(ticketedMetadata->seed));
-      world.tntExplodes = ticketedMetadata->gameRules.tntExplodes;
-      world.waterSourceConversion =
-          ticketedMetadata->gameRules.waterSourceConversion;
-      world.lavaSourceConversion =
-          ticketedMetadata->gameRules.lavaSourceConversion;
-      world.randomTickSpeed = ticketedMetadata->gameRules.randomTickSpeed;
+      const std::string targetDim = requestedDimension.empty()
+                                        ? std::string("minecraft:overworld")
+                                        : requestedDimension;
+      ServerWorldOptions worldOpts;
+      worldOpts.withChunkManagers = true;
+      worldOpts.lowMemoryMode = lowMemory;
+      worldOpts.viewDistance = options.ticketViewDistance;
+      worldOpts.simulationDistance = simulationDistance;
+      worldOpts.extraBlockTagPacks = explicitBlockTagPacks;
+      worldSet = ServerWorldSet::open(ticketedWorldPath, worldOpts);
+      for (const auto &message : worldSet->dataPackSelection().diagnostics)
+        std::cerr << "BLOCK_TAGS: " << message << std::endl;
+      blockTagPacks = worldSet->blockTagPacks();
+      if (!blockTagPacks.empty())
+        std::cout << "BLOCK_TAGS loaded packs=" << blockTagPacks.size()
+                  << std::endl;
+      primaryTicketedLevel = worldSet->find(targetDim);
+      if (!primaryTicketedLevel || !primaryTicketedLevel->chunkManager) {
+        throw ProtocolError("--ticketed-world has no region for " + targetDim);
+      }
+      configureDimensionOptions(primaryTicketedLevel->stem,
+                                worldSet->metadata().dimensions);
+      World &pw = *primaryTicketedLevel->world;
       std::cout << "TICKETED_GAME_RULES advanceTime="
-                << ticketedMetadata->gameRules.advanceTime
-                << " tntExplodes=" << world.tntExplodes
-                << " waterSourceConversion=" << world.waterSourceConversion
-                << " lavaSourceConversion=" << world.lavaSourceConversion
-                << " randomTickSpeed=" << world.randomTickSpeed
+                << worldSet->metadata().gameRules.advanceTime
+                << " tntExplodes=" << pw.tntExplodes
+                << " waterSourceConversion=" << pw.waterSourceConversion
+                << " lavaSourceConversion=" << pw.lavaSourceConversion
+                << " randomTickSpeed=" << pw.randomTickSpeed
                 << std::endl;
       for (const BuiltinWorldClock clock :
            {BuiltinWorldClock::Overworld, BuiltinWorldClock::TheEnd}) {
-        const WorldClockState &state = ticketedMetadata->worldClocks.state(clock);
+        const WorldClockState &state =
+            worldSet->metadata().worldClocks.state(clock);
         std::cout << "TICKETED_WORLD_CLOCK "
                   << (clock == BuiltinWorldClock::Overworld
                           ? "minecraft:overworld"
@@ -759,26 +800,43 @@ int runServer(int argc, char **argv) {
                   << " rate=" << state.rate
                   << " paused=" << (state.paused ? 1 : 0) << std::endl;
       }
-      persistentTickets = loadPersistentTickets(ticketDataPath(region));
-      std::sort(persistentTickets.begin(), persistentTickets.end(),
-                ticketRecordLess);
-      ticketedManager = std::make_unique<WorldChunkManager>(
-          world, region, options.ticketViewDistance, simulationDistance);
-      if (!persistentTickets.empty()) {
-        std::vector<std::pair<ChunkTicketPos, Ticket>> restore;
-        restore.reserve(persistentTickets.size());
-        for (const PersistentTicketRecord &record : persistentTickets)
-          restore.emplace_back(
-              ChunkTicketPos{record.x, record.z},
-              Ticket(record.type == ticket_types::Forced.name
-                         ? ticket_types::Forced
-                         : ticket_types::Portal,
-                     record.level, record.ticksLeft));
-        (void)ticketedManager->restorePersistentTickets(restore);
+      std::sort(primaryTicketedLevel->initialTickets.begin(),
+                primaryTicketedLevel->initialTickets.end(), ticketRecordLess);
+      if (!primaryTicketedLevel->initialTickets.empty()) {
         std::cout << "TICKETED_TICKETS_LOADED "
-                  << persistentTickets.size() << std::endl;
+                  << primaryTicketedLevel->initialTickets.size() << std::endl;
       }
+      std::cout << "TICKETED_DIMENSIONS count=" << worldSet->levels().size()
+                << " initial=" << primaryTicketedLevel->stem.id << std::endl;
+    } else if (!worldPath.empty()) {
+      const WorldMetadata meta = loadWorldMetadata(worldPath);
+      const std::string targetDim = requestedDimension.empty()
+                                        ? std::string("minecraft:overworld")
+                                        : requestedDimension;
+      const DimensionStem *stem = meta.findDimension(targetDim);
+      if (!stem)
+        throw ProtocolError("--world does not contain dimension " + targetDim);
+      createStandaloneWorld(stem->type, stem->id);
+      configureDimensionOptions(*stem, meta.dimensions);
+      selectPacks(worldPath, meta.levelRoot);
+      loadBlockTagsInto(*standaloneWorld);
+    } else {
+      DimensionStem stem{"minecraft:overworld", "minecraft:overworld",
+                         overworldDimensionType()};
+      if (!requestedDimension.empty()) {
+        const auto builtin = findBuiltinDimensionType(requestedDimension);
+        if (!builtin)
+          throw ProtocolError("unknown builtin dimension for standalone mode: " +
+                              requestedDimension);
+        stem.id = requestedDimension;
+        stem.typeId = requestedDimension;
+        stem.type = *builtin;
+      }
+      createStandaloneWorld(stem.type, stem.id);
+      configureDimensionOptions(stem, {stem});
+      loadBlockTagsInto(*standaloneWorld);
     }
+    World &world = worldSet ? *primaryTicketedLevel->world : *standaloneWorld;
     if (!schematicPath.empty()) {
       if (!options.chunks.empty())
         throw ProtocolError(
@@ -846,8 +904,6 @@ int runServer(int argc, char **argv) {
                   << " unsupported_entities="
                   << imported.skippedUnsupportedEntities << std::endl;
     } else if (!worldPath.empty()) {
-      selectPacks(worldPath, loadWorldMetadata(worldPath).levelRoot);
-      loadBlockTags();
       std::set<std::pair<int, int>> requestedChunks(options.chunks.begin(),
                                                     options.chunks.end());
       if (!requestedChunks.empty()) {
@@ -855,8 +911,14 @@ int runServer(int argc, char **argv) {
           return requestedChunks.contains({cx, cz});
         };
       }
-      const AnvilWorldImportSummary summary = loadAnvilWorldInto(
-          worldPath, defaultRegionDirectory(worldPath), world, anvilOptions);
+      const std::filesystem::path regionDir =
+          dimensionRegionDirectory(worldPath, world.dimensionId());
+      if (!std::filesystem::is_directory(regionDir)) {
+        throw ProtocolError("--world has no region directory for " +
+                            world.dimensionId() + ": " + regionDir.string());
+      }
+      const AnvilWorldImportSummary summary =
+          loadAnvilWorldInto(worldPath, regionDir, world, anvilOptions);
       if (options.chunks.empty()) {
         options.chunks = summary.loadedChunks;
       } else {
@@ -870,9 +932,9 @@ int runServer(int argc, char **argv) {
                 << " fluid_ticks=" << summary.loadedFluidTicks
                 << " block_entities=" << summary.loadedBlockEntities
                 << " entities=" << summary.loadedEntities << std::endl;
-    } else if (ticketedManager) {
+    } else if (worldSet) {
       // Opt-in async managed world. startup read only metadata; region reads
-      // happen on the lifecycle worker.
+      // happen on each dimension's lifecycle worker.
     } else {
       if (options.chunks.empty()) {
         const int radius = singlePlatform ? options.viewDistance : 1;
@@ -940,7 +1002,10 @@ int runServer(int argc, char **argv) {
     // The native protocol path uses published light rather than placeholder
     // brightness. Initial chunk sends wait asynchronously for the first complete
     // worker snapshot; no connection callback waits on the light worker.
-    world.enableLighting(lightOptions);
+    if (worldSet)
+      worldSet->enableLighting(lightOptions);
+    else
+      world.enableLighting(lightOptions);
     SocketSystem socketSystem;
     Socket listener(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     if (listener.get() == invalidSocket)
@@ -977,91 +1042,105 @@ int runServer(int argc, char **argv) {
     // encoding and socket writes happen on the writer thread.
     NetworkWriter writer;
     writer.start();
-    NetworkTeardownGuard teardown(world, ticketedManager.get());
+    NetworkTeardownGuard teardown;
     std::size_t ticketedInstalls = 0;
-    if (ticketedManager) {
-      ticketedManager->managedChunkInstalled = [&](const ChunkTicketPos &p) {
-        ++ticketedInstalls;
-        for (auto &c : connections)
-          if (!c->dead)
-            c->session.managedChunkResidency(p.x, p.z, true);
-      };
-      ticketedManager->managedChunkRemoved = [&](const ChunkTicketPos &p) {
-        for (auto &c : connections)
-          if (!c->dead)
-            c->session.managedChunkResidency(p.x, p.z, false);
-      };
-    }
-    world.lightPublicationObserver =
-        [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+    const auto bindDimensionObservers = [&](World &targetWorld,
+                                            WorldChunkManager *manager) {
+      teardown.track(&targetWorld, manager);
+      World *wp = &targetWorld;
+      if (manager) {
+        manager->managedChunkInstalled = [&, wp](const ChunkTicketPos &p) {
+          ++ticketedInstalls;
           for (auto &c : connections)
-            if (!c->dead) {
-              c->session.lightPublished(snapshot);
-              writer.submit(c, c->session.takeOutputItems());
-            }
+            if (!c->dead && &c->session.world() == wp)
+              c->session.managedChunkResidency(p.x, p.z, true);
         };
-    world.lightChunkLifecycleObserver = [&](int x, int z, bool loaded) {
-      for (auto &c : connections)
-        if (!c->dead) {
-          c->session.lightChunkLifecycle(x, z, loaded);
-          writer.submit(c, c->session.takeOutputItems());
-        }
+        manager->managedChunkRemoved = [&, wp](const ChunkTicketPos &p) {
+          for (auto &c : connections)
+            if (!c->dead && &c->session.world() == wp)
+              c->session.managedChunkResidency(p.x, p.z, false);
+        };
+      }
+      targetWorld.lightPublicationObserver =
+          [&, wp](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+            for (auto &c : connections)
+              if (!c->dead && &c->session.world() == wp) {
+                c->session.lightPublished(snapshot);
+                writer.submit(c, c->session.takeOutputItems());
+              }
+          };
+      targetWorld.lightChunkLifecycleObserver = [&, wp](int x, int z,
+                                                        bool loaded) {
+        for (auto &c : connections)
+          if (!c->dead && &c->session.world() == wp) {
+            c->session.lightChunkLifecycle(x, z, loaded);
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+      targetWorld.blockUpdateObserver = [&, wp](Pos p, const BlockState &s,
+                                                int) {
+        for (auto &c : connections)
+          if (!c->dead && &c->session.world() == wp)
+            c->session.blockUpdate(p, s);
+      };
+      targetWorld.blockEventObserver = [&, wp](const BlockEvent &e) {
+        for (auto &c : connections)
+          if (!c->dead && &c->session.world() == wp) {
+            c->session.blockEvent(e);
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+      targetWorld.blockUpdatesBroadcastObserver = [&, wp] {
+        for (auto &c : connections)
+          if (!c->dead && &c->session.world() == wp) {
+            c->session.flushBlockUpdates();
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+      targetWorld.entityTrackingBroadcastObserver = [&, wp] {
+        for (auto &c : connections)
+          if (!c->dead && &c->session.world() == wp) {
+            c->session.broadcastEntities();
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+      targetWorld.entityAddedObserver = [&, wp](const Entity &entity) {
+        for (auto &c : connections)
+          if (!c->dead && &c->session.world() == wp) {
+            c->session.entityAdded(entity);
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+      targetWorld.entityRemovedObserver = [&, wp](int id) {
+        for (auto &c : connections)
+          if (!c->dead && &c->session.world() == wp) {
+            c->session.entityRemoved(id);
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+      targetWorld.explosionObserver = [&, wp](Vec3 center, float radius,
+                                              int blockCount) {
+        for (auto &c : connections)
+          if (!c->dead && &c->session.world() == wp) {
+            c->session.explosion(center, radius, blockCount);
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+      targetWorld.fallingBlockLandObserver =
+          [&, wp](int entityId, Pos pos, const BlockState &state) {
+            for (auto &c : connections)
+              if (!c->dead && &c->session.world() == wp) {
+                c->session.fallingBlockLanded(entityId, pos, state);
+                writer.submit(c, c->session.takeOutputItems());
+              }
+          };
     };
-    world.blockUpdateObserver = [&](Pos p, const BlockState &s, int) {
-      for (auto &c : connections)
-        if (!c->dead)
-          c->session.blockUpdate(p, s);
-    };
-    world.blockEventObserver = [&](const BlockEvent &e) {
-      for (auto &c : connections)
-        if (!c->dead) {
-          c->session.blockEvent(e);
-          writer.submit(c, c->session.takeOutputItems());
-        }
-    };
-    world.blockUpdatesBroadcastObserver = [&] {
-      for (auto &c : connections)
-        if (!c->dead) {
-          c->session.flushBlockUpdates();
-          writer.submit(c, c->session.takeOutputItems());
-        }
-    };
-    world.entityTrackingBroadcastObserver = [&] {
-      for (auto &c : connections)
-        if (!c->dead) {
-          c->session.broadcastEntities();
-          writer.submit(c, c->session.takeOutputItems());
-        }
-    };
-    world.entityAddedObserver = [&](const Entity &entity) {
-      for (auto &c : connections)
-        if (!c->dead) {
-          c->session.entityAdded(entity);
-          writer.submit(c, c->session.takeOutputItems());
-        }
-    };
-    world.entityRemovedObserver = [&](int id) {
-      for (auto &c : connections)
-        if (!c->dead) {
-          c->session.entityRemoved(id);
-          writer.submit(c, c->session.takeOutputItems());
-        }
-    };
-    world.explosionObserver = [&](Vec3 center, float radius, int blockCount) {
-      for (auto &c : connections)
-        if (!c->dead) {
-          c->session.explosion(center, radius, blockCount);
-          writer.submit(c, c->session.takeOutputItems());
-        }
-    };
-    world.fallingBlockLandObserver = [&](int entityId, Pos pos,
-                                         const BlockState &state) {
-      for (auto &c : connections)
-        if (!c->dead) {
-          c->session.fallingBlockLanded(entityId, pos, state);
-          writer.submit(c, c->session.takeOutputItems());
-        }
-    };
+    if (worldSet) {
+      for (const auto &level : worldSet->levels())
+        bindDimensionObservers(*level->world, level->chunkManager.get());
+    } else {
+      bindDimensionObservers(world, nullptr);
+    }
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
 #ifndef _WIN32
@@ -1074,10 +1153,10 @@ int runServer(int argc, char **argv) {
     TickRateManager tickRate;
     command::Context commandContext;
     commandContext.ticks = &tickRate;
-    if (ticketedMetadata) {
+    if (worldSet) {
       command::registerTimeCommand(commands);
       commandContext.world = &world;
-      commandContext.worldClocks = &ticketedMetadata->worldClocks;
+      commandContext.worldClocks = &worldSet->metadata().worldClocks;
       commandContext.worldClockChanged = [&](BuiltinWorldClock clock) {
         for (auto &c : connections)
           if (!c->dead && !c->session.closed()) {
@@ -1102,8 +1181,8 @@ int runServer(int argc, char **argv) {
       std::cout << "CONSOLE ready: type /tick ... (stop to shut down)"
                 << std::endl;
     while (!stopRequested && (!maxTicks || ticks < maxTicks)) {
-      if (ticketedManager)
-        ticketedManager->pump();
+      if (worldSet)
+        worldSet->pumpAll();
       // Console commands run on the server thread between ticks, so they can
       // never interleave with a running simulation.
       if (consoleEnabled)
@@ -1115,10 +1194,24 @@ int runServer(int argc, char **argv) {
             break;
           }
           if (line == "reload") {
-            const auto reload = world.reloadBlockTags(blockTagPacks);
-            for (const auto &message : reload.diagnostics)
-              std::cerr << "BLOCK_TAGS: " << message << std::endl;
-            if (!reload.applied) {
+            bool allApplied = true;
+            if (worldSet) {
+              for (const auto &level : worldSet->levels()) {
+                const auto reload = level->world->reloadBlockTags(blockTagPacks);
+                for (const auto &message : reload.diagnostics)
+                  std::cerr << "BLOCK_TAGS: " << message << std::endl;
+                if (!reload.applied) {
+                  allApplied = false;
+                  break;
+                }
+              }
+            } else {
+              const auto reload = world.reloadBlockTags(blockTagPacks);
+              for (const auto &message : reload.diagnostics)
+                std::cerr << "BLOCK_TAGS: " << message << std::endl;
+              allApplied = reload.applied;
+            }
+            if (!allApplied) {
               std::cout << "BLOCK_TAGS reload failed; previous snapshot retained" << std::endl;
             } else {
               for (auto &c : connections)
@@ -1136,7 +1229,7 @@ int runServer(int argc, char **argv) {
             std::cout << "Commands: /tick query | /tick rate <1..10000> | "
                          "/tick step [<time>|stop] | /tick sprint "
                          "<time>|stop | /tick freeze | /tick unfreeze"
-                      << (ticketedMetadata
+                      << (worldSet
                               ? " | /time set <duration|marker> | /time add "
                                 "<duration> | /time pause|resume|rate <rate> | "
                                 "/time query time|gametime|<timeline> "
@@ -1197,12 +1290,12 @@ int runServer(int argc, char **argv) {
               std::move(socket), world, data, std::move(sessionOptions)));
           writer.add(connections.back());
           connections.back()->session.attachCommands(&commands, &commandContext);
-          if (ticketedMetadata)
+          if (worldSet)
             connections.back()->session.setWorldClockSource(
-                ticketedMetadata->worldClocks,
-                ticketedMetadata->gameRules.advanceTime);
-          if (ticketedManager) {
-            auto *manager = ticketedManager.get();
+                worldSet->metadata().worldClocks,
+                worldSet->metadata().gameRules.advanceTime);
+          if (primaryTicketedLevel && primaryTicketedLevel->chunkManager) {
+            auto *manager = primaryTicketedLevel->chunkManager.get();
             auto *session = &connections.back()->session;
             session->setManagedResidencyProvider(
                 [manager](int x, int z) {
@@ -1237,30 +1330,37 @@ int runServer(int argc, char **argv) {
         const ChunkTicketPos center{
             static_cast<int>(std::floor(position.x)) >> 4,
             static_cast<int>(std::floor(position.z)) >> 4};
-        if (ticketedManager)
-          (void)ticketedManager->setPlayer(
-              static_cast<std::uint64_t>(connection->session.playerId()),
-              present, center);
-        else
-          (void)ticketSources.setPlayer(
-              static_cast<std::uint64_t>(connection->session.playerId()),
-              present, center);
+        const auto pid = static_cast<std::uint64_t>(connection->session.playerId());
+        if (worldSet) {
+          for (const auto &level : worldSet->levels()) {
+            if (!level->chunkManager)
+              continue;
+            if (level->world.get() == &connection->session.world())
+              (void)level->chunkManager->setPlayer(pid, present, center);
+            else
+              (void)level->chunkManager->removePlayer(pid);
+          }
+        } else {
+          (void)ticketSources.setPlayer(pid, present, center);
+        }
       }
-      // One bounded manager pump per socket iteration keeps completed I/O and
+      // One bounded pump per socket iteration keeps completed I/O and
       // a large frozen-world ticket-removal queue moving without doing work
       // once per connection. Held autosave remains server-tick-only.
-      if (ticketedManager)
-        ticketedManager->pump();
+      if (worldSet)
+        worldSet->pumpAll();
       std::erase_if(connections, [&](const auto &c) {
         const bool remove =
             c->dead.load() || (c->closing.load() && c->flushed.load());
         if (remove) {
-          if (ticketedManager)
-            (void)ticketedManager->removePlayer(
-                static_cast<std::uint64_t>(c->session.playerId()));
-          else
-            (void)ticketSources.removePlayer(
-                static_cast<std::uint64_t>(c->session.playerId()));
+          const auto pid = static_cast<std::uint64_t>(c->session.playerId());
+          if (worldSet) {
+            for (const auto &level : worldSet->levels())
+              if (level->chunkManager)
+                (void)level->chunkManager->removePlayer(pid);
+          } else {
+            (void)ticketSources.removePlayer(pid);
+          }
         }
         return remove;
       });
@@ -1276,22 +1376,23 @@ int runServer(int argc, char **argv) {
       if (now >= nextTick) {
         const auto tickStart = now;
         tickRate.tick();
-        if (ticketedMetadata)
-          ticketedMetadata->worldClocks.tick(
-              tickRate.runsNormally(),
-              ticketedMetadata->gameRules.advanceTime);
-        // TickRateManager.runsNormally: a frozen server skips level ticking but
-        // keeps connections alive.
-        if (ticketedManager)
-          ticketedManager->serverTick(true, tickRate.runsNormally());
-        else if (tickRate.runsNormally())
+        if (worldSet) {
+          worldSet->tick(tickRate.runsNormally(), true);
+        } else if (tickRate.runsNormally()) {
           world.tick();
-        else
+        } else {
           world.drainLightPublications();
+        }
         for (auto &c : connections)
           if (!c->dead.load()) c->session.tick();
-        if (tickRate.runsNormally())
-          world.log.clear();
+        if (tickRate.runsNormally()) {
+          if (worldSet) {
+            for (const auto &level : worldSet->levels())
+              level->world->log.clear();
+          } else {
+            world.log.clear();
+          }
+        }
         const auto tickEnd = std::chrono::steady_clock::now();
         if (sprintingThisIteration)
           tickRate.endTickWork(tickEnd);
@@ -1374,53 +1475,49 @@ int runServer(int argc, char **argv) {
           }
       }
     }
-    if (ticketedManager) {
-      ChunkShutdownResult shutdown = ticketedManager->close();
-      std::cout << "TICKETED_WORLD_CLOSED complete="
-                << (shutdown.complete ? 1 : 0)
-                << " saved=" << shutdown.savedChunks.size()
-                << " unsaved=" << shutdown.unsavedChunks.size()
-                << " worker_stopped=" << (shutdown.workerStopped ? 1 : 0)
+    if (worldSet) {
+      bool allComplete = true;
+      bool allWorkersStopped = true;
+      std::size_t totalSaved = 0;
+      std::size_t totalUnsaved = 0;
+      for (const auto &level : worldSet->levels()) {
+        if (!level->chunkManager)
+          continue;
+        ChunkShutdownResult shutdown = level->chunkManager->close();
+        allComplete = allComplete && shutdown.complete;
+        allWorkersStopped = allWorkersStopped && shutdown.workerStopped;
+        totalSaved += shutdown.savedChunks.size();
+        totalUnsaved += shutdown.unsavedChunks.size();
+        if (!shutdown.fatalError.empty())
+          std::cerr << "TICKETED_WORLD_FATAL [" << level->stem.id << "] "
+                    << shutdown.fatalError << std::endl;
+        for (const ChunkShutdownIssue &issue : shutdown.unsavedChunks)
+          std::cerr << "UNSAVED_CHUNK [" << level->stem.id << "] "
+                    << issue.position.x << " " << issue.position.z
+                    << " dirty=" << issue.dirtyVersion
+                    << " saved=" << issue.savedDirtyVersion
+                    << " error=" << issue.error << std::endl;
+      }
+      std::cout << "TICKETED_WORLD_CLOSED complete=" << (allComplete ? 1 : 0)
+                << " saved=" << totalSaved << " unsaved=" << totalUnsaved
+                << " worker_stopped=" << (allWorkersStopped ? 1 : 0)
                 << " resident_installs=" << ticketedInstalls << std::endl;
-      if (!shutdown.fatalError.empty())
-        std::cerr << "TICKETED_WORLD_FATAL " << shutdown.fatalError
-                  << std::endl;
-      for (const ChunkShutdownIssue &issue : shutdown.unsavedChunks)
-        std::cerr << "UNSAVED_CHUNK " << issue.position.x << " "
-                  << issue.position.z << " dirty=" << issue.dirtyVersion
-                  << " saved=" << issue.savedDirtyVersion
-                  << " error=" << issue.error << std::endl;
-      if (!shutdown.complete)
+      if (!allComplete)
         return 1;
       // Terrain has settled under the same world lock. Metadata and tickets
       // follow as separate observable files; no cross-file crash transaction
       // is claimed.
+      WorldMetadata &meta = worldSet->metadata();
+      const std::int64_t initialTime =
+          meta.levelRoot.value.get("Data")->get("Time")->number;
       bool metadataSaved = false;
-      if (world.gameTime() != ticketedMetadata->gameTime) {
-        setWorldMetadataTime(*ticketedMetadata, world.gameTime());
-        saveWorldMetadata(ticketedWorldPath, *ticketedMetadata);
+      if (meta.gameTime != initialTime) {
+        setWorldMetadataTime(meta, meta.gameTime);
+        saveWorldMetadata(ticketedWorldPath, meta);
         metadataSaved = true;
       }
-      const bool clocksSaved = ticketedMetadata->worldClocks.saveIfDirty(
+      const bool clocksSaved = meta.worldClocks.saveIfDirty(
           ticketedWorldPath / "data" / "minecraft" / "world_clocks.dat");
-      const auto tickets = ticketedManager->ticketSources()
-                               .tickets()
-                               .storage()
-                               .persistentTickets();
-      std::vector<PersistentTicketRecord> ticketRecords;
-      ticketRecords.reserve(tickets.size());
-      for (const auto &[position, ticket] : tickets)
-        if (ticket.type().name == ticket_types::Forced.name ||
-            ticket.type().name == ticket_types::Portal.name)
-          ticketRecords.push_back({position.x, position.z,
-                                   std::string(ticket.type().name),
-                                   ticket.level(), ticket.ticksLeft()});
-      std::sort(ticketRecords.begin(), ticketRecords.end(), ticketRecordLess);
-      // Missing and empty persisted data both serialize as no tickets. Avoid
-      // materialising a new file merely because no persistent tickets exist.
-      const bool noTicketFile =
-          !std::filesystem::exists(ticketDataPath(
-              defaultRegionDirectory(ticketedWorldPath)));
       const auto sameTickets = [](const auto &left, const auto &right) {
         if (left.size() != right.size())
           return false;
@@ -1433,14 +1530,33 @@ int runServer(int argc, char **argv) {
         }
         return true;
       };
-      const auto ticketPath =
-          ticketDataPath(defaultRegionDirectory(ticketedWorldPath));
-      const bool ticketsChanged =
-          !(noTicketFile && ticketRecords.empty()) &&
-          !sameTickets(persistentTickets, ticketRecords);
-      if (ticketsChanged &&
-          (!ticketRecords.empty() || std::filesystem::exists(ticketPath))) {
-        savePersistentTickets(ticketPath, ticketRecords);
+      bool ticketsChanged = false;
+      for (const auto &level : worldSet->levels()) {
+        if (!level->chunkManager)
+          continue;
+        const auto tickets = level->chunkManager->ticketSources()
+                                 .tickets()
+                                 .storage()
+                                 .persistentTickets();
+        std::vector<PersistentTicketRecord> ticketRecords;
+        ticketRecords.reserve(tickets.size());
+        for (const auto &[position, ticket] : tickets)
+          if (ticket.type().name == ticket_types::Forced.name ||
+              ticket.type().name == ticket_types::Portal.name)
+            ticketRecords.push_back({position.x, position.z,
+                                     std::string(ticket.type().name),
+                                     ticket.level(), ticket.ticksLeft()});
+        std::sort(ticketRecords.begin(), ticketRecords.end(), ticketRecordLess);
+        const auto ticketPath = ticketDataPath(level->regionDirectory);
+        const bool noTicketFile = !std::filesystem::exists(ticketPath);
+        const bool levelChanged =
+            !(noTicketFile && ticketRecords.empty()) &&
+            !sameTickets(level->initialTickets, ticketRecords);
+        if (levelChanged &&
+            (!ticketRecords.empty() || std::filesystem::exists(ticketPath))) {
+          savePersistentTickets(ticketPath, ticketRecords);
+        }
+        ticketsChanged = ticketsChanged || levelChanged;
       }
       std::cout << "TICKETED_METADATA_SAVED metadata="
                 << (metadataSaved ? 1 : 0)

@@ -30,12 +30,23 @@ FluidPair familyOf(const Fluid &fluid) {
   return {&fluid, &fluid};
 }
 
-// FlowingFluid.getDropOff / getSlopeFindDistance / getTickDelay and
-// canConvertToSource. The per-environment differences (fast lava, gamerules) are
-// task F-4; these are the registered base values.
-int dropOff(const Fluid &fluid) { return fluid.dropOff(); }
-int slopeFindDistance(const Fluid &fluid) { return fluid.slopeFindDistance(); }
-int tickDelay(const Fluid &fluid) { return fluid.tickDelay(); }
+// FlowingFluid.getDropOff / getSlopeFindDistance / getTickDelay overridden by
+// LavaFluid when EnvironmentAttributes.FAST_LAVA is active (LavaFluid.java:149-176).
+int dropOff(const World &world, const Fluid &fluid) {
+  if (world.fastLava && fluid.isSame(Fluids::lava()))
+    return 1;
+  return fluid.dropOff();
+}
+int slopeFindDistance(const World &world, const Fluid &fluid) {
+  if (world.fastLava && fluid.isSame(Fluids::lava()))
+    return 4;
+  return fluid.slopeFindDistance();
+}
+int tickDelay(const World &world, const Fluid &fluid) {
+  if (world.fastLava && fluid.isSame(Fluids::lava()))
+    return 10;
+  return fluid.tickDelay();
+}
 
 // FlowingFluid.canHoldAnyFluid (FlowingFluid.java:410-427): a
 // LiquidBlockContainer always holds fluid whatever its collision shape says;
@@ -229,7 +240,7 @@ bool canBeReplacedWith(const FluidState &state, World &world, Pos pos,
 // random source rolls 0 (LavaFluid.java:179-191).
 int computeSpreadDelay(World &world, Pos pos, const Fluid &self,
                        const FluidState &oldState, const FluidState &newState) {
-  int result = tickDelay(self);
+  int result = tickDelay(world, self);
   if (!self.isSame(Fluids::lava()))
     return result;
   if (oldState.isEmpty() || newState.isEmpty())
@@ -269,7 +280,7 @@ class SpreadContext {
 public:
   SpreadContext(World &world, Pos origin, const Fluid &self)
       : world_(world), origin_(origin), self_(self),
-        radius_(slopeFindDistance(self) + 1) {
+        radius_(slopeFindDistance(world, self) + 1) {
     knownStates_.fill(false);
     knownHoles_.fill(false);
   }
@@ -395,7 +406,7 @@ int getSlopeDistance(World &world, const Fluid &self, Pos pos, int pass,
       continue;
     if (context.isHole(testPos))
       return pass;
-    if (pass < slopeFindDistance(self)) {
+    if (pass < slopeFindDistance(world, self)) {
       const int v = getSlopeDistance(world, self, testPos, pass + 1,
                                      opposite(direction), testState, context);
       if (v < lowest)
@@ -486,7 +497,7 @@ SpreadResult getSpread(World &world, Pos pos, const BlockState &state,
 
 void spreadToSides(World &world, Pos pos, const FluidState &state,
                    const BlockState &blockState, const Fluid &self) {
-  int neighbor = state.getAmount() - dropOff(self);
+  int neighbor = state.getAmount() - dropOff(world, self);
   if (state.isFalling())
     neighbor = 7;
   if (neighbor <= 0)
@@ -633,7 +644,7 @@ FluidState fluidNewLiquid(World &world, Pos pos, const BlockState &blockState,
       fluidCanPassThroughWall(world, Direction::Up, pos, blockState,
                               abovePos, aboveState))
     return getFlowing(self, 8, true);
-  const int amount = highestNeighbor - dropOff(self);
+  const int amount = highestNeighbor - dropOff(world, self);
   if (amount <= 0)
     return FluidState();
   return getFlowing(self, amount, false);
@@ -830,7 +841,7 @@ void requestFluidTick(World &world, Pos pos, const FluidState &fluid) {
   if (fluid.isEmpty())
     return;
   world.scheduleFluidTick(pos, FluidRef(fluid.getType()),
-                          fluid.getType().tickDelay());
+                          tickDelay(world, fluid.getType()));
 }
 } // namespace
 
@@ -869,7 +880,7 @@ bool placeLiquid(World &world, Pos pos, const BlockState &state,
   // SimpleWaterloggedBlock.java:29 schedules through the level, with the
   // incoming fluid state's own type and tick delay.
   world.scheduleFluidTick(pos, FluidRef(fluidState.getType()),
-                          fluidState.getType().tickDelay());
+                          tickDelay(world, fluidState.getType()));
   return true;
 }
 
