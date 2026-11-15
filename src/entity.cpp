@@ -1,4 +1,5 @@
 #include "redstone/entity.hpp"
+#include "redstone/containers.hpp"
 #include "redstone/shapes.hpp"
 #include <algorithm>
 #include <cmath>
@@ -8,6 +9,7 @@
 #include <random>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace redstone {
@@ -273,20 +275,82 @@ ItemStack itemStack(std::string id, int count) {
   return {canonical(std::move(id)), count};
 }
 std::string blockItem(const BlockState &state) {
-  const auto name = state.name();
-  if (name == "minecraft:air" || name == "minecraft:cave_air" ||
-      name == "minecraft:void_air" || name == "minecraft:water" ||
-      name == "minecraft:lava" || name == "minecraft:moving_piston" ||
-      name == "minecraft:piston_head")
+  const std::string_view name = state.name();
+  static constexpr std::string_view noItemBlocks[] = {
+      "minecraft:air",
+      "minecraft:attached_melon_stem",
+      "minecraft:attached_pumpkin_stem",
+      "minecraft:bamboo_sapling",
+      "minecraft:bubble_column",
+      "minecraft:candle_cake",
+      "minecraft:cave_air",
+      "minecraft:cave_vines_plant",
+      "minecraft:end_gateway",
+      "minecraft:end_portal",
+      "minecraft:fire",
+      "minecraft:frosted_ice",
+      "minecraft:kelp_plant",
+      "minecraft:lava",
+      "minecraft:melon_stem",
+      "minecraft:moving_piston",
+      "minecraft:nether_portal",
+      "minecraft:piston_head",
+      "minecraft:powder_snow",
+      "minecraft:pumpkin_stem",
+      "minecraft:soul_fire",
+      "minecraft:tall_seagrass",
+      "minecraft:twisting_vines_plant",
+      "minecraft:void_air",
+      "minecraft:water",
+      "minecraft:weeping_vines_plant",
+  };
+  if (name.starts_with("minecraft:potted_") ||
+      name.ends_with("_candle_cake") ||
+      std::find(std::begin(noItemBlocks), std::end(noItemBlocks), name) !=
+          std::end(noItemBlocks))
     return {};
-  if (isDeadCoralWallFan(state)) {
-    auto item = name;
-    auto pos = item.rfind("_wall_fan");
-    if (pos != std::string::npos)
-      item.replace(pos, 9, "_fan");
-    return item;
+
+  static constexpr std::pair<std::string_view, std::string_view> remaps[] = {
+      {"minecraft:beetroots", "minecraft:beetroot_seeds"},
+      {"minecraft:big_dripleaf_stem", "minecraft:big_dripleaf"},
+      {"minecraft:carrots", "minecraft:carrot"},
+      {"minecraft:cave_vines", "minecraft:glow_berries"},
+      {"minecraft:cocoa", "minecraft:cocoa_beans"},
+      {"minecraft:copper_wall_torch", "minecraft:copper_torch"},
+      {"minecraft:lava_cauldron", "minecraft:cauldron"},
+      {"minecraft:pitcher_crop", "minecraft:pitcher_pod"},
+      {"minecraft:potatoes", "minecraft:potato"},
+      {"minecraft:powder_snow_cauldron", "minecraft:cauldron"},
+      {"minecraft:redstone_wall_torch", "minecraft:redstone_torch"},
+      {"minecraft:redstone_wire", "minecraft:redstone"},
+      {"minecraft:soul_wall_torch", "minecraft:soul_torch"},
+      {"minecraft:sweet_berry_bush", "minecraft:sweet_berries"},
+      {"minecraft:torchflower_crop", "minecraft:torchflower_seeds"},
+      {"minecraft:tripwire", "minecraft:string"},
+      {"minecraft:wall_torch", "minecraft:torch"},
+      {"minecraft:water_cauldron", "minecraft:cauldron"},
+  };
+  for (const auto &[blockName, itemName] : remaps) {
+    if (name == blockName)
+      return std::string(itemName);
   }
-  return name;
+
+  static constexpr std::pair<std::string_view, std::string_view> wallSuffixes[] = {
+      {"_wall_hanging_sign", "_hanging_sign"},
+      {"_wall_sign", "_sign"},
+      {"_wall_banner", "_banner"},
+      {"_wall_skull", "_skull"},
+      {"_wall_head", "_head"},
+      {"_wall_fan", "_fan"},
+  };
+  for (const auto &[wallSuffix, itemSuffix] : wallSuffixes) {
+    if (name.ends_with(wallSuffix)) {
+      std::string item(name.substr(0, name.size() - wallSuffix.size()));
+      item += itemSuffix;
+      return item;
+    }
+  }
+  return std::string(name);
 }
 std::vector<ItemStack> blockDrops(const BlockState &state) {
   const auto name = state.name();
@@ -307,7 +371,11 @@ std::vector<ItemStack> blockDrops(const BlockState &state) {
                       : std::vector<ItemStack>{itemStack(item, 1)};
 }
 bool isReplaceable(const BlockState &state) {
-  return air(state) || state.is(Blocks::WATER) || state.is(Blocks::LAVA);
+  return air(state) || state.is(Blocks::WATER) || state.is(Blocks::LAVA) ||
+         state.is(Blocks::SHORT_GRASS) || state.is(Blocks::FERN) ||
+         state.is(Blocks::DEAD_BUSH) || state.is(Blocks::BUSH) ||
+         state.is(Blocks::SHORT_DRY_GRASS) || state.is(Blocks::TALL_DRY_GRASS) ||
+         state.is(Blocks::SEAGRASS) || state.is(Blocks::TALL_SEAGRASS);
 }
 bool isAirState(const BlockState &state) { return air(state); }
 
@@ -629,6 +697,8 @@ void Entity::applyEffectsFromBlocks(World &world) {
         }
         if (state.is(Blocks::DETECTOR_RAIL))
           railEntityInside(world, pos, state, *this);
+        if (state.is(Blocks::HOPPER))
+          hopperEntityInside(world, pos, state, *this);
       }
 }
 void Entity::spawnAtLocation(World &world, const ItemStack &stack) {
@@ -734,6 +804,9 @@ void ItemEntity::tick(World &world) {
     applyEffectsFromBlocks(world);
   } else {
     move(world, deltaMovement);
+    if (position.x != oldPosition.x || position.y != oldPosition.y ||
+        position.z != oldPosition.z)
+      world.wakeHopperItemWatchers(position);
     applyEffectsFromBlocks(world);
     if (isRemoved())
       return;
@@ -1219,6 +1292,8 @@ std::shared_ptr<Entity> World::addEntity(std::shared_ptr<Entity> entity) {
   entity->removalObserved_ = false;
   entities.push_back(entity);
   entitySectionAdd(*entity);
+  if (dynamic_cast<ItemEntity *>(entity.get()))
+    wakeHopperItemWatchers(entity->position);
   if (managedEntityMutationObserver)
     managedEntityMutationObserver(entity->position, entity->position,
                                   entity->uuid, false);
@@ -1311,6 +1386,8 @@ std::vector<Entity *> World::entitiesInSectionRange(int minX, int maxX, int minZ
 
 void World::synchronizeEntityAfterMove(Entity &entity, Vec3 previousPosition) {
   entitySectionUpdate(entity);
+  if (dynamic_cast<ItemEntity *>(&entity))
+    wakeHopperItemWatchers(entity.position);
   if (managedEntityMutationObserver)
     managedEntityMutationObserver(previousPosition, entity.position, entity.uuid,
                                   entity.isRemoved());

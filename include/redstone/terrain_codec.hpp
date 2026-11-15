@@ -64,6 +64,10 @@ struct DecodeOptions {
   // Fixture/debug callers may request the original DOM. Online managed loads
   // consume only the compact records and leave the root worker-owned.
   bool retainRawBlockEntities = false;
+  // Read-only offline benchmarks may decode registered 26.1 block states whose
+  // simulation behavior is not yet implemented. Production/save paths leave
+  // this false so chunks with unsupported blocks are rejected.
+  bool allowUnimplementedBlocks = false;
 };
 
 struct DecodedChunk {

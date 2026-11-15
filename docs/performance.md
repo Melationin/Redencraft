@@ -453,3 +453,39 @@ CTest **12/12 通过**（4.85 s），前后 **12 个检查点的全部指纹一�
 此前没有任何在实心介质里起爆的测试）和 `World::explosionStats` 计数。它们给出本轮最有用的一条结论：
 每 tick 约 27.9 万次"射线进入格子"，这个循环体才是 `World::explode` 的主要开销，探测次数不是瓶颈，
 继续换缓存表示不会更快。
+
+## 17. 世吞（World Eater）场景高频更新与热路径记录（2026-11-14）
+
+基于第 3/11 节同一世吞投影（`[再灰二度] 无沟V3.1双倍速防雪世吞-997.生成导出-800x83x800.litematic`，70,111 方块、2,916 强加载区块、3000 tick 实测，原始数据见 [2026-11-07 采样报告](../validation/performance/2026-11-07-server-profile.txt) 与 [访问探针记录](../validation/performance/2026-11-07-access-probe.json)），结合原版世吞常见模块（TNT 复制机、双倍速双向飞行器、扫水/扫岩浆清扫机），世吞场景下各更新路径的频度与结构特征如下：
+
+### 17.1 实测采样占比拆解（世吞 3000 tick，`13,044` 采样栈）
+
+| 更新/执行阶段 | inclusive 占比 | 主要具体方块/实体 | 说明 |
+| --- | ---: | --- | --- |
+| `World::tickEntities` | **34.21%** | `PrimedTnt::tick` (**31.06%** → `World::explode` **24.61%**)、`Minecart::tick` (**2.50%**) | TNT 轰炸产生的方块销毁、空气探测（每 tick ~27.9 万次射线进格）与连锁写块 |
+| `pistonTickBlockEntities` | **30.83%** | `MOVING_PISTON`（峰值 5,187、稳态 **1,995** 个） | 移动方块实体逐 tick 推进、碰撞挤推（`moveCollidedEntities` 4.77%）与到位写回（`finalTick` 4.24%） |
+| `World::runEvents` | **27.78%** | `pistonBlockEvent` (**27.48%** → `moveBlocks` 17.03%) | 世吞飞行器主推拉链几乎全部经由活塞方块事件完成 |
+| `World::executeNeighbor` | **13.64%** | `pistonNeighborChanged` (**11.15%** → `powered`/`getSignal` 11.05%) | 在所有邻居更新开销中，活塞自检充能占绝对大头 |
+| `World::runScheduled` | **6.44%** | `OBSERVER`（`observerNotify` **4.88%**) | 飞行器高频脉冲与移动活塞到位后触发大量 2 tick 侦测器计划刻与反向通知 |
+| `World::updateShapeState` | **2.96%** | 空气、侦测器背面、活塞头、扫水/清扫层流体与附着方块 | 占比显著低于 `neighborChanged` 与活塞事件；绝大多数邻格为空气或非反应固体块（粘液块、蜂蜜块、琉璃等） |
+
+另外，3000 tick 全程共触发 `chunkAtCached` **829,823,066 次**、`getBlock` **723,717,136 次**；64 项区块缓存命中率 **99.7159%**。
+
+### 17.2 对照分类：哪些适合“高频 `if/else` 热路径”，哪些适合“`Block` 函数指针”
+
+结合上表与 [BlockBehaviours](../include/redstone/block.hpp)（`src/engine.cpp` / `src/random_tick.cpp`）的实现结构：
+
+1. **必须走高频 `if/else` 快速路径的类别**（每 tick 触发量级从数万到数十万次，或空过率极高）：
+   - **空气（`state.isAir()`）**：TNT 爆炸边缘、移动活塞周围 6 向邻居/形状通知中占比最高，收到任何回调第一时间直接 `return`。
+   - **活塞（`piston(state)`：`PISTON` / `STICKY_PISTON`）**：`executeNeighbor`（占采样 11.15% / 13.64%）、`onPlace`、`triggerEvent` 的主热区。
+   - **流体（`isLiquidBlock(state)`：水 / 岩浆）**：世吞清扫模块（Sweeper）推进时持续接触或排除地下河/岩浆湖，高频触发 `onPlace` / `updateShape` / `neighborChanged` 与 `fluidTicks`。
+   - **含水宿主与下落方块标记（`isWaterloggedHost()` / `isFalling()`）**：结构上常与具体方块回调（如墙/树叶/半砖）正交叠加，放在 `updateShapeState` / `onPlace` 前置布尔位检查（O(1) 位掩码）可避免每个方块处理器重复写含水与沙砾调度。
+   - **铁轨（`isRailBlock(state)`）**：TNT 复制机内探测铁轨 / 充能铁轨每周期反复被活塞移动、卸载与充能，涵盖 `onPlace`、`affectNeighborsAfterRemoval`、`neighborChanged`、`tick`。
+   - **非随机刻状态筛选（`!stateIsRandomlyTicking(*this)`）**：世吞区块遍历采样时，超过九成固体结构块（粘液块、蜂蜜块、带釉陶瓦、黑曜石、空气等）无需任何随机刻逻辑，前缀布尔判断直接跳过函数指针调用。
+
+2. **适合挂载在 `Block::behaviours_` 函数指针表上的类别**（与 `BlockBehaviour` 虚表对齐，避免主循环积累上千分支）：
+   - 虽单类实例也较常见（如 `OBSERVER` 占计划刻主力、`TNT`、`PISTON_HEAD`），但在全量 **1,168 个方块**视角下属于各具体方块自身的专有规则，以及地毯、墙、栅栏门、植被、红石灯、音符盒、门/活板门/按钮/中继器/比较器等大量非全局热路径方块；统一走 `Block` 上的一次函数指针间接调用即可，既贴合原版面向对象结构，也不污染热路径分支预测。
+
+### 17.3 工程提醒
+
+- 本仓库尚未实现基于游戏内真实世界清扫/TNT 复制机全周期的 **26.1 在线差分回归**，上表占比来自现有 `2026-11-07` 世吞投影无网络基准采样；若后续接入**扫水/扫岩浆清扫机**或全量火/流体交互的投影，流体与 `updateShapeState` 的相对占比会上升，届时应重跑基准与采样再复核。

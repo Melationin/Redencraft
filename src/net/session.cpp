@@ -1,5 +1,7 @@
 #include "redstone/net/session.hpp"
+#include "redstone/fluid_flow.hpp"
 #include "redstone/piston.hpp"
+#include "redstone/redstone.hpp"
 #include "redstone/shapes.hpp"
 #include "redstone/storage.hpp"
 #include <algorithm>
@@ -16,6 +18,61 @@
 
 namespace redstone::net {
 namespace {
+bool isBucketItem(std::string_view name) {
+  return name == "minecraft:bucket" || name == "minecraft:water_bucket" ||
+         name == "minecraft:lava_bucket";
+}
+std::string_view placementBlockNameForItem(std::string_view itemName) {
+  if (itemName == "minecraft:redstone")
+    return "minecraft:redstone_wire";
+  return itemName;
+}
+bool canReplaceForPlacement(const BlockState &state, const ItemStack &held,
+                            double hitY, Direction face,
+                            bool replacingClickedOnBlock) {
+  if (state.block().isSlab()) {
+    if (state.getView("type") == "double" || held.id != state.block().name())
+      return false;
+    if (!replacingClickedOnBlock)
+      return true;
+    const bool above = hitY > 0.5;
+    const bool bottomSlab = state.getView("type") == "bottom";
+    const bool horizontal = face == Direction::North ||
+                            face == Direction::South ||
+                            face == Direction::East || face == Direction::West;
+    return bottomSlab ? (face == Direction::Up || (above && horizontal))
+                      : (face == Direction::Down || (!above && horizontal));
+  }
+  return isReplaceable(state);
+}
+bool isAxe(std::string_view name) {
+  return name == "minecraft:wooden_axe" || name == "minecraft:copper_axe" ||
+         name == "minecraft:stone_axe" || name == "minecraft:golden_axe" ||
+         name == "minecraft:iron_axe" || name == "minecraft:diamond_axe" ||
+         name == "minecraft:netherite_axe";
+}
+const Block *strippedLog(const BlockState &state) {
+  if (state.is(Blocks::OAK_LOG)) return &Blocks::STRIPPED_OAK_LOG;
+  if (state.is(Blocks::SPRUCE_LOG)) return &Blocks::STRIPPED_SPRUCE_LOG;
+  if (state.is(Blocks::BIRCH_LOG)) return &Blocks::STRIPPED_BIRCH_LOG;
+  if (state.is(Blocks::JUNGLE_LOG)) return &Blocks::STRIPPED_JUNGLE_LOG;
+  if (state.is(Blocks::ACACIA_LOG)) return &Blocks::STRIPPED_ACACIA_LOG;
+  if (state.is(Blocks::CHERRY_LOG)) return &Blocks::STRIPPED_CHERRY_LOG;
+  if (state.is(Blocks::DARK_OAK_LOG)) return &Blocks::STRIPPED_DARK_OAK_LOG;
+  if (state.is(Blocks::PALE_OAK_LOG)) return &Blocks::STRIPPED_PALE_OAK_LOG;
+  if (state.is(Blocks::MANGROVE_LOG)) return &Blocks::STRIPPED_MANGROVE_LOG;
+  if (state.is(Blocks::BAMBOO_BLOCK)) return &Blocks::STRIPPED_BAMBOO_BLOCK;
+  if (state.is(Blocks::OAK_WOOD)) return &Blocks::STRIPPED_OAK_WOOD;
+  if (state.is(Blocks::SPRUCE_WOOD)) return &Blocks::STRIPPED_SPRUCE_WOOD;
+  if (state.is(Blocks::BIRCH_WOOD)) return &Blocks::STRIPPED_BIRCH_WOOD;
+  if (state.is(Blocks::JUNGLE_WOOD)) return &Blocks::STRIPPED_JUNGLE_WOOD;
+  if (state.is(Blocks::ACACIA_WOOD)) return &Blocks::STRIPPED_ACACIA_WOOD;
+  if (state.is(Blocks::CHERRY_WOOD)) return &Blocks::STRIPPED_CHERRY_WOOD;
+  if (state.is(Blocks::DARK_OAK_WOOD)) return &Blocks::STRIPPED_DARK_OAK_WOOD;
+  if (state.is(Blocks::PALE_OAK_WOOD)) return &Blocks::STRIPPED_PALE_OAK_WOOD;
+  if (state.is(Blocks::MANGROVE_WOOD)) return &Blocks::STRIPPED_MANGROVE_WOOD;
+  return nullptr;
+}
 std::string key(std::string_view phase, std::string_view flow,
                 std::string_view name) {
   return std::string(phase) + "/" + std::string(flow) +
@@ -217,6 +274,55 @@ void lpVector(Writer &out, Vec3 value) {
   out.i32(static_cast<std::int32_t>(bits >> 16));
   if (partial)
     out.varInt(static_cast<std::int32_t>(scale >> 2));
+}
+
+// Keep all non-block registry tags from the original 26.1 packet. Replace the
+// block registry's payload using IDs from blocks.tsv, never local IDs.
+Bytes replaceBlockTagPacket(const Bytes &original, const ProtocolData &data,
+                            const BlockTagRegistry &tags, int packetId) {
+  auto copy = original;
+  auto body = popFrame(copy);
+  if (!body || !copy.empty()) throw ProtocolError("invalid update_tags frame");
+  Reader in(*body);
+  (void)in.varInt();
+  const int count = in.varInt();
+  if (count < 0 || count > 10000) throw ProtocolError("invalid tag registry count");
+  std::vector<Bytes> other;
+  bool foundBlock = false;
+  for (int i = 0; i < count; ++i) {
+    const auto start = in.pos;
+    const auto registry = in.string();
+    const int tagCount = in.varInt();
+    if (tagCount < 0 || tagCount > 100000) throw ProtocolError("invalid tag count");
+    for (int t = 0; t < tagCount; ++t) {
+      (void)in.string();
+      const int members = in.varInt();
+      if (members < 0 || members > 100000) throw ProtocolError("invalid tag member count");
+      for (int j = 0; j < members; ++j) (void)in.varInt();
+    }
+    if (registry == "minecraft:block") {
+      if (foundBlock) throw ProtocolError("duplicate block tag registry");
+      foundBlock = true;
+    } else {
+      other.emplace_back(body->begin() + start, body->begin() + in.pos);
+    }
+  }
+  if (!in.empty()) throw ProtocolError("trailing update_tags payload");
+  Writer out;
+  out.varInt(static_cast<int>(other.size()) + 1);
+  for (const auto &entry : other) out.raw(entry);
+  out.string("minecraft:block");
+  out.varInt(static_cast<int>(tags.entries().size()));
+  for (const auto &[name, members] : tags.entries()) {
+    out.string(name);
+    out.varInt(static_cast<int>(members.size()));
+    for (const auto &member : members) {
+      const auto found = data.blockIds.find(member);
+      if (found == data.blockIds.end()) throw ProtocolError("unknown block in tag: " + member);
+      out.varInt(found->second);
+    }
+  }
+  return frame(packetId, out.data);
 }
 } // namespace
 
@@ -523,6 +629,7 @@ std::vector<Bytes> Session::takeOutput() {
 void Session::disconnect(const std::string &reason) {
   if (closed())
     return;
+  closeOpenContainer(false);
   error_ = reason;
   Writer payload;
   if (phase_ == Phase::Login) {
@@ -622,8 +729,18 @@ void Session::handle(Reader &in) {
       if (!awaitingKnownPacks_ || in.varInt() != 0 || !in.empty())
         throw ProtocolError("bad known packs reply");
       awaitingKnownPacks_ = false;
-      for (const auto &bytes : data_.configuration)
-        queue(bytes);
+      for (const auto &bytes : data_.configuration) {
+        auto copy = bytes;
+        const auto body = popFrame(copy);
+        if (!body) throw ProtocolError("invalid configuration frame");
+        Reader packet(*body);
+        const int packetId = packet.varInt();
+        if (world_.customBlockTags() && packetId == data_.packet("configuration", "clientbound", "update_tags"))
+          queue(replaceBlockTagPacket(bytes, data_, *world_.customBlockTags(), packetId));
+        else
+          queue(bytes);
+      }
+      configuredBlockTagRevision_ = world_.blockTagRevision();
       send("finish_configuration");
       finishSent_ = true;
     } else if (id == 3) {
@@ -632,6 +749,8 @@ void Session::handle(Reader &in) {
       phase_ = Phase::Play;
       syncManagedResidency();
       join();
+      if (configuredBlockTagRevision_ != world_.blockTagRevision())
+        sendBlockTagUpdate();
     } else if (id != 0 && id != 2 && id != 5)
       throw ProtocolError("unsupported configuration packet");
     // Client information, brand payload and optional pong need no world state.
@@ -923,7 +1042,11 @@ void Session::creativeSlot(Reader &in) {
     // TODO: custom block-state/item components require a real item component
     // model. Reject rather than silently losing their placement semantics.
     if (added || removed ||
-        (!isSupportedBlock(item.id) && item.id != "minecraft:minecart")) {
+        (!isSupportedBlock(std::string(placementBlockNameForItem(item.id))) &&
+         item.id != "minecraft:minecart" && !isAxe(item.id) &&
+         !isBucketItem(item.id) && !isCompostableItem(item.id) &&
+         item.id != "minecraft:bone_meal" &&
+         item.id != "minecraft:flint_and_steel")) {
       item = {};
       if (diagnostic)
         diagnostic("TODO: unsupported creative item or custom components");
@@ -1006,8 +1129,10 @@ void Session::useItemOn(Reader &in) {
     throw ProtocolError("invalid block hit");
   const Direction face = static_cast<Direction>(faceId);
   const auto old = world_.getBlock(clicked);
-  const Pos target = isReplaceable(old) ? clicked : clicked.relative(face);
   const auto held = inventory_[hand ? 40 : selectedSlot_];
+  const bool clickedReplaceable =
+      canReplaceForPlacement(old, held, hitY, face, true);
+  const Pos target = clickedReplaceable ? clicked : clicked.relative(face);
   if (canInteract(clicked) && !sneaking_ && isFenceGate(old)) {
     auto next = old;
     if (old.getView("open", "false") == "true") {
@@ -1028,6 +1153,48 @@ void Session::useItemOn(Reader &in) {
     world_.setBlock(clicked, tuned, 3);
     if (isAirState(world_.getBlock(clicked.relative(Direction::Up))))
       world_.blockEvent(clicked, old.name(), 0, 0);
+  } else if (canInteract(clicked) && !sneaking_ &&
+             old.is(Blocks::REDSTONE_WIRE) &&
+             redstoneWireUse(world_, clicked, old)) {
+  } else if (canInteract(clicked) && !sneaking_ &&
+             old.is(Blocks::REPEATER)) {
+    repeaterUse(world_, clicked, old);
+  } else if (canInteract(clicked) && !sneaking_ &&
+             old.is(Blocks::COMPARATOR)) {
+    comparatorUse(world_, clicked, old);
+  } else if (canInteract(clicked) && !sneaking_ &&
+             old.is(Blocks::LEVER)) {
+    leverUse(world_, clicked, old);
+  } else if (canInteract(clicked) && !sneaking_ &&
+             old.block().isButton()) {
+    buttonUse(world_, clicked, old);
+  } else if (canInteract(clicked) && !sneaking_ &&
+             old.is(Blocks::COMPOSTER)) {
+    const int level = std::stoi(std::string(old.getView("level", "0")));
+    if (level == 8) {
+      world_.setBlock(clicked, old.with("level", "0"), 3);
+      world_.spawnItemAt(
+          {clicked.x + 0.5, clicked.y + 1.01, clicked.z + 0.5},
+          "minecraft:bone_meal", 1);
+    } else if (level < 7 && !held.empty() && isCompostableItem(held.id)) {
+      const float chance = composterChance(held.id);
+      if ((level == 0 && chance > 0.0f) || world_.random.nextDouble() < chance) {
+        const int nextLevel = level + 1;
+        world_.setBlock(
+            clicked, old.with("level", std::to_string(nextLevel)), 3);
+        if (nextLevel == 7)
+          world_.scheduleTick(clicked, Blocks::COMPOSTER, 20);
+      }
+    }
+  } else if (canInteract(clicked) && !sneaking_ &&
+             containerKindForState(old).has_value()) {
+    openContainerScreen(clicked, old);
+  } else if (canInteract(clicked) && isAxe(held.id) && strippedLog(old)) {
+    // AxeItem.getStripped retains the source axis; this endpoint is creative.
+    const auto stripped = strippedLog(old)->defaultState().with(
+        "axis", old.getView("axis"));
+    world_.setBlock(clicked, stripped, 11);
+    // TODO: axe sound, block-change game event and advancement criterion.
   } else if (canInteract(clicked) && !held.empty() &&
              held.id == "minecraft:minecart") {
     if (isRailBlock(old)) {
@@ -1035,13 +1202,79 @@ void Session::useItemOn(Reader &in) {
       world_.spawnMinecart(
           {clicked.x + 0.5, clicked.y + 0.0625 + raised, clicked.z + 0.5});
     }
-  } else if (canInteract(clicked) && canInteract(target) &&
-             isReplaceable(world_.getBlock(target)) && !held.empty()) {
-    if (isSupportedBlock(held.id) && held.id != "minecraft:air" &&
-        held.id != "minecraft:water" && held.id != "minecraft:lava") {
-      auto state = defaultState(held.id);
+  } else if (canInteract(clicked) && !held.empty() && isBucketItem(held.id)) {
+    // BucketItem uses server-side raycast on use_item, not block placement.
+  } else if (canInteract(clicked) && canInteract(target) && !held.empty() &&
+             canReplaceForPlacement(world_.getBlock(target), held, hitY, face,
+                                    clickedReplaceable)) {
+    const std::string placeBlockId(placementBlockNameForItem(held.id));
+    if (isSupportedBlock(placeBlockId) && placeBlockId != "minecraft:air" &&
+        placeBlockId != "minecraft:water" && placeBlockId != "minecraft:lava") {
+      auto state = defaultState(placeBlockId);
       bool valid = true;
-      if (isDeadCoralFan(state)) {
+      bool isDoubleSlab = false;
+      if (state.is(Blocks::REDSTONE_WIRE)) {
+        state = redstoneWirePlacementState(world_, target);
+        valid = redstoneWireCanSurvive(world_, target);
+      } else if (state.is(Blocks::REDSTONE_TORCH)) {
+        auto directions = lookingDirections(yaw_, pitch_);
+        if (target != clicked) {
+          auto it =
+              std::find(directions.begin(), directions.end(), opposite(face));
+          std::rotate(directions.begin(), it, it + 1);
+        }
+        valid = false;
+        for (Direction d : directions) {
+          if (d == Direction::Up)
+            continue;
+          if (d == Direction::Down) {
+            if (redstoneTorchCanSurvive(world_, target)) {
+              state = Blocks::REDSTONE_TORCH.defaultState();
+              valid = true;
+              break;
+            }
+          } else {
+            const Direction facing = opposite(d);
+            if (redstoneWallTorchCanSurvive(world_, target, facing)) {
+              state = Blocks::REDSTONE_WALL_TORCH.defaultState().with(
+                  "facing", directionName(facing));
+              valid = true;
+              break;
+            }
+          }
+        }
+      } else if (state.is(Blocks::LEVER) || state.block().isButton()) {
+        auto directions = lookingDirections(yaw_, pitch_);
+        if (target != clicked) {
+          auto it =
+              std::find(directions.begin(), directions.end(), opposite(face));
+          std::rotate(directions.begin(), it, it + 1);
+        }
+        valid = false;
+        const auto base = state;
+        for (Direction d : directions) {
+          BlockState candidate;
+          if (d == Direction::Up || d == Direction::Down) {
+            candidate =
+                base.with("face", d == Direction::Up ? "ceiling" : "floor")
+                    .with("facing", directionName(horizontal(yaw_)));
+          } else {
+            candidate = base.with("face", "wall")
+                            .with("facing", directionName(opposite(d)));
+          }
+          if (leverCanAttach(world_, target, candidate)) {
+            state = candidate;
+            valid = true;
+            break;
+          }
+        }
+      } else if (state.is(Blocks::REPEATER)) {
+        state = repeaterPlacementState(world_, target, horizontal(yaw_));
+        valid = diodeCanSurvive(world_, target);
+      } else if (state.is(Blocks::COMPARATOR)) {
+        state = comparatorPlacementState(horizontal(yaw_));
+        valid = diodeCanSurvive(world_, target);
+      } else if (isDeadCoralFan(state)) {
         auto directions = lookingDirections(yaw_, pitch_);
         // BlockPlaceContext prioritizes the clicked face only when placing
         // adjacent to a non-replaceable clicked block.
@@ -1071,18 +1304,59 @@ void Session::useItemOn(Reader &in) {
             break;
           }
         }
+      } else if (state.block().isSlab()) {
+        const auto existing = world_.getBlock(target);
+        if (existing.is(state.block())) {
+          // SlabBlock.getStateForPlacement: merging into a single slab drops
+          // waterlogging (double slabs cannot be waterlogged).
+          state = existing.with("type", "double").with("waterlogged", "false");
+          isDoubleSlab = true;
+        } else {
+          const bool top =
+              face == Direction::Down ||
+              (face != Direction::Up && static_cast<double>(hitY) > 0.5);
+          state = state.with("type", top ? "top" : "bottom");
+        }
+      } else if (state.block().isStairs()) {
+        const bool top =
+            face == Direction::Down ||
+            (face != Direction::Up && static_cast<double>(hitY) > 0.5);
+        state = state.with("facing", directionName(horizontal(yaw_)))
+                     .with("half", top ? "top" : "bottom");
       } else if (isFenceGate(state)) {
         const bool powered = world_.hasNeighborSignal(target);
         state = state.with("facing", directionName(horizontal(yaw_)))
                      .with("open", powered ? "true" : "false")
                      .with("powered", powered ? "true" : "false");
         state = world_.updateFromNeighbourShapes(target, state);
+      } else if (state.block().isRotatedPillar()) {
+        // RotatedPillarBlock.getStateForPlacement uses the clicked face axis.
+        state = state.with("axis", face == Direction::Up || face == Direction::Down
+                                       ? "y"
+                                       : face == Direction::East || face == Direction::West
+                                             ? "x" : "z");
+      } else if (isAnyChestBlock(state)) {
+        state = chestPlacementState(world_, target, state, horizontal(yaw_),
+                                    face, sneaking_);
+      } else if (state.is(Blocks::BARREL)) {
+        state = barrelPlacementState(state, lookingDirections(yaw_, pitch_)[0]);
+      } else if (state.is(Blocks::DISPENSER) || state.is(Blocks::DROPPER)) {
+        state =
+            dispenserPlacementState(state, lookingDirections(yaw_, pitch_)[0]);
+      } else if (state.is(Blocks::HOPPER)) {
+        state = hopperPlacementState(world_, target, state, face);
       } else if (state.hasProperty("facing")) {
-        const auto look = lookingDirections(yaw_, pitch_)[0];
-        state = state.with("facing",
-                           directionName(state.is(Blocks::OBSERVER)
-                                             ? look
-                                             : opposite(look)));
+        const auto dir3d = lookingDirections(yaw_, pitch_)[0];
+        const auto candidate =
+            state.is(Blocks::OBSERVER) ? dir3d : opposite(dir3d);
+        const auto *facingProp = state.block().stateDefinition().find("facing");
+        std::uint32_t idx = 0;
+        const auto finalDir =
+            (facingProp && facingProp->indexOf(directionName(candidate), idx))
+                ? candidate
+                : (state.is(Blocks::OBSERVER) ? horizontal(yaw_)
+                                              : opposite(horizontal(yaw_)));
+        state = state.with("facing", directionName(finalDir));
       } else if (isRailBlock(state)) {
         const auto look = horizontal(yaw_);
         state = state.with("shape",
@@ -1090,13 +1364,27 @@ void Session::useItemOn(Reader &in) {
                                ? "east_west"
                                : "north_south");
       }
+      if (state.block().isPressurePlate())
+        valid = pressurePlateCanSurvive(world_, target);
+      if (isWoolCarpet(state))
+        valid = !isAirState(world_.getBlock(target.relative(Direction::Down)));
+      if (isRailBlock(state))
+        valid = railCanSurvive(world_, target, state);
+      // getStateForPlacement initializes these neighbor-derived properties.
+      // Do not call observer.updateShape speculatively: it schedules a pulse
+      // before the observer even exists in the world.
+      if (isWallBlock(state) || state.block().isStairs() ||
+          state.block().isFence() || isIronBarsBlock(state) ||
+          state.is(Blocks::GRASS_BLOCK) || state.is(Blocks::MYCELIUM) ||
+          state.is(Blocks::PODZOL) || state.is(Blocks::NOTE_BLOCK))
+        state = world_.updateFromNeighbourShapes(target, state);
       // H-01: getStateForPlacement reads the fluid of the cell being replaced,
       // and the two host families ask different questions. BaseRailBlock
       // .java:139-147 and WallBlock.java:112-131 test the exact WATER source;
       // BaseCoralPlantTypeBlock.java:57-62 (inherited by BaseCoralWallFanBlock)
       // tests FluidTags.WATER plus isFull(), so a falling water[level=8] still
       // waterlogs the fan. A full water source lands waterlogged either way.
-      if (state.hasProperty("waterlogged")) {
+      if (state.hasProperty("waterlogged") && !isDoubleSlab) {
         // BlockPlaceContext.getClickedPos() is the CELL BEING REPLACED, which
         // is `target`, not the face that was clicked on (BlockPlaceContext
         // .java:48-51). Water is replaceable, so the two coincide exactly for
@@ -1109,16 +1397,6 @@ void Session::useItemOn(Reader &in) {
                 : replacedFluid.is(Fluids::water());
         state = state.with("waterlogged", wet ? "true" : "false");
       }
-      if (isWoolCarpet(state))
-        valid = !isAirState(world_.getBlock(target.relative(Direction::Down)));
-      if (isRailBlock(state))
-        valid = railCanSurvive(world_, target, state);
-      // getStateForPlacement initializes these neighbor-derived properties.
-      // Do not call observer.updateShape speculatively: it schedules a pulse
-      // before the observer even exists in the world.
-      if (isWallBlock(state) || state.is(Blocks::GRASS_BLOCK) ||
-          state.is(Blocks::NOTE_BLOCK))
-        state = world_.updateFromNeighbourShapes(target, state);
       if (state.is(Blocks::REDSTONE_LAMP))
         state = state.with("lit",
                            world_.hasNeighborSignal(target) ? "true" : "false");
@@ -1138,8 +1416,11 @@ void Session::useItemOn(Reader &in) {
                 entity->typeName() == "minecraft:minecart")
               valid = false;
         }
-        if (valid && !isAirState(state))
+        if (valid && !isAirState(state)) {
           world_.setBlock(target, state, 11);
+          if (state.is(Blocks::REPEATER) || state.is(Blocks::COMPARATOR))
+            diodeSetPlacedBy(world_, target, state);
+        }
       }
       // TODO: other players' placement collision, exact Mth trigonometric
       // lookup ties, replaceable-by-item predicates, skull note overrides and
@@ -1150,6 +1431,650 @@ void Session::useItemOn(Reader &in) {
   sendBlockUpdate(clicked);
   sendBlockUpdate(target);
   acknowledge(sequence);
+}
+
+namespace {
+struct PovHit {
+  bool hit = false;
+  Pos pos{};
+  Direction face = Direction::Up;
+};
+
+void clipAabb(double minX, double minY, double minZ, double maxX, double maxY,
+              double maxZ, Vec3 from, double dx, double dy, double dz,
+              double &scale, std::optional<Direction> &dir) {
+  auto clipPoint = [&](double da, double db, double dc, double point,
+                       double minB, double maxB, double minC, double maxC,
+                       Direction newDir, double fromA, double fromB,
+                       double fromC) {
+    const double s = (point - fromA) / da;
+    const double pb = fromB + s * db;
+    const double pc = fromC + s * dc;
+    if (0.0 < s && s < scale && minB - 1.0e-7 < pb && pb < maxB + 1.0e-7 &&
+        minC - 1.0e-7 < pc && pc < maxC + 1.0e-7) {
+      scale = s;
+      dir = newDir;
+    }
+  };
+  if (dx > 1.0e-7)
+    clipPoint(dx, dy, dz, minX, minY, maxY, minZ, maxZ, Direction::West, from.x,
+              from.y, from.z);
+  else if (dx < -1.0e-7)
+    clipPoint(dx, dy, dz, maxX, minY, maxY, minZ, maxZ, Direction::East, from.x,
+              from.y, from.z);
+  if (dy > 1.0e-7)
+    clipPoint(dy, dz, dx, minY, minZ, maxZ, minX, maxX, Direction::Down, from.y,
+              from.z, from.x);
+  else if (dy < -1.0e-7)
+    clipPoint(dy, dz, dx, maxY, minZ, maxZ, minX, maxX, Direction::Up, from.y,
+              from.z, from.x);
+  if (dz > 1.0e-7)
+    clipPoint(dz, dx, dy, minZ, minX, maxX, minY, maxY, Direction::North,
+              from.z, from.x, from.y);
+  else if (dz < -1.0e-7)
+    clipPoint(dz, dx, dy, maxZ, minX, maxX, minY, maxY, Direction::South,
+              from.z, from.x, from.y);
+}
+
+PovHit povRaycast(World &world, Vec3 from, Vec3 to, bool sourceFluids,
+                  const std::function<bool(Pos)> &canVisit) {
+  const double totalDx = to.x - from.x;
+  const double totalDy = to.y - from.y;
+  const double totalDz = to.z - from.z;
+  if (totalDx * totalDx + totalDy * totalDy + totalDz * totalDz < 1.0e-12)
+    return {};
+  const auto testCell = [&](Pos pos) -> PovHit {
+    if (!canVisit(pos))
+      return {};
+    const BlockState state = world.getBlock(pos);
+    double bestScale = 1.0;
+    std::optional<Direction> bestDir;
+    for (const ShapeBox &b : outlineShape(state)) {
+      clipAabb(pos.x + b.x0 / 16.0, pos.y + b.y0 / 16.0, pos.z + b.z0 / 16.0,
+               pos.x + b.x1 / 16.0, pos.y + b.y1 / 16.0, pos.z + b.z1 / 16.0,
+               from, totalDx, totalDy, totalDz, bestScale, bestDir);
+    }
+    if (sourceFluids) {
+      const FluidState fluid = fluidStateOf(state);
+      if (!fluid.isEmpty() && fluid.isSource()) {
+        const float height = fluidHeight(world, pos, fluid);
+        clipAabb(pos.x, pos.y, pos.z, pos.x + 1.0, pos.y + height, pos.z + 1.0,
+                 from, totalDx, totalDy, totalDz, bestScale, bestDir);
+      }
+    }
+    if (bestDir)
+      return {true, pos, *bestDir};
+    return {};
+  };
+
+  // BlockGetter.traverseBlocks (BlockGetter.java:119-167).
+  const double toX = to.x - (-1.0e-7) * totalDx;
+  const double toY = to.y - (-1.0e-7) * totalDy;
+  const double toZ = to.z - (-1.0e-7) * totalDz;
+  const double fromX = from.x + (-1.0e-7) * totalDx;
+  const double fromY = from.y + (-1.0e-7) * totalDy;
+  const double fromZ = from.z + (-1.0e-7) * totalDz;
+  int cx = static_cast<int>(std::floor(fromX));
+  int cy = static_cast<int>(std::floor(fromY));
+  int cz = static_cast<int>(std::floor(fromZ));
+  if (auto hit = testCell({cx, cy, cz}); hit.hit)
+    return hit;
+
+  const double dx = toX - fromX, dy = toY - fromY, dz = toZ - fromZ;
+  const auto sign = [](double v) { return (v > 0.0) - (v < 0.0); };
+  const auto frac = [](double v) { return v - std::floor(v); };
+  const int sx = sign(dx), sy = sign(dy), sz = sign(dz);
+  const double tDeltaX = sx == 0 ? 1.0e30 : sx / dx;
+  const double tDeltaY = sy == 0 ? 1.0e30 : sy / dy;
+  const double tDeltaZ = sz == 0 ? 1.0e30 : sz / dz;
+  double tX = tDeltaX * (sx > 0 ? 1.0 - frac(fromX) : frac(fromX));
+  double tY = tDeltaY * (sy > 0 ? 1.0 - frac(fromY) : frac(fromY));
+  double tZ = tDeltaZ * (sz > 0 ? 1.0 - frac(fromZ) : frac(fromZ));
+
+  for (int step = 0; step < 64 && (tX <= 1.0 || tY <= 1.0 || tZ <= 1.0); ++step) {
+    if (tX < tY) {
+      if (tX < tZ) {
+        cx += sx;
+        tX += tDeltaX;
+      } else {
+        cz += sz;
+        tZ += tDeltaZ;
+      }
+    } else if (tY < tZ) {
+      cy += sy;
+      tY += tDeltaY;
+    } else {
+      cz += sz;
+      tZ += tDeltaZ;
+    }
+    if (auto hit = testCell({cx, cy, cz}); hit.hit)
+      return hit;
+  }
+  return {};
+}
+} // namespace
+
+void Session::useItem(Reader &in) {
+  const int hand = in.varInt();
+  const int sequence = in.varInt();
+  const float yaw = in.f32();
+  const float pitch = in.f32();
+  if (hand < 0 || hand > 1 || sequence < 0 || !in.empty() ||
+      !std::isfinite(yaw) || !std::isfinite(pitch))
+    throw ProtocolError("invalid item use");
+  yaw_ = yaw;
+  pitch_ = pitch;
+  const auto held = inventory_[hand ? 40 : selectedSlot_];
+  if (isBucketItem(held.id)) {
+    const double yawRad = -yaw_ * (std::numbers::pi / 180.0);
+    const double pitchRad = pitch_ * (std::numbers::pi / 180.0);
+    const double cosPitch = std::cos(pitchRad);
+    const Vec3 view{std::sin(yawRad) * cosPitch, -std::sin(pitchRad),
+                    std::cos(yawRad) * cosPitch};
+    const Vec3 eye = position_ + Vec3{0, sneaking_ ? 1.27 : 1.62, 0};
+    // Player creative blockInteractionRange = 4.5 + 0.5 = 5.0.
+    const Vec3 to = eye + view * 5.0;
+    const auto hit = povRaycast(
+        world_, eye, to, held.id == "minecraft:bucket",
+        [&](Pos p) { return world_.isLoaded(p) && hasChunk(p); });
+    if (hit.hit && canInteract(hit.pos)) {
+      if (held.id == "minecraft:bucket") {
+        const BlockState state = world_.getBlock(hit.pos);
+        std::string taken;
+        if (state.block().isLiquidContainer() && state.block().isWaterloggedHost() &&
+            waterloggedOf(state)) {
+          world_.setBlock(hit.pos,
+                          state.with(PropertyKind::Waterlogged, std::uint8_t{0}),
+                          3);
+          taken = "minecraft:water_bucket";
+        } else if (isLiquidBlock(state)) {
+          const FluidState fluid = fluidStateOf(state);
+          if (fluid.isSource() && !fluid.isEmpty()) {
+            taken = fluid.is(Fluids::lava()) ? "minecraft:lava_bucket"
+                                              : "minecraft:water_bucket";
+            world_.setBlock(hit.pos, airState(), 11);
+          }
+        }
+        if (!taken.empty()) {
+          bool present = inventory_[40].id == taken;
+          for (int i = 0; i <= 35 && !present; ++i)
+            present = inventory_[i].id == taken;
+          if (!present) {
+            for (int i = 0; i <= 35; ++i) {
+              if (inventory_[i].empty()) {
+                setSlot(i, itemStack(taken));
+                break;
+              }
+            }
+          }
+          sendBlockUpdate(hit.pos);
+        }
+      } else {
+        const bool isWater = held.id == "minecraft:water_bucket";
+        const BlockState clickedState = world_.getBlock(hit.pos);
+        const Pos initialPos = (isWater && clickedState.block().isLiquidContainer())
+                                   ? hit.pos
+                                   : hit.pos.relative(hit.face);
+        const auto tryEmpty = [&](auto &self, Pos p, bool allowFallback) -> bool {
+          if (!canInteract(p))
+            return false;
+          const BlockState s = world_.getBlock(p);
+          const bool mayReplace = isReplaceable(s) || !blocksMotion(s);
+          const bool canContainer =
+              isWater && s.block().isLiquidContainer() &&
+              canPlaceLiquid(s, Fluids::water());
+          const bool canInside =
+              s.isAir() || ((mayReplace || canContainer) && (!sneaking_ || !allowFallback));
+          if (!canInside)
+            return allowFallback && self(self, hit.pos.relative(hit.face), false);
+          if (isWater && s.block().isLiquidContainer() &&
+              s.block().isWaterloggedHost()) {
+            placeLiquid(world_, p, s, fluidStateOf(defaultState("water")));
+            sendBlockUpdate(p);
+            return true;
+          }
+          if (!s.isAir() && mayReplace && !isLiquidBlock(s))
+            world_.updateOrDestroy(p, s, airState(), 3, 512);
+          const BlockState fluidBlock =
+              defaultState(isWater ? "water" : "lava");
+          const bool ok = world_.setBlock(p, fluidBlock, 11) ||
+                          fluidStateOf(s).isSource();
+          if (ok)
+            sendBlockUpdate(p);
+          return ok;
+        };
+        tryEmpty(tryEmpty, initialPos, true);
+        sendBlockUpdate(hit.pos);
+      }
+    }
+  }
+  acknowledge(sequence);
+}
+
+namespace {
+void skipHashedStack(Reader &in) {
+  if (!in.bool_())
+    return;
+  (void)in.varInt(); // item id
+  (void)in.varInt(); // count
+  const int added = in.varInt();
+  if (added < 0 || added > 256)
+    throw ProtocolError("invalid hashed stack components");
+  for (int i = 0; i < added; ++i) {
+    (void)in.varInt();
+    (void)in.i32();
+  }
+  const int removed = in.varInt();
+  if (removed < 0 || removed > 256)
+    throw ProtocolError("invalid hashed stack removals");
+  for (int i = 0; i < removed; ++i)
+    (void)in.varInt();
+}
+
+int containerMenuTypeId(ContainerKind kind, int slotCount) {
+  switch (kind) {
+  case ContainerKind::Chest:
+  case ContainerKind::TrappedChest:
+  case ContainerKind::Barrel:
+    return slotCount > 27 ? 5 : 2; // generic_9x6 or generic_9x3
+  case ContainerKind::Dispenser:
+  case ContainerKind::Dropper:
+    return 6; // generic_3x3
+  case ContainerKind::Hopper:
+    return 16; // hopper
+  }
+  return 2;
+}
+
+std::string containerTitle(ContainerKind kind, int slotCount) {
+  switch (kind) {
+  case ContainerKind::Chest:
+    return slotCount > 27 ? "Large Chest" : "Chest";
+  case ContainerKind::TrappedChest:
+    return slotCount > 27 ? "Large Chest" : "Trapped Chest";
+  case ContainerKind::Barrel:
+    return "Barrel";
+  case ContainerKind::Dispenser:
+    return "Dispenser";
+  case ContainerKind::Dropper:
+    return "Dropper";
+  case ContainerKind::Hopper:
+    return "Item Hopper";
+  }
+  return "Container";
+}
+
+std::uint64_t viewModSignature(const ResolvedContainerView &view) {
+  const std::uint64_t a = view.first ? view.first->modCount : 0;
+  const std::uint64_t b = view.second ? view.second->modCount : 0;
+  return a ^ (b * 0x9e3779b97f4a7c15ull);
+}
+} // namespace
+
+void Session::sendContainerContent() {
+  if (!openContainer_ || phase_ != Phase::Play)
+    return;
+  ResolvedContainerView view =
+      resolveContainerView(world_, openContainer_->pos, false);
+  if (!view.valid() || view.size() != openContainer_->slotCount) {
+    closeOpenContainer(true);
+    return;
+  }
+  const int n = openContainer_->slotCount;
+  Writer out;
+  out.varInt(openContainer_->containerId);
+  out.varInt(openContainer_->stateId);
+  out.varInt(n + 36);
+  for (int i = 0; i < n; ++i)
+    stack(out, view.getItem(i));
+  for (int i = 9; i <= 35; ++i)
+    stack(out, inventory_[i]);
+  for (int i = 0; i <= 8; ++i)
+    stack(out, inventory_[i]);
+  stack(out, carriedItem_);
+  send("container_set_content", std::move(out));
+  openContainer_->lastSeenModCount = viewModSignature(view);
+}
+
+void Session::openContainerScreen(Pos pos, const BlockState &state) {
+  const auto kind = containerKindForState(state);
+  if (!kind)
+    return;
+  ensureContainerBlockEntity(world_, pos, state);
+  ResolvedContainerView view = resolveContainerView(world_, pos, false);
+  if (!view.valid())
+    return;
+  if (openContainer_)
+    closeOpenContainer(false);
+
+  const int slotCount = view.size();
+  const int menuId = containerMenuTypeId(*kind, slotCount);
+  const int cid = nextContainerId_;
+  nextContainerId_ = (nextContainerId_ % 100) + 1;
+
+  OpenContainer opened;
+  opened.containerId = cid;
+  opened.menuTypeId = menuId;
+  opened.pos = pos;
+  opened.kind = *kind;
+  opened.slotCount = slotCount;
+  opened.stateId = 1;
+  opened.lastSeenModCount = viewModSignature(view);
+  openContainer_ = std::move(opened);
+
+  containerUpdateOpenCount(world_, pos, state, +1);
+
+  Writer openOut;
+  openOut.varInt(cid);
+  openOut.varInt(menuId);
+  nbtText(openOut, containerTitle(*kind, slotCount));
+  send("open_screen", std::move(openOut));
+  sendContainerContent();
+}
+
+void Session::closeOpenContainer(bool sendPacket) {
+  if (!openContainer_)
+    return;
+  const int cid = openContainer_->containerId;
+  const Pos pos = openContainer_->pos;
+  openContainer_.reset();
+  carriedItem_ = {};
+  if (world_.isLoaded(pos)) {
+    const BlockState state = world_.getBlock(pos);
+    if (containerKindForState(state))
+      containerUpdateOpenCount(world_, pos, state, -1);
+  }
+  if (sendPacket && phase_ == Phase::Play) {
+    Writer out;
+    out.varInt(cid);
+    send("container_close", std::move(out));
+  }
+  // Sync player hotbar/main inventory after closing a container menu.
+  for (int i = 0; i <= 35; ++i)
+    setSlot(i, inventory_[i]);
+}
+
+void Session::syncOpenContainer() {
+  if (!openContainer_ || phase_ != Phase::Play)
+    return;
+  if (!world_.isLoaded(openContainer_->pos) || !hasChunk(openContainer_->pos)) {
+    closeOpenContainer(true);
+    return;
+  }
+  const BlockState state = world_.getBlock(openContainer_->pos);
+  const auto kind = containerKindForState(state);
+  if (!kind || *kind != openContainer_->kind) {
+    closeOpenContainer(true);
+    return;
+  }
+  const ResolvedContainerView view =
+      resolveContainerView(world_, openContainer_->pos, false);
+  if (!view.valid() || view.size() != openContainer_->slotCount) {
+    closeOpenContainer(true);
+    return;
+  }
+  const std::uint64_t sig = viewModSignature(view);
+  if (sig != openContainer_->lastSeenModCount) {
+    ++openContainer_->stateId;
+    sendContainerContent();
+  }
+}
+
+void Session::containerClose(Reader &in) {
+  const int cid = in.varInt();
+  if (!in.empty())
+    throw ProtocolError("invalid container_close");
+  if (openContainer_ && cid == openContainer_->containerId)
+    closeOpenContainer(false);
+}
+
+void Session::containerClick(Reader &in) {
+  const int cid = in.varInt();
+  (void)in.varInt(); // stateId
+  const int slotNum = in.i16();
+  const int buttonNum = static_cast<int>(static_cast<std::int8_t>(in.u8()));
+  const int input = in.varInt();
+  const int changedCount = in.varInt();
+  if (changedCount < 0 || changedCount > 128)
+    throw ProtocolError("invalid container_click slot count");
+  for (int i = 0; i < changedCount; ++i) {
+    (void)in.i16();
+    skipHashedStack(in);
+  }
+  skipHashedStack(in); // carried item
+  if (!in.empty())
+    throw ProtocolError("trailing container_click data");
+
+  if (!openContainer_ || cid != openContainer_->containerId)
+    return;
+  if (!world_.isLoaded(openContainer_->pos)) {
+    closeOpenContainer(true);
+    return;
+  }
+  ResolvedContainerView view =
+      resolveContainerView(world_, openContainer_->pos, false);
+  if (!view.valid() || view.size() != openContainer_->slotCount) {
+    closeOpenContainer(true);
+    return;
+  }
+
+  const int n = openContainer_->slotCount;
+  const int totalSlots = n + 36;
+  bool containerMutated = false;
+
+  auto getMenuSlot = [&](int menuSlot) -> ItemStack {
+    if (menuSlot >= 0 && menuSlot < n)
+      return view.getItem(menuSlot);
+    if (menuSlot >= n && menuSlot < n + 27)
+      return inventory_[9 + (menuSlot - n)];
+    if (menuSlot >= n + 27 && menuSlot < totalSlots)
+      return inventory_[menuSlot - (n + 27)];
+    return {};
+  };
+  auto setMenuSlot = [&](int menuSlot, const ItemStack &val) {
+    if (menuSlot >= 0 && menuSlot < n) {
+      view.setItem(world_, menuSlot, val);
+      containerMutated = true;
+    } else if (menuSlot >= n && menuSlot < n + 27) {
+      inventory_[9 + (menuSlot - n)] = val;
+    } else if (menuSlot >= n + 27 && menuSlot < totalSlots) {
+      inventory_[menuSlot - (n + 27)] = val;
+    }
+  };
+  auto canMerge = [](const ItemStack &a, const ItemStack &b) {
+    return !a.empty() && !b.empty() && a.id == b.id &&
+           a.count < a.maxStackSize();
+  };
+  auto insertRange = [&](ItemStack &moving, int startSlot, int endExclusive) {
+    for (int s = startSlot; s < endExclusive && !moving.empty(); ++s) {
+      ItemStack cur = getMenuSlot(s);
+      if (canMerge(cur, moving)) {
+        const int add = std::min(moving.count, cur.maxStackSize() - cur.count);
+        if (add > 0) {
+          cur.count += add;
+          moving.count -= add;
+          if (moving.count <= 0)
+            moving = {};
+          setMenuSlot(s, cur);
+        }
+      }
+    }
+    for (int s = startSlot; s < endExclusive && !moving.empty(); ++s) {
+      if (getMenuSlot(s).empty()) {
+        setMenuSlot(s, moving);
+        moving = {};
+      }
+    }
+  };
+
+  if (input == 0) { // PICKUP
+    if (slotNum == -999 && !carriedItem_.empty() &&
+        world_.isChunkLoaded(chunkCoord(position_.x),
+                             chunkCoord(position_.z))) {
+      const int dropCount = (buttonNum == 0) ? carriedItem_.count : 1;
+      world_.spawnItemAt(position_ + Vec3{0, 1.3, 0}, carriedItem_.id,
+                         dropCount);
+      carriedItem_.count -= dropCount;
+      if (carriedItem_.count <= 0)
+        carriedItem_ = {};
+    } else if (slotNum >= 0 && slotNum < totalSlots) {
+      ItemStack slotStack = getMenuSlot(slotNum);
+      if (buttonNum == 0) {
+        if (carriedItem_.empty()) {
+          carriedItem_ = slotStack;
+          setMenuSlot(slotNum, {});
+        } else if (slotStack.empty()) {
+          setMenuSlot(slotNum, carriedItem_);
+          carriedItem_ = {};
+        } else if (canMerge(slotStack, carriedItem_)) {
+          const int add =
+              std::min(carriedItem_.count,
+                       slotStack.maxStackSize() - slotStack.count);
+          slotStack.count += add;
+          carriedItem_.count -= add;
+          if (carriedItem_.count <= 0)
+            carriedItem_ = {};
+          setMenuSlot(slotNum, slotStack);
+        } else {
+          setMenuSlot(slotNum, carriedItem_);
+          carriedItem_ = slotStack;
+        }
+      } else if (buttonNum == 1) {
+        if (carriedItem_.empty() && !slotStack.empty()) {
+          const int take = (slotStack.count + 1) / 2;
+          carriedItem_ = itemStack(slotStack.id, take);
+          slotStack.count -= take;
+          setMenuSlot(slotNum, slotStack.count > 0 ? slotStack : ItemStack{});
+        } else if (!carriedItem_.empty()) {
+          if (slotStack.empty()) {
+            setMenuSlot(slotNum, itemStack(carriedItem_.id, 1));
+            if (--carriedItem_.count <= 0)
+              carriedItem_ = {};
+          } else if (canMerge(slotStack, carriedItem_)) {
+            slotStack.count += 1;
+            setMenuSlot(slotNum, slotStack);
+            if (--carriedItem_.count <= 0)
+              carriedItem_ = {};
+          } else {
+            setMenuSlot(slotNum, carriedItem_);
+            carriedItem_ = slotStack;
+          }
+        }
+      }
+    }
+  } else if (input == 1 && slotNum >= 0 && slotNum < totalSlots) { // QUICK_MOVE
+    ItemStack moving = getMenuSlot(slotNum);
+    if (!moving.empty()) {
+      if (slotNum < n) {
+        insertRange(moving, n, totalSlots);
+      } else {
+        insertRange(moving, 0, n);
+      }
+      setMenuSlot(slotNum, moving);
+    }
+  } else if (input == 2 && slotNum >= 0 && slotNum < totalSlots) { // SWAP
+    const int invIdx =
+        (buttonNum >= 0 && buttonNum <= 8)
+            ? buttonNum
+            : (buttonNum == 40 ? 40 : -1);
+    if (invIdx >= 0) {
+      ItemStack a = getMenuSlot(slotNum);
+      ItemStack b = inventory_[invIdx];
+      inventory_[invIdx] = a;
+      setMenuSlot(slotNum, b);
+    }
+  } else if (input == 3 && slotNum >= 0 && slotNum < totalSlots &&
+             carriedItem_.empty()) { // CLONE
+    ItemStack s = getMenuSlot(slotNum);
+    if (!s.empty())
+      carriedItem_ = itemStack(s.id, s.maxStackSize());
+  } else if (input == 4 && slotNum >= 0 && slotNum < totalSlots &&
+             carriedItem_.empty()) { // THROW
+    ItemStack s = getMenuSlot(slotNum);
+    if (!s.empty() &&
+        world_.isChunkLoaded(chunkCoord(position_.x),
+                             chunkCoord(position_.z))) {
+      const int dropCount = (buttonNum == 1) ? s.count : 1;
+      world_.spawnItemAt(position_ + Vec3{0, 1.3, 0}, s.id, dropCount);
+      s.count -= dropCount;
+      setMenuSlot(slotNum, s.count > 0 ? s : ItemStack{});
+    }
+  } else if (input == 5) { // QUICK_CRAFT
+    const int header = buttonNum & 3;
+    if (header == 0) {
+      openContainer_->quickCraftMode = 1;
+      openContainer_->quickCraftEvent = (buttonNum >> 2) & 3;
+      openContainer_->quickCraftSlots.clear();
+    } else if (header == 1 && openContainer_->quickCraftMode == 1 &&
+               slotNum >= 0 && slotNum < totalSlots) {
+      if (std::find(openContainer_->quickCraftSlots.begin(),
+                    openContainer_->quickCraftSlots.end(),
+                    slotNum) == openContainer_->quickCraftSlots.end())
+        openContainer_->quickCraftSlots.push_back(slotNum);
+    } else if (header == 2 && openContainer_->quickCraftMode == 1) {
+      if (!carriedItem_.empty() && !openContainer_->quickCraftSlots.empty()) {
+        std::vector<int> eligible;
+        for (int s : openContainer_->quickCraftSlots) {
+          ItemStack cur = getMenuSlot(s);
+          if (cur.empty() || canMerge(cur, carriedItem_))
+            eligible.push_back(s);
+        }
+        if (!eligible.empty()) {
+          const int count = static_cast<int>(eligible.size());
+          for (int s : eligible) {
+            if (carriedItem_.empty())
+              break;
+            int add = 0;
+            if (openContainer_->quickCraftEvent == 0)
+              add = std::max(1, carriedItem_.count / count);
+            else if (openContainer_->quickCraftEvent == 1)
+              add = 1;
+            else
+              add = carriedItem_.maxStackSize();
+            ItemStack cur = getMenuSlot(s);
+            const int cap = cur.empty() ? carriedItem_.maxStackSize()
+                                        : cur.maxStackSize() - cur.count;
+            const int place =
+                openContainer_->quickCraftEvent == 2
+                    ? cap
+                    : std::min({add, cap, carriedItem_.count});
+            if (place > 0) {
+              setMenuSlot(s, itemStack(carriedItem_.id,
+                                       (cur.empty() ? 0 : cur.count) + place));
+              if (openContainer_->quickCraftEvent != 2)
+                carriedItem_.count -= place;
+            }
+          }
+          if (openContainer_->quickCraftEvent == 2 || carriedItem_.count <= 0)
+            carriedItem_ = {};
+        }
+      }
+      openContainer_->quickCraftMode = -1;
+      openContainer_->quickCraftSlots.clear();
+    }
+  } else if (input == 6 && !carriedItem_.empty()) { // PICKUP_ALL
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int s = 0;
+           s < totalSlots && carriedItem_.count < carriedItem_.maxStackSize();
+           ++s) {
+        ItemStack cur = getMenuSlot(s);
+        if (cur.empty() || cur.id != carriedItem_.id)
+          continue;
+        if (pass == 0 && cur.count == cur.maxStackSize())
+          continue;
+        const int take = std::min(cur.count,
+                                  carriedItem_.maxStackSize() - carriedItem_.count);
+        carriedItem_.count += take;
+        cur.count -= take;
+        setMenuSlot(s, cur.count > 0 ? cur : ItemStack{});
+      }
+    }
+  }
+
+  if (containerMutated)
+    view.setChanged(world_);
+  ++openContainer_->stateId;
+  sendContainerContent();
 }
 void Session::play(int id, Reader &in) {
   const auto is = [&](std::string_view name) {
@@ -1214,11 +2139,7 @@ void Session::play(int id, Reader &in) {
     if (canInteract(p) && !item.empty())
       setSlot(selectedSlot_, itemStack(item));
   } else if (is("use_item")) {
-    (void)in.varInt();
-    int sequence = in.varInt();
-    (void)in.f32();
-    (void)in.f32();
-    acknowledge(sequence);
+    useItem(in);
   } else if (is("chat_command")) {
     const std::string line = in.string();
     if (!in.empty())
@@ -1242,12 +2163,16 @@ void Session::play(int id, Reader &in) {
     awaitingChunkBatch_ = false;
     chunksPerBatch_ =
         static_cast<int>(std::clamp(desired, 1.0f, float(chunkBatchLimit_)));
+  } else if (is("container_click")) {
+    containerClick(in);
+  } else if (is("container_close")) {
+    containerClose(in);
   } else if (is("client_tick_end") || is("player_loaded") ||
              is("player_abilities") || is("client_information") ||
              is("custom_payload") || is("swing") || is("player_command") ||
-             is("container_close") || is("chat_session_update") || is("pong")) {
+             is("chat_session_update") || is("pong")) {
     // These packets do not modify this creative editor's simulated blocks.
-    // TODO: player actions, general containers, chat/session state and sprint.
+    // TODO: player actions, chat/session state and sprint.
   } else if (diagnostic)
     diagnostic("TODO: unsupported play packet ignored");
 }
@@ -1635,6 +2560,21 @@ void Session::runCommand(std::string_view line) {
   for (const auto &message : source.messages)
     sendCommandMessage(message);
 }
+void Session::sendBlockTagUpdate() {
+  if (phase_ != Phase::Play || !world_.customBlockTags()) return;
+  for (const auto &bytes : data_.configuration) {
+    auto copy = bytes;
+    const auto body = popFrame(copy);
+    if (!body) throw ProtocolError("invalid configuration frame");
+    Reader packet(*body);
+    if (packet.varInt() == data_.packet("configuration", "clientbound", "update_tags")) {
+      queue(replaceBlockTagPacket(bytes, data_, *world_.customBlockTags(),
+                                  data_.packet("play", "clientbound", "update_tags")));
+      return;
+    }
+  }
+  throw ProtocolError("missing configuration update_tags");
+}
 void Session::sendSuggestions(int requestId, std::string_view line) {
   if (!commands_ || !commandContext_ || phase_ != Phase::Play)
     return;
@@ -1984,6 +2924,7 @@ void Session::tick() {
     if (connectionTicks_ % 20 == 0)
       sendSetTime();
     refreshChunkView();
+    syncOpenContainer();
     sendChunkBatch();
     if (joinPositionPending_ && !sentChunks_.empty())
       finishJoin();

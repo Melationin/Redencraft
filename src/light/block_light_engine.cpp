@@ -70,6 +70,13 @@ void BlockLightPropagator::seedChunk(std::uint64_t key) {
         sectionY >= chunk->minBlockSectionY &&
         sectionY < chunk->minBlockSectionY + chunk->blockSectionCount;
     const GeometrySection *geometry = owner.geometrySection(key, sectionY);
+    const std::optional<LightSectionView> direct =
+        (!geometry && inBlockRange) ? owner.directSectionView(key, sectionY)
+                                    : std::nullopt;
+    const BlockLightProperties *singleDirectProps =
+        (direct && direct->bits == 0)
+            ? &owner.propertiesForState(direct->single)
+            : nullptr;
     for (int index = 0; index < kLightVolume; ++index) {
       const int x = index & 15;
       const int z = (index >> 4) & 15;
@@ -82,7 +89,13 @@ void BlockLightPropagator::seedChunk(std::uint64_t key) {
                                ? geometry->uniformClass
                                : geometry->at(static_cast<std::size_t>(index)))
                            .properties
-                     : unsupportedLightProperties())
+                     : (singleDirectProps
+                            ? *singleDirectProps
+                            : (direct
+                                   ? owner.propertiesForState(
+                                         direct->atomicStateAt(
+                                             static_cast<std::size_t>(index)))
+                                   : unsupportedLightProperties())))
               : emptyLightProperties();
       if (inBlockRange && !properties.supported)
         incomplete = true;
@@ -98,10 +111,13 @@ void BlockLightPropagator::seedChunk(std::uint64_t key) {
   }
 }
 
-void BlockLightPropagator::seedIncoming(std::uint64_t key) {
+void BlockLightPropagator::seedIncoming(std::uint64_t key,
+                                        std::uint8_t directionMask) {
   const int chunkX = static_cast<int>(key >> 32);
   const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
   for (int direction = 2; direction < 6; ++direction) {
+    if ((directionMask & (1u << direction)) == 0)
+      continue;
     const LightPos delta = kDirectionOffsets[direction];
     const std::uint64_t neighborKey =
         chunkKey(chunkX + delta.x, chunkZ + delta.z);
@@ -120,11 +136,14 @@ void BlockLightPropagator::seedIncoming(std::uint64_t key) {
   }
 }
 
-void BlockLightPropagator::seedOutgoing(std::uint64_t key) {
+void BlockLightPropagator::seedOutgoing(std::uint64_t key,
+                                        std::uint8_t directionMask) {
   const LightChunkSnapshot *chunk = stateFor(key);
   if (!chunk)
     return;
   for (int direction = 2; direction < 6; ++direction) {
+    if ((directionMask & (1u << direction)) == 0)
+      continue;
     const LightPos delta = kDirectionOffsets[direction];
     const LightChunkSnapshot *neighbor =
         stateFor(chunkKey(chunk->chunkX + delta.x, chunk->chunkZ + delta.z));
@@ -220,6 +239,7 @@ void BlockLightPropagator::commitLayers() {
     }
     chunk->dirtySections.push_back(position.y);
     chunk->dirty = true;
+    chunk->propagated = true;
   }
 }
 

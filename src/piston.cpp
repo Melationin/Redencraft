@@ -119,13 +119,14 @@ bool pistonIsPushable(World &w, Pos p, const BlockState &s, Direction d,
   const auto &metadata = blockMetadata(s);
   auto reaction = s.getView("push_reaction", metadata.pushReaction);
   if (metadata.hardness == -1 || s.getView("hardness") == "-1" ||
-      s.getView("has_block_entity") == "true" || reaction == "block")
+      reaction == "block")
     return false;
   if (reaction == "destroy")
     return allowDestroy;
   if (reaction == "push_only")
     return d == connection;
-  return true;
+  return !(s.block().hasBlockEntity() ||
+           s.getView("has_block_entity") == "true");
 }
 PistonStructureResolver::PistonStructureResolver(World &w, Pos p, Direction f,
                                                  bool e)

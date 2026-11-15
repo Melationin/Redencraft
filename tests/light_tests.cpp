@@ -316,7 +316,7 @@ void opticalAssetCoverage(const std::filesystem::path &assets) {
     officialKeys.insert(blockName + "\t" + propertyText);
     const Block *block = findBlockByName(blockName);
     require(block != nullptr, "official optical block is registered");
-    if (block->supported()) {
+    {
       std::map<std::string, std::string> propertyMap;
       std::size_t start = 0;
       while (start < propertyText.size()) {
@@ -351,7 +351,7 @@ void opticalAssetCoverage(const std::filesystem::path &assets) {
               "official optical values match the runtime metadata: " + blockName);
     }
   }
-  require(rows == 2366,
+  require(rows == 29873,
           "official optical TSV row count is pinned: " + std::to_string(rows));
 
   for (const BlockRegistration &registration : blockRegistry()) {
@@ -2606,6 +2606,179 @@ void persistedLightReuseNeighborPropagationAndStatus() {
               service.chunkStatus(1, 0).unloadedNeighborMask == 0,
           "unloaded chunk status reflects absent state");
 }
+
+void persistedNeighborsSkipRedundantSeedingAndEditPropagates() {
+  LightService service(0, 2);
+
+  auto setNibble = [](std::array<std::uint8_t, 2048> &layer, int lx, int ly,
+                      int lz, int value) {
+    const std::size_t idx = lightIndex(lx, ly, lz);
+    const std::uint8_t prev = layer[idx >> 1];
+    layer[idx >> 1] =
+        (idx & 1u)
+            ? static_cast<std::uint8_t>((prev & 0x0Fu) |
+                                        ((value & 0x0Fu) << 4))
+            : static_cast<std::uint8_t>((prev & 0xF0u) | (value & 0x0Fu));
+  };
+
+  auto makeRoofedPersisted = [&](int cx, int cz, int lx, int lz, int blockVal,
+                                 int skyVal) {
+    LightChunkInput chunk = emptyChunkFixture(cx, cz, 0, 2);
+    std::vector<std::pair<Pos, BlockState>> sec1Blocks;
+    for (int x = 0; x < 16; ++x)
+      for (int z = 0; z < 16; ++z)
+        sec1Blocks.push_back({{x, 6, z}, Blocks::STONE.defaultState()});
+    chunk.geometrySections[1] =
+        makeIndexedGeometrySection(airState(), sec1Blocks, false);
+
+    PersistedChunkLight saved;
+    saved.isLightOn = true;
+    PersistedLightSection sec1;
+    sec1.sectionY = 1;
+    sec1.blockLight.emplace();
+    sec1.blockLight->fill(0);
+    setNibble(*sec1.blockLight, lx, 4, lz, blockVal);
+    sec1.skyLight.emplace();
+    sec1.skyLight->fill(0);
+    setNibble(*sec1.skyLight, lx, 4, lz, skyVal);
+    saved.sections.push_back(std::move(sec1));
+    chunk.persistedLight = std::move(saved);
+    return chunk;
+  };
+
+  // Same-batch adjacent persisted chunks (0,0) and (1,0) must skip border
+  // seeding against each other (lightQueueEntries stays 0).
+  require(service.submitChunk(makeRoofedPersisted(0, 0, 15, 8, 12, 14)) != 0,
+          "submit persisted (0,0)");
+  require(service.submitChunk(makeRoofedPersisted(1, 0, 0, 8, 3, 5)) != 0,
+          "submit persisted (1,0)");
+  require(service.flushAndWait(std::chrono::seconds(2)),
+          "flush same-batch persisted neighbors");
+  service.drainPublished();
+
+  require(service.stats().lightQueueEntries == 0,
+          "same-batch persisted neighbors enqueue zero propagation entries");
+  auto snap1Block = service.latestLayerChunk(LightLayer::Block, 1, 0);
+  auto snap1Sky = service.latestLayerChunk(LightLayer::Sky, 1, 0);
+  require(blockLightAt(snap1Block, 16, 20, 8) == 3 &&
+              skyLightAt(snap1Sky, 16, 20, 8) == 5,
+          "persisted (1,0) retains saved boundary values next to (0,0)");
+
+  // Cross-batch persisted neighbor (2,0) next to already-loaded persisted (1,0)
+  // must also skip redundant border seeding.
+  require(service.submitChunk(makeRoofedPersisted(2, 0, 15, 8, 10, 11)) != 0,
+          "submit cross-batch persisted (2,0)");
+  require(service.flushAndWait(std::chrono::seconds(2)),
+          "flush cross-batch persisted neighbor");
+  service.drainPublished();
+  require(service.stats().lightQueueEntries == 0,
+          "cross-batch persisted neighbor enqueues zero propagation entries");
+
+  // Loading non-persisted dark chunk (3,0) next to persisted (2,0) must still
+  // propagate (2,0)'s persisted boundary into (3,0).
+  LightChunkInput unpersisted = emptyChunkFixture(3, 0, 0, 2);
+  std::vector<std::pair<Pos, BlockState>> sec1Blocks;
+  for (int x = 0; x < 16; ++x)
+    for (int z = 0; z < 16; ++z)
+      sec1Blocks.push_back({{x, 6, z}, Blocks::STONE.defaultState()});
+  unpersisted.geometrySections[1] =
+      makeIndexedGeometrySection(airState(), sec1Blocks, false);
+  require(service.submitChunk(std::move(unpersisted)) != 0,
+          "submit non-persisted (3,0)");
+  require(service.flushAndWait(std::chrono::seconds(2)),
+          "flush non-persisted (3,0)");
+  service.drainPublished();
+  auto snap3Block = service.latestLayerChunk(LightLayer::Block, 3, 0);
+  auto snap3Sky = service.latestLayerChunk(LightLayer::Sky, 3, 0);
+  require(blockLightAt(snap3Block, 48, 20, 8) == 9 &&
+              skyLightAt(snap3Sky, 48, 20, 8) == 10,
+          "persisted (2,0) propagates to non-persisted neighbor (3,0)");
+
+  // Subsequent block edit on (1,0) still triggers sky eligibility + propagation.
+  service.reportBlockCell({18, 22, 8, airState().id()});
+  require(service.flushAndWait(std::chrono::seconds(2)),
+          "flush post-persisted edit");
+  service.drainPublished();
+  snap1Sky = service.latestLayerChunk(LightLayer::Sky, 1, 0);
+  require(skyLightAt(snap1Sky, 18, 10, 8) == 15,
+          "roof break inside persisted chunk streams sky light after skip");
+}
+
+void lowMemoryDirectLightParityAndConcurrency() {
+  const auto stone = Blocks::SMOOTH_STONE.defaultState();
+  const auto slab =
+      Blocks::SMOOTH_STONE_SLAB.defaultState().with("type", "top");
+  const auto litLamp =
+      Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  const auto darkLamp =
+      Blocks::REDSTONE_LAMP.defaultState().with("lit", "false");
+  const std::vector<BlockState> noteStates =
+      findBlockByName("minecraft:note_block")->states();
+  require(noteStates.size() >= 25, "need note_block states for palette growth");
+
+  auto buildFixture = [&](World &w) {
+    for (int cx = -1; cx <= 1; ++cx)
+      w.loadChunk(cx, 0);
+    for (int x = -16; x < 32; ++x)
+      for (int z = 0; z < 16; ++z)
+        w.rawSetBlock({x, 24, z}, stone);
+    w.rawSetBlock({8, 16, 8}, slab);
+    w.rawSetBlock({15, 8, 8}, litLamp);
+  };
+
+  World normal(0, 64);
+  World lowMem(0, 64);
+  lowMem.setLowMemoryMode(true);
+  buildFixture(normal);
+  buildFixture(lowMem);
+
+  LightWorkerOptions opts;
+  opts.batchWindowMs = 0;
+  normal.enableLighting(opts);
+  lowMem.enableLighting(opts);
+
+  auto settleBoth = [&] {
+    require(normal.lightService()->waitIdleForTesting() &&
+                lowMem.lightService()->waitIdleForTesting(),
+            "normal and low-memory light settle");
+    normal.drainLightPublications();
+    lowMem.drainLightPublications();
+  };
+  settleBoth();
+
+  for (int x = -2; x <= 20; ++x) {
+    for (int y : {0, 8, 15, 16, 17, 23, 25}) {
+      for (int darken : {0, 10}) {
+        require(lowMem.getBrightness({x, y, 8}, darken) ==
+                    normal.getBrightness({x, y, 8}, darken),
+                "low-memory direct light matches buffered mode on initial load");
+      }
+    }
+  }
+
+  // Mutate optical sources + grow a section's packed palette concurrently while
+  // the worker processes batches in direct-geometry mode.
+  for (int i = 0; i < 20; ++i) {
+    const Pos p{i & 15, 1 + (i >> 4), 2};
+    normal.setBlock(p, noteStates[static_cast<std::size_t>(i)]);
+    lowMem.setBlock(p, noteStates[static_cast<std::size_t>(i)]);
+  }
+  require(lowMem.sectionStorageBitsForTest(0, 0, 0) == 5,
+          "low-memory section palette grew through 5 bits");
+  normal.setBlock({15, 8, 8}, darkLamp);
+  lowMem.setBlock({15, 8, 8}, darkLamp);
+  normal.setBlock({8, 24, 8}, airState());
+  lowMem.setBlock({8, 24, 8}, airState());
+  settleBoth();
+
+  for (int x = -2; x <= 20; ++x) {
+    for (int y : {0, 8, 15, 16, 17, 23, 25}) {
+      require(lowMem.getBrightness({x, y, 8}) ==
+                  normal.getBrightness({x, y, 8}),
+              "low-memory direct light matches after live edits and compaction");
+    }
+  }
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -2647,6 +2820,8 @@ int main(int argc, char **argv) {
     worldLifecycleQueueGrowthIsLossless();
     pausedWorldRecoveryAndImport();
     persistedLightReuseNeighborPropagationAndStatus();
+    persistedNeighborsSkipRedundantSeedingAndEditPropagates();
+    lowMemoryDirectLightParityAndConcurrency();
     std::cout << "light tests passed\n";
     return 0;
   } catch (const std::exception &error) {

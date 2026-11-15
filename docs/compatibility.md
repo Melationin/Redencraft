@@ -139,3 +139,51 @@ C++ 侧按 `LevelTicks`/`LevelChunkTicks` 实现：每个已加载区块一个�
 随后快速优化复用上次子区块指针、缩小爆炸缓存并预计算固定射线方向。缓存随加载/卸载、section 创建及 World 移动失效，读取仍使用当前状态；射线顺序、随机消耗与更新阶段保持。Release CTest 12/12 和投影前后 12 个检查点指纹通过，未运行真实服务端差分；详见 [性能记录第 13 节](performance.md#13-快速实现与最小验证2026-11-07)。
 
 同日发包优化：每连接有界 SPSC 队列和冻结区块快照后台编码，tick 内提交不等待写线程锁/socket；积压只关闭该连接。普通块变化继续在区块广播时读取当前状态，成功方块事件立即提交。实体跟踪广播对照 `ServerChunkCache → ChunkMap/ServerEntity` 移至方块事件/实体运动之前，注册 spawn 及落地修正/移除有顺序断言。TODO：移除通知目前在实体清理或方块实体刻末观察，同阶段内尚未完整复刻原版 `Entity.setRemoved → levelCallback.onRemove` 的即时交错。聊天耗时改为每秒报告前 1 秒完成 tick 的平均值。Release 构建、CTest **14/14**、官方 codec **294 包**及有限时长背压/投影 TCP 冒烟通过；这些分别属于源码对照、C++ 回归和协议编码验证，未进行本轮真实 26.1 服务端逐刻差分。详见 [发包优化记录](performance.md#14-发包隔离广播阶段与每秒耗时显示2026-11-07)。
+# 方块覆盖范围补充
+
+花岗岩、闪长岩、安山岩及其磨制变种、泥土和砂土（coarse dirt，亦称粗泥）已注册基础
+单状态和模拟器现有属性；这些状态的光照数据已从官方 26.1 重新导出。
+挖掘工具要求、战利品和音效仍未实现；其它未完成的
+方块和随机刻见 [BLOCK_TODO.md](../BLOCK_TODO.md)。协议导出不代表模拟行为完成。
+
+世界级随机刻已接入 `World::tick()`（`tickChunks()` 紧随 `fluidTickQueue_->tick()`
+之后、在块更新广播之前运行）：维护每子区块 `tickingBlockCount` 与 17 段×248 格
+微段计数、每区块随机刻子区块掩码及 `randomTickingChunks_` 集合，按 Lithium 26.1.x
+`<= 384` 稀疏微段定位 / `> 384` 直接探针分流，并经 `WorldRandomTickAccess` 与
+`WorldGameRules.randomTickSpeed`（`minecraft:random_tick_speed`）调度草方块等
+已实现的方块/流体随机刻。天气降水（`iceandsnow`）、树生成、蘑菇 `isSolidRender()`
+以及其余方块的 `randomTick()` 仍待实现；以上结论当前基于源码对照与 C++ 回归测试，
+尚未运行真实 26.1 服务端差分。
+
+方块标签默认使用官方 26.1 原版快照；世界接口可显式重载有序目录或普通 ZIP
+数据包并合并、替换和解析嵌套标签。原生服务端可用重复的 `--data-pack` 参数指定
+低到高优先级，控制台 `reload` 重载方块标签并同步客户端；该命令尚不重载其他资源。
+世界启动时会按 `level.dat` 启用列表选择本地 `file/` 数据包，显式参数的优先级更高；
+其他数据包来源及玩家 `/reload` 尚未支持，循环依赖顺序及 ZIP64 边界见
+[BLOCK_TODO.md](../BLOCK_TODO.md)。
+
+## 非实验性红石元件边界（2026-11-15）
+
+已按 Java 26.1 默认非实验性红石规则（`DefaultRedstoneWireEvaluator`）接入：`minecraft:redstone_wire`（`redstone` 物品映射、衰减、梯步爬升/下落与方块遮断、cross/dot 右键切换及间接形状更新）、`minecraft:redstone_torch` / `minecraft:redstone_wall_torch`（2 刻反转、8/60 烧毁与 160 刻重启冷却）、`minecraft:repeater`（1–4 档 2–8 刻延迟、锁存、`EXTREMELY_HIGH`/`VERY_HIGH`/`HIGH` 优先级、脉冲延长）、`minecraft:comparator`（比较/减法、`ComparatorBlockEntity` 输出缓存、2 刻计划刻、穿过红石导体的模拟信号读取，支持堆肥桶/炼药锅/蛋糕/重生锚/蜂巢/铜灯泡/末地传送门框架）、`minecraft:lever`、石/黑石/木质按钮（20/30 刻）、`minecraft:target`、测重/常规压力板（当前按 `World::entitiesIn` 现有实体统计），以及门/活板门/铜灯泡的红石接线。`protocol`（775 放置与右键交互）、`redstone_components`、`engine` 等 C++ 回归断言已建立。
+
+未实现部分已在对应代码处标注 `// TODO`：依赖 `LivingEntity`/玩家的石质与生物专用压力板、射弹命中标靶靶心判定，以及音效/粒子/`LevelEvent`/游戏事件通知；尚未运行真实 26.1 服务端红石元件逐刻差分。
+
+## 容器方块实体、堆肥桶与 Lithium 休眠刻优化（2026-11-15）
+
+已按 Java 26.1 与 Lithium 26.1.x 模型实现容器类方块及其红石/活塞/传输接线：
+
+- **支持方块与方块实体身份**：`chest`、`trapped_chest`、8 种铜箱子（`copper_chest`..`waxed_oxidized_copper_chest`，方块实体 ID 同原版均为 `minecraft:chest`）、`barrel`、`dispenser`、`dropper`、`hopper`（均已标记 `HasBlockEntity`）以及 `composter`。活塞推动判定（`src/piston.cpp`）按 `PistonBaseBlock.isPushable` 顺序检查 `BLOCK`/`DESTROY`/`PUSH_ONLY` 后再阻挡 `hasBlockEntity()`。
+- **双箱连接与比较器信号**：支持普通箱子、陷阱箱及铜箱子同族左右连接（`RIGHT` 占 0..26 槽、`LEFT` 占 27..53 槽，潜行放置保持 `single`）；破坏容器会按 `Containers.dropContents` 撒落全部物品并触发邻接与比较器信号更新；比较器按 `AbstractContainerMenu.getRedstoneSignalFromContainer` 计算 `0..15` 模拟输出（箱子遇上方红石导体遮挡时返回 0，而漏斗按 `ignoreBeingBlocked=true` 仍可存取）；陷阱箱按 `openCount` 输出 `0..15` 弱信号并对下方输出等强度强信号。
+- **发射器、投掷器与漏斗 / 堆肥桶**：发射器/投掷器实现 4 刻延迟调度、`triggered` 上升/下降沿与准连接触发、随机非空槽抽取；投掷器优先向朝向目标容器推入，否则以实体抛出；发射器实现默认抛出、`tnt`、`water_bucket`、`lava_bucket`、空 `bucket`、`flint_and_steel` 与 `minecart` 行为。漏斗支持朝向放置、红石锁存（`enabled`）、8 刻冷却及链式传递时的 7 刻（`tickedGameTime`）惩罚对齐、`SUCK_AABB`（`[0, 11/16, 0, 1, 2, 1]`）拾取掉落物（被上方非 `#does_not_block_hoppers` 整方块阻挡）、`entityInside` 入漏以及与堆肥桶 `0..7` 级输入（7 级 20 刻转 8 级）与 8 级输出 `minecraft:bone_meal`。
+- **Lithium 休眠 Ticker（`SleepingBlockEntity` / `modCount`）**：`ContainerBlockEntity` 维护单调 `modCount` 缓存空/满/比较器信号摘要；`HopperBlockEntity` 在空闲、被红石锁存、输入源持续空且无物品实体或目标持续满且冷却归零时切入 `SleepIndefinite` 或 `SleepUntil`，通过方块变动监听器、容器修改回调及掉落物实体入区/移动唤醒。
+- **存档导入、Litematic 与协议 775**：Anvil 存档读入（`src/storage.cpp`）与 Litematic 投影（`src/litematic.cpp`）支持导入容器 `Items` 与漏斗 `TransferCooldown`。协议 775 支持容器放置、堆肥桶右键交互、`open_screen` / `container_set_content` / `container_click` / `container_close` 实时容器菜单及 `openCount` 同步。
+
+当前未实现与边界（对应位置均已标 `// TODO`）：
+- `--ticketed-world` 写模式（`terrain_codec`）与 Anvil 回写尚不序列化非活塞 `block_entities`；
+- 容器物品 `DataComponents`、`LootTable`、`CustomName`/`Lock`、箱子/漏斗矿车容器实体与发射器其余物品专用行为；
+- 以上行为仅经源码对照与 C++ 回归断言检验，**尚未运行真实 26.1 服务端差分测试**。
+
+### Anvil 大世界直写导入与非 `minecraft:full` 边界区块配置
+
+- 新增 [AnvilLoadOptions](file:///wsl.localhost/Ubuntu-24.04/home/zhddsj/cpp/redstone-cpp/include/redstone/storage.hpp)（`skipNonFullChunks`，默认 `false`）与流式直写接口 `loadAnvilWorldInto`：[redstone_vanilla_server](file:///wsl.localhost/Ubuntu-24.04/home/zhddsj/cpp/redstone-cpp/src/net/server_main.cpp) 的 `--world` 路径直接把解码后的区块段写入 `World::Section`（`World::importSectionBlocks`），避免大型存档构造全量 `std::map<Pos, BlockState>`。
+- 默认保持严格行为：遇到 `Status != "minecraft:full"` 的原坯边界区块仍抛出 `nbt::Error`；传入 `--skip-non-full-chunks`（或设置 `skipNonFullChunks = true`）时暂时跳过非 `full` 边界区块，对应 `// TODO` 已留在 `AnvilLoadOptions` 中，待后续实现非 `full` 边界原坯区块加载后替换。

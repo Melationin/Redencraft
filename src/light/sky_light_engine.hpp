@@ -69,10 +69,15 @@ public:
   void enqueueCheck(LightPos position);
   void seedChunk(std::uint64_t key);
   void initPersistedSources(std::uint64_t key);
-  void seedIncoming(std::uint64_t key);
-  void seedOutgoing(std::uint64_t key);
+  void seedIncoming(std::uint64_t key, std::uint8_t directionMask = 0b111100);
+  void seedOutgoing(std::uint64_t key, std::uint8_t directionMask = 0b111100);
   void clearIncomingFrom(std::uint64_t removedKey);
   void syncStorageEligibility();
+  bool hasPendingWork() const {
+    return !checkQueue.empty() || !increaseQueue.empty() ||
+           !decreaseQueue.empty() || !currentIncreaseQueue.empty() ||
+           !currentDecreaseQueue.empty();
+  }
   int columnSource(std::uint64_t key, int localX, int localZ);
   SkyColumnSources &sourcesForWorking(std::uint64_t key, WorkingChunk &chunk);
   int updateColumnSource(std::uint64_t key, int localX, int localZ,
@@ -137,6 +142,7 @@ private:
   const LightSectionSnapshot *sectionAt(LightPos position) const;
   const BlockLightProperties &stateAt(LightPos position) const;
   int storedLevel(LightPos position) const;
+  bool isSectionStoredEligible(int sectionX, int sectionY, int sectionZ) const;
   bool eligibleHere(int sectionX, int sectionY, int sectionZ);
   LightValues *bulkValues(std::uint64_t chunkKeyValue, int sectionY);
   bool setStoredLevel(LightPos position, int level);

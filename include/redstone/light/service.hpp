@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <vector>
@@ -16,7 +17,18 @@
 
 namespace redstone {
 
+struct LightSectionView;
+
 struct LightWorkerOptions {
+  struct DirectWorldGeometrySource {
+    const void *context = nullptr;
+    // Taken in shared mode only for the brief readSection pointer+refcount
+    // acquisition, and exclusively by World when chunks_ or storage resizes.
+    std::shared_mutex *resizeMutex = nullptr;
+    LightSectionView (*readSection)(const void *context, int chunkX, int chunkZ,
+                                    int sectionY) = nullptr;
+  };
+
   std::size_t batchSize = 1000;
   std::size_t maxQueuedCommands = 4096;
 
@@ -38,6 +50,7 @@ struct LightWorkerOptions {
   // One worker publishes complete block and sky layer results into this SPSC
   // ring buffer. It also doubles automatically if a burst exceeds 256 KiB.
   std::size_t resultQueueBytes = std::size_t{256} << 10;
+  DirectWorldGeometrySource directWorld{};
   // Deterministic test seam invoked once per enabled layer, before propagation.
   std::function<void(LightLayer)> beforeLayerForTesting;
 };

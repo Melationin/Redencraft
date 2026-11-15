@@ -556,6 +556,104 @@ void coralAndRailRulesDivergeOnFallingWater() {
   require(!falling.is(Fluids::water()),
           "...but not the exact source, which the rail and wall rules test");
 }
+
+void seagrassWaterAndShapeUpdates() {
+  const auto shortGrass = Blocks::SEAGRASS.defaultState();
+  const auto lower = Blocks::TALL_SEAGRASS.defaultState();
+  const auto upper = lower.with("half", "upper");
+  require(lower.getView("half") == "lower" && upper.getView("half") == "upper",
+          "tall seagrass has distinct lower and upper states");
+  for (const auto &state : {shortGrass, lower, upper}) {
+    require(fluidStateOf(state).isSourceOfType(Fluids::water()),
+            "seagrass carries source water");
+    require(state.block().isLiquidContainer() && !canPlaceLiquid(state, Fluids::water()),
+            "seagrass refuses additional liquid");
+    require(state.isRandomlyTicking() == false, "seagrass is not randomly ticking");
+  }
+  const Pos pos{0, 64, 0};
+  World shortWorld;
+  flatFloor(shortWorld);
+  const auto sourceWater = fluidStateOf(Blocks::WATER.defaultState());
+  for (const auto &kelpState :
+       {Blocks::KELP.defaultState(), Blocks::KELP_PLANT.defaultState()}) {
+    require(fluidStateOf(kelpState).isSourceOfType(Fluids::water()),
+            "kelp and kelp_plant carry source water");
+    require(kelpState.block().isLiquidContainer() &&
+                !canPlaceLiquid(kelpState, Fluids::water()) &&
+                !placeLiquid(shortWorld, pos, kelpState, sourceWater),
+            "kelp and kelp_plant refuse additional liquid without property error");
+  }
+  require(fluidStateOf(Blocks::BUBBLE_COLUMN.defaultState())
+              .isSourceOfType(Fluids::water()),
+          "bubble_column carries source water");
+  World exclusionWorld;
+  flatFloor(exclusionWorld);
+  exclusionWorld.rawSetBlock({0, 64, 0}, Blocks::WATER.defaultState());
+  exclusionWorld.rawSetBlock({1, 64, 0}, Blocks::SUGAR_CANE.defaultState());
+  exclusionWorld.rawSetBlock({-1, 64, 0}, Blocks::BUBBLE_COLUMN.defaultState());
+  exclusionWorld.scheduleFluidTick({0, 64, 0}, FluidRef(Fluids::water()), 5);
+  for (int i = 0; i < 6; ++i)
+    exclusionWorld.tick();
+  require(exclusionWorld.getBlock({1, 64, 0}).is(Blocks::SUGAR_CANE) &&
+              exclusionWorld.getBlock({-1, 64, 0}).is(Blocks::BUBBLE_COLUMN),
+          "water does not destroy FlowingFluid.canHoldAnyFluid exclusions");
+  shortWorld.rawSetBlock(pos, shortGrass);
+  shortWorld.setBlock(pos.relative(Direction::East), Blocks::STONE.defaultState());
+  require(shortWorld.getBlock(pos).is(Blocks::SEAGRASS), "supported seagrass survives");
+  require(hasWaterTick(shortWorld, pos), "surviving seagrass schedules water");
+  shortWorld.setBlock(pos.relative(Direction::Down), Blocks::AIR.defaultState());
+  require(shortWorld.getBlock(pos).is(Blocks::WATER), "support loss leaves source water");
+
+  World tallWorld;
+  flatFloor(tallWorld);
+  tallWorld.rawSetBlock(pos, lower);
+  tallWorld.rawSetBlock(pos.relative(Direction::Up), upper);
+  tallWorld.setBlock(pos.relative(Direction::East), Blocks::STONE.defaultState());
+  require(tallWorld.getBlock(pos) == lower, "valid double plant survives side update");
+  require(!hasWaterTick(tallWorld, pos), "tall seagrass does not schedule water from shape update");
+  tallWorld.removeBlock(pos);
+  require(tallWorld.getBlock(pos).is(Blocks::WATER), "lower half removal leaves water");
+  require(tallWorld.getBlock(pos.relative(Direction::Up)).is(Blocks::WATER),
+          "orphaned upper half is replaced by its water");
+}
+
+void doubleSlabCannotBeWaterlogged() {
+  World world;
+  world.loadChunk(0, 0);
+  const BlockState singleSlab = defaultState("oak_slab").with("type", "bottom");
+  const BlockState doubleSlab = defaultState("oak_slab").with("type", "double");
+  require(canPlaceLiquid(singleSlab, Fluids::water()),
+          "single slab accepts water");
+  require(!canPlaceLiquid(doubleSlab, Fluids::water()),
+          "double slab rejects water");
+
+  const Pos dblPos{5, 64, 5};
+  world.rawSetBlock(dblPos, doubleSlab);
+  require(!placeLiquid(world, dblPos, doubleSlab, fluidStateOf(waterLevel(0))),
+          "placeLiquid refuses to waterlog double slab");
+  require(world.getBlock(dblPos).getView("waterlogged") == "false",
+          "double slab stays dry after rejected placeLiquid");
+
+  // Surround double slab with solid floor and place a water source next to it;
+  // water must flow past without waterlogging the double slab.
+  for (int dx = -2; dx <= 2; ++dx)
+    for (int dz = -2; dz <= 2; ++dz)
+      world.rawSetBlock({5 + dx, 63, 5 + dz}, defaultState("smooth_stone"));
+  world.setBlock({4, 64, 5}, defaultState("water").with("level", "0"));
+  for (int t = 0; t < 20; ++t)
+    world.tick();
+  require(world.getBlock(dblPos).is(Blocks::OAK_SLAB) &&
+              world.getBlock(dblPos).getView("type") == "double" &&
+              world.getBlock(dblPos).getView("waterlogged") == "false",
+          "double slab cannot be waterlogged by adjacent flowing water");
+
+  const Pos singlePos{7, 64, 5};
+  world.rawSetBlock(singlePos, singleSlab);
+  require(placeLiquid(world, singlePos, singleSlab, fluidStateOf(waterLevel(0))),
+          "placeLiquid waterlogs single slab");
+  require(world.getBlock(singlePos).getView("waterlogged") == "true",
+          "single slab becomes waterlogged");
+}
 } // namespace
 
 int main() {
@@ -574,9 +672,11 @@ int main() {
     hostUpdateShapeSchedulesWater();
     coralPlacementWaterloggedStates();
     coralAndRailRulesDivergeOnFallingWater();
+    seagrassWaterAndShapeUpdates();
     callbackStateDecidesIdentity();
     sameFluidLevelChangeRunsOnPlace();
     pistonMovesWaterloggedHost();
+    doubleSlabCannotBeWaterlogged();
     std::cout << "fluid block tests passed\n";
     return 0;
   } catch (const std::exception &error) {

@@ -241,14 +241,19 @@ int main(int argc, char **argv) {
   put(rulesRoot, "DataVersion", integer(4786));
   Tag rulesData = compound();
   put(rulesData, "minecraft:advance_time", byte(0));
+  put(rulesData, "minecraft:random_tick_speed", integer(7));
   put(rulesData, "unknown:rule", text("ignored"));
   put(rulesRoot, "data", std::move(rulesData));
   const auto rulesPath = scratch / "data/minecraft/game_rules.dat";
   writeDocument(rulesPath, RootTag{"", std::move(rulesRoot)});
-  check(!redstone::loadWorldGameRules(rulesPath).advanceTime,
-        "advance_time=false loaded");
+  const auto loadedRules = redstone::loadWorldGameRules(rulesPath);
+  check(!loadedRules.advanceTime, "advance_time=false loaded");
+  check(loadedRules.randomTickSpeed == 7,
+        "random_tick_speed=7 loaded");
   check(redstone::WorldGameRules{}.advanceTime,
         "advance_time defaults true");
+  check(redstone::WorldGameRules{}.randomTickSpeed == 3,
+        "random_tick_speed defaults 3");
 
   const auto corruptPath = scratch / "corrupt.dat";
   writeBytes(corruptPath, {'n', 'o', 't', ' ', 'n', 'b', 't'});

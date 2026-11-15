@@ -116,11 +116,14 @@ void SkyLightPropagator::initPersistedSources(std::uint64_t key) {
   sourceHeights[key] = computeSources(key);
 }
 
-void SkyLightPropagator::seedIncoming(std::uint64_t key) {
+void SkyLightPropagator::seedIncoming(std::uint64_t key,
+                                      std::uint8_t directionMask) {
   const LightChunkSnapshot *chunk = stateFor(key);
   if (!chunk)
     return;
   for (int direction = 2; direction < 6; ++direction) {
+    if ((directionMask & (1u << direction)) == 0)
+      continue;
     const LightPos delta = kDirectionOffsets[direction];
     const std::uint64_t neighborKey =
         chunkKey(chunk->chunkX + delta.x, chunk->chunkZ + delta.z);
@@ -137,11 +140,14 @@ void SkyLightPropagator::seedIncoming(std::uint64_t key) {
   }
 }
 
-void SkyLightPropagator::seedOutgoing(std::uint64_t key) {
+void SkyLightPropagator::seedOutgoing(std::uint64_t key,
+                                      std::uint8_t directionMask) {
   const LightChunkSnapshot *chunk = stateFor(key);
   if (!chunk)
     return;
   for (int direction = 2; direction < 6; ++direction) {
+    if ((directionMask & (1u << direction)) == 0)
+      continue;
     const LightPos delta = kDirectionOffsets[direction];
     const LightChunkSnapshot *neighbor =
         stateFor(chunkKey(chunk->chunkX + delta.x, chunk->chunkZ + delta.z));
@@ -179,40 +185,14 @@ void SkyLightPropagator::clearIncomingFrom(std::uint64_t removedKey) {
 void SkyLightPropagator::syncStorageEligibility() {
   storedEligible.clear();
   eligibleValid = false;
-  for (const auto &[key, chunk] : owner.lastReadySky) {
-    if (affected.contains(key) || removed.contains(key))
-      continue;
-    for (int y = chunk->minLightSectionY();
-         y < chunk->minBlockSectionY + chunk->blockSectionCount + 1; ++y) {
-      const LightSectionSnapshot *section = chunk->section(y);
-      if (section &&
-          !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
-               .isMissing())
-        storedEligible.insert(
-            {static_cast<int>(key >> 32), y,
-             static_cast<int>(static_cast<std::uint32_t>(key))});
-    }
-  }
-  for (std::uint64_t key : affected)
-    (void)ensureWorking(key);
-
-  for (auto &[key, chunk] : working) {
+  for (std::uint64_t key : affected) {
     if (removed.contains(key))
       continue;
-    if (!affected.contains(key)) {
-      for (int y = chunk.snapshot->minLightSectionY();
-           y < chunk.snapshot->minBlockSectionY +
-                   chunk.snapshot->blockSectionCount + 1;
-           ++y) {
-        const LightSectionSnapshot *section = chunk.snapshot->section(y);
-        if (section &&
-            !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
-                 .isMissing())
-          storedEligible.insert({chunk.chunkX, y, chunk.chunkZ});
-      }
+    WorkingChunk *chunkPtr = ensureWorking(key);
+    if (!chunkPtr)
       continue;
-    }
-    const int sectionX = static_cast<int>(key >> 32);
+    WorkingChunk &chunk = *chunkPtr;
+    const int sectionX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
     const int sectionZ = static_cast<int>(static_cast<std::uint32_t>(key));
     for (int y = chunk.snapshot->minLightSectionY();
          y < chunk.snapshot->minBlockSectionY +
@@ -241,6 +221,7 @@ void SkyLightPropagator::syncStorageEligibility() {
               LightLayerSnapshot::missing();
           chunk.dirtySections.push_back(y);
           chunk.dirty = true;
+          chunk.propagated = true;
         }
       }
     }
@@ -394,6 +375,7 @@ void SkyLightPropagator::commitLayers() {
     }
     chunk->dirtySections.push_back(position.y);
     chunk->dirty = true;
+    chunk->propagated = true;
   }
 }
 
@@ -612,8 +594,9 @@ SkyLightPropagator::initialWorkingLayer(std::uint64_t chunkKeyValue,
 
 bool SkyLightPropagator::blockSectionNonEmpty(int x, int y, int z) const {
   const auto key = chunkKey(x, z);
-  if (const GeometrySection *geometry = owner.geometrySection(key, y))
-    return !geometry->empty;
+  if (const std::optional<bool> nonEmpty =
+          owner.geometrySectionNonEmpty(key, y))
+    return *nonEmpty;
   const LightChunkSnapshot *chunk = stateFor(key);
   if (!chunk || y < chunk->minBlockSectionY ||
       y >= chunk->minBlockSectionY + chunk->blockSectionCount)
@@ -750,6 +733,19 @@ int SkyLightPropagator::storedLevel(LightPos position) const {
              : 15;
 }
 
+bool SkyLightPropagator::isSectionStoredEligible(int sectionX, int sectionY,
+                                                 int sectionZ) const {
+  const std::uint64_t packed = chunkKey(sectionX, sectionZ);
+  if (affected.contains(packed))
+    return storedEligible.contains({sectionX, sectionY, sectionZ});
+  const LightChunkSnapshot *chunk = stateFor(packed);
+  const LightSectionSnapshot *section =
+      chunk ? chunk->section(sectionY) : nullptr;
+  return section &&
+         !section->layers[static_cast<std::size_t>(LightLayer::Sky)]
+              .isMissing();
+}
+
 bool SkyLightPropagator::eligibleHere(int sectionX, int sectionY,
                                       int sectionZ) {
   const std::uint64_t packed =
@@ -760,7 +756,7 @@ bool SkyLightPropagator::eligibleHere(int sectionX, int sectionY,
     return eligibleResult;
   eligibleChunkKey = packed;
   eligibleSectionY = sectionY;
-  eligibleResult = storedEligible.contains({sectionX, sectionY, sectionZ});
+  eligibleResult = isSectionStoredEligible(sectionX, sectionY, sectionZ);
   eligibleValid = true;
   return eligibleResult;
 }
@@ -835,17 +831,8 @@ void SkyLightPropagator::allocateSection(std::uint64_t chunkKeyValue,
 
 const BlockLightProperties &SkyLightPropagator::sourcePropertyAt(
     std::uint64_t key, int x, int y, int z) const {
-  const int minY = owner.minBlockSectionY * 16;
-  const int maxY = (owner.minBlockSectionY + owner.blockSectionCount) * 16;
-  if (y < minY || y >= maxY)
-    return emptyLightProperties();
-  const GeometrySection *geometry = owner.geometrySection(key, y >> 4);
-  if (!geometry)
-    return unsupportedLightProperties();
-  const std::uint16_t classId =
-      geometry->uniform ? geometry->uniformClass
-                        : geometry->at(lightIndex(x, y, z));
-  return owner.opticalClass(classId).properties;
+  const BlockLightProperties *props = owner.sectionPropertiesAt(key, x, y, z);
+  return props ? *props : unsupportedLightProperties();
 }
 
 bool SkyLightPropagator::sourceEmptyGeometry(
@@ -875,19 +862,36 @@ int SkyLightPropagator::findSourceBelow(std::uint64_t key, int x, int z,
   const BlockLightProperties *topState = &sourcePropertyAt(key, x, topY, z);
   for (int sectionY = firstSectionY; sectionY >= bottomSectionY; --sectionY) {
     const GeometrySection *geometry = owner.geometrySection(key, sectionY);
+    const std::optional<LightSectionView> direct =
+        geometry ? std::nullopt : owner.directSectionView(key, sectionY);
     const int baseY = sectionY * 16;
     const int localStart = sectionY == firstSectionY ? (firstBottomY & 15) : 15;
-    if (sourceEmptyGeometry(geometry)) {
+    bool uniformEmpty = sourceEmptyGeometry(geometry);
+    if (!uniformEmpty && direct && direct->empty && direct->bits == 0) {
+      const auto &properties = owner.propertiesForState(direct->single);
+      uniformEmpty = properties.supported && properties.dampening == 0 &&
+                     !hasLightFaceRect(properties, 0) &&
+                     !hasLightFaceRect(properties, 1);
+    }
+    if (uniformEmpty) {
       const auto &empty = emptyLightProperties();
       if (isSourceEdgeOccluded(*topState, empty))
         return baseY + localStart + 1;
       topState = &empty;
       continue;
     }
-    if (!geometry)
+    if (!geometry && !direct)
       return baseY + localStart + 1;
     for (int localY = localStart; localY >= 0; --localY) {
-      const auto &bottom = sourcePropertyAt(key, x, baseY + localY, z);
+      const BlockLightProperties &bottom =
+          geometry
+              ? owner.opticalClass(
+                        geometry->uniform
+                            ? geometry->uniformClass
+                            : geometry->at(lightIndex(x, baseY + localY, z)))
+                    .properties
+              : owner.propertiesForState(
+                    direct->atomicStateAt(lightIndex(x, baseY + localY, z)));
       if (isSourceEdgeOccluded(*topState, bottom))
         return baseY + localY + 1;
       topState = &bottom;
@@ -904,17 +908,34 @@ int SkyLightPropagator::computeSource(std::uint64_t key, int x, int z) const {
   const BlockLightProperties *top = &empty;
   for (int sectionY = topSectionY; sectionY >= bottomSectionY; --sectionY) {
     const GeometrySection *geometry = owner.geometrySection(key, sectionY);
+    const std::optional<LightSectionView> direct =
+        geometry ? std::nullopt : owner.directSectionView(key, sectionY);
     const int baseY = sectionY * 16;
-    if (sourceEmptyGeometry(geometry)) {
+    bool uniformEmpty = sourceEmptyGeometry(geometry);
+    if (!uniformEmpty && direct && direct->empty && direct->bits == 0) {
+      const auto &properties = owner.propertiesForState(direct->single);
+      uniformEmpty = properties.supported && properties.dampening == 0 &&
+                     !hasLightFaceRect(properties, 0) &&
+                     !hasLightFaceRect(properties, 1);
+    }
+    if (uniformEmpty) {
       if (isSourceEdgeOccluded(*top, empty))
         return baseY + 16;
       top = &empty;
       continue;
     }
-    if (!geometry)
+    if (!geometry && !direct)
       return baseY + 16;
     for (int localY = 15; localY >= 0; --localY) {
-      const auto &bottom = sourcePropertyAt(key, x, baseY + localY, z);
+      const BlockLightProperties &bottom =
+          geometry
+              ? owner.opticalClass(
+                        geometry->uniform
+                            ? geometry->uniformClass
+                            : geometry->at(lightIndex(x, baseY + localY, z)))
+                    .properties
+              : owner.propertiesForState(
+                    direct->atomicStateAt(lightIndex(x, baseY + localY, z)));
       if (isSourceEdgeOccluded(*top, bottom))
         return baseY + localY + 1;
       top = &bottom;
@@ -957,7 +978,7 @@ int SkyLightPropagator::sourceFor(int blockX, int blockZ) {
   const std::uint64_t key = chunkKey(chunkX, chunkZ);
   auto found = sourceHeights.find(key);
   if (found == sourceHeights.end()) {
-    if (!owner.geometry.contains(key))
+    if (!owner.hasChunkGeometry(key))
       return owner.minBlockSectionY * 16 - 1;
     found = sourceHeights.emplace(key, computeSources(key)).first;
   }
@@ -1108,8 +1129,7 @@ int SkyLightPropagator::countEmptySectionsBelowIfAtBorder(
   int sectionY = position.y >> 4;
   int count = 0;
   while (sectionY - count - 1 >= owner.minBlockSectionY - 1) {
-    const SectionPos3 key{sectionX, sectionY - count - 1, sectionZ};
-    if (storedEligible.contains(key))
+    if (isSectionStoredEligible(sectionX, sectionY - count - 1, sectionZ))
       break;
     ++count;
   }
@@ -1140,8 +1160,7 @@ void SkyLightPropagator::propagateFromEmptySections(LightPos to, int direction,
   int sectionY = (to.y >> 4) - 1;
   const int bottomSectionY = sectionY - emptySectionsBelow + 1;
   while (sectionY >= bottomSectionY) {
-    const SectionPos3 key{sectionX, sectionY, sectionZ};
-    if (!storedEligible.contains(key)) {
+    if (!isSectionStoredEligible(sectionX, sectionY, sectionZ)) {
       --sectionY;
       continue;
     }

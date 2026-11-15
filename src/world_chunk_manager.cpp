@@ -1220,60 +1220,65 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
     }
     terrain::PackedBlockStates &packed = *loadedSection.blockStates;
     World::Section &section = chunk.sections[sectionIndex];
+    section.tickingBlockCount = 0;
+    section.randomTickByMinisection.fill(0);
     if (packed.palette.size() == 1) {
       const BlockState::Id id = packed.palette.front().state.id();
       section.single = id;
       section.nonEmpty = BlockState::fromId(id).isAir() ? 0 : 4096;
+      section.initSingleRandomTick(id);
     } else {
-      const bool wide = packed.palette.size() > 256;
-      std::shared_ptr<World::SectionStorage> storage =
-          wide ? std::static_pointer_cast<World::SectionStorage>(
-                     std::make_shared<World::SectionStorage16>())
-               : std::static_pointer_cast<World::SectionStorage>(
-                     std::make_shared<World::SectionStorage8>());
-      if (wide) {
-        auto *block = static_cast<World::SectionStorage16 *>(storage.get());
-        block->paletteSize =
-            static_cast<std::uint16_t>(packed.palette.size());
-        for (std::size_t i = 0; i < packed.palette.size(); ++i)
+      const std::uint8_t targetBits =
+          packed.palette.size() > 256
+              ? 16
+              : (world_.lowMemoryMode()
+                     ? World::minBitsForPaletteSize(packed.palette.size())
+                     : 8);
+      auto storage = World::makeSectionStorageForBits(targetBits);
+      std::vector<std::uint8_t> paletteTicking(packed.palette.size(), 0);
+      for (std::size_t i = 0; i < packed.palette.size(); ++i)
+        paletteTicking[i] =
+            stateIsRandomlyTickingId(packed.palette[i].state.id()) ? 1 : 0;
+      std::uint16_t tickingCount = 0;
+      std::uint16_t nonEmpty = 0;
+      bool outOfRange = false;
+      World::visitSectionStorage(storage.get(), [&](auto *block) {
+        using BlockT = std::remove_pointer_t<decltype(block)>;
+        const std::size_t paletteCount =
+            std::min(packed.palette.size(), BlockT::kPaletteCapacity);
+        block->paletteSize = static_cast<std::uint16_t>(paletteCount);
+        for (std::size_t i = 0; i < paletteCount; ++i) {
           block->palette[i] = packed.palette[i].state.id();
-        std::uint16_t nonEmpty = 0;
+          block->paletteTicking[i] = paletteTicking[i];
+        }
         for (std::size_t i = 0; i < terrain::PackedBlockStates::CellCount;
              ++i) {
           const std::size_t value = packed.cell(i);
-          if (value >= packed.palette.size()) {
-            errors_[position] = "decoded palette cell is out of range";
-            return false;
+          if (value >= paletteCount) {
+            outOfRange = true;
+            return;
           }
-          block->indices[i] = static_cast<std::uint16_t>(value);
+          block->setIndexAt(i, static_cast<std::uint16_t>(value));
           if (!packed.palette[value].state.isAir())
             ++nonEmpty;
-        }
-        section.nonEmpty = nonEmpty;
-      } else {
-        auto *block = static_cast<World::SectionStorage8 *>(storage.get());
-        block->paletteSize =
-            static_cast<std::uint16_t>(packed.palette.size());
-        for (std::size_t i = 0; i < packed.palette.size(); ++i)
-          block->palette[i] = packed.palette[i].state.id();
-        std::uint16_t nonEmpty = 0;
-        for (std::size_t i = 0; i < terrain::PackedBlockStates::CellCount;
-             ++i) {
-          const std::size_t value = packed.cell(i);
-          if (value >= packed.palette.size()) {
-            errors_[position] = "decoded palette cell is out of range";
-            return false;
+          if (paletteTicking[value]) {
+            ++tickingCount;
+            ++section.randomTickByMinisection
+                  [i / World::kRandomTickMinisectionSize];
           }
-          block->indices[i] = static_cast<std::uint8_t>(value);
-          if (!packed.palette[value].state.isAir())
-            ++nonEmpty;
         }
-        section.nonEmpty = nonEmpty;
+      });
+      if (outOfRange) {
+        errors_[position] = "decoded palette cell is out of range";
+        return false;
       }
+      section.nonEmpty = nonEmpty;
+      section.tickingBlockCount = tickingCount;
       section.storage = std::move(storage);
     }
     writableSections.insert(sectionY);
   }
+  chunk.refreshRandomTickMask(world_.sectionCount());
 
   chunk.heightmaps = std::make_unique<ChunkHeightmaps>(
       world_.minY(), world_.sectionCount() * 16);

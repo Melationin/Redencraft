@@ -1,5 +1,6 @@
 #pragma once
 #include "redstone/command.hpp"
+#include "redstone/containers.hpp"
 #include "redstone/entity.hpp"
 #include "redstone/net/wire.hpp"
 #include <array>
@@ -59,6 +60,8 @@ public:
   void setWorldClockSource(const WorldClocks &, bool advanceTime);
   // ServerClockManager.modifyClock: one changed single-clock record.
   void sendWorldClockUpdate(BuiltinWorldClock);
+  // Synchronize the current world's block-tag snapshot in the play phase.
+  void sendBlockTagUpdate();
   // Called at the chunk/entity broadcast phase of World::tick.
   void broadcastEntities();
   void entityAdded(const Entity &);
@@ -103,6 +106,10 @@ public:
   Vec3 playerPosition() const { return position_; }
   int playerId() const { return options_.playerId; }
   const std::array<ItemStack, 41> &inventory() const { return inventory_; }
+  int openContainerId() const {
+    return openContainer_ ? openContainer_->containerId : 0;
+  }
+  const ItemStack &carriedItem() const { return carriedItem_; }
   std::function<void(std::string_view)> diagnostic;
 
 private:
@@ -156,8 +163,15 @@ private:
   void positionPacket(Writer &, Vec3 pos, Vec3 motion, float yaw, float pitch);
   bool canInteract(Pos) const;
   void useItemOn(Reader &);
+  void useItem(Reader &);
   void playerAction(Reader &);
   void creativeSlot(Reader &);
+  void openContainerScreen(Pos, const BlockState &);
+  void closeOpenContainer(bool sendPacket);
+  void syncOpenContainer();
+  void sendContainerContent();
+  void containerClick(Reader &);
+  void containerClose(Reader &);
   void runCommand(std::string_view line);
   void sendSuggestions(int requestId, std::string_view line);
   World &world_;
@@ -171,6 +185,7 @@ private:
   bool awaitingKnownPacks_ = false, finishSent_ = false,
        teleportPending_ = true;
   bool sneaking_ = false;
+  std::uint64_t configuredBlockTagRevision_ = 0;
   Bytes input_;
   std::vector<OutPacket> output_;
   std::size_t outputBytes_ = 0;
@@ -180,6 +195,21 @@ private:
   float yaw_ = 0, pitch_ = 0;
   std::array<ItemStack, 41> inventory_{};
   int selectedSlot_ = 0;
+  struct OpenContainer {
+    int containerId = 0;
+    int menuTypeId = 0;
+    Pos pos{};
+    ContainerKind kind = ContainerKind::Chest;
+    int slotCount = 0;
+    int stateId = 1;
+    std::uint64_t lastSeenModCount = 0;
+    int quickCraftMode = -1;
+    int quickCraftEvent = 0;
+    std::vector<int> quickCraftSlots;
+  };
+  std::optional<OpenContainer> openContainer_;
+  int nextContainerId_ = 1;
+  ItemStack carriedItem_;
   std::map<int, TrackedEntity> trackedEntities_;
   struct ChangedBlock {
     std::uint64_t section;

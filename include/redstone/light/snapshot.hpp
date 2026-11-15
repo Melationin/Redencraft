@@ -216,7 +216,9 @@ struct LightChunkInput {
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
   // Chunk load input has exactly blockSectionCount entries converted directly
-  // from World::Chunk::Section or test LightSectionView fixtures.
+  // from World::Chunk::Section or test LightSectionView fixtures unless
+  // directGeometry is set (in which case geometrySections is omitted).
+  bool directGeometry = false;
   std::vector<GeometrySection> geometrySections;
   std::optional<PersistedChunkLight> persistedLight;
 

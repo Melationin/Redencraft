@@ -636,6 +636,13 @@ void testChunkCodecAndEdit(const std::filesystem::path &scratch) {
   require(decodeChunkNbt(nbt::writeRoot(unsupported)).status ==
               DecodeStatus::Unsupported,
           "unknown palette block is explicitly unsupported");
+  nbt::RootTag unimplemented = original;
+  auto &pending = unimplemented.value.compound["sections"].list[0]
+                      .compound["block_states"].compound["palette"];
+  pending.list[0] = paletteEntry(Blocks::WHITE_BED.defaultState());
+  require(decodeChunkNbt(nbt::writeRoot(unimplemented)).status ==
+              DecodeStatus::Unsupported,
+          "registered state with unsupported behavior is not accepted for writeback");
 
   nbt::RootTag badProperties = original;
   nbt::Tag &badPalette = badProperties.value.compound["sections"].list[0]

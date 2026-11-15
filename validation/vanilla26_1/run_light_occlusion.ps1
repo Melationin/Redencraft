@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$root = Resolve-Path (Join-Path $PSScriptRoot '../..')
+$root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
 $vanilla = Join-Path $root 'validation/vanilla26_1'
 $officialJar = Join-Path $vanilla 'server.jar'
 $classesJar = Join-Path $vanilla 'versions/26.1/server-26.1.jar'

@@ -1,0 +1,16 @@
+{
+  "version": "26.1",
+  "jar_sha1": "3872a7f07a1a595e651aef8b058dfc2bb3772f46",
+  "extracted_classes_jar_sha256": "a7fed6f7d88379349e35ae0c6e9881d4484605132f6f620376a3868eea6cce52",
+  "inventory_sha256": "7dfd3006813b475138c27a8c9b3a9825578caf6f1d5d87a6b1694f0029f0f26e",
+  "rows": 1168,
+  "columns": [
+    "block_id",
+    "name",
+    "java_class",
+    "default_properties",
+    "state_count",
+    "random_tick_state_count",
+    "block_entity_state_count"
+  ]
+}

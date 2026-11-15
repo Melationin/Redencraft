@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "redstone/light/service.hpp"
 #include "redstone/light/snapshot.hpp"
 #include "redstone/light/types.hpp"
 
@@ -25,6 +26,12 @@ const BlockLightProperties &unsupportedLightProperties() noexcept;
 }
 
 namespace redstone::light_internal {
+
+struct DirectChunkMeta {
+  int chunkX = 0;
+  int chunkZ = 0;
+  std::uint64_t lifecycleEpoch = 0;
+};
 
 struct ThreadAffinityResult {
   std::uint64_t mask = 0;
@@ -466,6 +473,7 @@ struct WorkingChunk {
   std::shared_ptr<LightChunkSnapshot> snapshot;
   std::vector<int> dirtySections;
   bool dirty = false;
+  bool propagated = false;
   bool inPlace = false;
 
   LightSectionSnapshot *sectionForEdit(int sectionY);
@@ -592,13 +600,16 @@ struct LightEngineHost {
   LightEngineHost(
       int minSection, int sectionCount, const LightOpticalTable &table,
       const FlatMap<std::uint64_t, GeometryChunk, UInt64Hash> &geo,
+      const FlatMap<std::uint64_t, DirectChunkMeta, UInt64Hash> &directMeta,
+      const LightWorkerOptions::DirectWorldGeometrySource &directSource,
       const FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>,
                     UInt64Hash> &readyBlock,
       const FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>,
                     UInt64Hash> &readySky,
       std::uint64_t &queueEntries, std::uint64_t &unloadedSkips)
       : minBlockSectionY(minSection), blockSectionCount(sectionCount),
-        opticalTable(table), geometry(geo), lastReadyBlock(readyBlock),
+        opticalTable(table), geometry(geo), directChunks(directMeta),
+        directWorld(directSource), lastReadyBlock(readyBlock),
         lastReadySky(readySky), lightQueueEntries(queueEntries),
         unloadedNeighborSkips(unloadedSkips) {}
 
@@ -606,6 +617,8 @@ struct LightEngineHost {
   int blockSectionCount = 0;
   const LightOpticalTable &opticalTable;
   const FlatMap<std::uint64_t, GeometryChunk, UInt64Hash> &geometry;
+  const FlatMap<std::uint64_t, DirectChunkMeta, UInt64Hash> &directChunks;
+  LightWorkerOptions::DirectWorldGeometrySource directWorld{};
   const FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>, UInt64Hash>
       &lastReadyBlock;
   const FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>, UInt64Hash>
@@ -616,30 +629,40 @@ struct LightEngineHost {
   const LightOpticalClass &opticalClass(std::uint16_t id) const {
     return opticalTable[static_cast<std::uint8_t>(id)];
   }
-  const GeometryChunk *geometryChunk(std::uint64_t key) const {
-    const std::size_t slot = chunkL1Slot(key);
-    GeoCacheEntry &entry = geoCache_[slot];
-    if (entry.valid && entry.key == key)
-      return entry.chunk;
-    const auto found = geometry.find(key);
-    entry.key = key;
-    entry.chunk = found == geometry.end() ? nullptr : &found->second;
-    entry.valid = true;
-    return entry.chunk;
+  const BlockLightProperties &propertiesForState(BlockState::Id state) const {
+    return opticalClass(opticalTable.classForState(state)).properties;
   }
-  const GeometrySection *geometrySection(std::uint64_t key, int sectionY) const;
-  const BlockLightProperties &blockPropertiesAt(int x, int y, int z,
-                                                bool &incomplete) const;
-  const std::shared_ptr<LightChunkSnapshot> &storedLayerSnapshot(
-      LightLayer layer, std::uint64_t key) const;
-
-private:
   struct GeoCacheEntry {
     std::uint64_t key = 0;
     const GeometryChunk *chunk = nullptr;
     bool valid = false;
   };
+  struct DirectSectionCacheEntry {
+    std::uint64_t key = 0;
+    int sectionY = 0;
+    bool present = false;
+    bool valid = false;
+    LightSectionView view{};
+  };
+  const DirectSectionCacheEntry *
+  lookupDirectSectionCache(std::uint64_t key, int sectionY) const;
+  const GeometryChunk *geometryChunk(std::uint64_t key) const;
+  bool hasChunkGeometry(std::uint64_t key) const;
+  const GeometrySection *geometrySection(std::uint64_t key, int sectionY) const;
+  std::optional<LightSectionView> directSectionView(std::uint64_t key,
+                                                    int sectionY) const;
+  std::optional<bool> geometrySectionNonEmpty(std::uint64_t key,
+                                              int sectionY) const;
+  const BlockLightProperties &blockPropertiesAt(int x, int y, int z,
+                                                bool &incomplete) const;
+  const BlockLightProperties *sectionPropertiesAt(std::uint64_t key, int x,
+                                                   int y, int z) const;
+  const std::shared_ptr<LightChunkSnapshot> &storedLayerSnapshot(
+      LightLayer layer, std::uint64_t key) const;
+
+private:
   mutable std::array<GeoCacheEntry, 64> geoCache_{};
+  mutable std::array<DirectSectionCacheEntry, 64> directSectionCache_{};
 };
 
 } // namespace redstone::light_internal

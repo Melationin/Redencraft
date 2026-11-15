@@ -1,0 +1,1168 @@
+0	minecraft:air	net.minecraft.world.level.block.AirBlock		1	0	0
+1	minecraft:stone	net.minecraft.world.level.block.Block		1	0	0
+2	minecraft:granite	net.minecraft.world.level.block.Block		1	0	0
+3	minecraft:polished_granite	net.minecraft.world.level.block.Block		1	0	0
+4	minecraft:diorite	net.minecraft.world.level.block.Block		1	0	0
+5	minecraft:polished_diorite	net.minecraft.world.level.block.Block		1	0	0
+6	minecraft:andesite	net.minecraft.world.level.block.Block		1	0	0
+7	minecraft:polished_andesite	net.minecraft.world.level.block.Block		1	0	0
+8	minecraft:grass_block	net.minecraft.world.level.block.GrassBlock	snowy=false	2	2	0
+9	minecraft:dirt	net.minecraft.world.level.block.Block		1	0	0
+10	minecraft:coarse_dirt	net.minecraft.world.level.block.Block		1	0	0
+11	minecraft:podzol	net.minecraft.world.level.block.SnowyBlock	snowy=false	2	0	0
+12	minecraft:cobblestone	net.minecraft.world.level.block.Block		1	0	0
+13	minecraft:oak_planks	net.minecraft.world.level.block.Block		1	0	0
+14	minecraft:spruce_planks	net.minecraft.world.level.block.Block		1	0	0
+15	minecraft:birch_planks	net.minecraft.world.level.block.Block		1	0	0
+16	minecraft:jungle_planks	net.minecraft.world.level.block.Block		1	0	0
+17	minecraft:acacia_planks	net.minecraft.world.level.block.Block		1	0	0
+18	minecraft:cherry_planks	net.minecraft.world.level.block.Block		1	0	0
+19	minecraft:dark_oak_planks	net.minecraft.world.level.block.Block		1	0	0
+20	minecraft:pale_oak_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+21	minecraft:pale_oak_planks	net.minecraft.world.level.block.Block		1	0	0
+22	minecraft:mangrove_planks	net.minecraft.world.level.block.Block		1	0	0
+23	minecraft:bamboo_planks	net.minecraft.world.level.block.Block		1	0	0
+24	minecraft:bamboo_mosaic	net.minecraft.world.level.block.Block		1	0	0
+25	minecraft:oak_sapling	net.minecraft.world.level.block.SaplingBlock	stage=0	2	2	0
+26	minecraft:spruce_sapling	net.minecraft.world.level.block.SaplingBlock	stage=0	2	2	0
+27	minecraft:birch_sapling	net.minecraft.world.level.block.SaplingBlock	stage=0	2	2	0
+28	minecraft:jungle_sapling	net.minecraft.world.level.block.SaplingBlock	stage=0	2	2	0
+29	minecraft:acacia_sapling	net.minecraft.world.level.block.SaplingBlock	stage=0	2	2	0
+30	minecraft:cherry_sapling	net.minecraft.world.level.block.SaplingBlock	stage=0	2	2	0
+31	minecraft:dark_oak_sapling	net.minecraft.world.level.block.SaplingBlock	stage=0	2	2	0
+32	minecraft:pale_oak_sapling	net.minecraft.world.level.block.SaplingBlock	stage=0	2	2	0
+33	minecraft:mangrove_propagule	net.minecraft.world.level.block.MangrovePropaguleBlock	age=0,hanging=false,stage=0,waterlogged=false	40	40	0
+34	minecraft:bedrock	net.minecraft.world.level.block.Block		1	0	0
+35	minecraft:water	net.minecraft.world.level.block.LiquidBlock	level=0	16	0	0
+36	minecraft:lava	net.minecraft.world.level.block.LiquidBlock	level=0	16	16	0
+37	minecraft:sand	net.minecraft.world.level.block.SandBlock		1	0	0
+38	minecraft:suspicious_sand	net.minecraft.world.level.block.BrushableBlock	dusted=0	4	0	4
+39	minecraft:red_sand	net.minecraft.world.level.block.SandBlock		1	0	0
+40	minecraft:gravel	net.minecraft.world.level.block.ColoredFallingBlock		1	0	0
+41	minecraft:suspicious_gravel	net.minecraft.world.level.block.BrushableBlock	dusted=0	4	0	4
+42	minecraft:gold_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+43	minecraft:deepslate_gold_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+44	minecraft:iron_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+45	minecraft:deepslate_iron_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+46	minecraft:coal_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+47	minecraft:deepslate_coal_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+48	minecraft:nether_gold_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+49	minecraft:oak_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+50	minecraft:spruce_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+51	minecraft:birch_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+52	minecraft:jungle_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+53	minecraft:acacia_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+54	minecraft:cherry_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+55	minecraft:dark_oak_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+56	minecraft:pale_oak_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+57	minecraft:mangrove_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+58	minecraft:mangrove_roots	net.minecraft.world.level.block.MangroveRootsBlock	waterlogged=false	2	0	0
+59	minecraft:muddy_mangrove_roots	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+60	minecraft:bamboo_block	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+61	minecraft:stripped_spruce_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+62	minecraft:stripped_birch_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+63	minecraft:stripped_jungle_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+64	minecraft:stripped_acacia_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+65	minecraft:stripped_cherry_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+66	minecraft:stripped_dark_oak_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+67	minecraft:stripped_pale_oak_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+68	minecraft:stripped_oak_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+69	minecraft:stripped_mangrove_log	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+70	minecraft:stripped_bamboo_block	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+71	minecraft:oak_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+72	minecraft:spruce_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+73	minecraft:birch_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+74	minecraft:jungle_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+75	minecraft:acacia_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+76	minecraft:cherry_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+77	minecraft:dark_oak_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+78	minecraft:mangrove_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+79	minecraft:stripped_oak_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+80	minecraft:stripped_spruce_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+81	minecraft:stripped_birch_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+82	minecraft:stripped_jungle_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+83	minecraft:stripped_acacia_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+84	minecraft:stripped_cherry_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+85	minecraft:stripped_dark_oak_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+86	minecraft:stripped_pale_oak_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+87	minecraft:stripped_mangrove_wood	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+88	minecraft:oak_leaves	net.minecraft.world.level.block.TintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+89	minecraft:spruce_leaves	net.minecraft.world.level.block.TintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+90	minecraft:birch_leaves	net.minecraft.world.level.block.TintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+91	minecraft:jungle_leaves	net.minecraft.world.level.block.TintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+92	minecraft:acacia_leaves	net.minecraft.world.level.block.TintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+93	minecraft:cherry_leaves	net.minecraft.world.level.block.UntintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+94	minecraft:dark_oak_leaves	net.minecraft.world.level.block.TintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+95	minecraft:pale_oak_leaves	net.minecraft.world.level.block.UntintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+96	minecraft:mangrove_leaves	net.minecraft.world.level.block.MangroveLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+97	minecraft:azalea_leaves	net.minecraft.world.level.block.UntintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+98	minecraft:flowering_azalea_leaves	net.minecraft.world.level.block.UntintedParticleLeavesBlock	distance=7,persistent=false,waterlogged=false	28	2	0
+99	minecraft:sponge	net.minecraft.world.level.block.SpongeBlock		1	0	0
+100	minecraft:wet_sponge	net.minecraft.world.level.block.WetSpongeBlock		1	0	0
+101	minecraft:glass	net.minecraft.world.level.block.TransparentBlock		1	0	0
+102	minecraft:lapis_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+103	minecraft:deepslate_lapis_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+104	minecraft:lapis_block	net.minecraft.world.level.block.Block		1	0	0
+105	minecraft:dispenser	net.minecraft.world.level.block.DispenserBlock	facing=north,triggered=false	12	0	12
+106	minecraft:sandstone	net.minecraft.world.level.block.Block		1	0	0
+107	minecraft:chiseled_sandstone	net.minecraft.world.level.block.Block		1	0	0
+108	minecraft:cut_sandstone	net.minecraft.world.level.block.Block		1	0	0
+109	minecraft:note_block	net.minecraft.world.level.block.NoteBlock	instrument=harp,note=0,powered=false	1350	0	0
+110	minecraft:white_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+111	minecraft:orange_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+112	minecraft:magenta_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+113	minecraft:light_blue_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+114	minecraft:yellow_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+115	minecraft:lime_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+116	minecraft:pink_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+117	minecraft:gray_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+118	minecraft:light_gray_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+119	minecraft:cyan_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+120	minecraft:purple_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+121	minecraft:blue_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+122	minecraft:brown_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+123	minecraft:green_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+124	minecraft:red_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+125	minecraft:black_bed	net.minecraft.world.level.block.BedBlock	facing=north,occupied=false,part=foot	16	0	16
+126	minecraft:powered_rail	net.minecraft.world.level.block.PoweredRailBlock	powered=false,shape=north_south,waterlogged=false	24	0	0
+127	minecraft:detector_rail	net.minecraft.world.level.block.DetectorRailBlock	powered=false,shape=north_south,waterlogged=false	24	0	0
+128	minecraft:sticky_piston	net.minecraft.world.level.block.piston.PistonBaseBlock	extended=false,facing=north	12	0	0
+129	minecraft:cobweb	net.minecraft.world.level.block.WebBlock		1	0	0
+130	minecraft:short_grass	net.minecraft.world.level.block.TallGrassBlock		1	0	0
+131	minecraft:fern	net.minecraft.world.level.block.TallGrassBlock		1	0	0
+132	minecraft:dead_bush	net.minecraft.world.level.block.DryVegetationBlock		1	0	0
+133	minecraft:bush	net.minecraft.world.level.block.BushBlock		1	0	0
+134	minecraft:short_dry_grass	net.minecraft.world.level.block.ShortDryGrassBlock		1	0	0
+135	minecraft:tall_dry_grass	net.minecraft.world.level.block.TallDryGrassBlock		1	0	0
+136	minecraft:seagrass	net.minecraft.world.level.block.SeagrassBlock		1	0	0
+137	minecraft:tall_seagrass	net.minecraft.world.level.block.TallSeagrassBlock	half=lower	2	0	0
+138	minecraft:piston	net.minecraft.world.level.block.piston.PistonBaseBlock	extended=false,facing=north	12	0	0
+139	minecraft:piston_head	net.minecraft.world.level.block.piston.PistonHeadBlock	facing=north,short=false,type=normal	24	0	0
+140	minecraft:white_wool	net.minecraft.world.level.block.Block		1	0	0
+141	minecraft:orange_wool	net.minecraft.world.level.block.Block		1	0	0
+142	minecraft:magenta_wool	net.minecraft.world.level.block.Block		1	0	0
+143	minecraft:light_blue_wool	net.minecraft.world.level.block.Block		1	0	0
+144	minecraft:yellow_wool	net.minecraft.world.level.block.Block		1	0	0
+145	minecraft:lime_wool	net.minecraft.world.level.block.Block		1	0	0
+146	minecraft:pink_wool	net.minecraft.world.level.block.Block		1	0	0
+147	minecraft:gray_wool	net.minecraft.world.level.block.Block		1	0	0
+148	minecraft:light_gray_wool	net.minecraft.world.level.block.Block		1	0	0
+149	minecraft:cyan_wool	net.minecraft.world.level.block.Block		1	0	0
+150	minecraft:purple_wool	net.minecraft.world.level.block.Block		1	0	0
+151	minecraft:blue_wool	net.minecraft.world.level.block.Block		1	0	0
+152	minecraft:brown_wool	net.minecraft.world.level.block.Block		1	0	0
+153	minecraft:green_wool	net.minecraft.world.level.block.Block		1	0	0
+154	minecraft:red_wool	net.minecraft.world.level.block.Block		1	0	0
+155	minecraft:black_wool	net.minecraft.world.level.block.Block		1	0	0
+156	minecraft:moving_piston	net.minecraft.world.level.block.piston.MovingPistonBlock	facing=north,type=normal	12	0	12
+157	minecraft:dandelion	net.minecraft.world.level.block.FlowerBlock		1	0	0
+158	minecraft:golden_dandelion	net.minecraft.world.level.block.FlowerBlock		1	0	0
+159	minecraft:torchflower	net.minecraft.world.level.block.FlowerBlock		1	0	0
+160	minecraft:poppy	net.minecraft.world.level.block.FlowerBlock		1	0	0
+161	minecraft:blue_orchid	net.minecraft.world.level.block.FlowerBlock		1	0	0
+162	minecraft:allium	net.minecraft.world.level.block.FlowerBlock		1	0	0
+163	minecraft:azure_bluet	net.minecraft.world.level.block.FlowerBlock		1	0	0
+164	minecraft:red_tulip	net.minecraft.world.level.block.FlowerBlock		1	0	0
+165	minecraft:orange_tulip	net.minecraft.world.level.block.FlowerBlock		1	0	0
+166	minecraft:white_tulip	net.minecraft.world.level.block.FlowerBlock		1	0	0
+167	minecraft:pink_tulip	net.minecraft.world.level.block.FlowerBlock		1	0	0
+168	minecraft:oxeye_daisy	net.minecraft.world.level.block.FlowerBlock		1	0	0
+169	minecraft:cornflower	net.minecraft.world.level.block.FlowerBlock		1	0	0
+170	minecraft:wither_rose	net.minecraft.world.level.block.WitherRoseBlock		1	0	0
+171	minecraft:lily_of_the_valley	net.minecraft.world.level.block.FlowerBlock		1	0	0
+172	minecraft:brown_mushroom	net.minecraft.world.level.block.MushroomBlock		1	1	0
+173	minecraft:red_mushroom	net.minecraft.world.level.block.MushroomBlock		1	1	0
+174	minecraft:gold_block	net.minecraft.world.level.block.Block		1	0	0
+175	minecraft:iron_block	net.minecraft.world.level.block.Block		1	0	0
+176	minecraft:bricks	net.minecraft.world.level.block.Block		1	0	0
+177	minecraft:tnt	net.minecraft.world.level.block.TntBlock	unstable=false	2	0	0
+178	minecraft:bookshelf	net.minecraft.world.level.block.Block		1	0	0
+179	minecraft:chiseled_bookshelf	net.minecraft.world.level.block.ChiseledBookShelfBlock	facing=north,slot_0_occupied=false,slot_1_occupied=false,slot_2_occupied=false,slot_3_occupied=false,slot_4_occupied=false,slot_5_occupied=false	256	0	256
+180	minecraft:acacia_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+181	minecraft:bamboo_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+182	minecraft:birch_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+183	minecraft:cherry_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+184	minecraft:crimson_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+185	minecraft:dark_oak_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+186	minecraft:jungle_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+187	minecraft:mangrove_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+188	minecraft:oak_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+189	minecraft:pale_oak_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+190	minecraft:spruce_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+191	minecraft:warped_shelf	net.minecraft.world.level.block.ShelfBlock	facing=north,powered=false,side_chain=unconnected,waterlogged=false	64	0	64
+192	minecraft:mossy_cobblestone	net.minecraft.world.level.block.Block		1	0	0
+193	minecraft:obsidian	net.minecraft.world.level.block.Block		1	0	0
+194	minecraft:torch	net.minecraft.world.level.block.TorchBlock		1	0	0
+195	minecraft:wall_torch	net.minecraft.world.level.block.WallTorchBlock	facing=north	4	0	0
+196	minecraft:fire	net.minecraft.world.level.block.FireBlock	age=0,east=false,north=false,south=false,up=false,west=false	512	0	0
+197	minecraft:soul_fire	net.minecraft.world.level.block.SoulFireBlock		1	0	0
+198	minecraft:spawner	net.minecraft.world.level.block.SpawnerBlock		1	0	1
+199	minecraft:creaking_heart	net.minecraft.world.level.block.CreakingHeartBlock	axis=y,creaking_heart_state=uprooted,natural=false	18	0	18
+200	minecraft:oak_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+201	minecraft:chest	net.minecraft.world.level.block.ChestBlock	facing=north,type=single,waterlogged=false	24	0	24
+202	minecraft:redstone_wire	net.minecraft.world.level.block.RedStoneWireBlock	east=none,north=none,power=0,south=none,west=none	1296	0	0
+203	minecraft:diamond_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+204	minecraft:deepslate_diamond_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+205	minecraft:diamond_block	net.minecraft.world.level.block.Block		1	0	0
+206	minecraft:crafting_table	net.minecraft.world.level.block.CraftingTableBlock		1	0	0
+207	minecraft:wheat	net.minecraft.world.level.block.CropBlock	age=0	8	7	0
+208	minecraft:farmland	net.minecraft.world.level.block.FarmlandBlock	moisture=0	8	8	0
+209	minecraft:furnace	net.minecraft.world.level.block.FurnaceBlock	facing=north,lit=false	8	0	8
+210	minecraft:oak_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+211	minecraft:spruce_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+212	minecraft:birch_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+213	minecraft:acacia_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+214	minecraft:cherry_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+215	minecraft:jungle_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+216	minecraft:dark_oak_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+217	minecraft:pale_oak_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+218	minecraft:mangrove_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+219	minecraft:bamboo_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+220	minecraft:oak_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+221	minecraft:ladder	net.minecraft.world.level.block.LadderBlock	facing=north,waterlogged=false	8	0	0
+222	minecraft:rail	net.minecraft.world.level.block.RailBlock	shape=north_south,waterlogged=false	20	0	0
+223	minecraft:cobblestone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+224	minecraft:oak_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+225	minecraft:spruce_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+226	minecraft:birch_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+227	minecraft:acacia_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+228	minecraft:cherry_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+229	minecraft:jungle_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+230	minecraft:dark_oak_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+231	minecraft:pale_oak_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+232	minecraft:mangrove_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+233	minecraft:bamboo_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+234	minecraft:oak_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+235	minecraft:spruce_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+236	minecraft:birch_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+237	minecraft:acacia_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+238	minecraft:cherry_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+239	minecraft:jungle_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+240	minecraft:dark_oak_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+241	minecraft:pale_oak_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+242	minecraft:crimson_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+243	minecraft:warped_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+244	minecraft:mangrove_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+245	minecraft:bamboo_hanging_sign	net.minecraft.world.level.block.CeilingHangingSignBlock	attached=false,rotation=8,waterlogged=false	64	0	64
+246	minecraft:oak_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+247	minecraft:spruce_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+248	minecraft:birch_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+249	minecraft:acacia_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+250	minecraft:cherry_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+251	minecraft:jungle_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+252	minecraft:dark_oak_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+253	minecraft:pale_oak_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+254	minecraft:mangrove_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+255	minecraft:crimson_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+256	minecraft:warped_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+257	minecraft:bamboo_wall_hanging_sign	net.minecraft.world.level.block.WallHangingSignBlock	facing=north,waterlogged=false	8	0	8
+258	minecraft:lever	net.minecraft.world.level.block.LeverBlock	face=wall,facing=north,powered=false	24	0	0
+259	minecraft:stone_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+260	minecraft:iron_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+261	minecraft:oak_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+262	minecraft:spruce_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+263	minecraft:birch_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+264	minecraft:jungle_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+265	minecraft:acacia_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+266	minecraft:cherry_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+267	minecraft:dark_oak_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+268	minecraft:pale_oak_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+269	minecraft:mangrove_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+270	minecraft:bamboo_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+271	minecraft:redstone_ore	net.minecraft.world.level.block.RedStoneOreBlock	lit=false	2	1	0
+272	minecraft:deepslate_redstone_ore	net.minecraft.world.level.block.RedStoneOreBlock	lit=false	2	1	0
+273	minecraft:redstone_torch	net.minecraft.world.level.block.RedstoneTorchBlock	lit=true	2	0	0
+274	minecraft:redstone_wall_torch	net.minecraft.world.level.block.RedstoneWallTorchBlock	facing=north,lit=true	8	0	0
+275	minecraft:stone_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+276	minecraft:snow	net.minecraft.world.level.block.SnowLayerBlock	layers=1	8	8	0
+277	minecraft:ice	net.minecraft.world.level.block.IceBlock		1	1	0
+278	minecraft:snow_block	net.minecraft.world.level.block.Block		1	0	0
+279	minecraft:cactus	net.minecraft.world.level.block.CactusBlock	age=0	16	16	0
+280	minecraft:cactus_flower	net.minecraft.world.level.block.CactusFlowerBlock		1	0	0
+281	minecraft:clay	net.minecraft.world.level.block.Block		1	0	0
+282	minecraft:sugar_cane	net.minecraft.world.level.block.SugarCaneBlock	age=0	16	16	0
+283	minecraft:jukebox	net.minecraft.world.level.block.JukeboxBlock	has_record=false	2	0	2
+284	minecraft:oak_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+285	minecraft:netherrack	net.minecraft.world.level.block.NetherrackBlock		1	0	0
+286	minecraft:soul_sand	net.minecraft.world.level.block.SoulSandBlock		1	0	0
+287	minecraft:soul_soil	net.minecraft.world.level.block.Block		1	0	0
+288	minecraft:basalt	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+289	minecraft:polished_basalt	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+290	minecraft:soul_torch	net.minecraft.world.level.block.TorchBlock		1	0	0
+291	minecraft:soul_wall_torch	net.minecraft.world.level.block.WallTorchBlock	facing=north	4	0	0
+292	minecraft:copper_torch	net.minecraft.world.level.block.TorchBlock		1	0	0
+293	minecraft:copper_wall_torch	net.minecraft.world.level.block.WallTorchBlock	facing=north	4	0	0
+294	minecraft:glowstone	net.minecraft.world.level.block.Block		1	0	0
+295	minecraft:nether_portal	net.minecraft.world.level.block.NetherPortalBlock	axis=x	2	2	0
+296	minecraft:carved_pumpkin	net.minecraft.world.level.block.CarvedPumpkinBlock	facing=north	4	0	0
+297	minecraft:jack_o_lantern	net.minecraft.world.level.block.CarvedPumpkinBlock	facing=north	4	0	0
+298	minecraft:cake	net.minecraft.world.level.block.CakeBlock	bites=0	7	0	0
+299	minecraft:repeater	net.minecraft.world.level.block.RepeaterBlock	delay=1,facing=north,locked=false,powered=false	64	0	0
+300	minecraft:white_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+301	minecraft:orange_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+302	minecraft:magenta_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+303	minecraft:light_blue_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+304	minecraft:yellow_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+305	minecraft:lime_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+306	minecraft:pink_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+307	minecraft:gray_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+308	minecraft:light_gray_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+309	minecraft:cyan_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+310	minecraft:purple_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+311	minecraft:blue_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+312	minecraft:brown_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+313	minecraft:green_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+314	minecraft:red_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+315	minecraft:black_stained_glass	net.minecraft.world.level.block.StainedGlassBlock		1	0	0
+316	minecraft:oak_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+317	minecraft:spruce_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+318	minecraft:birch_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+319	minecraft:jungle_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+320	minecraft:acacia_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+321	minecraft:cherry_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+322	minecraft:dark_oak_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+323	minecraft:pale_oak_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+324	minecraft:mangrove_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+325	minecraft:bamboo_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+326	minecraft:stone_bricks	net.minecraft.world.level.block.Block		1	0	0
+327	minecraft:mossy_stone_bricks	net.minecraft.world.level.block.Block		1	0	0
+328	minecraft:cracked_stone_bricks	net.minecraft.world.level.block.Block		1	0	0
+329	minecraft:chiseled_stone_bricks	net.minecraft.world.level.block.Block		1	0	0
+330	minecraft:packed_mud	net.minecraft.world.level.block.Block		1	0	0
+331	minecraft:mud_bricks	net.minecraft.world.level.block.Block		1	0	0
+332	minecraft:infested_stone	net.minecraft.world.level.block.InfestedBlock		1	0	0
+333	minecraft:infested_cobblestone	net.minecraft.world.level.block.InfestedBlock		1	0	0
+334	minecraft:infested_stone_bricks	net.minecraft.world.level.block.InfestedBlock		1	0	0
+335	minecraft:infested_mossy_stone_bricks	net.minecraft.world.level.block.InfestedBlock		1	0	0
+336	minecraft:infested_cracked_stone_bricks	net.minecraft.world.level.block.InfestedBlock		1	0	0
+337	minecraft:infested_chiseled_stone_bricks	net.minecraft.world.level.block.InfestedBlock		1	0	0
+338	minecraft:brown_mushroom_block	net.minecraft.world.level.block.HugeMushroomBlock	down=true,east=true,north=true,south=true,up=true,west=true	64	0	0
+339	minecraft:red_mushroom_block	net.minecraft.world.level.block.HugeMushroomBlock	down=true,east=true,north=true,south=true,up=true,west=true	64	0	0
+340	minecraft:mushroom_stem	net.minecraft.world.level.block.HugeMushroomBlock	down=true,east=true,north=true,south=true,up=true,west=true	64	0	0
+341	minecraft:iron_bars	net.minecraft.world.level.block.IronBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+342	minecraft:copper_bars	net.minecraft.world.level.block.WeatheringCopperBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	32	0
+343	minecraft:exposed_copper_bars	net.minecraft.world.level.block.WeatheringCopperBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	32	0
+344	minecraft:weathered_copper_bars	net.minecraft.world.level.block.WeatheringCopperBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	32	0
+345	minecraft:oxidized_copper_bars	net.minecraft.world.level.block.WeatheringCopperBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+346	minecraft:waxed_copper_bars	net.minecraft.world.level.block.IronBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+347	minecraft:waxed_exposed_copper_bars	net.minecraft.world.level.block.IronBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+348	minecraft:waxed_weathered_copper_bars	net.minecraft.world.level.block.IronBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+349	minecraft:waxed_oxidized_copper_bars	net.minecraft.world.level.block.IronBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+350	minecraft:iron_chain	net.minecraft.world.level.block.ChainBlock	axis=y,waterlogged=false	6	0	0
+351	minecraft:copper_chain	net.minecraft.world.level.block.WeatheringCopperChainBlock	axis=y,waterlogged=false	6	6	0
+352	minecraft:exposed_copper_chain	net.minecraft.world.level.block.WeatheringCopperChainBlock	axis=y,waterlogged=false	6	6	0
+353	minecraft:weathered_copper_chain	net.minecraft.world.level.block.WeatheringCopperChainBlock	axis=y,waterlogged=false	6	6	0
+354	minecraft:oxidized_copper_chain	net.minecraft.world.level.block.WeatheringCopperChainBlock	axis=y,waterlogged=false	6	0	0
+355	minecraft:waxed_copper_chain	net.minecraft.world.level.block.ChainBlock	axis=y,waterlogged=false	6	0	0
+356	minecraft:waxed_exposed_copper_chain	net.minecraft.world.level.block.ChainBlock	axis=y,waterlogged=false	6	0	0
+357	minecraft:waxed_weathered_copper_chain	net.minecraft.world.level.block.ChainBlock	axis=y,waterlogged=false	6	0	0
+358	minecraft:waxed_oxidized_copper_chain	net.minecraft.world.level.block.ChainBlock	axis=y,waterlogged=false	6	0	0
+359	minecraft:glass_pane	net.minecraft.world.level.block.IronBarsBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+360	minecraft:pumpkin	net.minecraft.world.level.block.PumpkinBlock		1	0	0
+361	minecraft:melon	net.minecraft.world.level.block.Block		1	0	0
+362	minecraft:attached_pumpkin_stem	net.minecraft.world.level.block.AttachedStemBlock	facing=north	4	0	0
+363	minecraft:attached_melon_stem	net.minecraft.world.level.block.AttachedStemBlock	facing=north	4	0	0
+364	minecraft:pumpkin_stem	net.minecraft.world.level.block.StemBlock	age=0	8	8	0
+365	minecraft:melon_stem	net.minecraft.world.level.block.StemBlock	age=0	8	8	0
+366	minecraft:vine	net.minecraft.world.level.block.VineBlock	east=false,north=false,south=false,up=false,west=false	32	32	0
+367	minecraft:glow_lichen	net.minecraft.world.level.block.GlowLichenBlock	down=false,east=false,north=false,south=false,up=false,waterlogged=false,west=false	128	0	0
+368	minecraft:resin_clump	net.minecraft.world.level.block.MultifaceBlock	down=false,east=false,north=false,south=false,up=false,waterlogged=false,west=false	128	0	0
+369	minecraft:oak_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+370	minecraft:brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+371	minecraft:stone_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+372	minecraft:mud_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+373	minecraft:mycelium	net.minecraft.world.level.block.MyceliumBlock	snowy=false	2	2	0
+374	minecraft:lily_pad	net.minecraft.world.level.block.LilyPadBlock		1	0	0
+375	minecraft:resin_block	net.minecraft.world.level.block.Block		1	0	0
+376	minecraft:resin_bricks	net.minecraft.world.level.block.Block		1	0	0
+377	minecraft:resin_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+378	minecraft:resin_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+379	minecraft:resin_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+380	minecraft:chiseled_resin_bricks	net.minecraft.world.level.block.Block		1	0	0
+381	minecraft:nether_bricks	net.minecraft.world.level.block.Block		1	0	0
+382	minecraft:nether_brick_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+383	minecraft:nether_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+384	minecraft:nether_wart	net.minecraft.world.level.block.NetherWartBlock	age=0	4	3	0
+385	minecraft:enchanting_table	net.minecraft.world.level.block.EnchantingTableBlock		1	0	1
+386	minecraft:brewing_stand	net.minecraft.world.level.block.BrewingStandBlock	has_bottle_0=false,has_bottle_1=false,has_bottle_2=false	8	0	8
+387	minecraft:cauldron	net.minecraft.world.level.block.CauldronBlock		1	0	0
+388	minecraft:water_cauldron	net.minecraft.world.level.block.LayeredCauldronBlock	level=1	3	0	0
+389	minecraft:lava_cauldron	net.minecraft.world.level.block.LavaCauldronBlock		1	0	0
+390	minecraft:powder_snow_cauldron	net.minecraft.world.level.block.LayeredCauldronBlock	level=1	3	0	0
+391	minecraft:end_portal	net.minecraft.world.level.block.EndPortalBlock		1	0	1
+392	minecraft:end_portal_frame	net.minecraft.world.level.block.EndPortalFrameBlock	eye=false,facing=north	8	0	0
+393	minecraft:end_stone	net.minecraft.world.level.block.Block		1	0	0
+394	minecraft:dragon_egg	net.minecraft.world.level.block.DragonEggBlock		1	0	0
+395	minecraft:redstone_lamp	net.minecraft.world.level.block.RedstoneLampBlock	lit=false	2	0	0
+396	minecraft:cocoa	net.minecraft.world.level.block.CocoaBlock	age=0,facing=north	12	8	0
+397	minecraft:sandstone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+398	minecraft:emerald_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+399	minecraft:deepslate_emerald_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+400	minecraft:ender_chest	net.minecraft.world.level.block.EnderChestBlock	facing=north,waterlogged=false	8	0	8
+401	minecraft:tripwire_hook	net.minecraft.world.level.block.TripWireHookBlock	attached=false,facing=north,powered=false	16	0	0
+402	minecraft:tripwire	net.minecraft.world.level.block.TripWireBlock	attached=false,disarmed=false,east=false,north=false,powered=false,south=false,west=false	128	0	0
+403	minecraft:emerald_block	net.minecraft.world.level.block.Block		1	0	0
+404	minecraft:spruce_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+405	minecraft:birch_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+406	minecraft:jungle_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+407	minecraft:command_block	net.minecraft.world.level.block.CommandBlock	conditional=false,facing=north	12	0	12
+408	minecraft:beacon	net.minecraft.world.level.block.BeaconBlock		1	0	1
+409	minecraft:cobblestone_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+410	minecraft:mossy_cobblestone_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+411	minecraft:flower_pot	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+412	minecraft:potted_torchflower	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+413	minecraft:potted_oak_sapling	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+414	minecraft:potted_spruce_sapling	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+415	minecraft:potted_birch_sapling	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+416	minecraft:potted_jungle_sapling	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+417	minecraft:potted_acacia_sapling	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+418	minecraft:potted_cherry_sapling	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+419	minecraft:potted_dark_oak_sapling	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+420	minecraft:potted_pale_oak_sapling	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+421	minecraft:potted_mangrove_propagule	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+422	minecraft:potted_fern	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+423	minecraft:potted_dandelion	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+424	minecraft:potted_golden_dandelion	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+425	minecraft:potted_poppy	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+426	minecraft:potted_blue_orchid	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+427	minecraft:potted_allium	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+428	minecraft:potted_azure_bluet	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+429	minecraft:potted_red_tulip	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+430	minecraft:potted_orange_tulip	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+431	minecraft:potted_white_tulip	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+432	minecraft:potted_pink_tulip	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+433	minecraft:potted_oxeye_daisy	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+434	minecraft:potted_cornflower	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+435	minecraft:potted_lily_of_the_valley	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+436	minecraft:potted_wither_rose	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+437	minecraft:potted_red_mushroom	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+438	minecraft:potted_brown_mushroom	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+439	minecraft:potted_dead_bush	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+440	minecraft:potted_cactus	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+441	minecraft:carrots	net.minecraft.world.level.block.CarrotBlock	age=0	8	7	0
+442	minecraft:potatoes	net.minecraft.world.level.block.PotatoBlock	age=0	8	7	0
+443	minecraft:oak_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+444	minecraft:spruce_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+445	minecraft:birch_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+446	minecraft:jungle_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+447	minecraft:acacia_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+448	minecraft:cherry_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+449	minecraft:dark_oak_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+450	minecraft:pale_oak_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+451	minecraft:mangrove_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+452	minecraft:bamboo_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+453	minecraft:skeleton_skull	net.minecraft.world.level.block.SkullBlock	powered=false,rotation=0	32	0	32
+454	minecraft:skeleton_wall_skull	net.minecraft.world.level.block.WallSkullBlock	facing=north,powered=false	8	0	8
+455	minecraft:wither_skeleton_skull	net.minecraft.world.level.block.WitherSkullBlock	powered=false,rotation=0	32	0	32
+456	minecraft:wither_skeleton_wall_skull	net.minecraft.world.level.block.WitherWallSkullBlock	facing=north,powered=false	8	0	8
+457	minecraft:zombie_head	net.minecraft.world.level.block.SkullBlock	powered=false,rotation=0	32	0	32
+458	minecraft:zombie_wall_head	net.minecraft.world.level.block.WallSkullBlock	facing=north,powered=false	8	0	8
+459	minecraft:player_head	net.minecraft.world.level.block.PlayerHeadBlock	powered=false,rotation=0	32	0	32
+460	minecraft:player_wall_head	net.minecraft.world.level.block.PlayerWallHeadBlock	facing=north,powered=false	8	0	8
+461	minecraft:creeper_head	net.minecraft.world.level.block.SkullBlock	powered=false,rotation=0	32	0	32
+462	minecraft:creeper_wall_head	net.minecraft.world.level.block.WallSkullBlock	facing=north,powered=false	8	0	8
+463	minecraft:dragon_head	net.minecraft.world.level.block.SkullBlock	powered=false,rotation=0	32	0	32
+464	minecraft:dragon_wall_head	net.minecraft.world.level.block.WallSkullBlock	facing=north,powered=false	8	0	8
+465	minecraft:piglin_head	net.minecraft.world.level.block.SkullBlock	powered=false,rotation=0	32	0	32
+466	minecraft:piglin_wall_head	net.minecraft.world.level.block.PiglinWallSkullBlock	facing=north,powered=false	8	0	8
+467	minecraft:anvil	net.minecraft.world.level.block.AnvilBlock	facing=north	4	0	0
+468	minecraft:chipped_anvil	net.minecraft.world.level.block.AnvilBlock	facing=north	4	0	0
+469	minecraft:damaged_anvil	net.minecraft.world.level.block.AnvilBlock	facing=north	4	0	0
+470	minecraft:trapped_chest	net.minecraft.world.level.block.TrappedChestBlock	facing=north,type=single,waterlogged=false	24	0	24
+471	minecraft:light_weighted_pressure_plate	net.minecraft.world.level.block.WeightedPressurePlateBlock	power=0	16	0	0
+472	minecraft:heavy_weighted_pressure_plate	net.minecraft.world.level.block.WeightedPressurePlateBlock	power=0	16	0	0
+473	minecraft:comparator	net.minecraft.world.level.block.ComparatorBlock	facing=north,mode=compare,powered=false	16	0	16
+474	minecraft:daylight_detector	net.minecraft.world.level.block.DaylightDetectorBlock	inverted=false,power=0	32	0	32
+475	minecraft:redstone_block	net.minecraft.world.level.block.PoweredBlock		1	0	0
+476	minecraft:nether_quartz_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+477	minecraft:hopper	net.minecraft.world.level.block.HopperBlock	enabled=true,facing=down	10	0	10
+478	minecraft:quartz_block	net.minecraft.world.level.block.Block		1	0	0
+479	minecraft:chiseled_quartz_block	net.minecraft.world.level.block.Block		1	0	0
+480	minecraft:quartz_pillar	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+481	minecraft:quartz_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+482	minecraft:activator_rail	net.minecraft.world.level.block.PoweredRailBlock	powered=false,shape=north_south,waterlogged=false	24	0	0
+483	minecraft:dropper	net.minecraft.world.level.block.DropperBlock	facing=north,triggered=false	12	0	12
+484	minecraft:white_terracotta	net.minecraft.world.level.block.Block		1	0	0
+485	minecraft:orange_terracotta	net.minecraft.world.level.block.Block		1	0	0
+486	minecraft:magenta_terracotta	net.minecraft.world.level.block.Block		1	0	0
+487	minecraft:light_blue_terracotta	net.minecraft.world.level.block.Block		1	0	0
+488	minecraft:yellow_terracotta	net.minecraft.world.level.block.Block		1	0	0
+489	minecraft:lime_terracotta	net.minecraft.world.level.block.Block		1	0	0
+490	minecraft:pink_terracotta	net.minecraft.world.level.block.Block		1	0	0
+491	minecraft:gray_terracotta	net.minecraft.world.level.block.Block		1	0	0
+492	minecraft:light_gray_terracotta	net.minecraft.world.level.block.Block		1	0	0
+493	minecraft:cyan_terracotta	net.minecraft.world.level.block.Block		1	0	0
+494	minecraft:purple_terracotta	net.minecraft.world.level.block.Block		1	0	0
+495	minecraft:blue_terracotta	net.minecraft.world.level.block.Block		1	0	0
+496	minecraft:brown_terracotta	net.minecraft.world.level.block.Block		1	0	0
+497	minecraft:green_terracotta	net.minecraft.world.level.block.Block		1	0	0
+498	minecraft:red_terracotta	net.minecraft.world.level.block.Block		1	0	0
+499	minecraft:black_terracotta	net.minecraft.world.level.block.Block		1	0	0
+500	minecraft:white_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+501	minecraft:orange_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+502	minecraft:magenta_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+503	minecraft:light_blue_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+504	minecraft:yellow_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+505	minecraft:lime_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+506	minecraft:pink_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+507	minecraft:gray_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+508	minecraft:light_gray_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+509	minecraft:cyan_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+510	minecraft:purple_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+511	minecraft:blue_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+512	minecraft:brown_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+513	minecraft:green_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+514	minecraft:red_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+515	minecraft:black_stained_glass_pane	net.minecraft.world.level.block.StainedGlassPaneBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+516	minecraft:acacia_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+517	minecraft:cherry_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+518	minecraft:dark_oak_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+519	minecraft:pale_oak_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+520	minecraft:mangrove_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+521	minecraft:bamboo_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+522	minecraft:bamboo_mosaic_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+523	minecraft:slime_block	net.minecraft.world.level.block.SlimeBlock		1	0	0
+524	minecraft:barrier	net.minecraft.world.level.block.BarrierBlock	waterlogged=false	2	0	0
+525	minecraft:light	net.minecraft.world.level.block.LightBlock	level=15,waterlogged=false	32	0	0
+526	minecraft:iron_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+527	minecraft:prismarine	net.minecraft.world.level.block.Block		1	0	0
+528	minecraft:prismarine_bricks	net.minecraft.world.level.block.Block		1	0	0
+529	minecraft:dark_prismarine	net.minecraft.world.level.block.Block		1	0	0
+530	minecraft:prismarine_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+531	minecraft:prismarine_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+532	minecraft:dark_prismarine_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+533	minecraft:prismarine_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+534	minecraft:prismarine_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+535	minecraft:dark_prismarine_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+536	minecraft:sea_lantern	net.minecraft.world.level.block.Block		1	0	0
+537	minecraft:hay_block	net.minecraft.world.level.block.HayBlock	axis=y	3	0	0
+538	minecraft:white_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+539	minecraft:orange_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+540	minecraft:magenta_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+541	minecraft:light_blue_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+542	minecraft:yellow_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+543	minecraft:lime_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+544	minecraft:pink_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+545	minecraft:gray_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+546	minecraft:light_gray_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+547	minecraft:cyan_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+548	minecraft:purple_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+549	minecraft:blue_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+550	minecraft:brown_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+551	minecraft:green_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+552	minecraft:red_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+553	minecraft:black_carpet	net.minecraft.world.level.block.WoolCarpetBlock		1	0	0
+554	minecraft:terracotta	net.minecraft.world.level.block.Block		1	0	0
+555	minecraft:coal_block	net.minecraft.world.level.block.Block		1	0	0
+556	minecraft:packed_ice	net.minecraft.world.level.block.Block		1	0	0
+557	minecraft:sunflower	net.minecraft.world.level.block.TallFlowerBlock	half=lower	2	0	0
+558	minecraft:lilac	net.minecraft.world.level.block.TallFlowerBlock	half=lower	2	0	0
+559	minecraft:rose_bush	net.minecraft.world.level.block.TallFlowerBlock	half=lower	2	0	0
+560	minecraft:peony	net.minecraft.world.level.block.TallFlowerBlock	half=lower	2	0	0
+561	minecraft:tall_grass	net.minecraft.world.level.block.DoublePlantBlock	half=lower	2	0	0
+562	minecraft:large_fern	net.minecraft.world.level.block.DoublePlantBlock	half=lower	2	0	0
+563	minecraft:white_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+564	minecraft:orange_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+565	minecraft:magenta_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+566	minecraft:light_blue_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+567	minecraft:yellow_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+568	minecraft:lime_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+569	minecraft:pink_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+570	minecraft:gray_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+571	minecraft:light_gray_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+572	minecraft:cyan_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+573	minecraft:purple_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+574	minecraft:blue_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+575	minecraft:brown_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+576	minecraft:green_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+577	minecraft:red_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+578	minecraft:black_banner	net.minecraft.world.level.block.BannerBlock	rotation=8	16	0	16
+579	minecraft:white_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+580	minecraft:orange_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+581	minecraft:magenta_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+582	minecraft:light_blue_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+583	minecraft:yellow_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+584	minecraft:lime_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+585	minecraft:pink_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+586	minecraft:gray_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+587	minecraft:light_gray_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+588	minecraft:cyan_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+589	minecraft:purple_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+590	minecraft:blue_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+591	minecraft:brown_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+592	minecraft:green_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+593	minecraft:red_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+594	minecraft:black_wall_banner	net.minecraft.world.level.block.WallBannerBlock	facing=north	4	0	4
+595	minecraft:red_sandstone	net.minecraft.world.level.block.Block		1	0	0
+596	minecraft:chiseled_red_sandstone	net.minecraft.world.level.block.Block		1	0	0
+597	minecraft:cut_red_sandstone	net.minecraft.world.level.block.Block		1	0	0
+598	minecraft:red_sandstone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+599	minecraft:oak_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+600	minecraft:spruce_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+601	minecraft:birch_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+602	minecraft:jungle_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+603	minecraft:acacia_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+604	minecraft:cherry_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+605	minecraft:dark_oak_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+606	minecraft:pale_oak_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+607	minecraft:mangrove_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+608	minecraft:bamboo_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+609	minecraft:bamboo_mosaic_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+610	minecraft:stone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+611	minecraft:smooth_stone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+612	minecraft:sandstone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+613	minecraft:cut_sandstone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+614	minecraft:petrified_oak_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+615	minecraft:cobblestone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+616	minecraft:brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+617	minecraft:stone_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+618	minecraft:mud_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+619	minecraft:nether_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+620	minecraft:quartz_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+621	minecraft:red_sandstone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+622	minecraft:cut_red_sandstone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+623	minecraft:purpur_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+624	minecraft:smooth_stone	net.minecraft.world.level.block.Block		1	0	0
+625	minecraft:smooth_sandstone	net.minecraft.world.level.block.Block		1	0	0
+626	minecraft:smooth_quartz	net.minecraft.world.level.block.Block		1	0	0
+627	minecraft:smooth_red_sandstone	net.minecraft.world.level.block.Block		1	0	0
+628	minecraft:spruce_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+629	minecraft:birch_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+630	minecraft:jungle_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+631	minecraft:acacia_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+632	minecraft:cherry_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+633	minecraft:dark_oak_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+634	minecraft:pale_oak_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+635	minecraft:mangrove_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+636	minecraft:bamboo_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+637	minecraft:spruce_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+638	minecraft:birch_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+639	minecraft:jungle_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+640	minecraft:acacia_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+641	minecraft:cherry_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+642	minecraft:dark_oak_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+643	minecraft:pale_oak_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+644	minecraft:mangrove_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+645	minecraft:bamboo_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+646	minecraft:spruce_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+647	minecraft:birch_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+648	minecraft:jungle_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+649	minecraft:acacia_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+650	minecraft:cherry_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+651	minecraft:dark_oak_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+652	minecraft:pale_oak_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+653	minecraft:mangrove_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+654	minecraft:bamboo_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+655	minecraft:end_rod	net.minecraft.world.level.block.EndRodBlock	facing=up	6	0	0
+656	minecraft:chorus_plant	net.minecraft.world.level.block.ChorusPlantBlock	down=false,east=false,north=false,south=false,up=false,west=false	64	0	0
+657	minecraft:chorus_flower	net.minecraft.world.level.block.ChorusFlowerBlock	age=0	6	5	0
+658	minecraft:purpur_block	net.minecraft.world.level.block.Block		1	0	0
+659	minecraft:purpur_pillar	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+660	minecraft:purpur_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+661	minecraft:end_stone_bricks	net.minecraft.world.level.block.Block		1	0	0
+662	minecraft:torchflower_crop	net.minecraft.world.level.block.TorchflowerCropBlock	age=0	2	2	0
+663	minecraft:pitcher_crop	net.minecraft.world.level.block.PitcherCropBlock	age=0,half=lower	10	4	0
+664	minecraft:pitcher_plant	net.minecraft.world.level.block.DoublePlantBlock	half=lower	2	0	0
+665	minecraft:beetroots	net.minecraft.world.level.block.BeetrootBlock	age=0	4	3	0
+666	minecraft:dirt_path	net.minecraft.world.level.block.DirtPathBlock		1	0	0
+667	minecraft:end_gateway	net.minecraft.world.level.block.EndGatewayBlock		1	0	1
+668	minecraft:repeating_command_block	net.minecraft.world.level.block.CommandBlock	conditional=false,facing=north	12	0	12
+669	minecraft:chain_command_block	net.minecraft.world.level.block.CommandBlock	conditional=false,facing=north	12	0	12
+670	minecraft:frosted_ice	net.minecraft.world.level.block.FrostedIceBlock	age=0	4	0	0
+671	minecraft:magma_block	net.minecraft.world.level.block.MagmaBlock		1	0	0
+672	minecraft:nether_wart_block	net.minecraft.world.level.block.Block		1	0	0
+673	minecraft:red_nether_bricks	net.minecraft.world.level.block.Block		1	0	0
+674	minecraft:bone_block	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+675	minecraft:structure_void	net.minecraft.world.level.block.StructureVoidBlock		1	0	0
+676	minecraft:observer	net.minecraft.world.level.block.ObserverBlock	facing=south,powered=false	12	0	0
+677	minecraft:shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+678	minecraft:white_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+679	minecraft:orange_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+680	minecraft:magenta_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+681	minecraft:light_blue_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+682	minecraft:yellow_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+683	minecraft:lime_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+684	minecraft:pink_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+685	minecraft:gray_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+686	minecraft:light_gray_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+687	minecraft:cyan_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+688	minecraft:purple_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+689	minecraft:blue_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+690	minecraft:brown_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+691	minecraft:green_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+692	minecraft:red_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+693	minecraft:black_shulker_box	net.minecraft.world.level.block.ShulkerBoxBlock	facing=up	6	0	6
+694	minecraft:white_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+695	minecraft:orange_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+696	minecraft:magenta_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+697	minecraft:light_blue_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+698	minecraft:yellow_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+699	minecraft:lime_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+700	minecraft:pink_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+701	minecraft:gray_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+702	minecraft:light_gray_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+703	minecraft:cyan_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+704	minecraft:purple_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+705	minecraft:blue_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+706	minecraft:brown_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+707	minecraft:green_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+708	minecraft:red_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+709	minecraft:black_glazed_terracotta	net.minecraft.world.level.block.GlazedTerracottaBlock	facing=north	4	0	0
+710	minecraft:white_concrete	net.minecraft.world.level.block.Block		1	0	0
+711	minecraft:orange_concrete	net.minecraft.world.level.block.Block		1	0	0
+712	minecraft:magenta_concrete	net.minecraft.world.level.block.Block		1	0	0
+713	minecraft:light_blue_concrete	net.minecraft.world.level.block.Block		1	0	0
+714	minecraft:yellow_concrete	net.minecraft.world.level.block.Block		1	0	0
+715	minecraft:lime_concrete	net.minecraft.world.level.block.Block		1	0	0
+716	minecraft:pink_concrete	net.minecraft.world.level.block.Block		1	0	0
+717	minecraft:gray_concrete	net.minecraft.world.level.block.Block		1	0	0
+718	minecraft:light_gray_concrete	net.minecraft.world.level.block.Block		1	0	0
+719	minecraft:cyan_concrete	net.minecraft.world.level.block.Block		1	0	0
+720	minecraft:purple_concrete	net.minecraft.world.level.block.Block		1	0	0
+721	minecraft:blue_concrete	net.minecraft.world.level.block.Block		1	0	0
+722	minecraft:brown_concrete	net.minecraft.world.level.block.Block		1	0	0
+723	minecraft:green_concrete	net.minecraft.world.level.block.Block		1	0	0
+724	minecraft:red_concrete	net.minecraft.world.level.block.Block		1	0	0
+725	minecraft:black_concrete	net.minecraft.world.level.block.Block		1	0	0
+726	minecraft:white_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+727	minecraft:orange_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+728	minecraft:magenta_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+729	minecraft:light_blue_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+730	minecraft:yellow_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+731	minecraft:lime_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+732	minecraft:pink_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+733	minecraft:gray_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+734	minecraft:light_gray_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+735	minecraft:cyan_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+736	minecraft:purple_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+737	minecraft:blue_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+738	minecraft:brown_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+739	minecraft:green_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+740	minecraft:red_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+741	minecraft:black_concrete_powder	net.minecraft.world.level.block.ConcretePowderBlock		1	0	0
+742	minecraft:kelp	net.minecraft.world.level.block.KelpBlock	age=0	26	25	0
+743	minecraft:kelp_plant	net.minecraft.world.level.block.KelpPlantBlock		1	0	0
+744	minecraft:dried_kelp_block	net.minecraft.world.level.block.Block		1	0	0
+745	minecraft:turtle_egg	net.minecraft.world.level.block.TurtleEggBlock	eggs=1,hatch=0	12	12	0
+746	minecraft:sniffer_egg	net.minecraft.world.level.block.SnifferEggBlock	hatch=0	3	0	0
+747	minecraft:dried_ghast	net.minecraft.world.level.block.DriedGhastBlock	facing=north,hydration=0,waterlogged=false	32	32	0
+748	minecraft:dead_tube_coral_block	net.minecraft.world.level.block.Block		1	0	0
+749	minecraft:dead_brain_coral_block	net.minecraft.world.level.block.Block		1	0	0
+750	minecraft:dead_bubble_coral_block	net.minecraft.world.level.block.Block		1	0	0
+751	minecraft:dead_fire_coral_block	net.minecraft.world.level.block.Block		1	0	0
+752	minecraft:dead_horn_coral_block	net.minecraft.world.level.block.Block		1	0	0
+753	minecraft:tube_coral_block	net.minecraft.world.level.block.CoralBlock		1	0	0
+754	minecraft:brain_coral_block	net.minecraft.world.level.block.CoralBlock		1	0	0
+755	minecraft:bubble_coral_block	net.minecraft.world.level.block.CoralBlock		1	0	0
+756	minecraft:fire_coral_block	net.minecraft.world.level.block.CoralBlock		1	0	0
+757	minecraft:horn_coral_block	net.minecraft.world.level.block.CoralBlock		1	0	0
+758	minecraft:dead_tube_coral	net.minecraft.world.level.block.BaseCoralPlantBlock	waterlogged=true	2	0	0
+759	minecraft:dead_brain_coral	net.minecraft.world.level.block.BaseCoralPlantBlock	waterlogged=true	2	0	0
+760	minecraft:dead_bubble_coral	net.minecraft.world.level.block.BaseCoralPlantBlock	waterlogged=true	2	0	0
+761	minecraft:dead_fire_coral	net.minecraft.world.level.block.BaseCoralPlantBlock	waterlogged=true	2	0	0
+762	minecraft:dead_horn_coral	net.minecraft.world.level.block.BaseCoralPlantBlock	waterlogged=true	2	0	0
+763	minecraft:tube_coral	net.minecraft.world.level.block.CoralPlantBlock	waterlogged=true	2	0	0
+764	minecraft:brain_coral	net.minecraft.world.level.block.CoralPlantBlock	waterlogged=true	2	0	0
+765	minecraft:bubble_coral	net.minecraft.world.level.block.CoralPlantBlock	waterlogged=true	2	0	0
+766	minecraft:fire_coral	net.minecraft.world.level.block.CoralPlantBlock	waterlogged=true	2	0	0
+767	minecraft:horn_coral	net.minecraft.world.level.block.CoralPlantBlock	waterlogged=true	2	0	0
+768	minecraft:dead_tube_coral_fan	net.minecraft.world.level.block.BaseCoralFanBlock	waterlogged=true	2	0	0
+769	minecraft:dead_brain_coral_fan	net.minecraft.world.level.block.BaseCoralFanBlock	waterlogged=true	2	0	0
+770	minecraft:dead_bubble_coral_fan	net.minecraft.world.level.block.BaseCoralFanBlock	waterlogged=true	2	0	0
+771	minecraft:dead_fire_coral_fan	net.minecraft.world.level.block.BaseCoralFanBlock	waterlogged=true	2	0	0
+772	minecraft:dead_horn_coral_fan	net.minecraft.world.level.block.BaseCoralFanBlock	waterlogged=true	2	0	0
+773	minecraft:tube_coral_fan	net.minecraft.world.level.block.CoralFanBlock	waterlogged=true	2	0	0
+774	minecraft:brain_coral_fan	net.minecraft.world.level.block.CoralFanBlock	waterlogged=true	2	0	0
+775	minecraft:bubble_coral_fan	net.minecraft.world.level.block.CoralFanBlock	waterlogged=true	2	0	0
+776	minecraft:fire_coral_fan	net.minecraft.world.level.block.CoralFanBlock	waterlogged=true	2	0	0
+777	minecraft:horn_coral_fan	net.minecraft.world.level.block.CoralFanBlock	waterlogged=true	2	0	0
+778	minecraft:dead_tube_coral_wall_fan	net.minecraft.world.level.block.BaseCoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+779	minecraft:dead_brain_coral_wall_fan	net.minecraft.world.level.block.BaseCoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+780	minecraft:dead_bubble_coral_wall_fan	net.minecraft.world.level.block.BaseCoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+781	minecraft:dead_fire_coral_wall_fan	net.minecraft.world.level.block.BaseCoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+782	minecraft:dead_horn_coral_wall_fan	net.minecraft.world.level.block.BaseCoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+783	minecraft:tube_coral_wall_fan	net.minecraft.world.level.block.CoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+784	minecraft:brain_coral_wall_fan	net.minecraft.world.level.block.CoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+785	minecraft:bubble_coral_wall_fan	net.minecraft.world.level.block.CoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+786	minecraft:fire_coral_wall_fan	net.minecraft.world.level.block.CoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+787	minecraft:horn_coral_wall_fan	net.minecraft.world.level.block.CoralWallFanBlock	facing=north,waterlogged=true	8	0	0
+788	minecraft:sea_pickle	net.minecraft.world.level.block.SeaPickleBlock	pickles=1,waterlogged=true	8	0	0
+789	minecraft:blue_ice	net.minecraft.world.level.block.HalfTransparentBlock		1	0	0
+790	minecraft:conduit	net.minecraft.world.level.block.ConduitBlock	waterlogged=true	2	0	2
+791	minecraft:bamboo_sapling	net.minecraft.world.level.block.BambooSaplingBlock		1	1	0
+792	minecraft:bamboo	net.minecraft.world.level.block.BambooStalkBlock	age=0,leaves=none,stage=0	12	6	0
+793	minecraft:potted_bamboo	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+794	minecraft:void_air	net.minecraft.world.level.block.AirBlock		1	0	0
+795	minecraft:cave_air	net.minecraft.world.level.block.AirBlock		1	0	0
+796	minecraft:bubble_column	net.minecraft.world.level.block.BubbleColumnBlock	drag=true	2	0	0
+797	minecraft:polished_granite_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+798	minecraft:smooth_red_sandstone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+799	minecraft:mossy_stone_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+800	minecraft:polished_diorite_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+801	minecraft:mossy_cobblestone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+802	minecraft:end_stone_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+803	minecraft:stone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+804	minecraft:smooth_sandstone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+805	minecraft:smooth_quartz_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+806	minecraft:granite_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+807	minecraft:andesite_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+808	minecraft:red_nether_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+809	minecraft:polished_andesite_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+810	minecraft:diorite_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+811	minecraft:polished_granite_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+812	minecraft:smooth_red_sandstone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+813	minecraft:mossy_stone_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+814	minecraft:polished_diorite_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+815	minecraft:mossy_cobblestone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+816	minecraft:end_stone_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+817	minecraft:smooth_sandstone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+818	minecraft:smooth_quartz_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+819	minecraft:granite_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+820	minecraft:andesite_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+821	minecraft:red_nether_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+822	minecraft:polished_andesite_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+823	minecraft:diorite_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+824	minecraft:brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+825	minecraft:prismarine_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+826	minecraft:red_sandstone_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+827	minecraft:mossy_stone_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+828	minecraft:granite_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+829	minecraft:stone_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+830	minecraft:mud_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+831	minecraft:nether_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+832	minecraft:andesite_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+833	minecraft:red_nether_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+834	minecraft:sandstone_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+835	minecraft:end_stone_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+836	minecraft:diorite_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+837	minecraft:scaffolding	net.minecraft.world.level.block.ScaffoldingBlock	bottom=false,distance=7,waterlogged=false	32	0	0
+838	minecraft:loom	net.minecraft.world.level.block.LoomBlock	facing=north	4	0	0
+839	minecraft:barrel	net.minecraft.world.level.block.BarrelBlock	facing=north,open=false	12	0	12
+840	minecraft:smoker	net.minecraft.world.level.block.SmokerBlock	facing=north,lit=false	8	0	8
+841	minecraft:blast_furnace	net.minecraft.world.level.block.BlastFurnaceBlock	facing=north,lit=false	8	0	8
+842	minecraft:cartography_table	net.minecraft.world.level.block.CartographyTableBlock		1	0	0
+843	minecraft:fletching_table	net.minecraft.world.level.block.Block		1	0	0
+844	minecraft:grindstone	net.minecraft.world.level.block.GrindstoneBlock	face=wall,facing=north	12	0	0
+845	minecraft:lectern	net.minecraft.world.level.block.LecternBlock	facing=north,has_book=false,powered=false	16	0	16
+846	minecraft:smithing_table	net.minecraft.world.level.block.SmithingTableBlock		1	0	0
+847	minecraft:stonecutter	net.minecraft.world.level.block.StonecutterBlock	facing=north	4	0	0
+848	minecraft:bell	net.minecraft.world.level.block.BellBlock	attachment=floor,facing=north,powered=false	32	0	32
+849	minecraft:lantern	net.minecraft.world.level.block.LanternBlock	hanging=false,waterlogged=false	4	0	0
+850	minecraft:soul_lantern	net.minecraft.world.level.block.LanternBlock	hanging=false,waterlogged=false	4	0	0
+851	minecraft:copper_lantern	net.minecraft.world.level.block.WeatheringLanternBlock	hanging=false,waterlogged=false	4	4	0
+852	minecraft:exposed_copper_lantern	net.minecraft.world.level.block.WeatheringLanternBlock	hanging=false,waterlogged=false	4	4	0
+853	minecraft:weathered_copper_lantern	net.minecraft.world.level.block.WeatheringLanternBlock	hanging=false,waterlogged=false	4	4	0
+854	minecraft:oxidized_copper_lantern	net.minecraft.world.level.block.WeatheringLanternBlock	hanging=false,waterlogged=false	4	0	0
+855	minecraft:waxed_copper_lantern	net.minecraft.world.level.block.LanternBlock	hanging=false,waterlogged=false	4	0	0
+856	minecraft:waxed_exposed_copper_lantern	net.minecraft.world.level.block.LanternBlock	hanging=false,waterlogged=false	4	0	0
+857	minecraft:waxed_weathered_copper_lantern	net.minecraft.world.level.block.LanternBlock	hanging=false,waterlogged=false	4	0	0
+858	minecraft:waxed_oxidized_copper_lantern	net.minecraft.world.level.block.LanternBlock	hanging=false,waterlogged=false	4	0	0
+859	minecraft:campfire	net.minecraft.world.level.block.CampfireBlock	facing=north,lit=true,signal_fire=false,waterlogged=false	32	0	32
+860	minecraft:soul_campfire	net.minecraft.world.level.block.CampfireBlock	facing=north,lit=true,signal_fire=false,waterlogged=false	32	0	32
+861	minecraft:sweet_berry_bush	net.minecraft.world.level.block.SweetBerryBushBlock	age=0	4	3	0
+862	minecraft:warped_stem	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+863	minecraft:stripped_warped_stem	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+864	minecraft:warped_hyphae	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+865	minecraft:stripped_warped_hyphae	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+866	minecraft:warped_nylium	net.minecraft.world.level.block.NyliumBlock		1	1	0
+867	minecraft:warped_fungus	net.minecraft.world.level.block.NetherFungusBlock		1	0	0
+868	minecraft:warped_wart_block	net.minecraft.world.level.block.Block		1	0	0
+869	minecraft:warped_roots	net.minecraft.world.level.block.NetherRootsBlock		1	0	0
+870	minecraft:nether_sprouts	net.minecraft.world.level.block.NetherSproutsBlock		1	0	0
+871	minecraft:crimson_stem	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+872	minecraft:stripped_crimson_stem	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+873	minecraft:crimson_hyphae	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+874	minecraft:stripped_crimson_hyphae	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+875	minecraft:crimson_nylium	net.minecraft.world.level.block.NyliumBlock		1	1	0
+876	minecraft:crimson_fungus	net.minecraft.world.level.block.NetherFungusBlock		1	0	0
+877	minecraft:shroomlight	net.minecraft.world.level.block.Block		1	0	0
+878	minecraft:weeping_vines	net.minecraft.world.level.block.WeepingVinesBlock	age=0	26	25	0
+879	minecraft:weeping_vines_plant	net.minecraft.world.level.block.WeepingVinesPlantBlock		1	0	0
+880	minecraft:twisting_vines	net.minecraft.world.level.block.TwistingVinesBlock	age=0	26	25	0
+881	minecraft:twisting_vines_plant	net.minecraft.world.level.block.TwistingVinesPlantBlock		1	0	0
+882	minecraft:crimson_roots	net.minecraft.world.level.block.NetherRootsBlock		1	0	0
+883	minecraft:crimson_planks	net.minecraft.world.level.block.Block		1	0	0
+884	minecraft:warped_planks	net.minecraft.world.level.block.Block		1	0	0
+885	minecraft:crimson_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+886	minecraft:warped_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+887	minecraft:crimson_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+888	minecraft:warped_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+889	minecraft:crimson_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+890	minecraft:warped_fence	net.minecraft.world.level.block.FenceBlock	east=false,north=false,south=false,waterlogged=false,west=false	32	0	0
+891	minecraft:crimson_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+892	minecraft:warped_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+893	minecraft:crimson_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+894	minecraft:warped_fence_gate	net.minecraft.world.level.block.FenceGateBlock	facing=north,in_wall=false,open=false,powered=false	32	0	0
+895	minecraft:crimson_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+896	minecraft:warped_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+897	minecraft:crimson_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+898	minecraft:warped_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+899	minecraft:crimson_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+900	minecraft:warped_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+901	minecraft:crimson_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+902	minecraft:warped_sign	net.minecraft.world.level.block.StandingSignBlock	rotation=8,waterlogged=false	32	0	32
+903	minecraft:crimson_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+904	minecraft:warped_wall_sign	net.minecraft.world.level.block.WallSignBlock	facing=north,waterlogged=false	8	0	8
+905	minecraft:structure_block	net.minecraft.world.level.block.StructureBlock	mode=load	4	0	4
+906	minecraft:jigsaw	net.minecraft.world.level.block.JigsawBlock	orientation=north_up	12	0	12
+907	minecraft:test_block	net.minecraft.world.level.block.TestBlock	mode=start	4	0	4
+908	minecraft:test_instance_block	net.minecraft.world.level.block.TestInstanceBlock		1	0	1
+909	minecraft:composter	net.minecraft.world.level.block.ComposterBlock	level=0	9	0	0
+910	minecraft:target	net.minecraft.world.level.block.TargetBlock	power=0	16	0	0
+911	minecraft:bee_nest	net.minecraft.world.level.block.BeehiveBlock	facing=north,honey_level=0	24	0	24
+912	minecraft:beehive	net.minecraft.world.level.block.BeehiveBlock	facing=north,honey_level=0	24	0	24
+913	minecraft:honey_block	net.minecraft.world.level.block.HoneyBlock		1	0	0
+914	minecraft:honeycomb_block	net.minecraft.world.level.block.Block		1	0	0
+915	minecraft:netherite_block	net.minecraft.world.level.block.Block		1	0	0
+916	minecraft:ancient_debris	net.minecraft.world.level.block.Block		1	0	0
+917	minecraft:crying_obsidian	net.minecraft.world.level.block.CryingObsidianBlock		1	0	0
+918	minecraft:respawn_anchor	net.minecraft.world.level.block.RespawnAnchorBlock	charges=0	5	0	0
+919	minecraft:potted_crimson_fungus	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+920	minecraft:potted_warped_fungus	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+921	minecraft:potted_crimson_roots	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+922	minecraft:potted_warped_roots	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+923	minecraft:lodestone	net.minecraft.world.level.block.Block		1	0	0
+924	minecraft:blackstone	net.minecraft.world.level.block.Block		1	0	0
+925	minecraft:blackstone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+926	minecraft:blackstone_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+927	minecraft:blackstone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+928	minecraft:polished_blackstone	net.minecraft.world.level.block.Block		1	0	0
+929	minecraft:polished_blackstone_bricks	net.minecraft.world.level.block.Block		1	0	0
+930	minecraft:cracked_polished_blackstone_bricks	net.minecraft.world.level.block.Block		1	0	0
+931	minecraft:chiseled_polished_blackstone	net.minecraft.world.level.block.Block		1	0	0
+932	minecraft:polished_blackstone_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+933	minecraft:polished_blackstone_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+934	minecraft:polished_blackstone_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+935	minecraft:gilded_blackstone	net.minecraft.world.level.block.Block		1	0	0
+936	minecraft:polished_blackstone_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+937	minecraft:polished_blackstone_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+938	minecraft:polished_blackstone_pressure_plate	net.minecraft.world.level.block.PressurePlateBlock	powered=false	2	0	0
+939	minecraft:polished_blackstone_button	net.minecraft.world.level.block.ButtonBlock	face=wall,facing=north,powered=false	24	0	0
+940	minecraft:polished_blackstone_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+941	minecraft:chiseled_nether_bricks	net.minecraft.world.level.block.Block		1	0	0
+942	minecraft:cracked_nether_bricks	net.minecraft.world.level.block.Block		1	0	0
+943	minecraft:quartz_bricks	net.minecraft.world.level.block.Block		1	0	0
+944	minecraft:candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+945	minecraft:white_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+946	minecraft:orange_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+947	minecraft:magenta_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+948	minecraft:light_blue_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+949	minecraft:yellow_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+950	minecraft:lime_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+951	minecraft:pink_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+952	minecraft:gray_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+953	minecraft:light_gray_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+954	minecraft:cyan_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+955	minecraft:purple_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+956	minecraft:blue_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+957	minecraft:brown_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+958	minecraft:green_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+959	minecraft:red_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+960	minecraft:black_candle	net.minecraft.world.level.block.CandleBlock	candles=1,lit=false,waterlogged=false	16	0	0
+961	minecraft:candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+962	minecraft:white_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+963	minecraft:orange_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+964	minecraft:magenta_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+965	minecraft:light_blue_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+966	minecraft:yellow_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+967	minecraft:lime_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+968	minecraft:pink_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+969	minecraft:gray_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+970	minecraft:light_gray_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+971	minecraft:cyan_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+972	minecraft:purple_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+973	minecraft:blue_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+974	minecraft:brown_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+975	minecraft:green_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+976	minecraft:red_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+977	minecraft:black_candle_cake	net.minecraft.world.level.block.CandleCakeBlock	lit=false	2	0	0
+978	minecraft:amethyst_block	net.minecraft.world.level.block.AmethystBlock		1	0	0
+979	minecraft:budding_amethyst	net.minecraft.world.level.block.BuddingAmethystBlock		1	1	0
+980	minecraft:amethyst_cluster	net.minecraft.world.level.block.AmethystClusterBlock	facing=up,waterlogged=false	12	0	0
+981	minecraft:large_amethyst_bud	net.minecraft.world.level.block.AmethystClusterBlock	facing=up,waterlogged=false	12	0	0
+982	minecraft:medium_amethyst_bud	net.minecraft.world.level.block.AmethystClusterBlock	facing=up,waterlogged=false	12	0	0
+983	minecraft:small_amethyst_bud	net.minecraft.world.level.block.AmethystClusterBlock	facing=up,waterlogged=false	12	0	0
+984	minecraft:tuff	net.minecraft.world.level.block.Block		1	0	0
+985	minecraft:tuff_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+986	minecraft:tuff_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+987	minecraft:tuff_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+988	minecraft:polished_tuff	net.minecraft.world.level.block.Block		1	0	0
+989	minecraft:polished_tuff_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+990	minecraft:polished_tuff_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+991	minecraft:polished_tuff_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+992	minecraft:chiseled_tuff	net.minecraft.world.level.block.Block		1	0	0
+993	minecraft:tuff_bricks	net.minecraft.world.level.block.Block		1	0	0
+994	minecraft:tuff_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+995	minecraft:tuff_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+996	minecraft:tuff_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+997	minecraft:chiseled_tuff_bricks	net.minecraft.world.level.block.Block		1	0	0
+998	minecraft:calcite	net.minecraft.world.level.block.Block		1	0	0
+999	minecraft:tinted_glass	net.minecraft.world.level.block.TintedGlassBlock		1	0	0
+1000	minecraft:powder_snow	net.minecraft.world.level.block.PowderSnowBlock		1	0	0
+1001	minecraft:sculk_sensor	net.minecraft.world.level.block.SculkSensorBlock	power=0,sculk_sensor_phase=inactive,waterlogged=false	96	0	96
+1002	minecraft:calibrated_sculk_sensor	net.minecraft.world.level.block.CalibratedSculkSensorBlock	facing=north,power=0,sculk_sensor_phase=inactive,waterlogged=false	384	0	384
+1003	minecraft:sculk	net.minecraft.world.level.block.SculkBlock		1	0	0
+1004	minecraft:sculk_vein	net.minecraft.world.level.block.SculkVeinBlock	down=false,east=false,north=false,south=false,up=false,waterlogged=false,west=false	128	0	0
+1005	minecraft:sculk_catalyst	net.minecraft.world.level.block.SculkCatalystBlock	bloom=false	2	0	2
+1006	minecraft:sculk_shrieker	net.minecraft.world.level.block.SculkShriekerBlock	can_summon=false,shrieking=false,waterlogged=false	8	0	8
+1007	minecraft:copper_block	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1008	minecraft:exposed_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1009	minecraft:weathered_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1010	minecraft:oxidized_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	0	0
+1011	minecraft:copper_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+1012	minecraft:deepslate_copper_ore	net.minecraft.world.level.block.DropExperienceBlock		1	0	0
+1013	minecraft:oxidized_cut_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	0	0
+1014	minecraft:weathered_cut_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1015	minecraft:exposed_cut_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1016	minecraft:cut_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1017	minecraft:oxidized_chiseled_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	0	0
+1018	minecraft:weathered_chiseled_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1019	minecraft:exposed_chiseled_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1020	minecraft:chiseled_copper	net.minecraft.world.level.block.WeatheringCopperFullBlock		1	1	0
+1021	minecraft:waxed_oxidized_chiseled_copper	net.minecraft.world.level.block.Block		1	0	0
+1022	minecraft:waxed_weathered_chiseled_copper	net.minecraft.world.level.block.Block		1	0	0
+1023	minecraft:waxed_exposed_chiseled_copper	net.minecraft.world.level.block.Block		1	0	0
+1024	minecraft:waxed_chiseled_copper	net.minecraft.world.level.block.Block		1	0	0
+1025	minecraft:oxidized_cut_copper_stairs	net.minecraft.world.level.block.WeatheringCopperStairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1026	minecraft:weathered_cut_copper_stairs	net.minecraft.world.level.block.WeatheringCopperStairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	80	0
+1027	minecraft:exposed_cut_copper_stairs	net.minecraft.world.level.block.WeatheringCopperStairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	80	0
+1028	minecraft:cut_copper_stairs	net.minecraft.world.level.block.WeatheringCopperStairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	80	0
+1029	minecraft:oxidized_cut_copper_slab	net.minecraft.world.level.block.WeatheringCopperSlabBlock	type=bottom,waterlogged=false	6	0	0
+1030	minecraft:weathered_cut_copper_slab	net.minecraft.world.level.block.WeatheringCopperSlabBlock	type=bottom,waterlogged=false	6	6	0
+1031	minecraft:exposed_cut_copper_slab	net.minecraft.world.level.block.WeatheringCopperSlabBlock	type=bottom,waterlogged=false	6	6	0
+1032	minecraft:cut_copper_slab	net.minecraft.world.level.block.WeatheringCopperSlabBlock	type=bottom,waterlogged=false	6	6	0
+1033	minecraft:waxed_copper_block	net.minecraft.world.level.block.Block		1	0	0
+1034	minecraft:waxed_weathered_copper	net.minecraft.world.level.block.Block		1	0	0
+1035	minecraft:waxed_exposed_copper	net.minecraft.world.level.block.Block		1	0	0
+1036	minecraft:waxed_oxidized_copper	net.minecraft.world.level.block.Block		1	0	0
+1037	minecraft:waxed_oxidized_cut_copper	net.minecraft.world.level.block.Block		1	0	0
+1038	minecraft:waxed_weathered_cut_copper	net.minecraft.world.level.block.Block		1	0	0
+1039	minecraft:waxed_exposed_cut_copper	net.minecraft.world.level.block.Block		1	0	0
+1040	minecraft:waxed_cut_copper	net.minecraft.world.level.block.Block		1	0	0
+1041	minecraft:waxed_oxidized_cut_copper_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1042	minecraft:waxed_weathered_cut_copper_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1043	minecraft:waxed_exposed_cut_copper_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1044	minecraft:waxed_cut_copper_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1045	minecraft:waxed_oxidized_cut_copper_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+1046	minecraft:waxed_weathered_cut_copper_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+1047	minecraft:waxed_exposed_cut_copper_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+1048	minecraft:waxed_cut_copper_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+1049	minecraft:copper_door	net.minecraft.world.level.block.WeatheringCopperDoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	64	0
+1050	minecraft:exposed_copper_door	net.minecraft.world.level.block.WeatheringCopperDoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	64	0
+1051	minecraft:oxidized_copper_door	net.minecraft.world.level.block.WeatheringCopperDoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+1052	minecraft:weathered_copper_door	net.minecraft.world.level.block.WeatheringCopperDoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	64	0
+1053	minecraft:waxed_copper_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+1054	minecraft:waxed_exposed_copper_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+1055	minecraft:waxed_oxidized_copper_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+1056	minecraft:waxed_weathered_copper_door	net.minecraft.world.level.block.DoorBlock	facing=north,half=lower,hinge=left,open=false,powered=false	64	0	0
+1057	minecraft:copper_trapdoor	net.minecraft.world.level.block.WeatheringCopperTrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	64	0
+1058	minecraft:exposed_copper_trapdoor	net.minecraft.world.level.block.WeatheringCopperTrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	64	0
+1059	minecraft:oxidized_copper_trapdoor	net.minecraft.world.level.block.WeatheringCopperTrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+1060	minecraft:weathered_copper_trapdoor	net.minecraft.world.level.block.WeatheringCopperTrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	64	0
+1061	minecraft:waxed_copper_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+1062	minecraft:waxed_exposed_copper_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+1063	minecraft:waxed_oxidized_copper_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+1064	minecraft:waxed_weathered_copper_trapdoor	net.minecraft.world.level.block.TrapDoorBlock	facing=north,half=bottom,open=false,powered=false,waterlogged=false	64	0	0
+1065	minecraft:copper_grate	net.minecraft.world.level.block.WeatheringCopperGrateBlock	waterlogged=false	2	2	0
+1066	minecraft:exposed_copper_grate	net.minecraft.world.level.block.WeatheringCopperGrateBlock	waterlogged=false	2	2	0
+1067	minecraft:weathered_copper_grate	net.minecraft.world.level.block.WeatheringCopperGrateBlock	waterlogged=false	2	2	0
+1068	minecraft:oxidized_copper_grate	net.minecraft.world.level.block.WeatheringCopperGrateBlock	waterlogged=false	2	0	0
+1069	minecraft:waxed_copper_grate	net.minecraft.world.level.block.WaterloggedTransparentBlock	waterlogged=false	2	0	0
+1070	minecraft:waxed_exposed_copper_grate	net.minecraft.world.level.block.WaterloggedTransparentBlock	waterlogged=false	2	0	0
+1071	minecraft:waxed_weathered_copper_grate	net.minecraft.world.level.block.WaterloggedTransparentBlock	waterlogged=false	2	0	0
+1072	minecraft:waxed_oxidized_copper_grate	net.minecraft.world.level.block.WaterloggedTransparentBlock	waterlogged=false	2	0	0
+1073	minecraft:copper_bulb	net.minecraft.world.level.block.WeatheringCopperBulbBlock	lit=false,powered=false	4	4	0
+1074	minecraft:exposed_copper_bulb	net.minecraft.world.level.block.WeatheringCopperBulbBlock	lit=false,powered=false	4	4	0
+1075	minecraft:weathered_copper_bulb	net.minecraft.world.level.block.WeatheringCopperBulbBlock	lit=false,powered=false	4	4	0
+1076	minecraft:oxidized_copper_bulb	net.minecraft.world.level.block.WeatheringCopperBulbBlock	lit=false,powered=false	4	0	0
+1077	minecraft:waxed_copper_bulb	net.minecraft.world.level.block.CopperBulbBlock	lit=false,powered=false	4	0	0
+1078	minecraft:waxed_exposed_copper_bulb	net.minecraft.world.level.block.CopperBulbBlock	lit=false,powered=false	4	0	0
+1079	minecraft:waxed_weathered_copper_bulb	net.minecraft.world.level.block.CopperBulbBlock	lit=false,powered=false	4	0	0
+1080	minecraft:waxed_oxidized_copper_bulb	net.minecraft.world.level.block.CopperBulbBlock	lit=false,powered=false	4	0	0
+1081	minecraft:copper_chest	net.minecraft.world.level.block.WeatheringCopperChestBlock	facing=north,type=single,waterlogged=false	24	24	24
+1082	minecraft:exposed_copper_chest	net.minecraft.world.level.block.WeatheringCopperChestBlock	facing=north,type=single,waterlogged=false	24	24	24
+1083	minecraft:weathered_copper_chest	net.minecraft.world.level.block.WeatheringCopperChestBlock	facing=north,type=single,waterlogged=false	24	24	24
+1084	minecraft:oxidized_copper_chest	net.minecraft.world.level.block.WeatheringCopperChestBlock	facing=north,type=single,waterlogged=false	24	0	24
+1085	minecraft:waxed_copper_chest	net.minecraft.world.level.block.CopperChestBlock	facing=north,type=single,waterlogged=false	24	0	24
+1086	minecraft:waxed_exposed_copper_chest	net.minecraft.world.level.block.CopperChestBlock	facing=north,type=single,waterlogged=false	24	0	24
+1087	minecraft:waxed_weathered_copper_chest	net.minecraft.world.level.block.CopperChestBlock	facing=north,type=single,waterlogged=false	24	0	24
+1088	minecraft:waxed_oxidized_copper_chest	net.minecraft.world.level.block.CopperChestBlock	facing=north,type=single,waterlogged=false	24	0	24
+1089	minecraft:copper_golem_statue	net.minecraft.world.level.block.WeatheringCopperGolemStatueBlock	copper_golem_pose=standing,facing=north,waterlogged=false	32	32	32
+1090	minecraft:exposed_copper_golem_statue	net.minecraft.world.level.block.WeatheringCopperGolemStatueBlock	copper_golem_pose=standing,facing=north,waterlogged=false	32	32	32
+1091	minecraft:weathered_copper_golem_statue	net.minecraft.world.level.block.WeatheringCopperGolemStatueBlock	copper_golem_pose=standing,facing=north,waterlogged=false	32	32	32
+1092	minecraft:oxidized_copper_golem_statue	net.minecraft.world.level.block.WeatheringCopperGolemStatueBlock	copper_golem_pose=standing,facing=north,waterlogged=false	32	0	32
+1093	minecraft:waxed_copper_golem_statue	net.minecraft.world.level.block.CopperGolemStatueBlock	copper_golem_pose=standing,facing=north,waterlogged=false	32	0	32
+1094	minecraft:waxed_exposed_copper_golem_statue	net.minecraft.world.level.block.CopperGolemStatueBlock	copper_golem_pose=standing,facing=north,waterlogged=false	32	0	32
+1095	minecraft:waxed_weathered_copper_golem_statue	net.minecraft.world.level.block.CopperGolemStatueBlock	copper_golem_pose=standing,facing=north,waterlogged=false	32	0	32
+1096	minecraft:waxed_oxidized_copper_golem_statue	net.minecraft.world.level.block.CopperGolemStatueBlock	copper_golem_pose=standing,facing=north,waterlogged=false	32	0	32
+1097	minecraft:lightning_rod	net.minecraft.world.level.block.WeatheringLightningRodBlock	facing=up,powered=false,waterlogged=false	24	24	0
+1098	minecraft:exposed_lightning_rod	net.minecraft.world.level.block.WeatheringLightningRodBlock	facing=up,powered=false,waterlogged=false	24	24	0
+1099	minecraft:weathered_lightning_rod	net.minecraft.world.level.block.WeatheringLightningRodBlock	facing=up,powered=false,waterlogged=false	24	24	0
+1100	minecraft:oxidized_lightning_rod	net.minecraft.world.level.block.WeatheringLightningRodBlock	facing=up,powered=false,waterlogged=false	24	0	0
+1101	minecraft:waxed_lightning_rod	net.minecraft.world.level.block.LightningRodBlock	facing=up,powered=false,waterlogged=false	24	0	0
+1102	minecraft:waxed_exposed_lightning_rod	net.minecraft.world.level.block.LightningRodBlock	facing=up,powered=false,waterlogged=false	24	0	0
+1103	minecraft:waxed_weathered_lightning_rod	net.minecraft.world.level.block.LightningRodBlock	facing=up,powered=false,waterlogged=false	24	0	0
+1104	minecraft:waxed_oxidized_lightning_rod	net.minecraft.world.level.block.LightningRodBlock	facing=up,powered=false,waterlogged=false	24	0	0
+1105	minecraft:pointed_dripstone	net.minecraft.world.level.block.PointedDripstoneBlock	thickness=tip,vertical_direction=up,waterlogged=false	20	20	0
+1106	minecraft:dripstone_block	net.minecraft.world.level.block.Block		1	0	0
+1107	minecraft:cave_vines	net.minecraft.world.level.block.CaveVinesBlock	age=0,berries=false	52	50	0
+1108	minecraft:cave_vines_plant	net.minecraft.world.level.block.CaveVinesPlantBlock	berries=false	2	0	0
+1109	minecraft:spore_blossom	net.minecraft.world.level.block.SporeBlossomBlock		1	0	0
+1110	minecraft:azalea	net.minecraft.world.level.block.AzaleaBlock		1	0	0
+1111	minecraft:flowering_azalea	net.minecraft.world.level.block.AzaleaBlock		1	0	0
+1112	minecraft:moss_carpet	net.minecraft.world.level.block.CarpetBlock		1	0	0
+1113	minecraft:pink_petals	net.minecraft.world.level.block.FlowerBedBlock	facing=north,flower_amount=1	16	0	0
+1114	minecraft:wildflowers	net.minecraft.world.level.block.FlowerBedBlock	facing=north,flower_amount=1	16	0	0
+1115	minecraft:leaf_litter	net.minecraft.world.level.block.LeafLitterBlock	facing=north,segment_amount=1	16	0	0
+1116	minecraft:moss_block	net.minecraft.world.level.block.BonemealableFeaturePlacerBlock		1	0	0
+1117	minecraft:big_dripleaf	net.minecraft.world.level.block.BigDripleafBlock	facing=north,tilt=none,waterlogged=false	32	0	0
+1118	minecraft:big_dripleaf_stem	net.minecraft.world.level.block.BigDripleafStemBlock	facing=north,waterlogged=false	8	0	0
+1119	minecraft:small_dripleaf	net.minecraft.world.level.block.SmallDripleafBlock	facing=north,half=lower,waterlogged=false	16	0	0
+1120	minecraft:hanging_roots	net.minecraft.world.level.block.HangingRootsBlock	waterlogged=false	2	0	0
+1121	minecraft:rooted_dirt	net.minecraft.world.level.block.RootedDirtBlock		1	0	0
+1122	minecraft:mud	net.minecraft.world.level.block.MudBlock		1	0	0
+1123	minecraft:deepslate	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+1124	minecraft:cobbled_deepslate	net.minecraft.world.level.block.Block		1	0	0
+1125	minecraft:cobbled_deepslate_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1126	minecraft:cobbled_deepslate_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+1127	minecraft:cobbled_deepslate_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+1128	minecraft:polished_deepslate	net.minecraft.world.level.block.Block		1	0	0
+1129	minecraft:polished_deepslate_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1130	minecraft:polished_deepslate_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+1131	minecraft:polished_deepslate_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+1132	minecraft:deepslate_tiles	net.minecraft.world.level.block.Block		1	0	0
+1133	minecraft:deepslate_tile_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1134	minecraft:deepslate_tile_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+1135	minecraft:deepslate_tile_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+1136	minecraft:deepslate_bricks	net.minecraft.world.level.block.Block		1	0	0
+1137	minecraft:deepslate_brick_stairs	net.minecraft.world.level.block.StairBlock	facing=north,half=bottom,shape=straight,waterlogged=false	80	0	0
+1138	minecraft:deepslate_brick_slab	net.minecraft.world.level.block.SlabBlock	type=bottom,waterlogged=false	6	0	0
+1139	minecraft:deepslate_brick_wall	net.minecraft.world.level.block.WallBlock	east=none,north=none,south=none,up=true,waterlogged=false,west=none	324	0	0
+1140	minecraft:chiseled_deepslate	net.minecraft.world.level.block.Block		1	0	0
+1141	minecraft:cracked_deepslate_bricks	net.minecraft.world.level.block.Block		1	0	0
+1142	minecraft:cracked_deepslate_tiles	net.minecraft.world.level.block.Block		1	0	0
+1143	minecraft:infested_deepslate	net.minecraft.world.level.block.InfestedRotatedPillarBlock	axis=y	3	0	0
+1144	minecraft:smooth_basalt	net.minecraft.world.level.block.Block		1	0	0
+1145	minecraft:raw_iron_block	net.minecraft.world.level.block.Block		1	0	0
+1146	minecraft:raw_copper_block	net.minecraft.world.level.block.Block		1	0	0
+1147	minecraft:raw_gold_block	net.minecraft.world.level.block.Block		1	0	0
+1148	minecraft:potted_azalea_bush	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+1149	minecraft:potted_flowering_azalea_bush	net.minecraft.world.level.block.FlowerPotBlock		1	0	0
+1150	minecraft:ochre_froglight	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+1151	minecraft:verdant_froglight	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+1152	minecraft:pearlescent_froglight	net.minecraft.world.level.block.RotatedPillarBlock	axis=y	3	0	0
+1153	minecraft:frogspawn	net.minecraft.world.level.block.FrogspawnBlock		1	0	0
+1154	minecraft:reinforced_deepslate	net.minecraft.world.level.block.Block		1	0	0
+1155	minecraft:decorated_pot	net.minecraft.world.level.block.DecoratedPotBlock	cracked=false,facing=north,waterlogged=false	16	0	16
+1156	minecraft:crafter	net.minecraft.world.level.block.CrafterBlock	crafting=false,orientation=north_up,triggered=false	48	0	48
+1157	minecraft:trial_spawner	net.minecraft.world.level.block.TrialSpawnerBlock	ominous=false,trial_spawner_state=inactive	12	0	12
+1158	minecraft:vault	net.minecraft.world.level.block.VaultBlock	facing=north,ominous=false,vault_state=inactive	32	0	32
+1159	minecraft:heavy_core	net.minecraft.world.level.block.HeavyCoreBlock	waterlogged=false	2	0	0
+1160	minecraft:pale_moss_block	net.minecraft.world.level.block.BonemealableFeaturePlacerBlock		1	0	0
+1161	minecraft:pale_moss_carpet	net.minecraft.world.level.block.MossyCarpetBlock	bottom=true,east=none,north=none,south=none,west=none	162	0	0
+1162	minecraft:pale_hanging_moss	net.minecraft.world.level.block.HangingMossBlock	tip=true	2	0	0
+1163	minecraft:open_eyeblossom	net.minecraft.world.level.block.EyeblossomBlock		1	1	0
+1164	minecraft:closed_eyeblossom	net.minecraft.world.level.block.EyeblossomBlock		1	1	0
+1165	minecraft:potted_open_eyeblossom	net.minecraft.world.level.block.FlowerPotBlock		1	1	0
+1166	minecraft:potted_closed_eyeblossom	net.minecraft.world.level.block.FlowerPotBlock		1	1	0
+1167	minecraft:firefly_bush	net.minecraft.world.level.block.FireflyBushBlock		1	0	0

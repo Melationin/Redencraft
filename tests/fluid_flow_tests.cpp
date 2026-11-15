@@ -728,18 +728,31 @@ void complementarySharedFace() {
           "a carpet's full bottom face seals the upward face");
 }
 
-// W-06 dependency gap, recorded rather than faked: 26.1's half slabs and stairs
-// are not registered in this simulator, so the 'two half slabs complete one
-// face' case cannot be asserted yet. The vanilla shapes are known (bottom slab
-// y=0..8, top slab y=8..16, so a bottom+top pair covers the whole vertical
-// plane) and the merged-face routine is shape-generic, but adding the blocks is
-// outside F-7's scope.
+// W-06: two complementary half slabs seal a vertical face together while a
+// single slab leaves the other half open.
 void sharedFaceDependencyGap() {
-  require(findBlockByName("minecraft:stone_slab") == nullptr,
-          "half slabs are still unregistered, so W-06's slab case is a known "
-          "dependency gap rather than a silent pass");
-  require(findBlockByName("minecraft:oak_stairs") == nullptr,
-          "stairs are still unregistered for the same reason");
+  World world;
+  for (int x = -1; x <= 1; ++x)
+    for (int z = -1; z <= 1; ++z)
+      world.loadChunk(x, z);
+  const BlockState bottomSlab =
+      Blocks::STONE_SLAB.defaultState().with("type", "bottom");
+  const BlockState topSlab =
+      Blocks::STONE_SLAB.defaultState().with("type", "top");
+  const Pos a{0, 65, 0};
+  const Pos b{1, 65, 0};
+  world.rawSetBlock(a, bottomSlab);
+  world.rawSetBlock(b, Blocks::AIR.defaultState());
+  require(fluidCanPassThroughWall(world, Direction::East, a, bottomSlab, b,
+                                  Blocks::AIR.defaultState()),
+          "single bottom slab does not seal the shared vertical face");
+  world.rawSetBlock(b, topSlab);
+  require(!fluidCanPassThroughWall(world, Direction::East, a, bottomSlab, b,
+                                   topSlab),
+          "bottom slab + top slab seal the shared vertical face");
+  require(findBlockByName("minecraft:oak_stairs") != nullptr &&
+              !collisionShape(Blocks::OAK_STAIRS.defaultState()).empty(),
+          "oak stairs is registered with non-empty collision shape");
 }
 
 // A-05: a sealed channel must reach a steady state. After the water fills it and

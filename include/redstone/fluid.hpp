@@ -33,6 +33,9 @@ public:
   // FluidState.isSourceOfType: exact identity AND that identity is a source.
   bool isSourceOfType(const Fluid &type) const;
   bool isEmpty() const;
+  bool isRandomlyTicking() const;
+  RandomTickResult randomTick(RandomTickAccess &level, const Pos &pos,
+                              Random &random) const;
   // FluidState.getAmount dispatches to the owning fluid: a Source answers 8 and
   // a Flowing variant answers its stored LEVEL property.
   std::uint8_t getAmount() const;
@@ -92,6 +95,11 @@ public:
   virtual int slopeFindDistance() const { return 0; }
   virtual int tickDelay() const { return 0; }
   virtual bool canConvertToSource() const { return false; }
+  virtual bool isRandomlyTicking() const { return false; }
+  virtual RandomTickResult randomTick(RandomTickAccess &, const Pos &,
+                                      const FluidState &, Random &) const {
+    return RandomTickResult::Applied;
+  }
   // Registered bucket item name; empty for the empty fluid.
   const std::string &bucketItem() const { return bucketItem_; }
 
@@ -138,6 +146,10 @@ public:
   int slopeFindDistance() const override { return 2; }
   int tickDelay() const override { return 30; }
   bool canConvertToSource() const override { return false; }
+  bool isRandomlyTicking() const override { return true; }
+  RandomTickResult randomTick(RandomTickAccess &level, const Pos &pos,
+                              const FluidState &state,
+                              Random &random) const override;
 
 protected:
   LavaFluid(std::string_view name, bool source);

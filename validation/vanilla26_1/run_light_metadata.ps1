@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$root = Resolve-Path (Join-Path $PSScriptRoot '../..')
+$root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
 $vanilla = Join-Path $root 'validation/vanilla26_1'
 $officialJar = Join-Path $vanilla 'server.jar'
 $classesJar = Join-Path $vanilla 'versions/26.1/server-26.1.jar'
@@ -11,7 +11,7 @@ if ($actualJarSha1 -ne $expectedJarSha1) {
 }
 
 $names = Join-Path $root 'assets/light26_1/block_names.txt'
-$source = Get-Content -Raw (Join-Path $root 'src/blocks.cpp')
+$source = Get-Content -Raw (Join-Path $root 'src/blocks_registry.inc')
 $matches = [regex]::Matches(
   $source,
   'const\s+Block\s+[A-Za-z0-9_]+\s*\{\s*"(minecraft:[^"]+)"')

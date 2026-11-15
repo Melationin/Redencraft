@@ -47,10 +47,10 @@ if(REDSTONE_ALLOCATOR STREQUAL "jemalloc")
 elseif(NOT REDSTONE_ALLOCATOR STREQUAL "system")
   message(FATAL_ERROR "Unknown allocator: ${REDSTONE_ALLOCATOR}")
 endif()
-add_library(redstone_core src/state.cpp src/blocks.cpp src/fluid.cpp src/fluid_flow.cpp src/light/optical.cpp src/light/snapshot.cpp src/light/common.cpp src/light/block_light_engine.cpp src/light/sky_light_engine.cpp src/light/service.cpp src/tickets.cpp src/heightmap.cpp src/engine.cpp src/entity.cpp src/rail.cpp src/piston.cpp src/shapes.cpp src/nbt.cpp src/storage.cpp src/region.cpp src/terrain_codec.cpp src/entity_codec.cpp src/chunk_lifecycle.cpp src/world_chunk_manager.cpp src/litematic.cpp src/command.cpp vendor/lz4/lz4.c vendor/lz4/xxhash.c)
+add_library(redstone_core src/state.cpp src/blocks.cpp src/block_tags.cpp src/random_tick.cpp src/fluid.cpp src/fluid_flow.cpp src/light/optical.cpp src/light/snapshot.cpp src/light/common.cpp src/light/block_light_engine.cpp src/light/sky_light_engine.cpp src/light/service.cpp src/tickets.cpp src/heightmap.cpp src/engine.cpp src/entity.cpp src/rail.cpp src/piston.cpp src/containers.cpp src/redstone/signal.cpp src/redstone/wire.cpp src/redstone/torch.cpp src/redstone/diode.cpp src/redstone/controls.cpp src/redstone/consumers.cpp src/shapes.cpp src/nbt.cpp src/storage.cpp src/region.cpp src/terrain_codec.cpp src/entity_codec.cpp src/chunk_lifecycle.cpp src/world_chunk_manager.cpp src/litematic.cpp src/command.cpp vendor/lz4/lz4.c vendor/lz4/xxhash.c)
 set_source_files_properties(src/light/optical.cpp PROPERTIES
   OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/light_metadata.inc;${CMAKE_CURRENT_SOURCE_DIR}/src/light_occlusion.inc")
-target_include_directories(redstone_core PUBLIC include PRIVATE src)
+target_include_directories(redstone_core PUBLIC include PRIVATE src vendor)
 target_include_directories(redstone_core PUBLIC vendor/lz4)
 target_link_libraries(redstone_core PUBLIC ZLIB::ZLIB Threads::Threads)
 if(MSVC)
@@ -69,6 +69,8 @@ if(REDSTONE_BUILD_BENCHMARKS)
   target_link_libraries(redstone_fluid_perf_benchmark PRIVATE redstone_core redstone_allocator)
   add_executable(redstone_block_light_benchmark benchmarks/block_light_benchmark.cpp)
   target_link_libraries(redstone_block_light_benchmark PRIVATE redstone_core redstone_allocator)
+  add_executable(redstone_random_tick_benchmark benchmarks/random_tick_benchmark.cpp)
+  target_link_libraries(redstone_random_tick_benchmark PRIVATE redstone_core redstone_allocator)
   if(REDSTONE_BENCHMARK_COUNT_ALLOCATIONS)
     add_library(redstone_counted_allocator OBJECT src/allocator.cpp)
     target_include_directories(redstone_counted_allocator PUBLIC include)
@@ -137,6 +139,16 @@ if(REDSTONE_BUILD_VANILLA_SERVER)
   endif()
 endif()
 if(BUILD_TESTING)
+  add_executable(block_tags_tests tests/block_tags_tests.cpp)
+  target_link_libraries(block_tags_tests PRIVATE redstone_core redstone_allocator)
+  if(MSVC)
+    target_compile_options(block_tags_tests PRIVATE /UNDEBUG /utf-8)
+  else()
+    target_compile_options(block_tags_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME block_tags_lookup COMMAND block_tags_tests
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/block26_1/block_tags.tsv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/protocol775/blocks.tsv")
   add_executable(safesave_order_probe tests/safesave_order_probe.cpp)
   target_link_libraries(safesave_order_probe PRIVATE redstone_core redstone_allocator)
   # F-7 differential: the C++ half of the same fixture the vanilla harness runs.
@@ -150,7 +162,16 @@ if(BUILD_TESTING)
     target_link_libraries(sky_light_probe PRIVATE redstone_core redstone_allocator)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME block_inventory COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/check_block_inventory.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME block_tags COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/check_block_tags.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}")
     if(REDSTONE_BUILD_VANILLA_SERVER)
+      add_test(NAME block_tags_server_smoke COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/validation/vanilla26_1/block_tags_server_smoke.py"
+        "$<TARGET_FILE:redstone_vanilla_server>")
       add_test(NAME protocol_socket COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/validation/protocol775/socket_test.py"
         --server "$<TARGET_FILE:redstone_vanilla_server>")
@@ -205,7 +226,7 @@ if(BUILD_TESTING)
       --faces "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_light_faces.tsv"
       --faces-source "${CMAKE_CURRENT_SOURCE_DIR}/src/light_occlusion.inc")
   endif()
-  foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap tickets region terrain_codec entity_codec chunk_lifecycle world_chunk_manager world_clock)
+  foreach(name engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap tickets region terrain_codec entity_codec chunk_lifecycle world_chunk_manager world_clock redstone_components containers)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_core redstone_allocator)

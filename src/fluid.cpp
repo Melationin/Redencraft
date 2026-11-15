@@ -1,4 +1,6 @@
 #include "redstone/fluid.hpp"
+#include "redstone/random_tick.hpp"
+#include "redstone/shapes.hpp"
 
 #include <algorithm>
 #include <string>
@@ -80,6 +82,65 @@ std::uint8_t LavaFluid::getAmount(const FluidState &state) const {
 BlockState LavaFluid::createLegacyBlock(const FluidState &state) const {
   return Blocks::LAVA.defaultState().with(
       PropertyKind::Level, static_cast<std::uint8_t>(state.getLegacyLevel()));
+}
+
+namespace {
+bool isLavaFlammable(const RandomTickAccess &level, Pos pos) {
+  if (level.isInsideBuildHeight(pos.y) && !level.hasChunkAt(pos))
+    return false;
+  return level.getBlock(pos).block().metadata().ignitedByLava;
+}
+
+bool hasLavaFlammableNeighbours(const RandomTickAccess &level, Pos pos) {
+  constexpr Direction kDirs[] = {Direction::Down, Direction::Up,
+                                 Direction::North, Direction::South,
+                                 Direction::West, Direction::East};
+  for (Direction dir : kDirs) {
+    if (isLavaFlammable(level, pos.relative(dir)))
+      return true;
+  }
+  return false;
+}
+} // namespace
+
+RandomTickResult LavaFluid::randomTick(RandomTickAccess &level, const Pos &pos,
+                                       const FluidState &,
+                                       Random &random) const {
+  if (!level.canSpreadFireAround(pos))
+    return RandomTickResult::Applied;
+  const int passes = random.nextInt(3);
+  if (passes > 0) {
+    Pos testPos = pos;
+    for (int pass = 0; pass < passes; ++pass) {
+      testPos = Pos{testPos.x + random.nextInt(3) - 1, testPos.y + 1,
+                    testPos.z + random.nextInt(3) - 1};
+      if (!level.isLoaded(testPos))
+        return RandomTickResult::Applied;
+      const BlockState state = level.getBlock(testPos);
+      if (state.isAir()) {
+        if (hasLavaFlammableNeighbours(level, testPos)) {
+          level.setBlockAndUpdate(testPos,
+                                  baseFireStateForPlacement(level, testPos));
+          return RandomTickResult::Applied;
+        }
+      } else if (stateBlocksMotion(state)) {
+        return RandomTickResult::Applied;
+      }
+    }
+  } else {
+    for (int i = 0; i < 3; ++i) {
+      const Pos testPos{pos.x + random.nextInt(3) - 1, pos.y,
+                        pos.z + random.nextInt(3) - 1};
+      if (!level.isLoaded(testPos))
+        return RandomTickResult::Applied;
+      const Pos above = testPos.relative(Direction::Up);
+      if (level.getBlock(above).isAir() && isLavaFlammable(level, testPos)) {
+        // LavaFluid.randomTick passes testPos (not above) to BaseFireBlock.getState.
+        level.setBlockAndUpdate(above, baseFireStateForPlacement(level, testPos));
+      }
+    }
+  }
+  return RandomTickResult::Applied;
 }
 
 namespace {
@@ -170,6 +231,13 @@ bool FluidState::isSourceOfType(const Fluid &type) const {
   return type_ == &type && type.isSource(*this);
 }
 bool FluidState::isEmpty() const { return getType().isEmpty(); }
+bool FluidState::isRandomlyTicking() const {
+  return getType().isRandomlyTicking();
+}
+RandomTickResult FluidState::randomTick(RandomTickAccess &level, const Pos &pos,
+                                        Random &random) const {
+  return getType().randomTick(level, pos, *this, random);
+}
 std::uint8_t FluidState::getAmount() const {
   return type_ ? type_->getAmount(*this) : std::uint8_t{0};
 }
@@ -196,11 +264,18 @@ std::vector<FluidStateCacheEntry> &fluidStateCache() {
   return cache;
 }
 
+bool isInherentWaterSourceBlock(const BlockState &state) {
+  return state.is(Blocks::SEAGRASS) || state.is(Blocks::TALL_SEAGRASS) ||
+         state.is(Blocks::KELP) || state.is(Blocks::KELP_PLANT) ||
+         state.is(Blocks::BUBBLE_COLUMN);
+}
+
 FluidState decodeFluidState(const BlockState &state) {
   if (!isLiquidBlock(state)) {
-    // SimpleWaterloggedBlock.getFluidState: a waterlogged host reports a water
-    // source even though its own block is not a liquid (F-5).
-    if (waterloggedOf(state))
+    // SimpleWaterloggedBlock.getFluidState + underwater plant/bubble blocks
+    // (KelpBlock.java:74, KelpPlantBlock.java:36, BubbleColumnBlock.java:74,
+    // SeagrassBlock.java:88, TallSeagrassBlock.java:81).
+    if (waterloggedOf(state) || isInherentWaterSourceBlock(state))
       return FluidState(Fluids::water(), 8, false);
     return FluidState();
   }
@@ -229,7 +304,8 @@ FluidState decodeFluidState(const BlockState &state) {
 FluidState fluidStateOf(const BlockState &state) {
   // Preserve the pre-cache fast path and avoid a thread-local vector allocation
   // for the overwhelmingly common air/ordinary dry-block query.
-  if (!isLiquidBlock(state) && !waterloggedOf(state))
+  if (!isLiquidBlock(state) && !waterloggedOf(state) &&
+      !isInherentWaterSourceBlock(state))
     return FluidState();
   const auto id = static_cast<std::size_t>(state.id());
   auto &cache = fluidStateCache();

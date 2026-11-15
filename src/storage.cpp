@@ -1,4 +1,5 @@
 #include "redstone/storage.hpp"
+#include "redstone/containers.hpp"
 #include "redstone/entity.hpp"
 #include "redstone/piston.hpp"
 #include <algorithm>
@@ -211,28 +212,52 @@ void applyRotation(Entity &entity, const Tag &tag) {
   entity.remainingFireTicks = shortOr(tag, "Fire", 0);
   entity.setOldPosAndRot();
 }
-void appendEntities(LoadedWorld &w, const Tag &list) {
+void appendEntities(std::vector<nbt::Tag> &out, const Tag &list) {
   if (list.type != 9)
     throw nbt::Error("invalid entities");
   for (const auto &entity : list.list) {
     if (entity.type != 10)
       throw nbt::Error("invalid entity");
-    w.entities.push_back(entity);
+    out.push_back(entity);
   }
 }
-void chunk(LoadedWorld &w, const Tag &root, int cx, int cz) {
+struct AnvilChunkSink {
+  int minY = -64;
+  int maxY = 320;
+  bool skipNonFullChunks = false;
+  std::size_t skippedNonFullChunks = 0;
+  std::vector<std::pair<int, int>> &chunks;
+  std::vector<SavedTickData> &ticks;
+  std::vector<nbt::Tag> &blockEntities;
+  std::vector<nbt::Tag> &entities;
+  std::function<void(int cx, int cz)> onChunkStart;
+  std::function<void(int cx, int cz, int sy, std::span<const BlockState> states,
+                     std::span<const std::uint16_t, 4096> indices)>
+      onSection;
+  std::function<void(int cx, int cz, PersistedChunkLight &&light)>
+      onPersistedLight;
+};
+void decodeAnvilChunk(AnvilChunkSink &sink, const Tag &root, int cx, int cz) {
   if (integer(root, "xPos") != cx || integer(root, "zPos") != cz)
     throw nbt::Error("chunk coordinates do not match region location");
   if (integer(root, "DataVersion") != 4786)
     throw nbt::Error("unsupported chunk DataVersion (expected 26.1: 4786)");
   auto status = required(root, "Status", 8).text;
-  if (status != "minecraft:full" && status != "full")
+  if (status != "minecraft:full" && status != "full") {
+    if (sink.skipNonFullChunks) {
+      ++sink.skippedNonFullChunks;
+      return;
+    }
     throw nbt::Error("chunk is not fully generated: " + status);
-  w.chunks.emplace_back(cx, cz);
+  }
+  sink.chunks.emplace_back(cx, cz);
+  if (sink.onChunkStart)
+    sink.onChunkStart(cx, cz);
   const auto *lightOnTag = root.get("isLightOn");
   const bool isLightOn = lightOnTag && lightOnTag->type == 1 && lightOnTag->number != 0;
   PersistedChunkLight persistedLight;
   persistedLight.isLightOn = isLightOn;
+  std::array<std::uint16_t, 4096> indices{};
   if (auto sections = root.get("sections")) {
     if (sections->type != 9)
       throw nbt::Error("invalid sections");
@@ -272,6 +297,7 @@ void chunk(LoadedWorld &w, const Tag &root, int cx, int cz) {
       if (pal.empty() || pal.size() > 4096)
         throw nbt::Error("invalid block palette");
       std::vector<BlockState> states;
+      states.reserve(pal.size());
       for (auto &e : pal) {
         if (e.type != 10)
           throw nbt::Error("invalid palette entry");
@@ -286,30 +312,25 @@ void chunk(LoadedWorld &w, const Tag &root, int cx, int cz) {
         throw nbt::Error("invalid block state data length");
       if (pal.size() == 1 && data && (data->type != 12 || !data->longs.empty()))
         throw nbt::Error("unexpected single palette data");
-      for (int i = 0; i < 4096; i++) {
-        unsigned index = 0;
-        if (pal.size() > 1)
-          index = (static_cast<uint64_t>(data->longs[i / per]) >>
-                   ((i % per) * bits)) &
-                  ((uint64_t(1) << bits) - 1);
-        if (index >= states.size())
-          throw nbt::Error("block palette index out of range");
-        int64_t y = sy * 16 + (i >> 8);
-        if (y < w.minY || y >= w.maxY)
-          continue;
-        auto &s = states[index];
-        if (!s.isAir())
-          w.blocks[{cx * 16 + (i & 15), static_cast<int>(y),
-                    cz * 16 + ((i >> 4) & 15)}] = s;
+      if (pal.size() > 1) {
+        const std::uint64_t mask = (std::uint64_t(1) << bits) - 1;
+        for (int i = 0; i < 4096; i++) {
+          const unsigned index =
+              (static_cast<uint64_t>(data->longs[i / per]) >>
+               ((i % per) * bits)) &
+              mask;
+          if (index >= states.size())
+            throw nbt::Error("block palette index out of range");
+          indices[static_cast<std::size_t>(i)] =
+              static_cast<std::uint16_t>(index);
+        }
       }
+      if (sink.onSection)
+        sink.onSection(cx, cz, static_cast<int>(sy), states, indices);
     }
   }
-  if (isLightOn) {
-    const std::uint64_t key =
-        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cx)) << 32) |
-        static_cast<std::uint32_t>(cz);
-    w.persistedLights[key] = std::move(persistedLight);
-  }
+  if (isLightOn && sink.onPersistedLight)
+    sink.onPersistedLight(cx, cz, std::move(persistedLight));
   for (auto [name, fluid] :
        {std::pair{"block_ticks", false}, std::pair{"fluid_ticks", true}})
     if (auto ts = root.get(name)) {
@@ -324,7 +345,7 @@ void chunk(LoadedWorld &w, const Tag &root, int cx, int cz) {
                         integer(t, "p"),
                         fluid};
         if (chunkCoord(v.pos.x) == cx && chunkCoord(v.pos.z) == cz)
-          w.ticks.push_back(std::move(v));
+          sink.ticks.push_back(std::move(v));
       }
     }
   if (auto es = root.get("block_entities")) {
@@ -333,15 +354,15 @@ void chunk(LoadedWorld &w, const Tag &root, int cx, int cz) {
     for (auto &e : es->list) {
       if (e.type != 10)
         throw nbt::Error("invalid block entity");
-      w.blockEntities.push_back(e);
+      sink.blockEntities.push_back(e);
     }
   }
   // SerializableChunkData's legacy terrain entities use lowercase. Keep the
   // former uppercase spelling as an alias, but never append both aliases.
   if (auto es = root.get("entities"))
-    appendEntities(w, *es);
+    appendEntities(sink.entities, *es);
   else if (auto alias = root.get("Entities"))
-    appendEntities(w, *alias);
+    appendEntities(sink.entities, *alias);
 }
 bool isSimpleEntity(const std::string &id) {
   auto name = id.find(':') == std::string::npos ? "minecraft:" + id : id;
@@ -448,6 +469,8 @@ void readRegions(const std::filesystem::path &regionDir, Keep keep,
     if (rx < -4194304 || rx > 4194303 || rz < -4194304 || rz > 4194303)
       throw nbt::Error("region coordinates outside block range");
     auto bytes = file(path);
+    if (bytes.empty())
+      continue;
     if (bytes.size() < 8192 || bytes.size() % 4096)
       throw nbt::Error("invalid region file size");
     std::set<size_t> occupied{0, 1};
@@ -798,6 +821,11 @@ WorldGameRules loadWorldGameRules(const std::filesystem::path &path) {
            result.waterSourceConversion);
   readBool("minecraft:lava_source_conversion",
            result.lavaSourceConversion);
+  if (const Tag *tickSpeed = data.get("minecraft:random_tick_speed")) {
+    if (tickSpeed->type != 3 || tickSpeed->number < 0)
+      throw nbt::Error("invalid game rule minecraft:random_tick_speed");
+    result.randomTickSpeed = static_cast<int>(tickSpeed->number);
+  }
   return result;
 }
 
@@ -830,6 +858,48 @@ WorldMetadata loadWorldMetadata(const std::filesystem::path &worldDir) {
   return result;
 }
 
+WorldDataPackSelection selectWorldDataPacks(const std::filesystem::path &worldDir,
+                                            const nbt::RootTag &levelRoot) {
+  WorldDataPackSelection result;
+  const Tag *data = levelRoot.value.get("Data");
+  const Tag *packs = data && data->type == 10 ? data->get("DataPacks") : nullptr;
+  if (!packs) return result; // DataPackConfig.DEFAULT enables only vanilla.
+  const Tag *enabled = packs->type == 10 ? packs->get("Enabled") : nullptr;
+  if (!enabled || enabled->type != 9 ||
+      (enabled->listElementType != 8 && !enabled->list.empty())) {
+    // TODO: Match the codec's partial-error handling for malformed DataPacks.
+    result.diagnostics.push_back("malformed level.dat DataPacks; using vanilla tags");
+    return result;
+  }
+  for (const Tag &entry : enabled->list) {
+    if (entry.type != 8) {
+      result.diagnostics.push_back("malformed enabled data pack entry");
+      continue;
+    }
+    const std::string &id = entry.text;
+    if (id == "vanilla") continue; // Already included as the base layer.
+    if (!id.starts_with("file/")) {
+      // TODO: Discover built-in feature packs and other repository providers.
+      result.diagnostics.push_back("unsupported enabled data pack provider: " + id);
+      continue;
+    }
+    const std::string name = id.substr(5);
+    if (name.empty() || name == "." || name == ".." ||
+        name.find_first_of("/\\") != std::string::npos ||
+        name.find(':') != std::string::npos) {
+      result.diagnostics.push_back("invalid enabled data pack id: " + id);
+      continue;
+    }
+    auto path = worldDir / "datapacks" / std::filesystem::u8path(name);
+    if (!std::filesystem::exists(path)) {
+      result.diagnostics.push_back("enabled data pack not found: " + id);
+      continue;
+    }
+    result.paths.push_back(std::move(path));
+  }
+  return result;
+}
+
 void setWorldMetadataTime(WorldMetadata &metadata, std::int64_t gameTime) {
   Tag *data = metadata.levelRoot.value.get("Data");
   if (!data || data->type != 10)
@@ -841,20 +911,19 @@ void setWorldMetadataTime(WorldMetadata &metadata, std::int64_t gameTime) {
   metadata.gameTime = gameTime;
 }
 
-LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
-                           const std::filesystem::path &regionDir, int minY,
-                           int maxY) {
-  if (minY >= maxY)
-    throw nbt::Error("invalid world height");
-  LoadedWorld w;
-  w.minY = minY;
-  w.maxY = maxY;
+namespace {
+struct AnvilLevelHeader {
+  std::int64_t gameTime = 0;
+  std::int64_t seed = 0;
+};
+AnvilLevelHeader readAnvilLevelHeader(const std::filesystem::path &worldDir) {
+  AnvilLevelHeader header;
   auto level = file(worldDir / "level.dat");
   auto root = nbt::parse(nbt::decompress(level, 15 + 16));
   auto &data = required(root, "Data", 10);
   if (integer(data, "DataVersion") != 4786)
     throw nbt::Error("unsupported world DataVersion (expected 26.1: 4786)");
-  w.gameTime = required(data, "Time", 4).number;
+  header.gameTime = required(data, "Time", 4).number;
   // 26.1 moved WorldGenSettings into namespaced SavedData. The old embedded
   // compound is accepted as a compatibility fallback for synthetic fixtures.
   const auto settingsPath = worldDir / "data" / "minecraft" / "world_gen_settings.dat";
@@ -862,15 +931,26 @@ LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
     auto settings = nbt::parse(nbt::decompress(file(settingsPath), 31));
     if (integer(settings, "DataVersion") != 4786)
       throw nbt::Error("unsupported world generation DataVersion (expected 26.1: 4786)");
-    w.seed = required(required(settings, "data", 10), "seed", 4).number;
+    header.seed = required(required(settings, "data", 10), "seed", 4).number;
   } else if (auto settings = data.get("WorldGenSettings"))
-    w.seed = required(*settings, "seed", 4).number;
+    header.seed = required(*settings, "seed", 4).number;
   // TODO: vanilla falls back to random WorldOptions when SavedData cannot be
   // read. This deterministic simulator uses zero if both seed sources are
   // absent; malformed present sources are rejected instead of randomized.
-  readRegions(regionDir, [](int, int) { return true; },
-              [&](const Tag &tag, int x, int z) { chunk(w, tag, x, z); });
-  const std::set<std::pair<int, int>> loadedChunks(w.chunks.begin(), w.chunks.end());
+  return header;
+}
+void readAnvilRegionsWithEntities(const std::filesystem::path &regionDir,
+                                  const AnvilLoadOptions &options,
+                                  AnvilChunkSink &sink) {
+  readRegions(regionDir,
+              [&](int x, int z) {
+                return !options.chunkFilter || options.chunkFilter(x, z);
+              },
+              [&](const Tag &tag, int x, int z) {
+                decodeAnvilChunk(sink, tag, x, z);
+              });
+  const std::set<std::pair<int, int>> loadedChunks(sink.chunks.begin(),
+                                                   sink.chunks.end());
   const auto entityDir = regionDir.parent_path() / "entities";
   if (std::filesystem::exists(entityDir))
     readRegions(entityDir,
@@ -881,11 +961,9 @@ LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
                   const auto &pos = required(tag, "Position", 11).ints;
                   if (pos.size() != 2 || pos[0] != x || pos[1] != z)
                     throw nbt::Error("entity chunk Position does not match region location");
-                  appendEntities(w, required(tag, "Entities", 9));
+                  appendEntities(sink.entities, required(tag, "Entities", 9));
                 });
-  return w;
 }
-namespace {
 // Java long addition wraps modulo 2^64 (SavedTick.java:49-51). Go through the
 // unsigned type so the C++ side is defined behaviour instead of UB.
 std::int64_t wrappingAdd(std::int64_t a, std::int64_t b) {
@@ -901,29 +979,11 @@ int tickPriorityByValue(int value) {
     return 3;
   return value;
 }
-} // namespace
-// TODO: non-piston block entities remain in LoadedWorld for reporting; their
-// simulation is not implemented.
-void importWorld(const LoadedWorld &input, World &world) {
-  world.setGameTime(input.gameTime);
-  world.setSeed(static_cast<std::uint64_t>(input.seed));
-  for (auto [x, z] : input.chunks)
-    world.loadChunk(x, z);
-  for (auto &[pos, block] : input.blocks)
-    world.rawSetBlock(pos, block);
-  world.primeHeightmaps();
-  for (auto [x, z] : input.chunks) {
-    const std::uint64_t key =
-        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
-        static_cast<std::uint32_t>(z);
-    if (auto it = input.persistedLights.find(key);
-        it != input.persistedLights.end())
-      world.setChunkPersistedLight(x, z, it->second);
-  }
-  // If lighting was enabled before import, loadChunk's pre-write snapshots are
-  // superseded by one complete post-import snapshot per chunk (with persisted
-  // Anvil light when isLightOn=true).
-  world.refreshLightSnapshots();
+void importWorldStateTail(World &world, std::int64_t gameTime,
+                          std::span<const SavedTickData> ticks,
+                          std::span<const nbt::Tag> blockEntities,
+                          std::span<const nbt::Tag> entities,
+                          AnvilWorldImportSummary *summary = nullptr) {
   // LevelChunkTicks.unpack assigns -N..-1 in saved-list order per chunk.
   // Its scheduleUnchecked path preserves duplicate saved entries. Unknown
   // vanilla block IDs cannot yet be validated against the complete registry.
@@ -936,7 +996,7 @@ void importWorld(const LoadedWorld &input, World &world) {
     return std::make_pair(chunkCoord(tick.pos.x), chunkCoord(tick.pos.z));
   };
   std::map<std::pair<int, int>, std::int64_t> blockNext, fluidNext;
-  for (const auto &tick : input.ticks) {
+  for (const auto &tick : ticks) {
     if (!world.isLoaded(tick.pos))
       continue;
     auto &table = tick.fluid ? fluidNext : blockNext;
@@ -946,7 +1006,7 @@ void importWorld(const LoadedWorld &input, World &world) {
     count = -count;
   for (auto &[chunk, count] : fluidNext)
     count = -count;
-  for (const auto &tick : input.ticks) {
+  for (const auto &tick : ticks) {
     if (!world.isLoaded(tick.pos))
       continue;
     const auto chunk = chunkOf(tick);
@@ -957,7 +1017,7 @@ void importWorld(const LoadedWorld &input, World &world) {
     // arithmetic (SavedTick.java:49-51), and 26.1 streams the delay as a
     // 32-bit int, so an extreme NBT Time must wrap exactly like the JVM
     // rather than trap on C++ signed overflow.
-    const std::int64_t trigger = wrappingAdd(input.gameTime, tick.delay);
+    const std::int64_t trigger = wrappingAdd(gameTime, tick.delay);
     // TickPriority.byValue clamps out-of-range values onto the nearest end
     // (TickPriority.java:21-29) instead of rejecting them.
     const int priority = tickPriorityByValue(tick.priority);
@@ -976,43 +1036,94 @@ void importWorld(const LoadedWorld &input, World &world) {
         throw nbt::Error("unknown fluid in fluid_ticks: " + name);
       world.restoreFluidTick({tick.pos, BlockRef{}, trigger, priority, order},
                              fluid);
+      if (summary)
+        ++summary->loadedFluidTicks;
       continue;
     }
     // LevelChunkTicks.unpack: scheduleUnchecked keeps duplicate saved entries.
     world.restoreScheduledTick({tick.pos, name, trigger, priority, order});
+    if (summary)
+      ++summary->loadedBlockTicks;
   }
-  for (auto &tag : input.blockEntities) {
+  for (const auto &tag : blockEntities) {
     auto id = tag.get("id");
-    if (!id || id->type != 8 || id->text != "minecraft:piston")
+    if (!id || id->type != 8)
       continue;
-    auto e = std::make_shared<PistonMovingBlockEntity>();
-    e->pos = {integer(tag, "x"), integer(tag, "y"), integer(tag, "z")};
-    e->movedState = state(required(tag, "blockState", 10));
-    auto facing = required(tag, "facing", 1).number;
-    if (facing < 0 || facing > 5)
-      throw nbt::Error("invalid piston facing");
-    e->direction = static_cast<Direction>(facing);
-    if (auto p = tag.get("progress")) {
-      if (p->type != 5)
-        throw nbt::Error("invalid piston progress");
-      e->progress = e->progressO = static_cast<float>(p->real);
+    const std::string canonicalId =
+        id->text.find(':') == std::string::npos ? "minecraft:" + id->text
+                                                : id->text;
+    if (canonicalId == "minecraft:piston") {
+      auto e = std::make_shared<PistonMovingBlockEntity>();
+      e->pos = {integer(tag, "x"), integer(tag, "y"), integer(tag, "z")};
+      e->movedState = state(required(tag, "blockState", 10));
+      auto facing = required(tag, "facing", 1).number;
+      if (facing < 0 || facing > 5)
+        throw nbt::Error("invalid piston facing");
+      e->direction = static_cast<Direction>(facing);
+      if (auto p = tag.get("progress")) {
+        if (p->type != 5)
+          throw nbt::Error("invalid piston progress");
+        e->progress = e->progressO = static_cast<float>(p->real);
+      }
+      if (auto p = tag.get("extending")) {
+        if (p->type != 1)
+          throw nbt::Error("invalid piston extending");
+        e->extending = p->number != 0;
+      } else
+        e->extending = false;
+      if (auto p = tag.get("source")) {
+        if (p->type != 1)
+          throw nbt::Error("invalid piston source");
+        e->source = p->number != 0;
+      } else
+        e->source = false;
+      world.setPistonEntity(e->pos, e);
+      if (summary)
+        ++summary->loadedBlockEntities;
+      continue;
     }
-    if (auto p = tag.get("extending")) {
-      if (p->type != 1)
-        throw nbt::Error("invalid piston extending");
-      e->extending = p->number != 0;
-    } else
-      e->extending = false;
-    if (auto p = tag.get("source")) {
-      if (p->type != 1)
-        throw nbt::Error("invalid piston source");
-      e->source = p->number != 0;
-    } else
-      e->source = false;
-    world.setPistonEntity(e->pos, e);
+    if (!isContainerEntityTypeId(canonicalId))
+      continue;
+    const Pos bePos{integer(tag, "x"), integer(tag, "y"), integer(tag, "z")};
+    if (!world.isLoaded(bePos))
+      continue;
+    const BlockState currentState = world.getBlock(bePos);
+    const auto kind = containerKindForState(currentState);
+    if (!kind || containerEntityTypeId(*kind) != canonicalId)
+      continue;
+    auto container = makeContainerEntityForState(currentState, bePos);
+    if (!container)
+      continue;
+    // TODO: restore LootTable / LootTableSeed, CustomName, Lock, and full item
+    // DataComponents when those systems exist.
+    if (auto items = tag.get("Items")) {
+      if (items->type != 9)
+        throw nbt::Error("invalid container Items");
+      for (const auto &entry : items->list) {
+        if (entry.type != 10)
+          throw nbt::Error("invalid container item entry");
+        const auto *slotTag = entry.get("Slot");
+        if (!slotTag || slotTag->type < 1 || slotTag->type > 4)
+          throw nbt::Error("invalid container item Slot");
+        const int slot =
+            slotTag->type == 1
+                ? static_cast<int>(static_cast<std::uint8_t>(slotTag->number))
+                : static_cast<int>(slotTag->number);
+        if (slot < 0 || slot >= container->containerSize())
+          continue;
+        container->setItem(slot, itemStackTag(entry));
+      }
+    }
+    if (*kind == ContainerKind::Hopper) {
+      auto *hopper = static_cast<HopperBlockEntity *>(container.get());
+      hopper->cooldownTime = intOr(tag, "TransferCooldown", -1);
+    }
+    world.setContainerEntity(bePos, container, *kind == ContainerKind::Hopper);
+    if (summary)
+      ++summary->loadedBlockEntities;
   }
   std::set<std::array<std::int32_t, 4>> importedUuids;
-  for (auto &tag : input.entities) {
+  for (const auto &tag : entities) {
     std::optional<std::array<std::int32_t, 4>> key;
     auto id = tag.get("id");
     if (id && id->type == 8 && isSimpleEntity(id->text)) {
@@ -1025,9 +1136,166 @@ void importWorld(const LoadedWorld &input, World &world) {
     }
     const auto before = world.entities.size();
     importEntity(world, tag);
-    if (key && world.entities.size() != before)
-      importedUuids.insert(*key);
+    if (world.entities.size() != before) {
+      if (summary)
+        ++summary->loadedEntities;
+      if (key)
+        importedUuids.insert(*key);
+    }
   }
+}
+} // namespace
+
+LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
+                           const std::filesystem::path &regionDir,
+                           const AnvilLoadOptions &options) {
+  if (options.minY >= options.maxY)
+    throw nbt::Error("invalid world height");
+  const AnvilLevelHeader header = readAnvilLevelHeader(worldDir);
+  LoadedWorld w;
+  w.minY = options.minY;
+  w.maxY = options.maxY;
+  w.gameTime = header.gameTime;
+  w.seed = header.seed;
+  AnvilChunkSink sink{
+      .minY = options.minY,
+      .maxY = options.maxY,
+      .skipNonFullChunks = options.skipNonFullChunks,
+      .chunks = w.chunks,
+      .ticks = w.ticks,
+      .blockEntities = w.blockEntities,
+      .entities = w.entities,
+      .onSection =
+          [&](int cx, int cz, int sy, std::span<const BlockState> states,
+              std::span<const std::uint16_t, 4096> indices) {
+            const int secBaseY = sy * 16;
+            for (int i = 0; i < 4096; ++i) {
+              const int y = secBaseY + (i >> 8);
+              if (y < w.minY || y >= w.maxY)
+                continue;
+              const BlockState &s =
+                  states.size() == 1
+                      ? states[0]
+                      : states[indices[static_cast<std::size_t>(i)]];
+              if (!s.isAir())
+                w.blocks[{cx * 16 + (i & 15), y,
+                          cz * 16 + ((i >> 4) & 15)}] = s;
+            }
+          },
+      .onPersistedLight =
+          [&](int cx, int cz, PersistedChunkLight &&light) {
+            const std::uint64_t key =
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cx))
+                 << 32) |
+                static_cast<std::uint32_t>(cz);
+            w.persistedLights[key] = std::move(light);
+          },
+  };
+  readAnvilRegionsWithEntities(regionDir, options, sink);
+  return w;
+}
+
+LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
+                           const std::filesystem::path &regionDir, int minY,
+                           int maxY) {
+  return loadAnvilWorld(worldDir, regionDir, AnvilLoadOptions{minY, maxY, false});
+}
+
+AnvilWorldImportSummary
+loadAnvilWorldInto(const std::filesystem::path &worldDir,
+                   const std::filesystem::path &regionDir, World &world,
+                   const AnvilLoadOptions &options) {
+  if (options.minY >= options.maxY)
+    throw nbt::Error("invalid world height");
+  const AnvilLevelHeader header = readAnvilLevelHeader(worldDir);
+  world.setGameTime(header.gameTime);
+  world.setSeed(static_cast<std::uint64_t>(header.seed));
+  AnvilWorldImportSummary summary;
+  std::vector<SavedTickData> ticks;
+  std::vector<nbt::Tag> blockEntities;
+  std::vector<nbt::Tag> entities;
+  std::array<BlockState::Id, 4096> paletteIds{};
+  AnvilChunkSink sink{
+      .minY = options.minY,
+      .maxY = options.maxY,
+      .skipNonFullChunks = options.skipNonFullChunks,
+      .chunks = summary.loadedChunks,
+      .ticks = ticks,
+      .blockEntities = blockEntities,
+      .entities = entities,
+      .onChunkStart = [&](int cx, int cz) { world.loadChunk(cx, cz); },
+      .onSection =
+          [&](int cx, int cz, int sy, std::span<const BlockState> states,
+              std::span<const std::uint16_t, 4096> indices) {
+            if (states.size() == 1 && states[0].isAir())
+              return;
+            bool hasContainer = false;
+            for (std::size_t p = 0; p < states.size(); ++p) {
+              paletteIds[p] = states[p].id();
+              if (!hasContainer && containerKindForState(states[p]))
+                hasContainer = true;
+            }
+            world.importSectionBlocks(cx, cz, sy,
+                                      {paletteIds.data(), states.size()},
+                                      indices);
+            if (hasContainer) {
+              const int secBaseY = sy * 16;
+              for (int i = 0; i < 4096; ++i) {
+                const int y = secBaseY + (i >> 8);
+                if (y < world.minY() || y >= world.maxY())
+                  continue;
+                const BlockState &s =
+                    states.size() == 1
+                        ? states[0]
+                        : states[indices[static_cast<std::size_t>(i)]];
+                if (containerKindForState(s))
+                  ensureContainerBlockEntity(
+                      world, {cx * 16 + (i & 15), y, cz * 16 + ((i >> 4) & 15)},
+                      s);
+              }
+            }
+          },
+      .onPersistedLight =
+          [&](int cx, int cz, PersistedChunkLight &&light) {
+            world.setChunkPersistedLight(cx, cz, std::move(light));
+          },
+  };
+  readAnvilRegionsWithEntities(regionDir, options, sink);
+  summary.skippedNonFullChunks = sink.skippedNonFullChunks;
+  world.primeHeightmaps();
+  world.refreshLightSnapshots();
+  importWorldStateTail(world, header.gameTime, ticks, blockEntities, entities,
+                       &summary);
+  return summary;
+}
+
+// TODO: non-piston/non-container block entities remain in LoadedWorld for
+// reporting; their simulation is not implemented.
+void importWorld(const LoadedWorld &input, World &world) {
+  world.setGameTime(input.gameTime);
+  world.setSeed(static_cast<std::uint64_t>(input.seed));
+  for (auto [x, z] : input.chunks)
+    world.loadChunk(x, z);
+  for (auto &[pos, block] : input.blocks) {
+    world.rawSetBlock(pos, block);
+    if (containerKindForState(block))
+      ensureContainerBlockEntity(world, pos, block);
+  }
+  world.primeHeightmaps();
+  for (auto [x, z] : input.chunks) {
+    const std::uint64_t key =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
+        static_cast<std::uint32_t>(z);
+    if (auto it = input.persistedLights.find(key);
+        it != input.persistedLights.end())
+      world.setChunkPersistedLight(x, z, it->second);
+  }
+  // If lighting was enabled before import, loadChunk's pre-write snapshots are
+  // superseded by one complete post-import snapshot per chunk (with persisted
+  // Anvil light when isLightOn=true).
+  world.refreshLightSnapshots();
+  importWorldStateTail(world, input.gameTime, input.ticks, input.blockEntities,
+                       input.entities);
 }
 
 std::vector<PersistentTicketRecord>

@@ -1,0 +1,1168 @@
+0	minecraft:air	0	0	0.6	1	normal	0	0	0	0	1	0	harp	air_like	
+1	minecraft:stone	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+2	minecraft:granite	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+3	minecraft:polished_granite	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+4	minecraft:diorite	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+5	minecraft:polished_diorite	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+6	minecraft:andesite	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+7	minecraft:polished_andesite	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+8	minecraft:grass_block	0.6	0.6	0.6	1	normal	1	0	0	0	0	0	harp	snowy	snowy=true|false=false
+9	minecraft:dirt	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	harp		
+10	minecraft:coarse_dirt	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	harp		
+11	minecraft:podzol	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	harp	snowy	snowy=true|false=false
+12	minecraft:cobblestone	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+13	minecraft:oak_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+14	minecraft:spruce_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+15	minecraft:birch_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+16	minecraft:jungle_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+17	minecraft:acacia_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+18	minecraft:cherry_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+19	minecraft:dark_oak_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+20	minecraft:pale_oak_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+21	minecraft:pale_oak_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+22	minecraft:mangrove_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+23	minecraft:bamboo_planks	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+24	minecraft:bamboo_mosaic	2	3	0.6	1	normal	1	0	0	0	0	1	bass		
+25	minecraft:oak_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	sapling,vegetation	stage=0|1=0
+26	minecraft:spruce_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	sapling,vegetation	stage=0|1=0
+27	minecraft:birch_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	sapling,vegetation	stage=0|1=0
+28	minecraft:jungle_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	sapling,vegetation	stage=0|1=0
+29	minecraft:acacia_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	sapling,vegetation	stage=0|1=0
+30	minecraft:cherry_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	sapling,vegetation	stage=0|1=0
+31	minecraft:dark_oak_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	sapling,vegetation	stage=0|1=0
+32	minecraft:pale_oak_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	sapling,vegetation	stage=0|1=0
+33	minecraft:mangrove_propagule	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	sapling,vegetation,waterlogged_host	age=0|1|2|3|4=0;hanging=true|false=false;stage=0|1=0;waterlogged=true|false=false
+34	minecraft:bedrock	-1	3600000	0.6	1	normal	1	0	0	0	0	0	basedrum		
+35	minecraft:water	100	100	0.6	1	destroy	0	1	0	0	1	0	harp	liquid	level=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+36	minecraft:lava	100	100	0.6	1	destroy	0	1	0	0	1	0	harp	liquid	level=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+37	minecraft:sand	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+38	minecraft:suspicious_sand	0.25	0.25	0.6	1	destroy	1	0	0	0	0	0	snare		dusted=0|1|2|3=0
+39	minecraft:red_sand	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+40	minecraft:gravel	0.6	0.6	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+41	minecraft:suspicious_gravel	0.25	0.25	0.6	1	destroy	1	0	0	0	0	0	snare		dusted=0|1|2|3=0
+42	minecraft:gold_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+43	minecraft:deepslate_gold_ore	4.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+44	minecraft:iron_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+45	minecraft:deepslate_iron_ore	4.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+46	minecraft:coal_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+47	minecraft:deepslate_coal_ore	4.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+48	minecraft:nether_gold_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+49	minecraft:oak_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+50	minecraft:spruce_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+51	minecraft:birch_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+52	minecraft:jungle_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+53	minecraft:acacia_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+54	minecraft:cherry_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+55	minecraft:dark_oak_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+56	minecraft:pale_oak_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+57	minecraft:mangrove_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+58	minecraft:mangrove_roots	0.7	0.7	0.6	1	normal	1	0	1	0	0	1	bass	waterlogged_host	waterlogged=true|false=false
+59	minecraft:muddy_mangrove_roots	0.7	0.7	0.6	1	normal	1	0	0	0	0	0	harp	rotated_pillar	axis=x|y|z=y
+60	minecraft:bamboo_block	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+61	minecraft:stripped_spruce_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+62	minecraft:stripped_birch_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+63	minecraft:stripped_jungle_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+64	minecraft:stripped_acacia_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+65	minecraft:stripped_cherry_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+66	minecraft:stripped_dark_oak_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+67	minecraft:stripped_pale_oak_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+68	minecraft:stripped_oak_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+69	minecraft:stripped_mangrove_log	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+70	minecraft:stripped_bamboo_block	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+71	minecraft:oak_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+72	minecraft:spruce_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+73	minecraft:birch_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+74	minecraft:jungle_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+75	minecraft:acacia_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+76	minecraft:cherry_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+77	minecraft:dark_oak_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+78	minecraft:mangrove_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+79	minecraft:stripped_oak_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+80	minecraft:stripped_spruce_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+81	minecraft:stripped_birch_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+82	minecraft:stripped_jungle_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+83	minecraft:stripped_acacia_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+84	minecraft:stripped_cherry_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+85	minecraft:stripped_dark_oak_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+86	minecraft:stripped_pale_oak_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+87	minecraft:stripped_mangrove_wood	2	2	0.6	1	normal	1	0	0	0	0	1	bass	rotated_pillar	axis=x|y|z=y
+88	minecraft:oak_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+89	minecraft:spruce_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+90	minecraft:birch_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+91	minecraft:jungle_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+92	minecraft:acacia_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+93	minecraft:cherry_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+94	minecraft:dark_oak_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+95	minecraft:pale_oak_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+96	minecraft:mangrove_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+97	minecraft:azalea_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+98	minecraft:flowering_azalea_leaves	0.2	0.2	0.6	1	destroy	0	0	1	0	0	1	harp	leaves,waterlogged_host	distance=1|2|3|4|5|6|7=7;persistent=true|false=false;waterlogged=true|false=false
+99	minecraft:sponge	0.6	0.6	0.6	1	normal	1	0	0	0	0	0	harp		
+100	minecraft:wet_sponge	0.6	0.6	0.6	1	normal	1	0	0	0	0	0	harp		
+101	minecraft:glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+102	minecraft:lapis_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+103	minecraft:deepslate_lapis_ore	4.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+104	minecraft:lapis_block	3	3	0.6	1	normal	1	0	0	0	0	0	harp		
+105	minecraft:dispenser	3.5	3.5	0.6	1	normal	1	0	0	0	0	0	basedrum		facing=north|east|south|west|up|down=north;triggered=true|false=false
+106	minecraft:sandstone	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+107	minecraft:chiseled_sandstone	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+108	minecraft:cut_sandstone	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+109	minecraft:note_block	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	bass		instrument=harp|basedrum|snare|hat|bass|flute|bell|guitar|chime|xylophone|iron_xylophone|cow_bell|didgeridoo|bit|banjo|pling|trumpet|trumpet_exposed|trumpet_oxidized|trumpet_weathered|zombie|skeleton|creeper|dragon|wither_skeleton|piglin|custom_head=harp;note=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24=0;powered=true|false=false
+110	minecraft:white_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+111	minecraft:orange_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+112	minecraft:magenta_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+113	minecraft:light_blue_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+114	minecraft:yellow_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+115	minecraft:lime_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+116	minecraft:pink_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+117	minecraft:gray_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+118	minecraft:light_gray_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+119	minecraft:cyan_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+120	minecraft:purple_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+121	minecraft:blue_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+122	minecraft:brown_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+123	minecraft:green_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+124	minecraft:red_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+125	minecraft:black_bed	0.2	0.2	0.6	1	destroy	0	0	0	0	0	1	harp	bed	facing=north|south|west|east=north;occupied=true|false=false;part=head|foot=foot
+126	minecraft:powered_rail	0.7	0.7	0.6	1	normal	0	0	1	0	0	0	harp	rail,waterlogged_host	powered=true|false=false;shape=north_south|east_west|ascending_east|ascending_west|ascending_north|ascending_south=north_south;waterlogged=true|false=false
+127	minecraft:detector_rail	0.7	0.7	0.6	1	normal	0	0	1	0	0	0	harp	rail,waterlogged_host	powered=true|false=false;shape=north_south|east_west|ascending_east|ascending_west|ascending_north|ascending_south=north_south;waterlogged=true|false=false
+128	minecraft:sticky_piston	1.5	1.5	0.6	1	block	0	0	0	0	0	0	harp	piston	extended=true|false=false;facing=north|east|south|west|up|down=north
+129	minecraft:cobweb	4	4	0.6	1	destroy	0	0	0	0	0	0	harp		
+130	minecraft:short_grass	0	0	0.6	1	destroy	0	0	0	0	1	1	harp	vegetation	
+131	minecraft:fern	0	0	0.6	1	destroy	0	0	0	0	1	1	harp	vegetation	
+132	minecraft:dead_bush	0	0	0.6	1	destroy	0	0	0	0	1	1	harp	vegetation,dry_vegetation	
+133	minecraft:bush	0	0	0.6	1	destroy	0	0	0	0	1	1	harp	vegetation	
+134	minecraft:short_dry_grass	0	0	0.6	1	destroy	0	0	0	0	1	1	harp	vegetation,dry_vegetation	
+135	minecraft:tall_dry_grass	0	0	0.6	1	destroy	0	0	0	0	1	1	harp	vegetation,dry_vegetation	
+136	minecraft:seagrass	0	0	0.6	1	destroy	0	0	1	0	1	0	harp	vegetation	
+137	minecraft:tall_seagrass	0	0	0.6	1	destroy	0	0	1	0	1	0	harp	vegetation	half=upper|lower=lower
+138	minecraft:piston	1.5	1.5	0.6	1	block	0	0	0	0	0	0	harp	piston	extended=true|false=false;facing=north|east|south|west|up|down=north
+139	minecraft:piston_head	1.5	1.5	0.6	1	block	0	0	0	0	0	0	harp		facing=north|east|south|west|up|down=north;short=true|false=false;type=normal|sticky=normal
+140	minecraft:white_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+141	minecraft:orange_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+142	minecraft:magenta_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+143	minecraft:light_blue_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+144	minecraft:yellow_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+145	minecraft:lime_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+146	minecraft:pink_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+147	minecraft:gray_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+148	minecraft:light_gray_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+149	minecraft:cyan_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+150	minecraft:purple_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+151	minecraft:blue_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+152	minecraft:brown_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+153	minecraft:green_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+154	minecraft:red_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+155	minecraft:black_wool	0.8	0.8	0.6	1	normal	1	0	0	0	0	1	guitar		
+156	minecraft:moving_piston	-1	0	0.6	1	block	0	0	0	1	0	0	harp	moving_piston	facing=north|east|south|west|up|down=north;type=normal|sticky=normal
+157	minecraft:dandelion	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+158	minecraft:golden_dandelion	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+159	minecraft:torchflower	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+160	minecraft:poppy	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+161	minecraft:blue_orchid	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+162	minecraft:allium	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+163	minecraft:azure_bluet	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+164	minecraft:red_tulip	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+165	minecraft:orange_tulip	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+166	minecraft:white_tulip	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+167	minecraft:pink_tulip	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+168	minecraft:oxeye_daisy	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+169	minecraft:cornflower	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+170	minecraft:wither_rose	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+171	minecraft:lily_of_the_valley	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+172	minecraft:brown_mushroom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	
+173	minecraft:red_mushroom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	
+174	minecraft:gold_block	3	6	0.6	1	normal	1	0	0	0	0	0	bell		
+175	minecraft:iron_block	5	6	0.6	1	normal	1	0	0	0	0	0	iron_xylophone		
+176	minecraft:bricks	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+177	minecraft:tnt	0	0	0.6	1	normal	0	0	0	0	0	1	harp		unstable=true|false=false
+178	minecraft:bookshelf	1.5	1.5	0.6	1	normal	1	0	0	0	0	1	bass		
+179	minecraft:chiseled_bookshelf	1.5	1.5	0.6	1	normal	1	0	0	0	0	1	bass		facing=north|south|west|east=north;slot_0_occupied=true|false=false;slot_1_occupied=true|false=false;slot_2_occupied=true|false=false;slot_3_occupied=true|false=false;slot_4_occupied=true|false=false;slot_5_occupied=true|false=false
+180	minecraft:acacia_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+181	minecraft:bamboo_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+182	minecraft:birch_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+183	minecraft:cherry_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+184	minecraft:crimson_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+185	minecraft:dark_oak_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+186	minecraft:jungle_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+187	minecraft:mangrove_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+188	minecraft:oak_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+189	minecraft:pale_oak_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+190	minecraft:spruce_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+191	minecraft:warped_shelf	2	3	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;powered=true|false=false;side_chain=unconnected|right|center|left=unconnected;waterlogged=true|false=false
+192	minecraft:mossy_cobblestone	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+193	minecraft:obsidian	50	1200	0.6	1	normal	1	0	0	0	0	0	basedrum		
+194	minecraft:torch	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+195	minecraft:wall_torch	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		facing=north|south|west|east=north
+196	minecraft:fire	0	0	0.6	1	destroy	0	0	0	0	1	0	harp		age=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0;east=true|false=false;north=true|false=false;south=true|false=false;up=true|false=false;west=true|false=false
+197	minecraft:soul_fire	0	0	0.6	1	destroy	0	0	0	0	1	0	harp		
+198	minecraft:spawner	5	5	0.6	1	normal	1	0	0	0	0	0	basedrum		
+199	minecraft:creaking_heart	10	10	0.6	1	normal	1	0	0	0	0	0	basedrum		axis=x|y|z=y;creaking_heart_state=uprooted|dormant|awake=uprooted;natural=true|false=false
+200	minecraft:oak_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+201	minecraft:chest	2.5	2.5	0.6	1	normal	0	0	1	0	0	1	bass	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+202	minecraft:redstone_wire	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		east=up|side|none=none;north=up|side|none=none;power=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0;south=up|side|none=none;west=up|side|none=none
+203	minecraft:diamond_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+204	minecraft:deepslate_diamond_ore	4.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+205	minecraft:diamond_block	5	6	0.6	1	normal	1	0	0	0	0	0	harp		
+206	minecraft:crafting_table	2.5	2.5	0.6	1	normal	1	0	0	0	0	1	bass		
+207	minecraft:wheat	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3|4|5|6|7=0
+208	minecraft:farmland	0.6	0.6	0.6	1	normal	0	0	0	0	0	0	harp		moisture=0|1|2|3|4|5|6|7=0
+209	minecraft:furnace	3.5	3.5	0.6	1	normal	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north;lit=true|false=false
+210	minecraft:oak_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+211	minecraft:spruce_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+212	minecraft:birch_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+213	minecraft:acacia_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+214	minecraft:cherry_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+215	minecraft:jungle_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+216	minecraft:dark_oak_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+217	minecraft:pale_oak_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+218	minecraft:mangrove_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+219	minecraft:bamboo_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+220	minecraft:oak_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+221	minecraft:ladder	0.4	0.4	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+222	minecraft:rail	0.7	0.7	0.6	1	normal	0	0	1	0	0	0	harp	rail,waterlogged_host	shape=north_south|east_west|ascending_east|ascending_west|ascending_north|ascending_south|south_east|south_west|north_west|north_east=north_south;waterlogged=true|false=false
+223	minecraft:cobblestone_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+224	minecraft:oak_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+225	minecraft:spruce_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+226	minecraft:birch_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+227	minecraft:acacia_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+228	minecraft:cherry_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+229	minecraft:jungle_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+230	minecraft:dark_oak_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+231	minecraft:pale_oak_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+232	minecraft:mangrove_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+233	minecraft:bamboo_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+234	minecraft:oak_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+235	minecraft:spruce_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+236	minecraft:birch_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+237	minecraft:acacia_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+238	minecraft:cherry_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+239	minecraft:jungle_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+240	minecraft:dark_oak_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+241	minecraft:pale_oak_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+242	minecraft:crimson_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	0	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+243	minecraft:warped_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	0	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+244	minecraft:mangrove_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+245	minecraft:bamboo_hanging_sign	1	1	0.6	1	normal	0	0	1	1	0	1	bass	sign,waterlogged_host	attached=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+246	minecraft:oak_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+247	minecraft:spruce_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+248	minecraft:birch_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+249	minecraft:acacia_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+250	minecraft:cherry_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+251	minecraft:jungle_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+252	minecraft:dark_oak_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+253	minecraft:pale_oak_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+254	minecraft:mangrove_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+255	minecraft:crimson_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	0	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+256	minecraft:warped_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	0	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+257	minecraft:bamboo_wall_hanging_sign	1	1	0.6	1	normal	0	0	1	0	0	1	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+258	minecraft:lever	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp		face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+259	minecraft:stone_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	0	basedrum	pressure_plate	powered=true|false=false
+260	minecraft:iron_door	5	5	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+261	minecraft:oak_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+262	minecraft:spruce_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+263	minecraft:birch_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+264	minecraft:jungle_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+265	minecraft:acacia_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+266	minecraft:cherry_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+267	minecraft:dark_oak_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+268	minecraft:pale_oak_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+269	minecraft:mangrove_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+270	minecraft:bamboo_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	1	bass	pressure_plate	powered=true|false=false
+271	minecraft:redstone_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		lit=true|false=false
+272	minecraft:deepslate_redstone_ore	4.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		lit=true|false=false
+273	minecraft:redstone_torch	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		lit=true|false=true
+274	minecraft:redstone_wall_torch	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		facing=north|south|west|east=north;lit=true|false=true
+275	minecraft:stone_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+276	minecraft:snow	0.1	0.1	0.6	1	destroy	0	0	0	0	1	0	harp		layers=1|2|3|4|5|6|7|8=1
+277	minecraft:ice	0.5	0.5	0.98	1	normal	0	0	0	0	0	0	harp		
+278	minecraft:snow_block	0.2	0.2	0.6	1	normal	1	0	0	0	0	0	harp		
+279	minecraft:cactus	0.4	0.4	0.6	1	destroy	0	0	0	0	0	0	harp		age=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+280	minecraft:cactus_flower	0	0	0.6	1	destroy	0	0	0	0	0	1	harp	vegetation	
+281	minecraft:clay	0.6	0.6	0.6	1	normal	1	0	0	0	0	0	flute		
+282	minecraft:sugar_cane	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		age=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+283	minecraft:jukebox	2	6	0.6	1	normal	1	0	0	0	0	1	bass		has_record=true|false=false
+284	minecraft:oak_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+285	minecraft:netherrack	0.4	0.4	0.6	1	normal	1	0	0	0	0	0	basedrum		
+286	minecraft:soul_sand	0.5	0.5	0.6	0.4	normal	1	0	0	0	0	0	cow_bell		
+287	minecraft:soul_soil	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	harp		
+288	minecraft:basalt	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum	rotated_pillar	axis=x|y|z=y
+289	minecraft:polished_basalt	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum	rotated_pillar	axis=x|y|z=y
+290	minecraft:soul_torch	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+291	minecraft:soul_wall_torch	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		facing=north|south|west|east=north
+292	minecraft:copper_torch	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+293	minecraft:copper_wall_torch	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		facing=north|south|west|east=north
+294	minecraft:glowstone	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	pling		
+295	minecraft:nether_portal	-1	0	0.6	1	block	0	0	0	0	0	0	harp		axis=x|z=x
+296	minecraft:carved_pumpkin	1	1	0.6	1	destroy	1	0	0	0	0	0	harp		facing=north|south|west|east=north
+297	minecraft:jack_o_lantern	1	1	0.6	1	destroy	1	0	0	0	0	0	harp		facing=north|south|west|east=north
+298	minecraft:cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp		bites=0|1|2|3|4|5|6=0
+299	minecraft:repeater	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		delay=1|2|3|4=1;facing=north|south|west|east=north;locked=true|false=false;powered=true|false=false
+300	minecraft:white_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+301	minecraft:orange_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+302	minecraft:magenta_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+303	minecraft:light_blue_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+304	minecraft:yellow_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+305	minecraft:lime_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+306	minecraft:pink_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+307	minecraft:gray_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+308	minecraft:light_gray_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+309	minecraft:cyan_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+310	minecraft:purple_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+311	minecraft:blue_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+312	minecraft:brown_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+313	minecraft:green_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+314	minecraft:red_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+315	minecraft:black_stained_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+316	minecraft:oak_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+317	minecraft:spruce_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+318	minecraft:birch_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+319	minecraft:jungle_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+320	minecraft:acacia_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+321	minecraft:cherry_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+322	minecraft:dark_oak_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+323	minecraft:pale_oak_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+324	minecraft:mangrove_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+325	minecraft:bamboo_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	1	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+326	minecraft:stone_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+327	minecraft:mossy_stone_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+328	minecraft:cracked_stone_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+329	minecraft:chiseled_stone_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+330	minecraft:packed_mud	1	3	0.6	1	normal	1	0	0	0	0	0	harp		
+331	minecraft:mud_bricks	1.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+332	minecraft:infested_stone	0.75	0.75	0.6	1	normal	1	0	0	0	0	0	harp		
+333	minecraft:infested_cobblestone	1	0.75	0.6	1	normal	1	0	0	0	0	0	harp		
+334	minecraft:infested_stone_bricks	0.75	0.75	0.6	1	normal	1	0	0	0	0	0	harp		
+335	minecraft:infested_mossy_stone_bricks	0.75	0.75	0.6	1	normal	1	0	0	0	0	0	harp		
+336	minecraft:infested_cracked_stone_bricks	0.75	0.75	0.6	1	normal	1	0	0	0	0	0	harp		
+337	minecraft:infested_chiseled_stone_bricks	0.75	0.75	0.6	1	normal	1	0	0	0	0	0	harp		
+338	minecraft:brown_mushroom_block	0.2	0.2	0.6	1	normal	1	0	0	0	0	1	bass		down=true|false=true;east=true|false=true;north=true|false=true;south=true|false=true;up=true|false=true;west=true|false=true
+339	minecraft:red_mushroom_block	0.2	0.2	0.6	1	normal	1	0	0	0	0	1	bass		down=true|false=true;east=true|false=true;north=true|false=true;south=true|false=true;up=true|false=true;west=true|false=true
+340	minecraft:mushroom_stem	0.2	0.2	0.6	1	normal	1	0	0	0	0	1	bass		down=true|false=true;east=true|false=true;north=true|false=true;south=true|false=true;up=true|false=true;west=true|false=true
+341	minecraft:iron_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+342	minecraft:copper_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+343	minecraft:exposed_copper_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+344	minecraft:weathered_copper_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+345	minecraft:oxidized_copper_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+346	minecraft:waxed_copper_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+347	minecraft:waxed_exposed_copper_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+348	minecraft:waxed_weathered_copper_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+349	minecraft:waxed_oxidized_copper_bars	5	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+350	minecraft:iron_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+351	minecraft:copper_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+352	minecraft:exposed_copper_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+353	minecraft:weathered_copper_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+354	minecraft:oxidized_copper_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+355	minecraft:waxed_copper_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+356	minecraft:waxed_exposed_copper_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+357	minecraft:waxed_weathered_copper_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+358	minecraft:waxed_oxidized_copper_chain	5	6	0.6	1	normal	0	0	1	0	0	0	harp	rotated_pillar,waterlogged_host	axis=x|y|z=y;waterlogged=true|false=false
+359	minecraft:glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+360	minecraft:pumpkin	1	1	0.6	1	destroy	1	0	0	0	0	0	didgeridoo		
+361	minecraft:melon	1	1	0.6	1	destroy	1	0	0	0	0	0	harp		
+362	minecraft:attached_pumpkin_stem	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	facing=north|south|west|east=north
+363	minecraft:attached_melon_stem	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	facing=north|south|west|east=north
+364	minecraft:pumpkin_stem	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3|4|5|6|7=0
+365	minecraft:melon_stem	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3|4|5|6|7=0
+366	minecraft:vine	0.2	0.2	0.6	1	destroy	0	0	0	0	1	1	harp		east=true|false=false;north=true|false=false;south=true|false=false;up=true|false=false;west=true|false=false
+367	minecraft:glow_lichen	0.2	0.2	0.6	1	destroy	0	0	1	0	1	1	harp	waterlogged_host	down=true|false=false;east=true|false=false;north=true|false=false;south=true|false=false;up=true|false=false;waterlogged=true|false=false;west=true|false=false
+368	minecraft:resin_clump	0	0	0.6	1	destroy	0	0	1	0	1	1	harp	waterlogged_host	down=true|false=false;east=true|false=false;north=true|false=false;south=true|false=false;up=true|false=false;waterlogged=true|false=false;west=true|false=false
+369	minecraft:oak_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+370	minecraft:brick_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+371	minecraft:stone_brick_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+372	minecraft:mud_brick_stairs	1.5	3	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+373	minecraft:mycelium	0.6	0.6	0.6	1	normal	1	0	0	0	0	0	harp	snowy	snowy=true|false=false
+374	minecraft:lily_pad	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	
+375	minecraft:resin_block	0	0	0.6	1	normal	1	0	0	0	0	0	basedrum		
+376	minecraft:resin_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+377	minecraft:resin_brick_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+378	minecraft:resin_brick_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+379	minecraft:resin_brick_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+380	minecraft:chiseled_resin_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+381	minecraft:nether_bricks	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+382	minecraft:nether_brick_fence	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+383	minecraft:nether_brick_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+384	minecraft:nether_wart	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3=0
+385	minecraft:enchanting_table	5	1200	0.6	1	normal	0	0	0	0	0	0	basedrum		
+386	minecraft:brewing_stand	0.5	0.5	0.6	1	normal	0	0	0	0	0	0	harp		has_bottle_0=true|false=false;has_bottle_1=true|false=false;has_bottle_2=true|false=false
+387	minecraft:cauldron	2	2	0.6	1	normal	0	0	0	0	0	0	harp	cauldron	
+388	minecraft:water_cauldron	2	2	0.6	1	normal	0	0	0	0	0	0	harp	cauldron	level=1|2|3=1
+389	minecraft:lava_cauldron	2	2	0.6	1	normal	0	0	0	0	0	0	harp	cauldron	
+390	minecraft:powder_snow_cauldron	2	2	0.6	1	normal	0	0	0	0	0	0	harp	cauldron	level=1|2|3=1
+391	minecraft:end_portal	-1	3600000	0.6	1	block	0	0	0	0	0	0	harp		
+392	minecraft:end_portal_frame	-1	3600000	0.6	1	normal	0	0	0	0	0	0	basedrum		eye=true|false=false;facing=north|south|west|east=north
+393	minecraft:end_stone	3	9	0.6	1	normal	1	0	0	0	0	0	basedrum		
+394	minecraft:dragon_egg	3	9	0.6	1	destroy	0	0	0	0	0	0	harp	falling	
+395	minecraft:redstone_lamp	0.3	0.3	0.6	1	normal	1	0	0	0	0	0	harp		lit=true|false=false
+396	minecraft:cocoa	0.2	3	0.6	1	destroy	0	0	0	0	0	0	harp		age=0|1|2=0;facing=north|south|west|east=north
+397	minecraft:sandstone_stairs	0.8	0.8	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+398	minecraft:emerald_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+399	minecraft:deepslate_emerald_ore	4.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+400	minecraft:ender_chest	22.5	600	0.6	1	normal	0	0	1	0	0	0	basedrum	chest,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+401	minecraft:tripwire_hook	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		attached=true|false=false;facing=north|south|west|east=north;powered=true|false=false
+402	minecraft:tripwire	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		attached=true|false=false;disarmed=true|false=false;east=true|false=false;north=true|false=false;powered=true|false=false;south=true|false=false;west=true|false=false
+403	minecraft:emerald_block	5	6	0.6	1	normal	1	0	0	0	0	0	bit		
+404	minecraft:spruce_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+405	minecraft:birch_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+406	minecraft:jungle_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+407	minecraft:command_block	-1	3600000	0.6	1	normal	1	0	0	0	0	0	harp		conditional=true|false=false;facing=north|east|south|west|up|down=north
+408	minecraft:beacon	3	3	0.6	1	normal	0	0	0	0	0	0	hat		
+409	minecraft:cobblestone_wall	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+410	minecraft:mossy_cobblestone_wall	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+411	minecraft:flower_pot	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+412	minecraft:potted_torchflower	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+413	minecraft:potted_oak_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+414	minecraft:potted_spruce_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+415	minecraft:potted_birch_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+416	minecraft:potted_jungle_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+417	minecraft:potted_acacia_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+418	minecraft:potted_cherry_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+419	minecraft:potted_dark_oak_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+420	minecraft:potted_pale_oak_sapling	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+421	minecraft:potted_mangrove_propagule	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+422	minecraft:potted_fern	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+423	minecraft:potted_dandelion	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+424	minecraft:potted_golden_dandelion	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+425	minecraft:potted_poppy	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+426	minecraft:potted_blue_orchid	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+427	minecraft:potted_allium	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+428	minecraft:potted_azure_bluet	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+429	minecraft:potted_red_tulip	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+430	minecraft:potted_orange_tulip	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+431	minecraft:potted_white_tulip	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+432	minecraft:potted_pink_tulip	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+433	minecraft:potted_oxeye_daisy	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+434	minecraft:potted_cornflower	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+435	minecraft:potted_lily_of_the_valley	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+436	minecraft:potted_wither_rose	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+437	minecraft:potted_red_mushroom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+438	minecraft:potted_brown_mushroom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+439	minecraft:potted_dead_bush	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+440	minecraft:potted_cactus	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+441	minecraft:carrots	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3|4|5|6|7=0
+442	minecraft:potatoes	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3|4|5|6|7=0
+443	minecraft:oak_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+444	minecraft:spruce_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+445	minecraft:birch_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+446	minecraft:jungle_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+447	minecraft:acacia_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+448	minecraft:cherry_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+449	minecraft:dark_oak_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+450	minecraft:pale_oak_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+451	minecraft:mangrove_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+452	minecraft:bamboo_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+453	minecraft:skeleton_skull	1	1	0.6	1	destroy	0	0	0	0	0	0	skeleton	skull	powered=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+454	minecraft:skeleton_wall_skull	1	1	0.6	1	destroy	0	0	0	0	0	0	harp	skull	facing=north|south|west|east=north;powered=true|false=false
+455	minecraft:wither_skeleton_skull	1	1	0.6	1	destroy	0	0	0	0	0	0	wither_skeleton	skull	powered=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+456	minecraft:wither_skeleton_wall_skull	1	1	0.6	1	destroy	0	0	0	0	0	0	harp	skull	facing=north|south|west|east=north;powered=true|false=false
+457	minecraft:zombie_head	1	1	0.6	1	destroy	0	0	0	0	0	0	zombie	skull	powered=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+458	minecraft:zombie_wall_head	1	1	0.6	1	destroy	0	0	0	0	0	0	harp	skull	facing=north|south|west|east=north;powered=true|false=false
+459	minecraft:player_head	1	1	0.6	1	destroy	0	0	0	0	0	0	custom_head	skull	powered=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+460	minecraft:player_wall_head	1	1	0.6	1	destroy	0	0	0	0	0	0	harp	skull	facing=north|south|west|east=north;powered=true|false=false
+461	minecraft:creeper_head	1	1	0.6	1	destroy	0	0	0	0	0	0	creeper	skull	powered=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+462	minecraft:creeper_wall_head	1	1	0.6	1	destroy	0	0	0	0	0	0	harp	skull	facing=north|south|west|east=north;powered=true|false=false
+463	minecraft:dragon_head	1	1	0.6	1	destroy	0	0	0	0	0	0	dragon	skull	powered=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+464	minecraft:dragon_wall_head	1	1	0.6	1	destroy	0	0	0	0	0	0	harp	skull	facing=north|south|west|east=north;powered=true|false=false
+465	minecraft:piglin_head	1	1	0.6	1	destroy	0	0	0	0	0	0	piglin	skull	powered=true|false=false;rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+466	minecraft:piglin_wall_head	1	1	0.6	1	destroy	0	0	0	0	0	0	harp	skull	facing=north|south|west|east=north;powered=true|false=false
+467	minecraft:anvil	5	1200	0.6	1	block	0	0	0	0	0	0	harp	falling	facing=north|south|west|east=north
+468	minecraft:chipped_anvil	5	1200	0.6	1	block	0	0	0	0	0	0	harp	falling	facing=north|south|west|east=north
+469	minecraft:damaged_anvil	5	1200	0.6	1	block	0	0	0	0	0	0	harp	falling	facing=north|south|west|east=north
+470	minecraft:trapped_chest	2.5	2.5	0.6	1	normal	0	0	1	0	0	1	bass	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+471	minecraft:light_weighted_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	0	harp	pressure_plate	power=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+472	minecraft:heavy_weighted_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	0	harp	pressure_plate	power=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+473	minecraft:comparator	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		facing=north|south|west|east=north;mode=compare|subtract=compare;powered=true|false=false
+474	minecraft:daylight_detector	0.2	0.2	0.6	1	normal	0	0	0	0	0	1	bass		inverted=true|false=false;power=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+475	minecraft:redstone_block	5	6	0.6	1	normal	0	0	0	0	0	0	harp		
+476	minecraft:nether_quartz_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+477	minecraft:hopper	3	4.8	0.6	1	normal	0	0	0	0	0	0	harp		enabled=true|false=true;facing=down|north|south|west|east=down
+478	minecraft:quartz_block	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+479	minecraft:chiseled_quartz_block	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+480	minecraft:quartz_pillar	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum	rotated_pillar	axis=x|y|z=y
+481	minecraft:quartz_stairs	0.8	0.8	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+482	minecraft:activator_rail	0.7	0.7	0.6	1	normal	0	0	1	0	0	0	harp	rail,waterlogged_host	powered=true|false=false;shape=north_south|east_west|ascending_east|ascending_west|ascending_north|ascending_south=north_south;waterlogged=true|false=false
+483	minecraft:dropper	3.5	3.5	0.6	1	normal	1	0	0	0	0	0	basedrum		facing=north|east|south|west|up|down=north;triggered=true|false=false
+484	minecraft:white_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+485	minecraft:orange_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+486	minecraft:magenta_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+487	minecraft:light_blue_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+488	minecraft:yellow_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+489	minecraft:lime_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+490	minecraft:pink_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+491	minecraft:gray_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+492	minecraft:light_gray_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+493	minecraft:cyan_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+494	minecraft:purple_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+495	minecraft:blue_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+496	minecraft:brown_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+497	minecraft:green_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+498	minecraft:red_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+499	minecraft:black_terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+500	minecraft:white_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+501	minecraft:orange_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+502	minecraft:magenta_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+503	minecraft:light_blue_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+504	minecraft:yellow_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+505	minecraft:lime_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+506	minecraft:pink_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+507	minecraft:gray_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+508	minecraft:light_gray_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+509	minecraft:cyan_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+510	minecraft:purple_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+511	minecraft:blue_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+512	minecraft:brown_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+513	minecraft:green_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+514	minecraft:red_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+515	minecraft:black_stained_glass_pane	0.3	0.3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+516	minecraft:acacia_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+517	minecraft:cherry_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+518	minecraft:dark_oak_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+519	minecraft:pale_oak_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+520	minecraft:mangrove_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+521	minecraft:bamboo_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+522	minecraft:bamboo_mosaic_stairs	2	3	0.6	1	normal	0	0	1	0	0	1	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+523	minecraft:slime_block	0	0	0.8	1	normal	1	0	0	0	0	0	harp		
+524	minecraft:barrier	-1	3600000.8	0.6	1	block	1	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+525	minecraft:light	-1	3600000.8	0.6	1	normal	0	0	1	0	1	0	harp	waterlogged_host	level=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=15;waterlogged=true|false=false
+526	minecraft:iron_trapdoor	5	5	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+527	minecraft:prismarine	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+528	minecraft:prismarine_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+529	minecraft:dark_prismarine	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+530	minecraft:prismarine_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+531	minecraft:prismarine_brick_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+532	minecraft:dark_prismarine_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+533	minecraft:prismarine_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+534	minecraft:prismarine_brick_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+535	minecraft:dark_prismarine_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+536	minecraft:sea_lantern	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+537	minecraft:hay_block	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	banjo	rotated_pillar	axis=x|y|z=y
+538	minecraft:white_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+539	minecraft:orange_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+540	minecraft:magenta_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+541	minecraft:light_blue_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+542	minecraft:yellow_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+543	minecraft:lime_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+544	minecraft:pink_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+545	minecraft:gray_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+546	minecraft:light_gray_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+547	minecraft:cyan_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+548	minecraft:purple_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+549	minecraft:blue_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+550	minecraft:brown_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+551	minecraft:green_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+552	minecraft:red_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+553	minecraft:black_carpet	0.1	0.1	0.6	1	normal	0	0	0	0	0	1	harp	carpet	
+554	minecraft:terracotta	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+555	minecraft:coal_block	5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+556	minecraft:packed_ice	0.5	0.5	0.98	1	normal	1	0	0	0	0	0	chime		
+557	minecraft:sunflower	0	0	0.6	1	destroy	0	0	0	0	0	1	harp	vegetation	half=upper|lower=lower
+558	minecraft:lilac	0	0	0.6	1	destroy	0	0	0	0	0	1	harp	vegetation	half=upper|lower=lower
+559	minecraft:rose_bush	0	0	0.6	1	destroy	0	0	0	0	0	1	harp	vegetation	half=upper|lower=lower
+560	minecraft:peony	0	0	0.6	1	destroy	0	0	0	0	0	1	harp	vegetation	half=upper|lower=lower
+561	minecraft:tall_grass	0	0	0.6	1	destroy	0	0	0	0	1	1	harp	vegetation	half=upper|lower=lower
+562	minecraft:large_fern	0	0	0.6	1	destroy	0	0	0	0	1	1	harp	vegetation	half=upper|lower=lower
+563	minecraft:white_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+564	minecraft:orange_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+565	minecraft:magenta_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+566	minecraft:light_blue_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+567	minecraft:yellow_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+568	minecraft:lime_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+569	minecraft:pink_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+570	minecraft:gray_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+571	minecraft:light_gray_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+572	minecraft:cyan_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+573	minecraft:purple_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+574	minecraft:blue_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+575	minecraft:brown_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+576	minecraft:green_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+577	minecraft:red_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+578	minecraft:black_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8
+579	minecraft:white_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+580	minecraft:orange_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+581	minecraft:magenta_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+582	minecraft:light_blue_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+583	minecraft:yellow_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+584	minecraft:lime_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+585	minecraft:pink_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+586	minecraft:gray_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+587	minecraft:light_gray_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+588	minecraft:cyan_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+589	minecraft:purple_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+590	minecraft:blue_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+591	minecraft:brown_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+592	minecraft:green_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+593	minecraft:red_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+594	minecraft:black_wall_banner	1	1	0.6	1	normal	0	0	0	1	0	1	bass	banner	facing=north|south|west|east=north
+595	minecraft:red_sandstone	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+596	minecraft:chiseled_red_sandstone	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+597	minecraft:cut_red_sandstone	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+598	minecraft:red_sandstone_stairs	0.8	0.8	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+599	minecraft:oak_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+600	minecraft:spruce_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+601	minecraft:birch_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+602	minecraft:jungle_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+603	minecraft:acacia_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+604	minecraft:cherry_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+605	minecraft:dark_oak_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+606	minecraft:pale_oak_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+607	minecraft:mangrove_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+608	minecraft:bamboo_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+609	minecraft:bamboo_mosaic_slab	2	3	0.6	1	normal	0	0	1	0	0	1	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+610	minecraft:stone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+611	minecraft:smooth_stone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+612	minecraft:sandstone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+613	minecraft:cut_sandstone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+614	minecraft:petrified_oak_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+615	minecraft:cobblestone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+616	minecraft:brick_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+617	minecraft:stone_brick_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+618	minecraft:mud_brick_slab	1.5	3	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+619	minecraft:nether_brick_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+620	minecraft:quartz_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+621	minecraft:red_sandstone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+622	minecraft:cut_red_sandstone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+623	minecraft:purpur_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+624	minecraft:smooth_stone	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+625	minecraft:smooth_sandstone	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+626	minecraft:smooth_quartz	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+627	minecraft:smooth_red_sandstone	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+628	minecraft:spruce_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+629	minecraft:birch_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+630	minecraft:jungle_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+631	minecraft:acacia_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+632	minecraft:cherry_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+633	minecraft:dark_oak_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+634	minecraft:pale_oak_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+635	minecraft:mangrove_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+636	minecraft:bamboo_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	1	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+637	minecraft:spruce_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+638	minecraft:birch_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+639	minecraft:jungle_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+640	minecraft:acacia_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+641	minecraft:cherry_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+642	minecraft:dark_oak_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+643	minecraft:pale_oak_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+644	minecraft:mangrove_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+645	minecraft:bamboo_fence	2	3	0.6	1	normal	0	0	1	0	0	1	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+646	minecraft:spruce_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+647	minecraft:birch_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+648	minecraft:jungle_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+649	minecraft:acacia_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+650	minecraft:cherry_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+651	minecraft:dark_oak_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+652	minecraft:pale_oak_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+653	minecraft:mangrove_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+654	minecraft:bamboo_door	3	3	0.6	1	destroy	0	0	0	0	0	1	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+655	minecraft:end_rod	0	0	0.6	1	normal	0	0	0	0	0	0	harp		facing=north|east|south|west|up|down=up
+656	minecraft:chorus_plant	0.4	0.4	0.6	1	destroy	0	0	0	0	0	0	harp		down=true|false=false;east=true|false=false;north=true|false=false;south=true|false=false;up=true|false=false;west=true|false=false
+657	minecraft:chorus_flower	0.4	0.4	0.6	1	destroy	0	0	0	0	0	0	harp		age=0|1|2|3|4|5=0
+658	minecraft:purpur_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+659	minecraft:purpur_pillar	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum	rotated_pillar	axis=x|y|z=y
+660	minecraft:purpur_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+661	minecraft:end_stone_bricks	3	9	0.6	1	normal	1	0	0	0	0	0	basedrum		
+662	minecraft:torchflower_crop	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1=0
+663	minecraft:pitcher_crop	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3|4=0;half=upper|lower=lower
+664	minecraft:pitcher_plant	0	0	0.6	1	destroy	0	0	0	0	0	1	harp	vegetation	half=upper|lower=lower
+665	minecraft:beetroots	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3=0
+666	minecraft:dirt_path	0.65	0.65	0.6	1	normal	0	0	0	0	0	0	harp		
+667	minecraft:end_gateway	-1	3600000	0.6	1	block	0	0	0	0	0	0	harp		
+668	minecraft:repeating_command_block	-1	3600000	0.6	1	normal	1	0	0	0	0	0	harp		conditional=true|false=false;facing=north|east|south|west|up|down=north
+669	minecraft:chain_command_block	-1	3600000	0.6	1	normal	1	0	0	0	0	0	harp		conditional=true|false=false;facing=north|east|south|west|up|down=north
+670	minecraft:frosted_ice	0.5	0.5	0.98	1	normal	0	0	0	0	0	0	harp		age=0|1|2|3=0
+671	minecraft:magma_block	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	basedrum		
+672	minecraft:nether_wart_block	1	1	0.6	1	normal	1	0	0	0	0	0	harp		
+673	minecraft:red_nether_bricks	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+674	minecraft:bone_block	2	2	0.6	1	normal	1	0	0	0	0	0	xylophone	rotated_pillar	axis=x|y|z=y
+675	minecraft:structure_void	0	0	0.6	1	destroy	0	0	0	0	1	0	harp		
+676	minecraft:observer	3	3	0.6	1	normal	0	0	0	0	0	0	basedrum		facing=north|east|south|west|up|down=south;powered=true|false=false
+677	minecraft:shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+678	minecraft:white_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+679	minecraft:orange_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+680	minecraft:magenta_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+681	minecraft:light_blue_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+682	minecraft:yellow_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+683	minecraft:lime_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+684	minecraft:pink_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+685	minecraft:gray_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+686	minecraft:light_gray_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+687	minecraft:cyan_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+688	minecraft:purple_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+689	minecraft:blue_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+690	minecraft:brown_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+691	minecraft:green_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+692	minecraft:red_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+693	minecraft:black_shulker_box	2	2	0.6	1	destroy	1	0	0	0	0	0	harp	shulker_box	facing=north|east|south|west|up|down=up
+694	minecraft:white_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+695	minecraft:orange_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+696	minecraft:magenta_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+697	minecraft:light_blue_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+698	minecraft:yellow_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+699	minecraft:lime_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+700	minecraft:pink_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+701	minecraft:gray_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+702	minecraft:light_gray_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+703	minecraft:cyan_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+704	minecraft:purple_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+705	minecraft:blue_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+706	minecraft:brown_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+707	minecraft:green_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+708	minecraft:red_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+709	minecraft:black_glazed_terracotta	1.4	1.4	0.6	1	push_only	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+710	minecraft:white_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+711	minecraft:orange_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+712	minecraft:magenta_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+713	minecraft:light_blue_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+714	minecraft:yellow_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+715	minecraft:lime_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+716	minecraft:pink_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+717	minecraft:gray_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+718	minecraft:light_gray_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+719	minecraft:cyan_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+720	minecraft:purple_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+721	minecraft:blue_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+722	minecraft:brown_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+723	minecraft:green_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+724	minecraft:red_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+725	minecraft:black_concrete	1.8	1.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+726	minecraft:white_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+727	minecraft:orange_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+728	minecraft:magenta_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+729	minecraft:light_blue_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+730	minecraft:yellow_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+731	minecraft:lime_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+732	minecraft:pink_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+733	minecraft:gray_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+734	minecraft:light_gray_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+735	minecraft:cyan_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+736	minecraft:purple_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+737	minecraft:blue_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+738	minecraft:brown_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+739	minecraft:green_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+740	minecraft:red_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+741	minecraft:black_concrete_powder	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	snare	falling	
+742	minecraft:kelp	0	0	0.6	1	destroy	0	0	1	0	0	0	harp		age=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25=0
+743	minecraft:kelp_plant	0	0	0.6	1	destroy	0	0	1	0	0	0	harp		
+744	minecraft:dried_kelp_block	0.5	2.5	0.6	1	normal	1	0	0	0	0	0	harp		
+745	minecraft:turtle_egg	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp		eggs=1|2|3|4=1;hatch=0|1|2=0
+746	minecraft:sniffer_egg	0.5	0.5	0.6	1	normal	0	0	0	0	0	0	harp		hatch=0|1|2=0
+747	minecraft:dried_ghast	0	0	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|south|west|east=north;hydration=0|1|2|3=0;waterlogged=true|false=false
+748	minecraft:dead_tube_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+749	minecraft:dead_brain_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+750	minecraft:dead_bubble_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+751	minecraft:dead_fire_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+752	minecraft:dead_horn_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+753	minecraft:tube_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+754	minecraft:brain_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+755	minecraft:bubble_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+756	minecraft:fire_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+757	minecraft:horn_coral_block	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+758	minecraft:dead_tube_coral	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	waterlogged_host	waterlogged=true|false=true
+759	minecraft:dead_brain_coral	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	waterlogged_host	waterlogged=true|false=true
+760	minecraft:dead_bubble_coral	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	waterlogged_host	waterlogged=true|false=true
+761	minecraft:dead_fire_coral	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	waterlogged_host	waterlogged=true|false=true
+762	minecraft:dead_horn_coral	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	waterlogged_host	waterlogged=true|false=true
+763	minecraft:tube_coral	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=true
+764	minecraft:brain_coral	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=true
+765	minecraft:bubble_coral	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=true
+766	minecraft:fire_coral	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=true
+767	minecraft:horn_coral	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=true
+768	minecraft:dead_tube_coral_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_fan,waterlogged_host	waterlogged=true|false=true
+769	minecraft:dead_brain_coral_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_fan,waterlogged_host	waterlogged=true|false=true
+770	minecraft:dead_bubble_coral_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_fan,waterlogged_host	waterlogged=true|false=true
+771	minecraft:dead_fire_coral_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_fan,waterlogged_host	waterlogged=true|false=true
+772	minecraft:dead_horn_coral_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_fan,waterlogged_host	waterlogged=true|false=true
+773	minecraft:tube_coral_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_fan,waterlogged_host	waterlogged=true|false=true
+774	minecraft:brain_coral_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_fan,waterlogged_host	waterlogged=true|false=true
+775	minecraft:bubble_coral_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_fan,waterlogged_host	waterlogged=true|false=true
+776	minecraft:fire_coral_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_fan,waterlogged_host	waterlogged=true|false=true
+777	minecraft:horn_coral_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_fan,waterlogged_host	waterlogged=true|false=true
+778	minecraft:dead_tube_coral_wall_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+779	minecraft:dead_brain_coral_wall_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+780	minecraft:dead_bubble_coral_wall_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+781	minecraft:dead_fire_coral_wall_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+782	minecraft:dead_horn_coral_wall_fan	0	0	0.6	1	normal	0	0	1	1	0	0	basedrum	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+783	minecraft:tube_coral_wall_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+784	minecraft:brain_coral_wall_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+785	minecraft:bubble_coral_wall_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+786	minecraft:fire_coral_wall_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+787	minecraft:horn_coral_wall_fan	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	coral_wall_fan,coral_fan,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=true
+788	minecraft:sea_pickle	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	vegetation,waterlogged_host	pickles=1|2|3|4=1;waterlogged=true|false=true
+789	minecraft:blue_ice	2.8	2.8	0.989	1	normal	1	0	0	0	0	0	harp		
+790	minecraft:conduit	3	3	0.6	1	normal	0	0	1	0	0	0	hat	waterlogged_host	waterlogged=true|false=true
+791	minecraft:bamboo_sapling	1	1	0.6	1	destroy	0	0	0	0	0	1	harp		
+792	minecraft:bamboo	1	1	0.6	1	destroy	0	0	0	0	0	1	harp		age=0|1=0;leaves=none|small|large=none;stage=0|1=0
+793	minecraft:potted_bamboo	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+794	minecraft:void_air	0	0	0.6	1	normal	0	0	0	0	1	0	harp	air_like	
+795	minecraft:cave_air	0	0	0.6	1	normal	0	0	0	0	1	0	harp	air_like	
+796	minecraft:bubble_column	0	0	0.6	1	destroy	0	0	0	0	1	0	harp		drag=true|false=true
+797	minecraft:polished_granite_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+798	minecraft:smooth_red_sandstone_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+799	minecraft:mossy_stone_brick_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+800	minecraft:polished_diorite_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+801	minecraft:mossy_cobblestone_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+802	minecraft:end_stone_brick_stairs	3	9	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+803	minecraft:stone_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+804	minecraft:smooth_sandstone_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+805	minecraft:smooth_quartz_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+806	minecraft:granite_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+807	minecraft:andesite_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+808	minecraft:red_nether_brick_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+809	minecraft:polished_andesite_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+810	minecraft:diorite_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+811	minecraft:polished_granite_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+812	minecraft:smooth_red_sandstone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+813	minecraft:mossy_stone_brick_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+814	minecraft:polished_diorite_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+815	minecraft:mossy_cobblestone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+816	minecraft:end_stone_brick_slab	3	9	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+817	minecraft:smooth_sandstone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+818	minecraft:smooth_quartz_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+819	minecraft:granite_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+820	minecraft:andesite_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+821	minecraft:red_nether_brick_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+822	minecraft:polished_andesite_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+823	minecraft:diorite_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+824	minecraft:brick_wall	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+825	minecraft:prismarine_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+826	minecraft:red_sandstone_wall	0.8	0.8	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+827	minecraft:mossy_stone_brick_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+828	minecraft:granite_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+829	minecraft:stone_brick_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+830	minecraft:mud_brick_wall	1.5	3	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+831	minecraft:nether_brick_wall	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+832	minecraft:andesite_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+833	minecraft:red_nether_brick_wall	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+834	minecraft:sandstone_wall	0.8	0.8	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+835	minecraft:end_stone_brick_wall	3	9	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+836	minecraft:diorite_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+837	minecraft:scaffolding	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	bottom=true|false=false;distance=0|1|2|3|4|5|6|7=7;waterlogged=true|false=false
+838	minecraft:loom	2.5	2.5	0.6	1	normal	1	0	0	0	0	1	bass		facing=north|south|west|east=north
+839	minecraft:barrel	2.5	2.5	0.6	1	normal	1	0	0	0	0	1	bass		facing=north|east|south|west|up|down=north;open=true|false=false
+840	minecraft:smoker	3.5	3.5	0.6	1	normal	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north;lit=true|false=false
+841	minecraft:blast_furnace	3.5	3.5	0.6	1	normal	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north;lit=true|false=false
+842	minecraft:cartography_table	2.5	2.5	0.6	1	normal	1	0	0	0	0	1	bass		
+843	minecraft:fletching_table	2.5	2.5	0.6	1	normal	1	0	0	0	0	1	bass		
+844	minecraft:grindstone	2	6	0.6	1	block	0	0	0	0	0	0	harp		face=floor|wall|ceiling=wall;facing=north|south|west|east=north
+845	minecraft:lectern	2.5	2.5	0.6	1	normal	0	0	0	0	0	1	bass		facing=north|south|west|east=north;has_book=true|false=false;powered=true|false=false
+846	minecraft:smithing_table	2.5	2.5	0.6	1	normal	1	0	0	0	0	1	bass		
+847	minecraft:stonecutter	3.5	3.5	0.6	1	normal	0	0	0	0	0	0	basedrum		facing=north|south|west|east=north
+848	minecraft:bell	5	5	0.6	1	destroy	0	0	0	0	0	0	harp		attachment=floor|ceiling|single_wall|double_wall=floor;facing=north|south|west|east=north;powered=true|false=false
+849	minecraft:lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+850	minecraft:soul_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+851	minecraft:copper_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+852	minecraft:exposed_copper_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+853	minecraft:weathered_copper_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+854	minecraft:oxidized_copper_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+855	minecraft:waxed_copper_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+856	minecraft:waxed_exposed_copper_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+857	minecraft:waxed_weathered_copper_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+858	minecraft:waxed_oxidized_copper_lantern	3.5	3.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	hanging=true|false=false;waterlogged=true|false=false
+859	minecraft:campfire	2	2	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;lit=true|false=true;signal_fire=true|false=false;waterlogged=true|false=false
+860	minecraft:soul_campfire	2	2	0.6	1	normal	0	0	1	0	0	1	bass	waterlogged_host	facing=north|south|west|east=north;lit=true|false=true;signal_fire=true|false=false;waterlogged=true|false=false
+861	minecraft:sweet_berry_bush	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	age=0|1|2|3=0
+862	minecraft:warped_stem	2	2	0.6	1	normal	1	0	0	0	0	0	bass	rotated_pillar	axis=x|y|z=y
+863	minecraft:stripped_warped_stem	2	2	0.6	1	normal	1	0	0	0	0	0	bass	rotated_pillar	axis=x|y|z=y
+864	minecraft:warped_hyphae	2	2	0.6	1	normal	1	0	0	0	0	0	bass	rotated_pillar	axis=x|y|z=y
+865	minecraft:stripped_warped_hyphae	2	2	0.6	1	normal	1	0	0	0	0	0	bass	rotated_pillar	axis=x|y|z=y
+866	minecraft:warped_nylium	0.4	0.4	0.6	1	normal	1	0	0	0	0	0	basedrum		
+867	minecraft:warped_fungus	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	
+868	minecraft:warped_wart_block	1	1	0.6	1	normal	1	0	0	0	0	0	harp		
+869	minecraft:warped_roots	0	0	0.6	1	destroy	0	0	0	0	1	0	harp	vegetation	
+870	minecraft:nether_sprouts	0	0	0.6	1	destroy	0	0	0	0	1	0	harp	vegetation	
+871	minecraft:crimson_stem	2	2	0.6	1	normal	1	0	0	0	0	0	bass	rotated_pillar	axis=x|y|z=y
+872	minecraft:stripped_crimson_stem	2	2	0.6	1	normal	1	0	0	0	0	0	bass	rotated_pillar	axis=x|y|z=y
+873	minecraft:crimson_hyphae	2	2	0.6	1	normal	1	0	0	0	0	0	bass	rotated_pillar	axis=x|y|z=y
+874	minecraft:stripped_crimson_hyphae	2	2	0.6	1	normal	1	0	0	0	0	0	bass	rotated_pillar	axis=x|y|z=y
+875	minecraft:crimson_nylium	0.4	0.4	0.6	1	normal	1	0	0	0	0	0	basedrum		
+876	minecraft:crimson_fungus	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	
+877	minecraft:shroomlight	1	1	0.6	1	normal	1	0	0	0	0	0	harp		
+878	minecraft:weeping_vines	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		age=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25=0
+879	minecraft:weeping_vines_plant	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+880	minecraft:twisting_vines	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		age=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25=0
+881	minecraft:twisting_vines_plant	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+882	minecraft:crimson_roots	0	0	0.6	1	destroy	0	0	0	0	1	0	harp	vegetation	
+883	minecraft:crimson_planks	2	3	0.6	1	normal	1	0	0	0	0	0	bass		
+884	minecraft:warped_planks	2	3	0.6	1	normal	1	0	0	0	0	0	bass		
+885	minecraft:crimson_slab	2	3	0.6	1	normal	0	0	1	0	0	0	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+886	minecraft:warped_slab	2	3	0.6	1	normal	0	0	1	0	0	0	bass	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+887	minecraft:crimson_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	0	bass	pressure_plate	powered=true|false=false
+888	minecraft:warped_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	0	bass	pressure_plate	powered=true|false=false
+889	minecraft:crimson_fence	2	3	0.6	1	normal	0	0	1	0	0	0	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+890	minecraft:warped_fence	2	3	0.6	1	normal	0	0	1	0	0	0	bass	fence,waterlogged_host	east=true|false=false;north=true|false=false;south=true|false=false;waterlogged=true|false=false;west=true|false=false
+891	minecraft:crimson_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	0	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+892	minecraft:warped_trapdoor	3	3	0.6	1	normal	0	0	1	0	0	0	bass	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+893	minecraft:crimson_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	0	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+894	minecraft:warped_fence_gate	2	3	0.6	1	normal	0	0	0	0	0	0	bass	fence_gate	facing=north|south|west|east=north;in_wall=true|false=false;open=true|false=false;powered=true|false=false
+895	minecraft:crimson_stairs	2	3	0.6	1	normal	0	0	1	0	0	0	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+896	minecraft:warped_stairs	2	3	0.6	1	normal	0	0	1	0	0	0	bass	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+897	minecraft:crimson_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+898	minecraft:warped_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+899	minecraft:crimson_door	3	3	0.6	1	destroy	0	0	0	0	0	0	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+900	minecraft:warped_door	3	3	0.6	1	destroy	0	0	0	0	0	0	bass	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+901	minecraft:crimson_sign	1	1	0.6	1	normal	0	0	1	1	0	0	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+902	minecraft:warped_sign	1	1	0.6	1	normal	0	0	1	1	0	0	bass	sign,waterlogged_host	rotation=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=8;waterlogged=true|false=false
+903	minecraft:crimson_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	0	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+904	minecraft:warped_wall_sign	1	1	0.6	1	normal	0	0	1	1	0	0	bass	sign,waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+905	minecraft:structure_block	-1	3600000	0.6	1	normal	1	0	0	0	0	0	harp		mode=save|load|corner|data=load
+906	minecraft:jigsaw	-1	3600000	0.6	1	normal	1	0	0	0	0	0	harp		orientation=down_east|down_north|down_south|down_west|up_east|up_north|up_south|up_west|west_up|east_up|north_up|south_up=north_up
+907	minecraft:test_block	-1	3600000	0.6	1	normal	1	0	0	0	0	0	harp		mode=start|log|fail|accept=start
+908	minecraft:test_instance_block	-1	3600000	0.6	1	normal	1	0	0	0	0	0	harp		
+909	minecraft:composter	0.6	0.6	0.6	1	normal	0	0	0	0	0	1	bass		level=0|1|2|3|4|5|6|7|8=0
+910	minecraft:target	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	harp		power=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0
+911	minecraft:bee_nest	0.3	0.3	0.6	1	normal	1	0	0	0	0	1	bass		facing=north|south|west|east=north;honey_level=0|1|2|3|4|5=0
+912	minecraft:beehive	0.6	0.6	0.6	1	normal	1	0	0	0	0	1	bass		facing=north|south|west|east=north;honey_level=0|1|2|3|4|5=0
+913	minecraft:honey_block	0	0	0.6	0.4	normal	0	0	0	0	0	0	harp		
+914	minecraft:honeycomb_block	0.6	0.6	0.6	1	normal	1	0	0	0	0	0	harp		
+915	minecraft:netherite_block	50	1200	0.6	1	normal	1	0	0	0	0	0	harp		
+916	minecraft:ancient_debris	30	1200	0.6	1	normal	1	0	0	0	0	0	harp		
+917	minecraft:crying_obsidian	50	1200	0.6	1	normal	1	0	0	0	0	0	basedrum		
+918	minecraft:respawn_anchor	50	1200	0.6	1	normal	1	0	0	0	0	0	basedrum		charges=0|1|2|3|4=0
+919	minecraft:potted_crimson_fungus	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+920	minecraft:potted_warped_fungus	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+921	minecraft:potted_crimson_roots	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+922	minecraft:potted_warped_roots	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+923	minecraft:lodestone	3.5	3.5	0.6	1	block	1	0	0	0	0	0	harp		
+924	minecraft:blackstone	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+925	minecraft:blackstone_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+926	minecraft:blackstone_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+927	minecraft:blackstone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+928	minecraft:polished_blackstone	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+929	minecraft:polished_blackstone_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+930	minecraft:cracked_polished_blackstone_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+931	minecraft:chiseled_polished_blackstone	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+932	minecraft:polished_blackstone_brick_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+933	minecraft:polished_blackstone_brick_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+934	minecraft:polished_blackstone_brick_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+935	minecraft:gilded_blackstone	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+936	minecraft:polished_blackstone_stairs	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+937	minecraft:polished_blackstone_slab	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+938	minecraft:polished_blackstone_pressure_plate	0.5	0.5	0.6	1	destroy	0	0	0	1	0	0	basedrum	pressure_plate	powered=true|false=false
+939	minecraft:polished_blackstone_button	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	button	face=floor|wall|ceiling=wall;facing=north|south|west|east=north;powered=true|false=false
+940	minecraft:polished_blackstone_wall	2	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+941	minecraft:chiseled_nether_bricks	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+942	minecraft:cracked_nether_bricks	2	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+943	minecraft:quartz_bricks	0.8	0.8	0.6	1	normal	1	0	0	0	0	0	basedrum		
+944	minecraft:candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+945	minecraft:white_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+946	minecraft:orange_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+947	minecraft:magenta_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+948	minecraft:light_blue_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+949	minecraft:yellow_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+950	minecraft:lime_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+951	minecraft:pink_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+952	minecraft:gray_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+953	minecraft:light_gray_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+954	minecraft:cyan_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+955	minecraft:purple_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+956	minecraft:blue_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+957	minecraft:brown_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+958	minecraft:green_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+959	minecraft:red_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+960	minecraft:black_candle	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	candle,waterlogged_host	candles=1|2|3|4=1;lit=true|false=false;waterlogged=true|false=false
+961	minecraft:candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+962	minecraft:white_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+963	minecraft:orange_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+964	minecraft:magenta_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+965	minecraft:light_blue_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+966	minecraft:yellow_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+967	minecraft:lime_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+968	minecraft:pink_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+969	minecraft:gray_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+970	minecraft:light_gray_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+971	minecraft:cyan_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+972	minecraft:purple_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+973	minecraft:blue_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+974	minecraft:brown_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+975	minecraft:green_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+976	minecraft:red_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+977	minecraft:black_candle_cake	0.5	0.5	0.6	1	destroy	0	0	0	0	0	0	harp	candle	lit=true|false=false
+978	minecraft:amethyst_block	1.5	1.5	0.6	1	normal	1	0	0	0	0	0	harp		
+979	minecraft:budding_amethyst	1.5	1.5	0.6	1	destroy	1	0	0	0	0	0	harp		
+980	minecraft:amethyst_cluster	1.5	1.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;waterlogged=true|false=false
+981	minecraft:large_amethyst_bud	1.5	1.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;waterlogged=true|false=false
+982	minecraft:medium_amethyst_bud	1.5	1.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;waterlogged=true|false=false
+983	minecraft:small_amethyst_bud	1.5	1.5	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;waterlogged=true|false=false
+984	minecraft:tuff	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+985	minecraft:tuff_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+986	minecraft:tuff_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+987	minecraft:tuff_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+988	minecraft:polished_tuff	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+989	minecraft:polished_tuff_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+990	minecraft:polished_tuff_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+991	minecraft:polished_tuff_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+992	minecraft:chiseled_tuff	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+993	minecraft:tuff_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+994	minecraft:tuff_brick_slab	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+995	minecraft:tuff_brick_stairs	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+996	minecraft:tuff_brick_wall	1.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+997	minecraft:chiseled_tuff_bricks	1.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+998	minecraft:calcite	0.75	0.75	0.6	1	normal	1	0	0	0	0	0	basedrum		
+999	minecraft:tinted_glass	0.3	0.3	0.6	1	normal	0	0	0	0	0	0	hat		
+1000	minecraft:powder_snow	0.25	0.25	0.6	1	normal	0	0	0	0	0	0	harp		
+1001	minecraft:sculk_sensor	1.5	1.5	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	power=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0;sculk_sensor_phase=inactive|active|cooldown=inactive;waterlogged=true|false=false
+1002	minecraft:calibrated_sculk_sensor	1.5	1.5	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|south|west|east=north;power=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15=0;sculk_sensor_phase=inactive|active|cooldown=inactive;waterlogged=true|false=false
+1003	minecraft:sculk	0.2	0.2	0.6	1	normal	1	0	0	0	0	0	harp		
+1004	minecraft:sculk_vein	0.2	0.2	0.6	1	destroy	0	0	1	1	0	0	harp	waterlogged_host	down=true|false=false;east=true|false=false;north=true|false=false;south=true|false=false;up=true|false=false;waterlogged=true|false=false;west=true|false=false
+1005	minecraft:sculk_catalyst	3	3	0.6	1	normal	1	0	0	0	0	0	harp		bloom=true|false=false
+1006	minecraft:sculk_shrieker	3	3	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	can_summon=true|false=false;shrieking=true|false=false;waterlogged=true|false=false
+1007	minecraft:copper_block	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet		
+1008	minecraft:exposed_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_exposed		
+1009	minecraft:weathered_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_weathered		
+1010	minecraft:oxidized_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_oxidized		
+1011	minecraft:copper_ore	3	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1012	minecraft:deepslate_copper_ore	4.5	3	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1013	minecraft:oxidized_cut_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_oxidized		
+1014	minecraft:weathered_cut_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_weathered		
+1015	minecraft:exposed_cut_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_exposed		
+1016	minecraft:cut_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet		
+1017	minecraft:oxidized_chiseled_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_oxidized		
+1018	minecraft:weathered_chiseled_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_weathered		
+1019	minecraft:exposed_chiseled_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_exposed		
+1020	minecraft:chiseled_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet		
+1021	minecraft:waxed_oxidized_chiseled_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_oxidized		
+1022	minecraft:waxed_weathered_chiseled_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_weathered		
+1023	minecraft:waxed_exposed_chiseled_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_exposed		
+1024	minecraft:waxed_chiseled_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet		
+1025	minecraft:oxidized_cut_copper_stairs	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_oxidized	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1026	minecraft:weathered_cut_copper_stairs	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_weathered	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1027	minecraft:exposed_cut_copper_stairs	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_exposed	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1028	minecraft:cut_copper_stairs	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1029	minecraft:oxidized_cut_copper_slab	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_oxidized	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1030	minecraft:weathered_cut_copper_slab	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_weathered	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1031	minecraft:exposed_cut_copper_slab	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_exposed	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1032	minecraft:cut_copper_slab	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1033	minecraft:waxed_copper_block	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet		
+1034	minecraft:waxed_weathered_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_weathered		
+1035	minecraft:waxed_exposed_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_exposed		
+1036	minecraft:waxed_oxidized_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_oxidized		
+1037	minecraft:waxed_oxidized_cut_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_oxidized		
+1038	minecraft:waxed_weathered_cut_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_weathered		
+1039	minecraft:waxed_exposed_cut_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet_exposed		
+1040	minecraft:waxed_cut_copper	3	6	0.6	1	normal	1	0	0	0	0	0	trumpet		
+1041	minecraft:waxed_oxidized_cut_copper_stairs	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_oxidized	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1042	minecraft:waxed_weathered_cut_copper_stairs	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_weathered	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1043	minecraft:waxed_exposed_cut_copper_stairs	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_exposed	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1044	minecraft:waxed_cut_copper_stairs	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1045	minecraft:waxed_oxidized_cut_copper_slab	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_oxidized	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1046	minecraft:waxed_weathered_cut_copper_slab	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_weathered	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1047	minecraft:waxed_exposed_cut_copper_slab	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet_exposed	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1048	minecraft:waxed_cut_copper_slab	3	6	0.6	1	normal	0	0	1	0	0	0	trumpet	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1049	minecraft:copper_door	3	6	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+1050	minecraft:exposed_copper_door	3	6	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+1051	minecraft:oxidized_copper_door	3	6	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+1052	minecraft:weathered_copper_door	3	6	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+1053	minecraft:waxed_copper_door	3	6	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+1054	minecraft:waxed_exposed_copper_door	3	6	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+1055	minecraft:waxed_oxidized_copper_door	3	6	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+1056	minecraft:waxed_weathered_copper_door	3	6	0.6	1	destroy	0	0	0	0	0	0	harp	door	facing=north|south|west|east=north;half=upper|lower=lower;hinge=left|right=left;open=true|false=false;powered=true|false=false
+1057	minecraft:copper_trapdoor	3	6	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+1058	minecraft:exposed_copper_trapdoor	3	6	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+1059	minecraft:oxidized_copper_trapdoor	3	6	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+1060	minecraft:weathered_copper_trapdoor	3	6	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+1061	minecraft:waxed_copper_trapdoor	3	6	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+1062	minecraft:waxed_exposed_copper_trapdoor	3	6	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+1063	minecraft:waxed_oxidized_copper_trapdoor	3	6	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+1064	minecraft:waxed_weathered_copper_trapdoor	3	6	0.6	1	normal	0	0	1	0	0	0	harp	trapdoor,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;open=true|false=false;powered=true|false=false;waterlogged=true|false=false
+1065	minecraft:copper_grate	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+1066	minecraft:exposed_copper_grate	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+1067	minecraft:weathered_copper_grate	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+1068	minecraft:oxidized_copper_grate	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+1069	minecraft:waxed_copper_grate	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+1070	minecraft:waxed_exposed_copper_grate	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+1071	minecraft:waxed_weathered_copper_grate	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+1072	minecraft:waxed_oxidized_copper_grate	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	waterlogged=true|false=false
+1073	minecraft:copper_bulb	3	6	0.6	1	normal	0	0	0	0	0	0	harp	copper_bulb	lit=true|false=false;powered=true|false=false
+1074	minecraft:exposed_copper_bulb	3	6	0.6	1	normal	0	0	0	0	0	0	harp	copper_bulb	lit=true|false=false;powered=true|false=false
+1075	minecraft:weathered_copper_bulb	3	6	0.6	1	normal	0	0	0	0	0	0	harp	copper_bulb	lit=true|false=false;powered=true|false=false
+1076	minecraft:oxidized_copper_bulb	3	6	0.6	1	normal	0	0	0	0	0	0	harp	copper_bulb	lit=true|false=false;powered=true|false=false
+1077	minecraft:waxed_copper_bulb	3	6	0.6	1	normal	0	0	0	0	0	0	harp	copper_bulb	lit=true|false=false;powered=true|false=false
+1078	minecraft:waxed_exposed_copper_bulb	3	6	0.6	1	normal	0	0	0	0	0	0	harp	copper_bulb	lit=true|false=false;powered=true|false=false
+1079	minecraft:waxed_weathered_copper_bulb	3	6	0.6	1	normal	0	0	0	0	0	0	harp	copper_bulb	lit=true|false=false;powered=true|false=false
+1080	minecraft:waxed_oxidized_copper_bulb	3	6	0.6	1	normal	0	0	0	0	0	0	harp	copper_bulb	lit=true|false=false;powered=true|false=false
+1081	minecraft:copper_chest	3	6	0.6	1	normal	0	0	1	0	0	0	harp	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+1082	minecraft:exposed_copper_chest	3	6	0.6	1	normal	0	0	1	0	0	0	harp	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+1083	minecraft:weathered_copper_chest	3	6	0.6	1	normal	0	0	1	0	0	0	harp	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+1084	minecraft:oxidized_copper_chest	3	6	0.6	1	normal	0	0	1	0	0	0	harp	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+1085	minecraft:waxed_copper_chest	3	6	0.6	1	normal	0	0	1	0	0	0	harp	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+1086	minecraft:waxed_exposed_copper_chest	3	6	0.6	1	normal	0	0	1	0	0	0	harp	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+1087	minecraft:waxed_weathered_copper_chest	3	6	0.6	1	normal	0	0	1	0	0	0	harp	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+1088	minecraft:waxed_oxidized_copper_chest	3	6	0.6	1	normal	0	0	1	0	0	0	harp	chest,waterlogged_host	facing=north|south|west|east=north;type=single|left|right=single;waterlogged=true|false=false
+1089	minecraft:copper_golem_statue	3	6	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	copper_golem_pose=standing|sitting|running|star=standing;facing=north|south|west|east=north;waterlogged=true|false=false
+1090	minecraft:exposed_copper_golem_statue	3	6	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	copper_golem_pose=standing|sitting|running|star=standing;facing=north|south|west|east=north;waterlogged=true|false=false
+1091	minecraft:weathered_copper_golem_statue	3	6	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	copper_golem_pose=standing|sitting|running|star=standing;facing=north|south|west|east=north;waterlogged=true|false=false
+1092	minecraft:oxidized_copper_golem_statue	3	6	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	copper_golem_pose=standing|sitting|running|star=standing;facing=north|south|west|east=north;waterlogged=true|false=false
+1093	minecraft:waxed_copper_golem_statue	3	6	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	copper_golem_pose=standing|sitting|running|star=standing;facing=north|south|west|east=north;waterlogged=true|false=false
+1094	minecraft:waxed_exposed_copper_golem_statue	3	6	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	copper_golem_pose=standing|sitting|running|star=standing;facing=north|south|west|east=north;waterlogged=true|false=false
+1095	minecraft:waxed_weathered_copper_golem_statue	3	6	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	copper_golem_pose=standing|sitting|running|star=standing;facing=north|south|west|east=north;waterlogged=true|false=false
+1096	minecraft:waxed_oxidized_copper_golem_statue	3	6	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	copper_golem_pose=standing|sitting|running|star=standing;facing=north|south|west|east=north;waterlogged=true|false=false
+1097	minecraft:lightning_rod	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;powered=true|false=false;waterlogged=true|false=false
+1098	minecraft:exposed_lightning_rod	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;powered=true|false=false;waterlogged=true|false=false
+1099	minecraft:weathered_lightning_rod	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;powered=true|false=false;waterlogged=true|false=false
+1100	minecraft:oxidized_lightning_rod	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;powered=true|false=false;waterlogged=true|false=false
+1101	minecraft:waxed_lightning_rod	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;powered=true|false=false;waterlogged=true|false=false
+1102	minecraft:waxed_exposed_lightning_rod	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;powered=true|false=false;waterlogged=true|false=false
+1103	minecraft:waxed_weathered_lightning_rod	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;powered=true|false=false;waterlogged=true|false=false
+1104	minecraft:waxed_oxidized_lightning_rod	3	6	0.6	1	normal	0	0	1	0	0	0	harp	waterlogged_host	facing=north|east|south|west|up|down=up;powered=true|false=false;waterlogged=true|false=false
+1105	minecraft:pointed_dripstone	1.5	3	0.6	1	destroy	0	0	1	0	0	0	basedrum	waterlogged_host	thickness=tip_merge|tip|frustum|middle|base=tip;vertical_direction=up|down=up;waterlogged=true|false=false
+1106	minecraft:dripstone_block	1.5	1	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1107	minecraft:cave_vines	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		age=0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25=0;berries=true|false=false
+1108	minecraft:cave_vines_plant	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		berries=true|false=false
+1109	minecraft:spore_blossom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+1110	minecraft:azalea	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	
+1111	minecraft:flowering_azalea	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	
+1112	minecraft:moss_carpet	0.1	0.1	0.6	1	destroy	0	0	0	0	0	0	harp	carpet	
+1113	minecraft:pink_petals	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	facing=north|south|west|east=north;flower_amount=1|2|3|4=1
+1114	minecraft:wildflowers	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	vegetation	facing=north|south|west|east=north;flower_amount=1|2|3|4=1
+1115	minecraft:leaf_litter	0	0	0.6	1	destroy	0	0	0	0	1	0	harp	vegetation	facing=north|south|west|east=north;segment_amount=1|2|3|4=1
+1116	minecraft:moss_block	0.1	0.1	0.6	1	destroy	1	0	0	0	0	0	harp		
+1117	minecraft:big_dripleaf	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	facing=north|south|west|east=north;tilt=none|unstable|partial|full=none;waterlogged=true|false=false
+1118	minecraft:big_dripleaf_stem	0.1	0.1	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	facing=north|south|west|east=north;waterlogged=true|false=false
+1119	minecraft:small_dripleaf	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	vegetation,waterlogged_host	facing=north|south|west|east=north;half=upper|lower=lower;waterlogged=true|false=false
+1120	minecraft:hanging_roots	0	0	0.6	1	destroy	0	0	1	0	1	1	harp	waterlogged_host	waterlogged=true|false=false
+1121	minecraft:rooted_dirt	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	harp		
+1122	minecraft:mud	0.5	0.5	0.6	1	normal	1	0	0	0	0	0	harp		
+1123	minecraft:deepslate	3	6	0.6	1	normal	1	0	0	0	0	0	basedrum	rotated_pillar	axis=x|y|z=y
+1124	minecraft:cobbled_deepslate	3.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1125	minecraft:cobbled_deepslate_stairs	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1126	minecraft:cobbled_deepslate_slab	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1127	minecraft:cobbled_deepslate_wall	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+1128	minecraft:polished_deepslate	3.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1129	minecraft:polished_deepslate_stairs	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1130	minecraft:polished_deepslate_slab	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1131	minecraft:polished_deepslate_wall	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+1132	minecraft:deepslate_tiles	3.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1133	minecraft:deepslate_tile_stairs	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1134	minecraft:deepslate_tile_slab	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1135	minecraft:deepslate_tile_wall	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+1136	minecraft:deepslate_bricks	3.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1137	minecraft:deepslate_brick_stairs	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	stairs,waterlogged_host	facing=north|south|west|east=north;half=top|bottom=bottom;shape=straight|inner_left|inner_right|outer_left|outer_right=straight;waterlogged=true|false=false
+1138	minecraft:deepslate_brick_slab	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	slab,waterlogged_host	type=top|bottom|double=bottom;waterlogged=true|false=false
+1139	minecraft:deepslate_brick_wall	3.5	6	0.6	1	normal	0	0	1	0	0	0	basedrum	wall,waterlogged_host	east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;up=true|false=true;waterlogged=true|false=false;west=none|low|tall=none
+1140	minecraft:chiseled_deepslate	3.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1141	minecraft:cracked_deepslate_bricks	3.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1142	minecraft:cracked_deepslate_tiles	3.5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1143	minecraft:infested_deepslate	1.5	0.75	0.6	1	normal	1	0	0	0	0	0	harp		axis=x|y|z=y
+1144	minecraft:smooth_basalt	1.25	4.2	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1145	minecraft:raw_iron_block	5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1146	minecraft:raw_copper_block	5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1147	minecraft:raw_gold_block	5	6	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1148	minecraft:potted_azalea_bush	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+1149	minecraft:potted_flowering_azalea_bush	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+1150	minecraft:ochre_froglight	0.3	0.3	0.6	1	normal	1	0	0	0	0	0	harp	rotated_pillar	axis=x|y|z=y
+1151	minecraft:verdant_froglight	0.3	0.3	0.6	1	normal	1	0	0	0	0	0	harp	rotated_pillar	axis=x|y|z=y
+1152	minecraft:pearlescent_froglight	0.3	0.3	0.6	1	normal	1	0	0	0	0	0	harp	rotated_pillar	axis=x|y|z=y
+1153	minecraft:frogspawn	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+1154	minecraft:reinforced_deepslate	55	1200	0.6	1	normal	1	0	0	0	0	0	basedrum		
+1155	minecraft:decorated_pot	0	0	0.6	1	destroy	0	0	1	0	0	0	harp	waterlogged_host	cracked=true|false=false;facing=north|south|west|east=north;waterlogged=true|false=false
+1156	minecraft:crafter	1.5	3.5	0.6	1	normal	1	0	0	0	0	0	harp		crafting=true|false=false;orientation=down_east|down_north|down_south|down_west|up_east|up_north|up_south|up_west|west_up|east_up|north_up|south_up=north_up;triggered=true|false=false
+1157	minecraft:trial_spawner	50	50	0.6	1	normal	1	0	0	0	0	0	basedrum		ominous=true|false=false;trial_spawner_state=inactive|waiting_for_players|active|waiting_for_reward_ejection|ejecting_reward|cooldown=inactive
+1158	minecraft:vault	50	50	0.6	1	normal	1	0	0	0	0	0	basedrum		facing=north|south|west|east=north;ominous=true|false=false;vault_state=inactive|active|unlocking|ejecting=inactive
+1159	minecraft:heavy_core	10	1200	0.6	1	normal	0	0	1	0	0	0	snare	waterlogged_host	waterlogged=true|false=false
+1160	minecraft:pale_moss_block	0.1	0.1	0.6	1	destroy	1	0	0	0	0	1	harp		
+1161	minecraft:pale_moss_carpet	0.1	0.1	0.6	1	destroy	0	0	0	0	0	1	harp		bottom=true|false=true;east=none|low|tall=none;north=none|low|tall=none;south=none|low|tall=none;west=none|low|tall=none
+1162	minecraft:pale_hanging_moss	0	0	0.6	1	destroy	0	0	0	0	0	1	harp		tip=true|false=true
+1163	minecraft:open_eyeblossom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+1164	minecraft:closed_eyeblossom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp	flower,vegetation	
+1165	minecraft:potted_open_eyeblossom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+1166	minecraft:potted_closed_eyeblossom	0	0	0.6	1	destroy	0	0	0	0	0	0	harp		
+1167	minecraft:firefly_bush	0	0	0.6	1	destroy	0	0	0	0	0	1	harp	vegetation	

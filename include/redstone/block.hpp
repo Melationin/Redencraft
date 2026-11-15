@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -12,7 +13,14 @@
 
 namespace redstone {
 class Block;
+class BlockRef;
 class BlockState;
+class Random;
+class RandomTickAccess;
+class World;
+enum class Direction;
+struct Pos;
+enum class RandomTickResult { Applied, Unsupported };
 
 namespace detail {
 // Registry tables are published as a flat pointer plus count so that
@@ -21,10 +29,14 @@ namespace detail {
 // state can be resolved before, during and after block registration.
 extern const BlockState *gStateData;
 extern std::uint32_t gStateCount;
+extern const std::uint8_t *const gRandomTickStateFlags;
+extern const std::uint32_t gRandomTickStateCount;
 // The air singleton, published as soon as minecraft:air registers, so a default
 // constructed BlockState is the registered air state (not a null placeholder).
 extern const Block *gAirBlock;
 void registerBlock(Block &block);
+void bindBlockBehaviours(Block &block);
+void bindRandomTickBehaviour(Block &block);
 std::uint32_t internState(const Block *block);
 struct Tables;
 Tables &tables();
@@ -87,6 +99,9 @@ public:
   // block's StateDefinition are the out-of-schema extension states.
   std::uint32_t variant() const;
   bool isSchemaState() const;
+  // nullopt means the block's random-tick declaration is not yet modeled.
+  std::optional<bool> isRandomlyTicking() const;
+  RandomTickResult randomTick(RandomTickAccess &level, Pos pos, Random &random) const;
 
 private:
   friend void detail::registerBlock(Block &);
@@ -223,6 +238,46 @@ struct BlockLightProperties {
 static_assert(sizeof(BlockLightProperties) == 4,
               "BlockLightProperties must stay four bytes");
 
+enum class BlockClassFlag : std::uint64_t {
+  None = 0,
+  AirLike = 1ULL << 0,
+  Rail = 1ULL << 1,
+  Liquid = 1ULL << 2,
+  Carpet = 1ULL << 3,
+  Wall = 1ULL << 4,
+  Fence = 1ULL << 5,
+  FenceGate = 1ULL << 6,
+  Stairs = 1ULL << 7,
+  Slab = 1ULL << 8,
+  Door = 1ULL << 9,
+  Trapdoor = 1ULL << 10,
+  Button = 1ULL << 11,
+  PressurePlate = 1ULL << 12,
+  Sign = 1ULL << 13,
+  Leaves = 1ULL << 14,
+  Sapling = 1ULL << 15,
+  Falling = 1ULL << 16,
+  CoralFan = 1ULL << 17,
+  CoralWallFan = 1ULL << 18,
+  Snowy = 1ULL << 19,
+  Flower = 1ULL << 20,
+  Vegetation = 1ULL << 21,
+  DryVegetation = 1ULL << 22,
+  RotatedPillar = 1ULL << 23,
+  Bed = 1ULL << 24,
+  Chest = 1ULL << 25,
+  ShulkerBox = 1ULL << 26,
+  Piston = 1ULL << 27,
+  MovingPiston = 1ULL << 28,
+  CopperBulb = 1ULL << 29,
+  Candle = 1ULL << 30,
+  Cauldron = 1ULL << 31,
+  Banner = 1ULL << 32,
+  Skull = 1ULL << 33,
+  WaterloggedHost = 1ULL << 34,
+  HasBlockEntity = 1ULL << 35,
+};
+
 // BlockBehaviour.Properties subset (see docs/compatibility.md).
 struct BlockMetadata {
   float hardness;
@@ -244,6 +299,10 @@ struct BlockMetadata {
   // instanceof test a single load instead of a string compare on the property
   // declaration (FlowingFluid.java:410-435).
   bool liquidContainer = false;
+  bool replaceable = false;
+  bool ignitedByLava = false;
+  Instrument instrument = Instrument::Harp;
+  std::uint64_t classFlags = 0;
 };
 
 // Placeholder identity used for imported states outside the official metadata
@@ -254,9 +313,51 @@ BlockLightProperties officialLightProperties(
     std::string_view blockName, std::string_view properties);
 // BlockBehaviour.BlockStateBase.blocksMotion for the registered subset.
 bool blocksMotion(const BlockState &state);
+bool stateIsRandomlyTicking(const BlockState &state);
+inline bool stateIsRandomlyTickingId(BlockState::Id id) {
+  return id < detail::gRandomTickStateCount &&
+         detail::gRandomTickStateFlags[id] != 0;
+}
+bool stateBlocksMotion(const BlockState &state);
+bool stateIsRedstoneConductor(const BlockState &state);
 struct BlockRegistration {
   std::string name;
   BlockMetadata metadata;
+};
+
+// BlockBehaviour per-block dispatch table. Vanilla Block subclasses override
+// virtual callbacks on BlockBehaviour; here each Block binds static function
+// pointers once during registration, leaving high-frequency checks (air,
+// fluids, pistons, rails) as inline fast paths in World.
+struct BlockBehaviours {
+  using OnPlaceFn = void (*)(World &world, Pos pos, const BlockState &state,
+                             const BlockState &oldState, bool movedByPiston);
+  using AffectRemovalFn = void (*)(World &world, Pos pos,
+                                   const BlockState &state,
+                                   bool movedByPiston);
+  using NeighborChangedFn = void (*)(World &world, Pos pos,
+                                     const BlockState &state,
+                                     const BlockRef &source,
+                                     bool movedByPiston);
+  using UpdateShapeFn = BlockState (*)(World &world, Pos pos,
+                                       const BlockState &state,
+                                       Direction direction, Pos neighborPos,
+                                       const BlockState &neighbor);
+  using ScheduledTickFn = void (*)(World &world, Pos pos,
+                                   const BlockState &state);
+  using BlockEventFn = bool (*)(World &world, Pos pos, const BlockState &state,
+                                int type, int data);
+  using RandomTickFn = RandomTickResult (*)(RandomTickAccess &level, Pos pos,
+                                            const BlockState &state,
+                                            Random &random);
+
+  OnPlaceFn onPlace = nullptr;
+  AffectRemovalFn affectNeighborsAfterRemoval = nullptr;
+  NeighborChangedFn neighborChanged = nullptr;
+  UpdateShapeFn updateShape = nullptr;
+  ScheduledTickFn tick = nullptr;
+  BlockEventFn triggerEvent = nullptr;
+  RandomTickFn randomTick = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -292,13 +393,63 @@ public:
   bool isWall() const { return wall_; }
   bool isCoralFan() const { return coralFan_; }
   bool isCoralWallFan() const { return coralWallFan_; }
+  bool hasClassFlag(BlockClassFlag flag) const {
+    return (metadata_.classFlags & static_cast<std::uint64_t>(flag)) != 0;
+  }
+  bool isFence() const { return hasClassFlag(BlockClassFlag::Fence); }
+  bool isFenceGate() const { return hasClassFlag(BlockClassFlag::FenceGate); }
+  bool isStairs() const { return hasClassFlag(BlockClassFlag::Stairs); }
+  bool isSlab() const { return hasClassFlag(BlockClassFlag::Slab); }
+  bool isDoor() const { return hasClassFlag(BlockClassFlag::Door); }
+  bool isTrapdoor() const { return hasClassFlag(BlockClassFlag::Trapdoor); }
+  bool isButton() const { return hasClassFlag(BlockClassFlag::Button); }
+  bool isPressurePlate() const { return hasClassFlag(BlockClassFlag::PressurePlate); }
+  bool isSign() const { return hasClassFlag(BlockClassFlag::Sign); }
+  bool isLeaves() const { return hasClassFlag(BlockClassFlag::Leaves); }
+  bool isSapling() const { return hasClassFlag(BlockClassFlag::Sapling); }
+  bool isFalling() const { return hasClassFlag(BlockClassFlag::Falling); }
+  bool isSnowy() const { return hasClassFlag(BlockClassFlag::Snowy); }
+  bool isFlower() const { return hasClassFlag(BlockClassFlag::Flower); }
+  bool isVegetation() const { return hasClassFlag(BlockClassFlag::Vegetation); }
+  bool isDryVegetation() const { return hasClassFlag(BlockClassFlag::DryVegetation); }
+  bool isRotatedPillar() const { return hasClassFlag(BlockClassFlag::RotatedPillar); }
+  bool isBed() const { return hasClassFlag(BlockClassFlag::Bed); }
+  bool isChest() const { return hasClassFlag(BlockClassFlag::Chest); }
+  bool isShulkerBox() const { return hasClassFlag(BlockClassFlag::ShulkerBox); }
+  bool isPiston() const { return hasClassFlag(BlockClassFlag::Piston); }
+  bool isMovingPiston() const { return hasClassFlag(BlockClassFlag::MovingPiston); }
+  bool isCopperBulb() const { return hasClassFlag(BlockClassFlag::CopperBulb); }
+  bool isCandle() const { return hasClassFlag(BlockClassFlag::Candle); }
+  bool isCauldron() const { return hasClassFlag(BlockClassFlag::Cauldron); }
+  bool isBanner() const { return hasClassFlag(BlockClassFlag::Banner); }
+  bool isSkull() const { return hasClassFlag(BlockClassFlag::Skull); }
+  bool isWaterloggedHost() const { return hasClassFlag(BlockClassFlag::WaterloggedHost); }
+  bool hasBlockEntity() const { return hasClassFlag(BlockClassFlag::HasBlockEntity); }
   // LiquidBlockContainer: the block can hold its own fluid independent of the
   // blocksMotion test (SimpleWaterloggedBlock.java:18-36).
   bool isLiquidContainer() const { return metadata_.liquidContainer; }
   const BlockLightProperties &lightProperties(std::uint32_t variant) const;
+  const BlockBehaviours &behaviours() const { return behaviours_; }
+  void onPlace(World &world, Pos pos, const BlockState &state,
+               const BlockState &oldState, bool movedByPiston) const;
+  void affectNeighborsAfterRemoval(World &world, Pos pos,
+                                   const BlockState &state,
+                                   bool movedByPiston) const;
+  void neighborChanged(World &world, Pos pos, const BlockState &state,
+                       const BlockRef &source, bool movedByPiston) const;
+  BlockState updateShape(World &world, Pos pos, const BlockState &state,
+                         Direction direction, Pos neighborPos,
+                         const BlockState &neighbor) const;
+  void tick(World &world, Pos pos, const BlockState &state) const;
+  bool triggerEvent(World &world, Pos pos, const BlockState &state, int type,
+                    int data) const;
+  RandomTickResult randomTick(RandomTickAccess &level, Pos pos,
+                              const BlockState &state, Random &random) const;
 
 private:
   friend void detail::registerBlock(Block &block);
+  friend void detail::bindBlockBehaviours(Block &block);
+  friend void detail::bindRandomTickBehaviour(Block &block);
   std::string name_;
   BlockMetadata metadata_;
   StateDefinition definition_;
@@ -313,6 +464,7 @@ private:
   bool wall_ = false;
   bool coralFan_ = false;
   bool coralWallFan_ = false;
+  BlockBehaviours behaviours_{};
   std::vector<BlockLightProperties> lightProperties_;
 };
 
@@ -463,76 +615,7 @@ inline const BlockLightProperties &blockLightProperties(const BlockState &state)
 // Block registry (net/minecraft/world/level/block/Blocks).
 // ---------------------------------------------------------------------------
 namespace Blocks {
-extern const Block AIR;
-extern const Block GRASS_BLOCK;
-extern const Block BEDROCK;
-extern const Block SLIME_BLOCK;
-extern const Block HONEY_BLOCK;
-extern const Block SMOOTH_STONE;
-extern const Block WHITE_TERRACOTTA;
-extern const Block DEAD_TUBE_CORAL_WALL_FAN;
-extern const Block DEAD_BRAIN_CORAL_WALL_FAN;
-extern const Block DEAD_BUBBLE_CORAL_WALL_FAN;
-extern const Block DEAD_FIRE_CORAL_WALL_FAN;
-extern const Block DEAD_HORN_CORAL_WALL_FAN;
-extern const Block DEAD_TUBE_CORAL_FAN;
-extern const Block DEAD_BRAIN_CORAL_FAN;
-extern const Block DEAD_BUBBLE_CORAL_FAN;
-extern const Block DEAD_FIRE_CORAL_FAN;
-extern const Block DEAD_HORN_CORAL_FAN;
-extern const Block COBBLESTONE_WALL;
-extern const Block STONE_BRICK_WALL;
-extern const Block OAK_FENCE_GATE;
-extern const Block BIRCH_FENCE_GATE;
-extern const Block MOSS_BLOCK;
-extern const Block STONE_BRICKS;
-extern const Block SAND;
-extern const Block REDSTONE_LAMP;
-extern const Block OBSIDIAN;
-extern const Block GLASS;
-extern const Block PISTON;
-extern const Block STICKY_PISTON;
-extern const Block PISTON_HEAD;
-extern const Block MOVING_PISTON;
-extern const Block OBSERVER;
-extern const Block NOTE_BLOCK;
-extern const Block REDSTONE_BLOCK;
-extern const Block WHITE_CARPET;
-extern const Block ORANGE_CARPET;
-extern const Block MAGENTA_CARPET;
-extern const Block LIGHT_BLUE_CARPET;
-extern const Block YELLOW_CARPET;
-extern const Block LIME_CARPET;
-extern const Block PINK_CARPET;
-extern const Block GRAY_CARPET;
-extern const Block LIGHT_GRAY_CARPET;
-extern const Block CYAN_CARPET;
-extern const Block PURPLE_CARPET;
-extern const Block BLUE_CARPET;
-extern const Block BROWN_CARPET;
-extern const Block GREEN_CARPET;
-extern const Block RED_CARPET;
-extern const Block BLACK_CARPET;
-extern const Block TNT;
-extern const Block RAIL;
-extern const Block POWERED_RAIL;
-extern const Block DETECTOR_RAIL;
-extern const Block ACTIVATOR_RAIL;
-extern const Block WATER;
-extern const Block LAVA;
-// Known to vanilla, outside the simulated/editable registry subset.
-extern const Block SNOW;
-extern const Block SNOW_BLOCK;
-extern const Block POWDER_SNOW;
-extern const Block CRYING_OBSIDIAN;
-extern const Block RESPAWN_ANCHOR;
-extern const Block REINFORCED_DEEPSLATE;
-// Added by F-4 for the water/lava reaction rules.
-extern const Block STONE;
-extern const Block COBBLESTONE;
-extern const Block BASALT;
-extern const Block SOUL_SOIL;
-extern const Block BLUE_ICE;
+#include "redstone/blocks_decl.inc"
 } // namespace Blocks
 
 // Name lookup: findBlockByName never registers, blockByName registers an
@@ -557,6 +640,41 @@ inline bool isRedstoneConductor(const BlockState &state) {
     return false;
   return true;
 }
+inline bool isRegisteredSmallFlower(const BlockState &state) {
+  return state.is(Blocks::DANDELION) ||
+         state.is(Blocks::GOLDEN_DANDELION) ||
+         state.is(Blocks::TORCHFLOWER) ||
+         state.is(Blocks::POPPY) ||
+         state.is(Blocks::BLUE_ORCHID) ||
+         state.is(Blocks::ALLIUM) ||
+         state.is(Blocks::AZURE_BLUET) ||
+         state.is(Blocks::RED_TULIP) ||
+         state.is(Blocks::ORANGE_TULIP) ||
+         state.is(Blocks::WHITE_TULIP) ||
+         state.is(Blocks::PINK_TULIP) ||
+         state.is(Blocks::OXEYE_DAISY) ||
+         state.is(Blocks::CORNFLOWER) ||
+         state.is(Blocks::WITHER_ROSE) ||
+         state.is(Blocks::LILY_OF_THE_VALLEY);
+}
+inline bool isWoolBlock(const BlockState &state) {
+  return state.is(Blocks::WHITE_WOOL) ||
+         state.is(Blocks::ORANGE_WOOL) ||
+         state.is(Blocks::MAGENTA_WOOL) ||
+         state.is(Blocks::LIGHT_BLUE_WOOL) ||
+         state.is(Blocks::YELLOW_WOOL) ||
+         state.is(Blocks::LIME_WOOL) ||
+         state.is(Blocks::PINK_WOOL) ||
+         state.is(Blocks::GRAY_WOOL) ||
+         state.is(Blocks::LIGHT_GRAY_WOOL) ||
+         state.is(Blocks::CYAN_WOOL) ||
+         state.is(Blocks::PURPLE_WOOL) ||
+         state.is(Blocks::BLUE_WOOL) ||
+         state.is(Blocks::BROWN_WOOL) ||
+         state.is(Blocks::GREEN_WOOL) ||
+         state.is(Blocks::RED_WOOL) ||
+         state.is(Blocks::BLACK_WOOL);
+}
 inline bool isWoolCarpet(const BlockState &state) {
   const Block *block = state.blockOrNull();
   return block && block->isCarpet() && block->supported();
@@ -566,7 +684,8 @@ inline bool isWallBlock(const BlockState &state) {
   return block && block->isWall();
 }
 inline bool isFenceGate(const BlockState &state) {
-  return state.is(Blocks::OAK_FENCE_GATE) || state.is(Blocks::BIRCH_FENCE_GATE);
+  const Block *block = state.blockOrNull();
+  return block && block->isFenceGate();
 }
 inline bool isDeadCoralWallFan(const BlockState &state) {
   const Block *block = state.blockOrNull();

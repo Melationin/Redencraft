@@ -1,4 +1,5 @@
 #include "redstone/litematic.hpp"
+#include "redstone/containers.hpp"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -246,7 +247,7 @@ LitematicImport loadLitematic(const nbt::Tag &root,
         ++result.skippedSignBlockEntities;
         continue;
       }
-      if (id != "minecraft:piston") {
+      if (id != "minecraft:piston" && !isContainerEntityTypeId(id)) {
         if (!options.substituteUnsupported)
           throw nbt::Error("unsupported schematic block entity: " + id);
         ++result.skippedUnsupportedBlockEntities;
@@ -256,11 +257,13 @@ LitematicImport loadLitematic(const nbt::Tag &root,
       entity.compound["x"] = integerTag(pos.x);
       entity.compound["y"] = integerTag(pos.y);
       entity.compound["z"] = integerTag(pos.z);
-      const auto moved = state(required(entity, "blockState", 10));
-      if (!isSupportedBlock(moved.name()))
-        throw nbt::Error("unsupported moving schematic block");
-      if (options.validateState)
-        options.validateState(moved);
+      if (id == "minecraft:piston") {
+        const auto moved = state(required(entity, "blockState", 10));
+        if (!isSupportedBlock(moved.name()))
+          throw nbt::Error("unsupported moving schematic block");
+        if (options.validateState)
+          options.validateState(moved);
+      }
       result.world.blockEntities.push_back(std::move(entity));
     }
     for (const auto &tick : list(region, "PendingBlockTicks")) {

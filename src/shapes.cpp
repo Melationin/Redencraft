@@ -6,11 +6,36 @@
 #include <deque>
 #include <string>
 namespace redstone {
+#include "block_shapes.inc"
+namespace {
+constexpr std::size_t kRandomTickFlagCount = std::size(kStateBasicInfo);
+consteval std::array<std::uint8_t, kRandomTickFlagCount> makeRandomTickFlags() {
+  std::array<std::uint8_t, kRandomTickFlagCount> flags{};
+  for (std::size_t i = 0; i < kRandomTickFlagCount; ++i)
+    flags[i] = static_cast<std::uint8_t>(kStateBasicInfo[i].flags & 1u);
+  return flags;
+}
+inline constexpr auto kRandomTickFlags = makeRandomTickFlags();
+} // namespace
+namespace detail {
+const std::uint8_t *const gRandomTickStateFlags = kRandomTickFlags.data();
+const std::uint32_t gRandomTickStateCount =
+    static_cast<std::uint32_t>(kRandomTickFlags.size());
+} // namespace detail
+bool stateIsRandomlyTicking(const BlockState &state) {
+  return state.isSchemaState() && state.id() < std::size(kStateBasicInfo) &&
+         (kStateBasicInfo[state.id()].flags & 1u) != 0;
+}
+bool stateBlocksMotion(const BlockState &state) {
+  return state.isSchemaState() && state.id() < std::size(kStateBasicInfo) &&
+         (kStateBasicInfo[state.id()].flags & 2u) != 0;
+}
+bool stateIsRedstoneConductor(const BlockState &state) {
+  return state.isSchemaState() && state.id() < std::size(kStateBasicInfo) &&
+         (kStateBasicInfo[state.id()].flags & 4u) != 0;
+}
 bool blocksMotion(const BlockState &state) {
-  // BlockBehaviour.calculateSolid: forceSolidOn wins, then the collision
-  // shape's bounding box decides. COBWEB and BAMBOO_SAPLING are not in the
-  // registered subset.
-  if (blockMetadata(state).forceSolid)
+  if (blockMetadata(state).forceSolid || state.block().isFenceGate())
     return true;
   // TODO: forceSolidOff has no registered user yet.
   const VoxelShape &shape = collisionShape(state);
@@ -118,33 +143,40 @@ bool covers(const std::vector<Rect> &rs, Rect target) {
     }
   return true;
 }
-bool sturdyShape(const VoxelShape &shape, Direction d) {
+bool sturdyShape(const VoxelShape &shape, Direction d, SupportType type) {
   if (shape.empty())
     return false;
-  if (shape.size() != 1)
-    return covers(face(shape, d), {0, 0, 16, 16});
-  const auto &b = shape.front();
-  switch (d) {
-  case Direction::Down:
-    return b.y0 <= 0 && b.y1 > 0 && b.x0 <= 0 && b.z0 <= 0 &&
-           b.x1 >= 16 && b.z1 >= 16;
-  case Direction::Up:
-    return b.y0 < 16 && b.y1 >= 16 && b.x0 <= 0 && b.z0 <= 0 &&
-           b.x1 >= 16 && b.z1 >= 16;
-  case Direction::North:
-    return b.z0 <= 0 && b.z1 > 0 && b.x0 <= 0 && b.y0 <= 0 &&
-           b.x1 >= 16 && b.y1 >= 16;
-  case Direction::South:
-    return b.z0 < 16 && b.z1 >= 16 && b.x0 <= 0 && b.y0 <= 0 &&
-           b.x1 >= 16 && b.y1 >= 16;
-  case Direction::West:
-    return b.x0 <= 0 && b.x1 > 0 && b.z0 <= 0 && b.y0 <= 0 &&
-           b.z1 >= 16 && b.y1 >= 16;
-  case Direction::East:
-    return b.x0 < 16 && b.x1 >= 16 && b.z0 <= 0 && b.y0 <= 0 &&
-           b.z1 >= 16 && b.y1 >= 16;
+  if (type == SupportType::Full) {
+    if (shape.size() != 1)
+      return covers(face(shape, d), {0, 0, 16, 16});
+    const auto &b = shape.front();
+    switch (d) {
+    case Direction::Down:
+      return b.y0 <= 0 && b.y1 > 0 && b.x0 <= 0 && b.z0 <= 0 &&
+             b.x1 >= 16 && b.z1 >= 16;
+    case Direction::Up:
+      return b.y0 < 16 && b.y1 >= 16 && b.x0 <= 0 && b.z0 <= 0 &&
+             b.x1 >= 16 && b.z1 >= 16;
+    case Direction::North:
+      return b.z0 <= 0 && b.z1 > 0 && b.x0 <= 0 && b.y0 <= 0 &&
+             b.x1 >= 16 && b.y1 >= 16;
+    case Direction::South:
+      return b.z0 < 16 && b.z1 >= 16 && b.x0 <= 0 && b.y0 <= 0 &&
+             b.x1 >= 16 && b.y1 >= 16;
+    case Direction::West:
+      return b.x0 <= 0 && b.x1 > 0 && b.z0 <= 0 && b.y0 <= 0 &&
+             b.z1 >= 16 && b.y1 >= 16;
+    case Direction::East:
+      return b.x0 < 16 && b.x1 >= 16 && b.z0 <= 0 && b.y0 <= 0 &&
+             b.z1 >= 16 && b.y1 >= 16;
+    }
+    return false;
   }
-  return false;
+  const auto rects = face(shape, d);
+  if (type == SupportType::Center)
+    return covers(rects, {7, 7, 9, 9});
+  return covers(rects, {0, 0, 16, 2}) && covers(rects, {0, 14, 16, 16}) &&
+         covers(rects, {0, 2, 2, 14}) && covers(rects, {14, 2, 16, 14});
 }
 const std::array<Direction, 4> dirs{Direction::North, Direction::East,
                                     Direction::South, Direction::West};
@@ -171,51 +203,23 @@ std::vector<bool> &shapeReady() {
   return ready;
 }
 } // namespace
+VoxelShape spanToShape(std::uint16_t spanIndex) {
+  const ShapeSpan span = kBlockShapeSpans[spanIndex];
+  VoxelShape out;
+  out.reserve(span.count);
+  for (std::uint16_t i = 0; i < span.count; ++i)
+    out.push_back(kBlockShapeBoxes[span.offset + i]);
+  return out;
+}
 VoxelShape computeStateShape(const BlockState &s) {
-  if (isFenceGate(s)) {
-    if (s.getView("open", "false") == "true") return {};
-    const auto d = directionFromString(s.getView("facing", "north"));
-    return {orient({0, 0, 6, 16, 24, 10}, d)};
-  }
-  if (s.isAir() ||
-      isDeadCoralFan(s) || s.is(Blocks::MOVING_PISTON) || isRailBlock(s) ||
-      isLiquidBlock(s))
-    return {};
-  if (isWoolCarpet(s))
-    return {{0, 0, 0, 16, 1, 16}};
-  if (s.is(Blocks::HONEY_BLOCK))
-    return {{1, 0, 1, 15, 15, 15}};
-  if (wall(s)) {
-    VoxelShape out;
-    if (s.getView("up", "true") == "true")
-      out.push_back({4, 0, 4, 12, 24, 12});
-    for (auto d : dirs)
-      if (s.getView(directionName(d), "none") != "none")
-        out.push_back(orient({5, 0, 0, 11, 24, 11}, d));
-    return out;
-  }
-  if (s.is(Blocks::PISTON) || s.is(Blocks::STICKY_PISTON)) {
-    if (s.getView("extended", "false") == "true")
-      return {orient({0, 0, 4, 16, 16, 16},
-                     directionFromString(s.getView("facing", "north")))};
-    return {{0, 0, 0, 16, 16, 16}};
-  }
-  if (s.is(Blocks::PISTON_HEAD)) {
-    auto d = directionFromString(s.getView("facing", "north"));
-    return {orient({0, 0, 0, 16, 16, 4}, d),
-            orient({6, 6, 4, 10, 10,
-                    s.getView("short", "false") == "true" ? 16.0 : 20.0},
-                   d)};
-  }
-  // TODO: unknown blocks require their registered collision shapes.
+  if (s.isSchemaState() && s.id() < std::size(kStateBasicInfo))
+    return spanToShape(kStateBasicInfo[s.id()].collisionShape);
   return {{0, 0, 0, 16, 16, 16}};
 }
 VoxelShape outlineShape(const BlockState &s) {
-  if (!isFenceGate(s))
-    return collisionShape(s);
-  const auto d = directionFromString(s.getView("facing", "north"));
-  const double bottom = s.getView("in_wall", "false") == "true" ? 13 : 0;
-  return {orient({0, bottom, 6, 16, 16, 10}, d)};
+  if (s.isSchemaState() && s.id() < std::size(kStateBasicInfo))
+    return spanToShape(kStateBasicInfo[s.id()].outlineShape);
+  return collisionShape(s);
 }
 const VoxelShape &collisionShape(const BlockState &s) {
   const auto id = static_cast<std::size_t>(s.id());
@@ -272,13 +276,14 @@ VoxelShape collisionShape(World &w, Pos p, const BlockState &s) {
         {b.x0 + dx, b.y0 + dy, b.z0 + dz, b.x1 + dx, b.y1 + dy, b.z1 + dz});
   return result;
 }
-bool faceSturdy(const BlockState &s, Direction d) {
-  return sturdyShape(collisionShape(s), d);
+bool faceSturdy(const BlockState &s, Direction d, SupportType type) {
+  return sturdyShape(collisionShape(s), d, type);
 }
-bool faceSturdy(World &w, Pos p, const BlockState &s, Direction d) {
+bool faceSturdy(World &w, Pos p, const BlockState &s, Direction d,
+                SupportType type) {
   if (!s.is(Blocks::MOVING_PISTON))
-    return faceSturdy(s, d);
-  return sturdyShape(collisionShape(w, p, s), d);
+    return faceSturdy(s, d, type);
+  return sturdyShape(collisionShape(w, p, s), d, type);
 }
 bool coralCanSurvive(World &w, Pos p, const BlockState &state) {
   const auto facing = isDeadCoralWallFan(state)
@@ -287,6 +292,120 @@ bool coralCanSurvive(World &w, Pos p, const BlockState &state) {
   const auto support = p.relative(opposite(facing));
   return faceSturdy(w, support, w.getBlock(support), facing);
 }
+namespace {
+bool isHorizontalDir(Direction d) {
+  return d == Direction::North || d == Direction::South ||
+         d == Direction::East || d == Direction::West;
+}
+
+int horizontalAxis(Direction d) {
+  return (d == Direction::East || d == Direction::West) ? 0
+         : (d == Direction::North || d == Direction::South) ? 2
+                                                            : 1;
+}
+
+Direction counterClockWise(Direction d) {
+  switch (d) {
+  case Direction::North:
+    return Direction::West;
+  case Direction::West:
+    return Direction::South;
+  case Direction::South:
+    return Direction::East;
+  case Direction::East:
+    return Direction::North;
+  default:
+    return d;
+  }
+}
+
+BlockState computeStairShape(World &w, Pos p, const BlockState &s,
+                             Direction *overrideDir,
+                             const BlockState *overrideState) {
+  const auto neighborAt = [&](Direction d) -> BlockState {
+    if (overrideDir && overrideState && d == *overrideDir)
+      return *overrideState;
+    return w.getBlock(p.relative(d));
+  };
+  const Direction facing = directionFromString(s.getView("facing", "north"));
+  const auto half = s.getView("half", "bottom");
+  const auto canTakeShape = [&](Direction neighbourDir) {
+    const BlockState ns = neighborAt(neighbourDir);
+    return !ns.block().isStairs() ||
+           directionFromString(ns.getView("facing", "north")) != facing ||
+           ns.getView("half", "bottom") != half;
+  };
+  const BlockState behindState = neighborAt(facing);
+  if (behindState.block().isStairs() &&
+      half == behindState.getView("half", "bottom")) {
+    const Direction behindFacing =
+        directionFromString(behindState.getView("facing", "north"));
+    if (horizontalAxis(behindFacing) != horizontalAxis(facing) &&
+        canTakeShape(opposite(behindFacing))) {
+      return s.with("shape", behindFacing == counterClockWise(facing)
+                                 ? "outer_left"
+                                 : "outer_right");
+    }
+  }
+  const BlockState frontState = neighborAt(opposite(facing));
+  if (frontState.block().isStairs() &&
+      half == frontState.getView("half", "bottom")) {
+    const Direction frontFacing =
+        directionFromString(frontState.getView("facing", "north"));
+    if (horizontalAxis(frontFacing) != horizontalAxis(facing) &&
+        canTakeShape(frontFacing)) {
+      return s.with("shape", frontFacing == counterClockWise(facing)
+                                 ? "inner_left"
+                                 : "inner_right");
+    }
+  }
+  return s.with("shape", "straight");
+}
+} // namespace
+
+bool isIronBarsBlock(const BlockState &s) {
+  const Block *b = &s.block();
+  return b == &Blocks::IRON_BARS || b == &Blocks::GLASS_PANE ||
+         b == &Blocks::WHITE_STAINED_GLASS_PANE ||
+         b == &Blocks::ORANGE_STAINED_GLASS_PANE ||
+         b == &Blocks::MAGENTA_STAINED_GLASS_PANE ||
+         b == &Blocks::LIGHT_BLUE_STAINED_GLASS_PANE ||
+         b == &Blocks::YELLOW_STAINED_GLASS_PANE ||
+         b == &Blocks::LIME_STAINED_GLASS_PANE ||
+         b == &Blocks::PINK_STAINED_GLASS_PANE ||
+         b == &Blocks::GRAY_STAINED_GLASS_PANE ||
+         b == &Blocks::LIGHT_GRAY_STAINED_GLASS_PANE ||
+         b == &Blocks::CYAN_STAINED_GLASS_PANE ||
+         b == &Blocks::PURPLE_STAINED_GLASS_PANE ||
+         b == &Blocks::BLUE_STAINED_GLASS_PANE ||
+         b == &Blocks::BROWN_STAINED_GLASS_PANE ||
+         b == &Blocks::GREEN_STAINED_GLASS_PANE ||
+         b == &Blocks::RED_STAINED_GLASS_PANE ||
+         b == &Blocks::BLACK_STAINED_GLASS_PANE ||
+         b == &Blocks::COPPER_BARS || b == &Blocks::EXPOSED_COPPER_BARS ||
+         b == &Blocks::WEATHERED_COPPER_BARS ||
+         b == &Blocks::OXIDIZED_COPPER_BARS ||
+         b == &Blocks::WAXED_COPPER_BARS ||
+         b == &Blocks::WAXED_EXPOSED_COPPER_BARS ||
+         b == &Blocks::WAXED_WEATHERED_COPPER_BARS ||
+         b == &Blocks::WAXED_OXIDIZED_COPPER_BARS;
+}
+
+bool isExceptionForConnection(const BlockState &s) {
+  return s.block().isLeaves() || s.is(Blocks::BARRIER) ||
+         s.is(Blocks::CARVED_PUMPKIN) || s.is(Blocks::JACK_O_LANTERN) ||
+         s.is(Blocks::MELON) || s.is(Blocks::PUMPKIN) ||
+         s.block().isShulkerBox();
+}
+
+bool fenceGateConnectsToDirection(const BlockState &s, Direction d) {
+  if (!isFenceGate(s) || !isHorizontalDir(d))
+    return false;
+  const auto gateFacing = directionFromString(s.getView("facing", "north"));
+  return (gateFacing == Direction::North || gateFacing == Direction::South) !=
+         (d == Direction::North || d == Direction::South);
+}
+
 BlockState wallUpdateShape(World &w, Pos p, const BlockState &s,
                            Direction changed) {
   return wallUpdateShape(w, p, s, changed, w.getBlock(p.relative(changed)));
@@ -300,13 +419,12 @@ BlockState wallUpdateShape(World &w, Pos p, const BlockState &s,
   for (int i = 0; i < 4; ++i) {
     auto d = dirs[i];
     auto n = changed == d ? capturedNeighbor : w.getBlock(p.relative(d));
-    const auto gateFacing = directionFromString(n.getView("facing", "north"));
-    const bool gateConnects = isFenceGate(n) &&
-        ((gateFacing == Direction::North || gateFacing == Direction::South) !=
-         (d == Direction::North || d == Direction::South));
+    const bool connects =
+        wall(n) || fenceGateConnectsToDirection(n, d) || isIronBarsBlock(n) ||
+        (!isExceptionForConnection(n) &&
+         faceSturdy(w, p.relative(d), n, opposite(d)));
     connections[i] =
-        changed == d ? (wall(n) || gateConnects || faceSturdy(w, p.relative(d), n, opposite(d)))
-                     : s.getView(directionName(d), "none") != "none";
+        changed == d ? connects : s.getView(directionName(d), "none") != "none";
   }
   auto above = changed == Direction::Up ? capturedNeighbor
                                         : w.getBlock(p.relative(Direction::Up));
@@ -331,5 +449,59 @@ BlockState wallUpdateShape(World &w, Pos p, const BlockState &s,
   bool post = (wall(above) && above.getView("up", "true") == "true") || corner ||
               (!high && covers(coverage, {7, 7, 9, 9}));
   return out.with("up", post ? "true" : "false");
+}
+
+BlockState fenceUpdateShape(World &w, Pos p, const BlockState &s,
+                            Direction changed) {
+  return fenceUpdateShape(w, p, s, changed, w.getBlock(p.relative(changed)));
+}
+
+BlockState fenceUpdateShape(World &w, Pos p, const BlockState &s,
+                            Direction changed,
+                            const BlockState &capturedNeighbor) {
+  if (!isHorizontalDir(changed))
+    return s;
+  const bool sameFence =
+      w.hasBlockTag(capturedNeighbor, "minecraft:fences").value_or(false) &&
+      w.hasBlockTag(capturedNeighbor, "minecraft:wooden_fences").value_or(false) ==
+          w.hasBlockTag(s, "minecraft:wooden_fences").value_or(false);
+  const bool gate =
+      fenceGateConnectsToDirection(capturedNeighbor, opposite(changed));
+  const bool solid =
+      !isExceptionForConnection(capturedNeighbor) &&
+      faceSturdy(w, p.relative(changed), capturedNeighbor, opposite(changed));
+  return s.with(directionName(changed),
+                (sameFence || gate || solid) ? "true" : "false");
+}
+
+BlockState ironBarsUpdateShape(World &w, Pos p, const BlockState &s,
+                               Direction changed) {
+  return ironBarsUpdateShape(w, p, s, changed, w.getBlock(p.relative(changed)));
+}
+
+BlockState ironBarsUpdateShape(World &w, Pos p, const BlockState &s,
+                               Direction changed,
+                               const BlockState &capturedNeighbor) {
+  if (!isHorizontalDir(changed))
+    return s;
+  const bool wallAttach =
+      w.hasBlockTag(capturedNeighbor, "minecraft:walls").value_or(wall(capturedNeighbor));
+  const bool attach =
+      isIronBarsBlock(capturedNeighbor) || wallAttach ||
+      (!isExceptionForConnection(capturedNeighbor) &&
+       faceSturdy(w, p.relative(changed), capturedNeighbor, opposite(changed)));
+  return s.with(directionName(changed), attach ? "true" : "false");
+}
+
+BlockState stairUpdateShape(World &w, Pos p, const BlockState &s) {
+  return computeStairShape(w, p, s, nullptr, nullptr);
+}
+
+BlockState stairUpdateShape(World &w, Pos p, const BlockState &s,
+                            Direction changed,
+                            const BlockState &capturedNeighbor) {
+  if (!isHorizontalDir(changed))
+    return s;
+  return computeStairShape(w, p, s, &changed, &capturedNeighbor);
 }
 } // namespace redstone

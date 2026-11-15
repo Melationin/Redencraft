@@ -11,16 +11,14 @@ def cpp_string(value):
 
 def parse_face(field):
     if not field:
-        return None
+        return ()
     rectangles = []
     for rectangle in field.split(';'):
         values = tuple(int(value) for value in rectangle.split(':'))
         if len(values) != 4:
             raise ValueError(f'invalid face rectangle: {rectangle}')
         rectangles.append(values)
-    if len(rectangles) != 1:
-        raise ValueError('expected one rectangle per exported face')
-    return rectangles[0]
+    return tuple(rectangles)
 
 
 def main():
@@ -29,8 +27,10 @@ def main():
     parser.add_argument('--out', required=True)
     args = parser.parse_args()
 
-    shapes = {tuple([None] * 6): 0}
-    shape_rows = [tuple([None] * 6)]
+    shapes = {tuple([()] * 6): 0}
+    shape_rows = [tuple([()] * 6)]
+    rect_spans = {(): (0, 0)}
+    rect_list = []
     states = []
     for number, line in enumerate(
             pathlib.Path(args.tsv).read_text(encoding='utf-8').splitlines(), 1):
@@ -41,6 +41,10 @@ def main():
             raise SystemExit(f'{args.tsv}:{number}: expected 8 fields')
         key = fields[0] + '\x1f' + fields[1]
         faces = tuple(parse_face(field) for field in fields[2:])
+        for face in faces:
+            if face not in rect_spans:
+                rect_spans[face] = (len(rect_list), len(face))
+                rect_list.extend(face)
         shape_index = shapes.get(faces)
         if shape_index is None:
             shape_index = len(shape_rows)
@@ -51,18 +55,23 @@ def main():
 
     text = [
         '// Generated from assets/light26_1/block_light_faces.tsv. Do not edit.',
-        'static constexpr LightFaceShape kLightFaceShapes[] = {'
+        'static constexpr LightFaceRect kLightFaceRects[] = {'
     ]
+    if not rect_list:
+        text.append('    {},')
+    else:
+        for rect in rect_list:
+            text.append('    {%d, %d, %d, %d},' % rect)
+    text.append('};')
+    text.append('static constexpr LightFaceShape kLightFaceShapes[] = {')
     for faces in shape_rows:
         parts = []
         present = 0
         for face in faces:
-            if face is not None:
+            if face:
                 present |= 1 << len(parts)
-            if face is None:
-                parts.append('{}')
-            else:
-                parts.append('{%d, %d, %d, %d}' % face)
+            offset, count = rect_spans[face]
+            parts.append('{%d, %d}' % (offset, count))
         text.append('    {%s, %d},' % (', '.join(parts), present))
     text.append('};')
     text.append('static constexpr OfficialLightFaceState kOfficialLightFaceStates[] = {')

@@ -102,7 +102,19 @@ bool propertyKindFromName(std::string_view name, PropertyKind &out) {
       "level",    "extended", "in_wall",    "lit",        "open",
       "powered",  "short",    "snowy",      "unstable",   "up",
       "waterlogged", "east",  "north",      "south",      "west",
-      "axis"};
+      "axis", "stage", "distance", "persistent", "triggered", "part", "occupied", "half",
+      "age", "attached", "attachment", "berries", "bites", "bloom", "bottom",
+      "can_summon", "candles", "charges", "conditional", "copper_golem_pose",
+      "cracked", "crafting", "creaking_heart_state", "delay", "disarmed", "down",
+      "drag", "dusted", "eggs", "enabled", "eye", "face", "flower_amount",
+      "hanging", "has_book", "has_bottle_0", "has_bottle_1", "has_bottle_2",
+      "has_record", "hatch", "hinge", "honey_level", "hydration", "inverted",
+      "layers", "leaves", "locked", "mode", "moisture", "natural", "ominous",
+      "orientation", "pickles", "power", "rotation", "sculk_sensor_phase",
+      "segment_amount", "shrieking", "side_chain", "signal_fire",
+      "slot_0_occupied", "slot_1_occupied", "slot_2_occupied", "slot_3_occupied",
+      "slot_4_occupied", "slot_5_occupied", "thickness", "tilt", "tip",
+      "trial_spawner_state", "vault_state", "vertical_direction"};
   static_assert(std::size(names) == kPropertyKindCount);
   for (std::size_t i = 0; i < std::size(names); ++i)
     if (names[i] == name) {
@@ -121,7 +133,8 @@ bool propertyValueFromName(PropertyKind kind, std::string_view value,
     return lookupName(names, value, out);
   }
   case PropertyKind::Type: {
-    static constexpr std::string_view names[] = {"normal", "sticky"};
+    static constexpr std::string_view names[] = {
+        "normal", "sticky", "top", "bottom", "double", "single", "left", "right"};
     return lookupName(names, value, out);
   }
   case PropertyKind::Axis: {
@@ -129,12 +142,21 @@ bool propertyValueFromName(PropertyKind kind, std::string_view value,
     static constexpr std::string_view names[] = {"x", "y", "z"};
     return lookupName(names, value, out);
   }
+  case PropertyKind::BedPart: {
+    static constexpr std::string_view names[] = {"head", "foot"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Half: {
+    static constexpr std::string_view names[] = {"upper", "lower", "top", "bottom"};
+    return lookupName(names, value, out);
+  }
   case PropertyKind::Shape: {
     static constexpr std::string_view names[] = {
         "north_south",     "east_west",       "ascending_east",
         "ascending_west",  "ascending_north", "ascending_south",
         "south_east",      "south_west",      "north_west",
-        "north_east"};
+        "north_east",      "straight",        "inner_left",
+        "inner_right",     "outer_left",      "outer_right"};
     return lookupName(names, value, out);
   }
   case PropertyKind::Instrument: {
@@ -142,18 +164,125 @@ bool propertyValueFromName(PropertyKind kind, std::string_view value,
         "harp",  "basedrum", "snare",        "hat",     "bass",
         "flute", "bell",     "guitar",       "chime",   "xylophone",
         "iron_xylophone",    "cow_bell",     "didgeridoo",
-        "bit",               "banjo",        "pling"};
+        "bit",               "banjo",        "pling",
+        "trumpet", "trumpet_exposed", "trumpet_oxidized", "trumpet_weathered",
+        "zombie", "skeleton", "creeper", "dragon", "wither_skeleton", "piglin", "custom_head"};
     return lookupName(names, value, out);
   }
   case PropertyKind::Note:
     return parseSmallNumber(value, out) && out <= 24;
+  case PropertyKind::Age:
+    return parseSmallNumber(value, out) && out <= 25;
   case PropertyKind::Level:
+  case PropertyKind::Power:
+  case PropertyKind::Rotation:
     return parseSmallNumber(value, out) && out <= 15;
+  case PropertyKind::Stage:
+    return parseSmallNumber(value, out) && out <= 1;
+  case PropertyKind::Distance:
+  case PropertyKind::Moisture:
+    return parseSmallNumber(value, out) && out <= 7;
+  case PropertyKind::Bites:
+    return parseSmallNumber(value, out) && out <= 6;
+  case PropertyKind::HoneyLevel:
+    return parseSmallNumber(value, out) && out <= 5;
+  case PropertyKind::Charges:
+    return parseSmallNumber(value, out) && out <= 4;
+  case PropertyKind::Dusted:
+  case PropertyKind::Hydration:
+    return parseSmallNumber(value, out) && out <= 3;
+  case PropertyKind::Hatch:
+    return parseSmallNumber(value, out) && out <= 2;
+  case PropertyKind::Layers:
+    return parseSmallNumber(value, out) && out >= 1 && out <= 8;
+  case PropertyKind::Candles:
+  case PropertyKind::Delay:
+  case PropertyKind::Eggs:
+  case PropertyKind::FlowerAmount:
+  case PropertyKind::Pickles:
+  case PropertyKind::SegmentAmount:
+    return parseSmallNumber(value, out) && out >= 1 && out <= 4;
   case PropertyKind::WallEast:
   case PropertyKind::WallNorth:
   case PropertyKind::WallSouth:
   case PropertyKind::WallWest: {
-    static constexpr std::string_view names[] = {"none", "low", "tall"};
+    static constexpr std::string_view names[] = {
+        "none", "low", "tall", "false", "true", "side", "up"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Attachment: {
+    static constexpr std::string_view names[] = {
+        "floor", "ceiling", "single_wall", "double_wall"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::CopperGolemPose: {
+    static constexpr std::string_view names[] = {
+        "standing", "sitting", "running", "star"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::CreakingHeartState: {
+    static constexpr std::string_view names[] = {
+        "uprooted", "dormant", "awake"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Face: {
+    static constexpr std::string_view names[] = {"floor", "wall", "ceiling"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Hinge: {
+    static constexpr std::string_view names[] = {"left", "right"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Leaves: {
+    static constexpr std::string_view names[] = {"none", "small", "large"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Mode: {
+    static constexpr std::string_view names[] = {
+        "compare", "subtract", "save", "load", "corner",
+        "data", "start", "log", "fail", "accept"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Orientation: {
+    static constexpr std::string_view names[] = {
+        "down_east", "down_north", "down_south", "down_west",
+        "up_east", "up_north", "up_south", "up_west",
+        "west_up", "east_up", "north_up", "south_up"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::SculkSensorPhase: {
+    static constexpr std::string_view names[] = {
+        "inactive", "active", "cooldown"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::SideChain: {
+    static constexpr std::string_view names[] = {
+        "unconnected", "right", "center", "left"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Thickness: {
+    static constexpr std::string_view names[] = {
+        "tip_merge", "tip", "frustum", "middle", "base"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::Tilt: {
+    static constexpr std::string_view names[] = {
+        "none", "unstable", "partial", "full"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::TrialSpawnerState: {
+    static constexpr std::string_view names[] = {
+        "inactive", "waiting_for_players", "active",
+        "waiting_for_reward_ejection", "ejecting_reward", "cooldown"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::VaultState: {
+    static constexpr std::string_view names[] = {
+        "inactive", "active", "unlocking", "ejecting"};
+    return lookupName(names, value, out);
+  }
+  case PropertyKind::VerticalDirection: {
+    static constexpr std::string_view names[] = {"up", "down"};
     return lookupName(names, value, out);
   }
   case PropertyKind::Extended:
@@ -165,7 +294,42 @@ bool propertyValueFromName(PropertyKind kind, std::string_view value,
   case PropertyKind::Snowy:
   case PropertyKind::Unstable:
   case PropertyKind::Up:
-  case PropertyKind::Waterlogged: {
+  case PropertyKind::Waterlogged:
+  case PropertyKind::Persistent:
+  case PropertyKind::Occupied:
+  case PropertyKind::Triggered:
+  case PropertyKind::Attached:
+  case PropertyKind::Berries:
+  case PropertyKind::Bloom:
+  case PropertyKind::Bottom:
+  case PropertyKind::CanSummon:
+  case PropertyKind::Conditional:
+  case PropertyKind::Cracked:
+  case PropertyKind::Crafting:
+  case PropertyKind::Disarmed:
+  case PropertyKind::Down:
+  case PropertyKind::Drag:
+  case PropertyKind::Enabled:
+  case PropertyKind::Eye:
+  case PropertyKind::Hanging:
+  case PropertyKind::HasBook:
+  case PropertyKind::HasBottle0:
+  case PropertyKind::HasBottle1:
+  case PropertyKind::HasBottle2:
+  case PropertyKind::HasRecord:
+  case PropertyKind::Inverted:
+  case PropertyKind::Locked:
+  case PropertyKind::Natural:
+  case PropertyKind::Ominous:
+  case PropertyKind::Shrieking:
+  case PropertyKind::SignalFire:
+  case PropertyKind::Slot0Occupied:
+  case PropertyKind::Slot1Occupied:
+  case PropertyKind::Slot2Occupied:
+  case PropertyKind::Slot3Occupied:
+  case PropertyKind::Slot4Occupied:
+  case PropertyKind::Slot5Occupied:
+  case PropertyKind::Tip: {
     static constexpr std::string_view names[] = {"false", "true"};
     return lookupName(names, value, out);
   }
@@ -397,71 +561,18 @@ void registerBlock(Block &block) {
            name.substr(name.size() - suffix.size()) == suffix;
   };
   // Block class stand-ins: vanilla resolves these with instanceof at runtime.
-  block.airLike_ = name == "minecraft:air" || name == "minecraft:cave_air" ||
-                   name == "minecraft:void_air";
   if (name == "minecraft:air")
     gAirBlock = &block;
-  block.rail_ = name == "minecraft:rail" || name == "minecraft:powered_rail" ||
-                name == "minecraft:detector_rail" ||
-                name == "minecraft:activator_rail";
-  block.liquid_ = name == "minecraft:water" || name == "minecraft:lava";
-  block.carpet_ = endsWith("_carpet");
-  block.wall_ = name == "minecraft:cobblestone_wall" ||
-                name == "minecraft:stone_brick_wall";
-  block.coralWallFan_ = endsWith("_coral_wall_fan");
-  block.coralFan_ = endsWith("_coral_fan");
-  if (block.metadata_.supported) {
-    // BlockBehaviour.Properties.forceSolidOn(): Blocks.java sets it on the fence
-    // gates (so an opened gate still counts as solid), on moving_piston (so a
-    // moving block is never mistaken for an empty, fluid-holding cell), and on
-    // the walls and dead coral fans (F-5).
-    if (name == "minecraft:oak_fence_gate" ||
-        name == "minecraft:birch_fence_gate" ||
-        name == "minecraft:moving_piston" ||
-        name == "minecraft:cobblestone_wall" ||
-        name == "minecraft:stone_brick_wall" || block.coralFan_ ||
-        block.coralWallFan_)
-      block.metadata_.forceSolid = true;
-    // LiquidBlockContainer: in this registry subset exactly the blocks that
-    // declare BlockStateProperties.WATERLOGGED through SimpleWaterloggedBlock.
-    // Blocks.java marks the rails, the walls, the dead coral fans and the fence
-    // gates this way; nothing else in the subset has the property.
-    block.metadata_.liquidContainer = block.rail_ || block.wall_ ||
-                                      block.coralFan_ || block.coralWallFan_;
-    if (name == "minecraft:slime_block")
-      block.metadata_.friction = 0.8f;
-    if (name == "minecraft:honey_block")
-      block.metadata_.speedFactor = 0.4f;
-    block.metadata_.liquid = block.liquid_;
-    if (name == "minecraft:grass_block")
-      block.metadata_.explosionResistance = 0.6f;
-    else if (name == "minecraft:glass")
-      block.metadata_.explosionResistance = 0.3f;
-    else if (name == "minecraft:bedrock")
-      block.metadata_.explosionResistance = 3600000.0f;
-    else if (name == "minecraft:obsidian")
-      block.metadata_.explosionResistance = 1200.0f;
-    else if (name == "minecraft:smooth_stone" || block.wall_)
-      block.metadata_.explosionResistance = 6.0f;
-    else if (name == "minecraft:white_terracotta")
-      block.metadata_.explosionResistance = 4.2f;
-    else if (name == "minecraft:redstone_block")
-      block.metadata_.explosionResistance = 6.0f;
-    else if (block.rail_)
-      block.metadata_.explosionResistance = 0.7f;
-    else if (name == "minecraft:moving_piston")
-      block.metadata_.explosionResistance = 0.0f;
-    else if (block.metadata_.explosionResistance == 0.0f)
-      // Blocks registered without an explicit strength keep the vanilla default.
-      block.metadata_.explosionResistance =
-          name == "minecraft:slime_block" || name == "minecraft:honey_block" ||
-                  name == "minecraft:tnt" || block.coralFan_ ||
-                  block.coralWallFan_
-              ? 0.0f
-              : block.metadata_.hardness < 0
-                    ? 3600000.0f
-                    : block.metadata_.hardness;
-  }
+  block.airLike_ = block.hasClassFlag(BlockClassFlag::AirLike) ||
+                   name == "minecraft:air" || name == "minecraft:cave_air" ||
+                   name == "minecraft:void_air";
+  block.rail_ = block.hasClassFlag(BlockClassFlag::Rail);
+  block.liquid_ = block.hasClassFlag(BlockClassFlag::Liquid);
+  block.carpet_ = block.hasClassFlag(BlockClassFlag::Carpet);
+  block.wall_ = block.hasClassFlag(BlockClassFlag::Wall);
+  block.coralWallFan_ = block.hasClassFlag(BlockClassFlag::CoralWallFan);
+  block.coralFan_ = block.hasClassFlag(BlockClassFlag::CoralFan);
+  (void)endsWith;
   block.index_ = static_cast<std::uint32_t>(table.blocks.size());
   block.firstState_ = gStateCount;
   block.stateCount_ = block.definition_.stateCount();
@@ -486,6 +597,8 @@ void registerBlock(Block &block) {
                                       block.definition_.packedOf(variant)));
   gStateData = table.states.data();
   gStateCount = static_cast<std::uint32_t>(table.states.size());
+  bindBlockBehaviours(block);
+  bindRandomTickBehaviour(block);
 }
 
 std::uint32_t internState(const Block *block) {

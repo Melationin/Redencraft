@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <span>
 #include <optional>
 #include <string>
@@ -28,6 +29,7 @@ struct WorldGameRules {
   bool tntExplodes = true;
   bool waterSourceConversion = true;
   bool lavaSourceConversion = false;
+  int randomTickSpeed = 3;
 };
 
 struct WorldClockState {
@@ -111,11 +113,46 @@ std::filesystem::path defaultRegionDirectory(const std::filesystem::path &worldD
 // worldDir contains level.dat and namespaced data/minecraft saved data.
 // Reads level.dat and namespaced seed metadata only; no terrain scan.
 WorldMetadata loadWorldMetadata(const std::filesystem::path &worldDir);
+// Resolve file packs listed by level.dat in low-to-high priority order.
+struct WorldDataPackSelection {
+  std::vector<std::filesystem::path> paths;
+  std::vector<std::string> diagnostics;
+};
+WorldDataPackSelection selectWorldDataPacks(const std::filesystem::path &worldDir,
+                                            const nbt::RootTag &levelRoot);
 // Reads only the existing 26.1 namespaced game_rules SavedData. Missing
 // returns the vanilla defaults; malformed present data is an error.
 WorldGameRules loadWorldGameRules(const std::filesystem::path &path);
+struct AnvilLoadOptions {
+  int minY = -64;
+  int maxY = 320;
+  // Default false: non-"minecraft:full" proto-chunks raise nbt::Error so
+  // callers notice incomplete chunks. Set true (via --skip-non-full-chunks) to
+  // skip partially generated perimeter chunks until border/proto-chunk loading
+  // is implemented.
+  // TODO: load non-full border proto-chunks instead of only skipping them.
+  bool skipNonFullChunks = false;
+  std::function<bool(int, int)> chunkFilter{};
+};
+struct AnvilWorldImportSummary {
+  std::vector<std::pair<int, int>> loadedChunks;
+  std::size_t skippedNonFullChunks = 0;
+  std::size_t loadedBlockTicks = 0;
+  std::size_t loadedFluidTicks = 0;
+  std::size_t loadedBlockEntities = 0;
+  std::size_t loadedEntities = 0;
+};
+LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
+                           const std::filesystem::path &regionDir,
+                           const AnvilLoadOptions &options);
 LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
                            const std::filesystem::path &regionDir,
                            int minY = -64, int maxY = 320);
+// Streams decoded Anvil sections directly into `world` without building an
+// intermediate LoadedWorld::blocks std::map (for multi-thousand-chunk saves).
+AnvilWorldImportSummary
+loadAnvilWorldInto(const std::filesystem::path &worldDir,
+                   const std::filesystem::path &regionDir, World &world,
+                   const AnvilLoadOptions &options = {});
 void importWorld(const LoadedWorld &input, World &world);
 } // namespace redstone

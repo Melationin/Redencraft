@@ -81,14 +81,13 @@ def main():
         for field in fields[2:]:
             if not field:
                 continue
-            if len(field.split(';')) != 1:
-                raise SystemExit(f'face row {number}: expected one rectangle')
-            values = [int(value) for value in field.split(':')]
-            if len(values) != 4:
-                raise SystemExit(f'face row {number}: invalid rectangle')
-            if not (0 <= values[0] < values[1] <= 1_000_000 and
-                    0 <= values[2] < values[3] <= 1_000_000):
-                raise SystemExit(f'face row {number}: rectangle out of range')
+            for rect in field.split(';'):
+                values = [int(value) for value in rect.split(':')]
+                if len(values) != 4:
+                    raise SystemExit(f'face row {number}: invalid rectangle')
+                if not (0 <= values[0] < values[1] <= 1_000_000 and
+                        0 <= values[2] < values[3] <= 1_000_000):
+                    raise SystemExit(f'face row {number}: rectangle out of range')
     if face_keys != shaped_keys:
         raise SystemExit('face states do not equal useShapeForLightOcclusion states')
 

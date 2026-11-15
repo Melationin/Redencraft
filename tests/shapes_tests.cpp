@@ -32,8 +32,8 @@ int main() {
     require(eastGate[0].x0 == 6 && eastGate[0].x1 == 10 &&
                 eastGate[0].z1 == 16, "east gate collision rotates");
     auto gateOutline = outlineShape(gate.with("in_wall", "true"));
-    require(gateOutline.size() == 1 && gateOutline[0].y0 == 13 &&
-                gateOutline[0].y1 == 16, "in-wall gate outline");
+    require(gateOutline.size() == 1 && gateOutline[0].y0 == 0 &&
+                gateOutline[0].y1 == 13, "in-wall gate outline");
     w.rawSetBlock({1, 0, 0}, gate);
     auto joinedWall = wallUpdateShape(w, {0, 0, 0}, wall, Direction::East);
     require(joinedWall.get("east") != "none", "wall connects to gate across its axis");
@@ -126,6 +126,71 @@ int main() {
     require(faceSturdy(head, Direction::Up) &&
                 !faceSturdy(head, Direction::Down),
             "multi-box piston head has a sturdy outer face only");
+
+    // Stair corner shapes: inner/outer left/right, plus half mismatch stays straight.
+    {
+      World sw;
+      sw.loadChunk(0, 0);
+      const Pos sp{8, 64, 8};
+      const auto northBottom =
+          defaultState("oak_stairs").with("facing", "north").with("half", "bottom");
+      sw.rawSetBlock(sp, northBottom);
+      sw.rawSetBlock(sp.relative(Direction::North),
+                     defaultState("oak_stairs").with("facing", "west").with("half", "bottom"));
+      require(stairUpdateShape(sw, sp, sw.getBlock(sp)).getView("shape") == "outer_left",
+              "behind west-facing bottom stair creates outer_left");
+      sw.rawSetBlock(sp.relative(Direction::North),
+                     defaultState("oak_stairs").with("facing", "east").with("half", "bottom"));
+      require(stairUpdateShape(sw, sp, sw.getBlock(sp)).getView("shape") == "outer_right",
+              "behind east-facing bottom stair creates outer_right");
+      sw.rawSetBlock(sp.relative(Direction::North),
+                     defaultState("oak_stairs").with("facing", "west").with("half", "top"));
+      require(stairUpdateShape(sw, sp, sw.getBlock(sp)).getView("shape") == "straight",
+              "mismatched half ignores behind stair");
+      sw.rawSetBlock(sp.relative(Direction::North), airState());
+      sw.setBlock(sp.relative(Direction::South),
+                  defaultState("oak_stairs").with("facing", "west").with("half", "bottom"));
+      require(sw.getBlock(sp).getView("shape") == "inner_left",
+              "neighbor setBlock updates stair to inner_left");
+      sw.setBlock(sp.relative(Direction::South),
+                  defaultState("oak_stairs").with("facing", "east").with("half", "bottom"));
+      require(sw.getBlock(sp).getView("shape") == "inner_right",
+              "neighbor setBlock updates stair to inner_right");
+    }
+
+    // Fence and iron bars / glass pane connection rules.
+    {
+      World fw;
+      fw.loadChunk(0, 0);
+      const Pos fp{8, 64, 8};
+      fw.rawSetBlock(fp, defaultState("oak_fence"));
+      fw.setBlock(fp.relative(Direction::North), defaultState("spruce_fence"));
+      fw.setBlock(fp.relative(Direction::East), defaultState("nether_brick_fence"));
+      fw.setBlock(fp.relative(Direction::South),
+                  defaultState("oak_fence_gate").with("facing", "east"));
+      fw.setBlock(fp.relative(Direction::West), defaultState("oak_leaves"));
+      const auto f = fw.getBlock(fp);
+      require(f.getView("north") == "true", "wooden fence connects to wooden fence");
+      require(f.getView("east") == "false",
+              "wooden fence does not connect to nether_brick_fence");
+      require(f.getView("south") == "true",
+              "fence connects to perpendicular fence gate");
+      require(f.getView("west") == "false",
+              "fence does not connect to leaves exception");
+
+      const Pos gp{4, 64, 4};
+      fw.rawSetBlock(gp, defaultState("glass_pane"));
+      fw.setBlock(gp.relative(Direction::North), defaultState("iron_bars"));
+      fw.setBlock(gp.relative(Direction::East), defaultState("cobblestone_wall"));
+      fw.setBlock(gp.relative(Direction::South), defaultState("smooth_stone"));
+      fw.setBlock(gp.relative(Direction::West), defaultState("barrier"));
+      const auto g = fw.getBlock(gp);
+      require(g.getView("north") == "true" && g.getView("east") == "true" &&
+                  g.getView("south") == "true" && g.getView("west") == "false",
+              "glass pane connects to bars, walls, sturdy blocks, and skips barrier");
+      require(fw.getBlock(gp.relative(Direction::East)).getView("west") == "low",
+              "cobblestone wall connects to glass pane / bars");
+    }
     std::cout << "shape tests passed\n";
     return 0;
   } catch (const std::exception &e) {

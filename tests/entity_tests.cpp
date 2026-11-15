@@ -139,6 +139,19 @@ void itemRegistryAndDrops() {
           "rail drops itself");
   require(blockDrops(defaultState("tnt").with("unstable", "true")).empty(),
           "unstable TNT does not drop");
+  auto wireDrop = blockDrops(defaultState("redstone_wire"));
+  require(wireDrop.size() == 1 && wireDrop[0].id == "minecraft:redstone",
+          "redstone_wire drops minecraft:redstone");
+  auto wallTorchDrop = blockDrops(defaultState("redstone_wall_torch"));
+  require(wallTorchDrop.size() == 1 &&
+              wallTorchDrop[0].id == "minecraft:redstone_torch",
+          "redstone_wall_torch drops minecraft:redstone_torch");
+  require(blockItem(defaultState("wall_torch")) == "minecraft:torch",
+          "wall_torch maps to torch item");
+  require(blockItem(defaultState("water_cauldron")) == "minecraft:cauldron",
+          "water_cauldron maps to cauldron item");
+  require(blockItem(defaultState("fire")).empty(),
+          "fire has no item representation");
 }
 void itemFluids() {
   World water;

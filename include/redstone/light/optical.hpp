@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -65,15 +66,74 @@ struct GeometrySection {
   }
 };
 
-// Read-only view into a live World section. Conversion happens synchronously
-// on the world thread; the view is never stored or read by a worker.
+// Read-only view into a live World section. In standard mode conversion runs
+// synchronously on the world thread; in direct low-memory mode the worker
+// borrows live World sections under the resize lock and reads atomically.
 struct LightSectionView {
   bool empty = true;
-  std::uint8_t bits = 0; // 0 = single, 8 = cells8, 16 = cells16
+  std::uint8_t bits = 0; // 0 = single, 1..7 = packedWords, 8 = cells8, 16 = cells16
   BlockState::Id single = 0;
   std::span<const BlockState::Id> palette;
   std::span<const std::uint8_t> cells8;
   std::span<const std::uint16_t> cells16;
+  std::span<const std::uint64_t> packedWords;
+  // Keeps SectionStorage alive when borrowed in direct low-memory mode.
+  std::shared_ptr<const void> storageOwner;
+
+  static std::uint16_t unpackBits(std::uint8_t bitWidth,
+                                  std::span<const std::uint64_t> words,
+                                  std::size_t cell) noexcept {
+    const std::size_t perWord = std::size_t{64} / bitWidth;
+    const std::size_t wordIndex = cell / perWord;
+    const std::size_t shift = (cell % perWord) * bitWidth;
+    const std::uint64_t mask = (std::uint64_t{1} << bitWidth) - 1u;
+    return static_cast<std::uint16_t>((words[wordIndex] >> shift) & mask);
+  }
+
+  std::uint16_t paletteIndexAt(std::size_t cell) const noexcept {
+    if (bits == 8)
+      return cells8[cell];
+    if (bits == 16)
+      return cells16[cell];
+    if (bits >= 1 && bits <= 7)
+      return unpackBits(bits, packedWords, cell);
+    return 0;
+  }
+
+  std::uint16_t atomicPaletteIndexAt(std::size_t cell) const noexcept {
+    if (bits == 8) {
+      auto &slot = const_cast<std::uint8_t &>(cells8[cell]);
+      return std::atomic_ref<std::uint8_t>(slot).load(
+          std::memory_order_acquire);
+    }
+    if (bits == 16) {
+      auto &slot = const_cast<std::uint16_t &>(cells16[cell]);
+      return std::atomic_ref<std::uint16_t>(slot).load(
+          std::memory_order_acquire);
+    }
+    if (bits >= 1 && bits <= 7) {
+      const std::size_t perWord = std::size_t{64} / bits;
+      const std::size_t wordIndex = cell / perWord;
+      const std::size_t shift = (cell % perWord) * bits;
+      const std::uint64_t mask = (std::uint64_t{1} << bits) - 1u;
+      auto &slot = const_cast<std::uint64_t &>(packedWords[wordIndex]);
+      const std::uint64_t word =
+          std::atomic_ref<std::uint64_t>(slot).load(std::memory_order_acquire);
+      return static_cast<std::uint16_t>((word >> shift) & mask);
+    }
+    return 0;
+  }
+
+  BlockState::Id atomicStateAt(std::size_t cell) const noexcept {
+    if (bits == 0)
+      return single;
+    const std::uint16_t index = atomicPaletteIndexAt(cell);
+    // Palette slots are populated with release semantics before their index
+    // appears in words/cells; storage capacity prevents widening without lock.
+    auto &slot = const_cast<BlockState::Id &>(palette.data()[index]);
+    return std::atomic_ref<BlockState::Id>(slot).load(
+        std::memory_order_acquire);
+  }
 };
 
 GeometrySection makeLightGeometrySection(const LightOpticalTable &optical,

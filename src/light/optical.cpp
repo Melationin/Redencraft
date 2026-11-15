@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -16,7 +17,7 @@ namespace redstone {
 namespace {
 
 struct OfficialLightState {
-  std::string_view key;
+  const char *key;
   std::uint8_t emission;
   std::uint8_t dampening;
   bool canOcclude;
@@ -32,19 +33,25 @@ struct LightFaceRect {
   bool operator==(const LightFaceRect &) const = default;
 };
 
+struct LightFaceRectSpan {
+  std::uint16_t offset = 0;
+  std::uint8_t count = 0;
+  bool operator==(const LightFaceRectSpan &) const = default;
+};
+
 struct LightFaceShape {
-  LightFaceRect down{};
-  LightFaceRect up{};
-  LightFaceRect north{};
-  LightFaceRect south{};
-  LightFaceRect west{};
-  LightFaceRect east{};
+  LightFaceRectSpan down{};
+  LightFaceRectSpan up{};
+  LightFaceRectSpan north{};
+  LightFaceRectSpan south{};
+  LightFaceRectSpan west{};
+  LightFaceRectSpan east{};
   std::uint8_t present = 0;
   bool operator==(const LightFaceShape &) const = default;
 };
 
 struct OfficialLightFaceState {
-  std::string_view key;
+  const char *key;
   std::uint16_t shape;
 };
 
@@ -54,64 +61,74 @@ struct OfficialLightFaceState {
 const BlockLightProperties kUnsupportedLightProperties{};
 constexpr int kFaceScale = 1'000'000;
 
-const LightFaceRect *faceRect(const BlockLightProperties &properties,
-                              int direction) {
+std::span<const LightFaceRect> faceRects(const BlockLightProperties &properties,
+                                         int direction) {
   if (properties.occlusionShapeId >= std::size(kLightFaceShapes))
-    return nullptr;
+    return {};
   const LightFaceShape &shape = kLightFaceShapes[properties.occlusionShapeId];
   if ((shape.present & (1u << direction)) == 0)
-    return nullptr;
+    return {};
+  const LightFaceRectSpan *span = nullptr;
   switch (direction) {
   case 0:
-    return &shape.down;
+    span = &shape.down;
+    break;
   case 1:
-    return &shape.up;
+    span = &shape.up;
+    break;
   case 2:
-    return &shape.north;
+    span = &shape.north;
+    break;
   case 3:
-    return &shape.south;
+    span = &shape.south;
+    break;
   case 4:
-    return &shape.west;
+    span = &shape.west;
+    break;
   default:
-    return &shape.east;
+    span = &shape.east;
+    break;
   }
+  return {kLightFaceRects + span->offset, span->count};
 }
 
-bool faceUnionCovers(const LightFaceRect *first, const LightFaceRect *second) {
-  std::array<const LightFaceRect *, 2> rectangles{first, second};
-  std::array<int, 6> xs{};
-  std::size_t count = 2;
-  xs[0] = 0;
-  xs[1] = kFaceScale;
-  for (const LightFaceRect *rectangle : rectangles) {
-    if (!rectangle)
-      continue;
-    xs[count++] = std::clamp(rectangle->u0, 0, kFaceScale);
-    xs[count++] = std::clamp(rectangle->u1, 0, kFaceScale);
+bool faceUnionCovers(std::span<const LightFaceRect> first,
+                     std::span<const LightFaceRect> second) {
+  std::vector<int> xs;
+  xs.reserve(2 + (first.size() + second.size()) * 2);
+  xs.push_back(0);
+  xs.push_back(kFaceScale);
+  for (const auto &r : first) {
+    xs.push_back(std::clamp(r.u0, 0, kFaceScale));
+    xs.push_back(std::clamp(r.u1, 0, kFaceScale));
   }
-  std::sort(xs.begin(), xs.begin() + static_cast<std::ptrdiff_t>(count));
-  count = static_cast<std::size_t>(
-      std::unique(xs.begin(), xs.begin() + static_cast<std::ptrdiff_t>(count)) -
-      xs.begin());
-  for (std::size_t i = 1; i < count; ++i) {
+  for (const auto &r : second) {
+    xs.push_back(std::clamp(r.u0, 0, kFaceScale));
+    xs.push_back(std::clamp(r.u1, 0, kFaceScale));
+  }
+  std::sort(xs.begin(), xs.end());
+  xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
+  std::vector<std::pair<int, int>> intervals;
+  intervals.reserve(first.size() + second.size());
+  for (std::size_t i = 1; i < xs.size(); ++i) {
     if (xs[i - 1] == xs[i])
       continue;
     const int midpoint = (xs[i - 1] + xs[i]) / 2;
-    std::array<std::pair<int, int>, 2> intervals{};
-    std::size_t intervalsCount = 0;
-    for (const LightFaceRect *rectangle : rectangles) {
-      if (!rectangle || midpoint < rectangle->u0 || midpoint >= rectangle->u1)
-        continue;
-      intervals[intervalsCount++] = {
-          std::max(0, rectangle->v0), std::min(kFaceScale, rectangle->v1)};
+    intervals.clear();
+    for (const auto &r : first) {
+      if (midpoint >= r.u0 && midpoint < r.u1)
+        intervals.emplace_back(std::max(0, r.v0), std::min(kFaceScale, r.v1));
     }
-    std::sort(intervals.begin(),
-              intervals.begin() + static_cast<std::ptrdiff_t>(intervalsCount));
+    for (const auto &r : second) {
+      if (midpoint >= r.u0 && midpoint < r.u1)
+        intervals.emplace_back(std::max(0, r.v0), std::min(kFaceScale, r.v1));
+    }
+    std::sort(intervals.begin(), intervals.end());
     int covered = 0;
-    for (std::size_t j = 0; j < intervalsCount; ++j) {
-      if (intervals[j].first > covered)
+    for (const auto &[v0, v1] : intervals) {
+      if (v0 > covered)
         return false;
-      covered = std::max(covered, intervals[j].second);
+      covered = std::max(covered, v1);
     }
     if (covered < kFaceScale)
       return false;
@@ -124,16 +141,16 @@ bool faceUnionCovers(const LightFaceRect *first, const LightFaceRect *second) {
 namespace light_internal {
 
 bool hasLightFaceRect(const BlockLightProperties &properties, int direction) {
-  return faceRect(properties, direction) != nullptr;
+  return !faceRects(properties, direction).empty();
 }
 
 bool faceShapesOcclude(const BlockLightProperties &from,
                        const BlockLightProperties &to, int direction) {
   if (!from.supported || !to.supported)
     return true;
-  const LightFaceRect *first = faceRect(from, direction);
-  const LightFaceRect *second = faceRect(to, direction ^ 1);
-  if (!first && !second)
+  const auto first = faceRects(from, direction);
+  const auto second = faceRects(to, direction ^ 1);
+  if (first.empty() && second.empty())
     return false;
   return faceUnionCovers(first, second);
 }
@@ -184,10 +201,22 @@ GeometrySection makeLightGeometrySection(const LightOpticalTable &optical,
     result.unknown = klass.properties.supported ? 0 : kLightVolume;
     return result;
   }
-  if (section.bits != 8 && section.bits != 16)
+  const bool validBits =
+      (section.bits >= 1 && section.bits <= 8) || section.bits == 16;
+  if (!validBits)
     throw std::runtime_error("World section has invalid palette width");
   if (section.palette.empty())
     throw std::runtime_error("World section has an empty palette");
+  if (section.bits == 8 && section.cells8.size() < kLightVolume)
+    throw std::runtime_error("World section has truncated 8-bit indices");
+  if (section.bits == 16 && section.cells16.size() < kLightVolume)
+    throw std::runtime_error("World section has truncated 16-bit indices");
+  if (section.bits >= 1 && section.bits <= 7) {
+    const std::size_t perWord = std::size_t{64} / section.bits;
+    const std::size_t requiredWords = (kLightVolume + perWord - 1) / perWord;
+    if (section.packedWords.size() < requiredWords)
+      throw std::runtime_error("World section has truncated packed words");
+  }
 
   std::vector<std::uint8_t> palette;
   palette.reserve(section.palette.size());
@@ -196,8 +225,7 @@ GeometrySection makeLightGeometrySection(const LightOpticalTable &optical,
 
   result.cells = std::make_unique<GeometrySection::Cells>();
   for (std::size_t i = 0; i < kLightVolume; ++i) {
-    const std::uint16_t index =
-        section.bits == 8 ? section.cells8[i] : section.cells16[i];
+    const std::uint16_t index = section.paletteIndexAt(i);
     if (index >= palette.size())
       throw std::runtime_error("World section palette index out of range");
     (*result.cells)[i] = palette[index];
@@ -226,9 +254,10 @@ BlockLightProperties officialLightProperties(std::string_view blockName,
   const auto found = std::lower_bound(
       std::begin(kOfficialLightStates), std::end(kOfficialLightStates), key,
       [](const OfficialLightState &entry, const std::string &wanted) {
-        return entry.key < wanted;
+        return std::string_view(entry.key) < wanted;
       });
-  if (found == std::end(kOfficialLightStates) || found->key != key)
+  if (found == std::end(kOfficialLightStates) ||
+      std::string_view(found->key) != key)
     return unsupportedLightProperties();
   BlockLightProperties result;
   result.emission = found->emission;
@@ -242,9 +271,10 @@ BlockLightProperties officialLightProperties(std::string_view blockName,
         std::begin(kOfficialLightFaceStates),
         std::end(kOfficialLightFaceStates), key,
         [](const OfficialLightFaceState &entry, const std::string &wanted) {
-          return entry.key < wanted;
+          return std::string_view(entry.key) < wanted;
         });
-    if (face == std::end(kOfficialLightFaceStates) || face->key != key) {
+    if (face == std::end(kOfficialLightFaceStates) ||
+        std::string_view(face->key) != key) {
       result.supported = false;
       return result;
     }

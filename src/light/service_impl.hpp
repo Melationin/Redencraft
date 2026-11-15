@@ -106,6 +106,13 @@ private:
   void loadGeometry(std::uint64_t key, LightChunkInput &input);
   GeometrySection *geometrySection(std::uint64_t key, int sectionY);
   const GeometrySection *geometrySection(std::uint64_t key, int sectionY) const;
+  std::optional<LightSectionView> readDirectSection(std::uint64_t key,
+                                                    int sectionY) const;
+  struct SectionMetaSummary {
+    bool empty = true;
+    std::uint16_t unknown = 0;
+  };
+  SectionMetaSummary sectionMetaSummary(std::uint64_t key, int sectionY) const;
   const std::shared_ptr<LightChunkSnapshot> &
   storedLayerSnapshot(LightLayer layer, std::uint64_t key) const;
   std::shared_ptr<LightChunkSnapshot>
@@ -158,6 +165,13 @@ private:
   void publishIndependentLayer(const light_internal::PreparedBatch &prepared,
                                light_internal::LayerOutcome &outcome,
                                LightLayer layer);
+  std::uint8_t persistedBoundaryMask(
+      std::uint64_t key,
+      const light_internal::FlatSet<std::uint64_t, light_internal::UInt64Hash>
+          &removed,
+      const light_internal::FlatMap<std::uint64_t,
+                                    std::shared_ptr<LightChunkSnapshot>,
+                                    light_internal::UInt64Hash> &ready) const;
   void executeLayers(const light_internal::PreparedBatch &prepared);
   void processBatch(std::vector<light_internal::PendingChunk> &batch);
 
@@ -174,6 +188,9 @@ private:
   light_internal::FlatMap<std::uint64_t, light_internal::GeometryChunk,
                           light_internal::UInt64Hash>
       geometry;
+  light_internal::FlatMap<std::uint64_t, light_internal::DirectChunkMeta,
+                          light_internal::UInt64Hash>
+      directChunks;
   std::unique_ptr<
       light_internal::GrowableSpscRing<light_internal::GeometryInput>>
       inputQueue;
@@ -209,6 +226,10 @@ private:
   light_internal::FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>,
                           light_internal::UInt64Hash>
       lastReadySky;
+  // Loaded chunks whose current light still matches persisted isLightOn data
+  // without dynamic edits or propagation modifications.
+  light_internal::FlatSet<std::uint64_t, light_internal::UInt64Hash>
+      persistedLightChunks;
   // Last network-visible complete metadata and dirty sections accumulated
   // while one layer was incomplete.
   light_internal::FlatMap<std::uint64_t, light_internal::ProtocolBaseMeta,

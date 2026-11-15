@@ -170,6 +170,24 @@ void LightValues::ensureMixed() {
   }
 }
 
+const GeometryChunk *LightEngineHost::geometryChunk(std::uint64_t key) const {
+  const std::size_t slot = chunkL1Slot(key);
+  GeoCacheEntry &entry = geoCache_[slot];
+  if (entry.valid && entry.key == key)
+    return entry.chunk;
+  entry.key = key;
+  const auto found = geometry.find(key);
+  entry.chunk = found == geometry.end() ? nullptr : &found->second;
+  entry.valid = true;
+  return entry.chunk;
+}
+
+bool LightEngineHost::hasChunkGeometry(std::uint64_t key) const {
+  if (geometryChunk(key) != nullptr)
+    return true;
+  return directWorld.context && directChunks.contains(key);
+}
+
 const GeometrySection *LightEngineHost::geometrySection(std::uint64_t key,
                                                         int sectionY) const {
   const GeometryChunk *chunk = geometryChunk(key);
@@ -181,23 +199,83 @@ const GeometrySection *LightEngineHost::geometrySection(std::uint64_t key,
   return &chunk->sections[static_cast<std::size_t>(index)];
 }
 
+const LightEngineHost::DirectSectionCacheEntry *
+LightEngineHost::lookupDirectSectionCache(std::uint64_t key,
+                                          int sectionY) const {
+  if (!directWorld.context)
+    return nullptr;
+  const int index = sectionY - minBlockSectionY;
+  if (index < 0 || index >= blockSectionCount)
+    return nullptr;
+  const std::size_t slot =
+      (chunkL1Slot(key) ^ (static_cast<std::size_t>(sectionY) * 29u)) & 63u;
+  DirectSectionCacheEntry &entry = directSectionCache_[slot];
+  if (entry.valid && entry.key == key && entry.sectionY == sectionY)
+    return entry.present ? &entry : nullptr;
+  entry.key = key;
+  entry.sectionY = sectionY;
+  entry.valid = true;
+  const auto metaIt = directChunks.find(key);
+  if (metaIt == directChunks.end()) {
+    entry.present = false;
+    entry.view = LightSectionView{};
+    return nullptr;
+  }
+  entry.present = true;
+  entry.view = directWorld.readSection(
+      directWorld.context, metaIt->second.chunkX, metaIt->second.chunkZ,
+      sectionY);
+  return &entry;
+}
+
+std::optional<LightSectionView>
+LightEngineHost::directSectionView(std::uint64_t key, int sectionY) const {
+  const auto *entry = lookupDirectSectionCache(key, sectionY);
+  if (!entry)
+    return std::nullopt;
+  return entry->view;
+}
+
+std::optional<bool>
+LightEngineHost::geometrySectionNonEmpty(std::uint64_t key,
+                                         int sectionY) const {
+  if (const GeometrySection *geo = geometrySection(key, sectionY))
+    return !geo->empty;
+  if (const auto *entry = lookupDirectSectionCache(key, sectionY))
+    return !entry->view.empty;
+  return std::nullopt;
+}
+
+const BlockLightProperties *
+LightEngineHost::sectionPropertiesAt(std::uint64_t key, int x, int y,
+                                     int z) const {
+  if (y < minBlockSectionY * 16 ||
+      y >= (minBlockSectionY + blockSectionCount) * 16)
+    return &emptyLightProperties();
+  const int sectionY = y >> 4;
+  if (const GeometrySection *geometry = geometrySection(key, sectionY)) {
+    const std::uint16_t classId =
+        geometry->uniform ? geometry->uniformClass
+                          : geometry->at(lightIndex(x, y, z));
+    return &opticalClass(classId).properties;
+  }
+  if (const auto *entry = lookupDirectSectionCache(key, sectionY)) {
+    const BlockState::Id state = entry->view.atomicStateAt(lightIndex(x, y, z));
+    return &propertiesForState(state);
+  }
+  return nullptr;
+}
+
 const BlockLightProperties &
 LightEngineHost::blockPropertiesAt(int x, int y, int z,
                                    bool &incomplete) const {
-  if (y < minBlockSectionY * 16 ||
-      y >= (minBlockSectionY + blockSectionCount) * 16)
-    return emptyLightProperties();
-  const GeometrySection *geometry =
-      geometrySection(chunkKey(x >> 4, z >> 4), y >> 4);
-  if (!geometry)
+  const BlockLightProperties *props =
+      sectionPropertiesAt(chunkKey(x >> 4, z >> 4), x, y, z);
+  if (!props)
     return unsupportedLightProperties();
-  const std::uint16_t classId =
-      geometry->uniform ? geometry->uniformClass
-                        : geometry->at(lightIndex(x, y, z));
-  const auto &properties = opticalClass(classId).properties;
-  if (!properties.supported)
+  if (!props->supported)
     incomplete = true;
-  return properties;
+  return *props;
 }
 
 const std::shared_ptr<LightChunkSnapshot> &

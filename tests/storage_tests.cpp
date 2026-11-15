@@ -469,6 +469,40 @@ public:
 };
 
 int main() try {
+  {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     "redstone-selected-data-packs-test";
+    std::filesystem::create_directories(dir / "datapacks" / "first");
+    std::filesystem::create_directories(dir / "datapacks" / "second");
+    nbt::RootTag root;
+    root.value.type = 10;
+    auto &data = root.value.compound["Data"];
+    data.type = 10;
+    auto &packs = data.compound["DataPacks"];
+    packs.type = 10;
+    auto &enabled = packs.compound["Enabled"];
+    enabled.type = 9;
+    enabled.listElementType = 8;
+    for (const char *id : {"vanilla", "file/first", "file/missing", "file/second",
+                           "file/../escape", "custom:provider"}) {
+      nbt::Tag entry;
+      entry.type = 8;
+      entry.text = id;
+      enabled.list.push_back(std::move(entry));
+    }
+    auto selected = selectWorldDataPacks(dir, root);
+    assert((selected.paths == std::vector<std::filesystem::path>{
+                                  dir / "datapacks" / "first",
+                                  dir / "datapacks" / "second"}));
+    assert(selected.diagnostics.size() == 3);
+    enabled.type = 3;
+    selected = selectWorldDataPacks(dir, root);
+    assert(selected.paths.empty() && selected.diagnostics.size() == 1);
+    std::filesystem::remove(dir / "datapacks" / "first");
+    std::filesystem::remove(dir / "datapacks" / "second");
+    std::filesystem::remove(dir / "datapacks");
+    std::filesystem::remove(dir);
+  }
   const StorageFixture fixture;
   const auto &p = fixture.path;
   {
@@ -907,6 +941,134 @@ int main() try {
         std::vector<PersistentTicketRecord>{
             {-13, -16, "minecraft:forced", 31, 0},
             {-14, -16, "minecraft:portal", 33, 257}});
+  }
+  {
+    // Non-full border chunk configuration + streaming loadAnvilWorldInto parity.
+    const auto borderDir = p / "border_skip_world";
+    std::filesystem::create_directories(borderDir / "region");
+    Bytes lv = root();
+    tag(lv, 10, "Data");
+    integer(lv, "DataVersion", 4786);
+    longtag(lv, "Time", 100);
+    lv.push_back(0);
+    lv.push_back(0);
+    write(borderDir / "level.dat", compressed(lv, 31));
+
+    // Chunk (0, 0): minecraft:full with section Y=0 all smooth_stone and Y=4 mixed with chest.
+    Bytes fullChunk = root();
+    integer(fullChunk, "DataVersion", 4786);
+    integer(fullChunk, "xPos", 0);
+    integer(fullChunk, "zPos", 0);
+    stringtag(fullChunk, "Status", "minecraft:full");
+    tag(fullChunk, 9, "sections");
+    fullChunk.push_back(10);
+    u32(fullChunk, 2);
+    // Section Y=0: single palette smooth_stone
+    tag(fullChunk, 1, "Y");
+    fullChunk.push_back(0);
+    tag(fullChunk, 10, "block_states");
+    tag(fullChunk, 9, "palette");
+    fullChunk.push_back(10);
+    u32(fullChunk, 1);
+    stringtag(fullChunk, "Name", "minecraft:smooth_stone");
+    fullChunk.push_back(0);
+    fullChunk.push_back(0);
+    fullChunk.push_back(0);
+    // Section Y=4: air (idx 0) + chest (idx 1) at local slot 0 ({0, 64, 0})
+    tag(fullChunk, 1, "Y");
+    fullChunk.push_back(4);
+    tag(fullChunk, 10, "block_states");
+    tag(fullChunk, 9, "palette");
+    fullChunk.push_back(10);
+    u32(fullChunk, 2);
+    stringtag(fullChunk, "Name", "minecraft:air");
+    fullChunk.push_back(0);
+    stringtag(fullChunk, "Name", "minecraft:chest");
+    tag(fullChunk, 10, "Properties");
+    stringtag(fullChunk, "facing", "north");
+    stringtag(fullChunk, "type", "single");
+    fullChunk.push_back(0);
+    fullChunk.push_back(0);
+    tag(fullChunk, 12, "data");
+    u32(fullChunk, 256);
+    for (int i = 0; i < 256; ++i) {
+      const uint64_t val = (i == 0) ? 1ULL : 0ULL;
+      for (int b = 7; b >= 0; --b)
+        fullChunk.push_back(uint8_t(val >> (b * 8)));
+    }
+    fullChunk.push_back(0);
+    fullChunk.push_back(0);
+    fullChunk.push_back(0);
+
+    // Chunk (1, 0): incomplete border proto-chunk (minecraft:structure_starts).
+    Bytes protoChunk = root();
+    integer(protoChunk, "DataVersion", 4786);
+    integer(protoChunk, "xPos", 1);
+    integer(protoChunk, "zPos", 0);
+    stringtag(protoChunk, "Status", "minecraft:structure_starts");
+    protoChunk.push_back(0);
+
+    Bytes rgn(8192, 0);
+    auto appendChunk = [&](int slot, const Bytes &raw) {
+      const Bytes z = compressed(raw, 15);
+      Bytes payload;
+      u32(payload, uint32_t(z.size() + 1));
+      payload.push_back(2);
+      payload.insert(payload.end(), z.begin(), z.end());
+      while (payload.size() % 4096)
+        payload.push_back(0);
+      const uint32_t off = uint32_t(rgn.size() / 4096);
+      const uint32_t sec = uint32_t(payload.size() / 4096);
+      rgn[slot * 4] = uint8_t(off >> 16);
+      rgn[slot * 4 + 1] = uint8_t(off >> 8);
+      rgn[slot * 4 + 2] = uint8_t(off);
+      rgn[slot * 4 + 3] = uint8_t(sec);
+      rgn.insert(rgn.end(), payload.begin(), payload.end());
+    };
+    appendChunk(0, fullChunk);
+    appendChunk(1, protoChunk);
+    write(borderDir / "region" / "r.0.0.mca", rgn);
+    // Vanilla/Chunky also create 0-byte .mca files for empty regions.
+    write(borderDir / "region" / "r.2.0.mca", Bytes{});
+
+    // Default behavior (skipNonFullChunks = false) rejects incomplete border chunk.
+    bool threwLoaded = false;
+    try {
+      (void)loadAnvilWorld(borderDir, borderDir / "region");
+    } catch (const nbt::Error &) {
+      threwLoaded = true;
+    }
+    assert(threwLoaded);
+
+    bool threwInto = false;
+    try {
+      World strictWorld;
+      (void)loadAnvilWorldInto(borderDir, borderDir / "region", strictWorld);
+    } catch (const nbt::Error &) {
+      threwInto = true;
+    }
+    assert(threwInto);
+
+    // Configurable skipNonFullChunks = true skips (1, 0) and streams (0, 0).
+    AnvilLoadOptions skipOpts;
+    skipOpts.skipNonFullChunks = true;
+    LoadedWorld legacySkipped =
+        loadAnvilWorld(borderDir, borderDir / "region", skipOpts);
+    assert(legacySkipped.chunks == (std::vector<std::pair<int, int>>{{0, 0}}));
+    World legacyWorld;
+    importWorld(legacySkipped, legacyWorld);
+
+    World streamedWorld;
+    AnvilWorldImportSummary summary = loadAnvilWorldInto(
+        borderDir, borderDir / "region", streamedWorld, skipOpts);
+    assert(summary.loadedChunks == (std::vector<std::pair<int, int>>{{0, 0}}));
+    assert(summary.skippedNonFullChunks == 1);
+    assert(streamedWorld.isChunkLoaded(0, 0));
+    assert(!streamedWorld.isChunkLoaded(1, 0));
+    assert(streamedWorld.getBlock({5, 10, 5}) == legacyWorld.getBlock({5, 10, 5}));
+    assert(streamedWorld.getBlock({0, 64, 0}).is(Blocks::CHEST));
+    assert(streamedWorld.containerEntity({0, 64, 0}) != nullptr);
+    assert(streamedWorld.allBlocks() == legacyWorld.allBlocks());
   }
   return 0;
 } catch (const std::exception &failure) {

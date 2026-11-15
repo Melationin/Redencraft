@@ -38,15 +38,20 @@ int slopeFindDistance(const Fluid &fluid) { return fluid.slopeFindDistance(); }
 int tickDelay(const Fluid &fluid) { return fluid.tickDelay(); }
 
 // FlowingFluid.canHoldAnyFluid (FlowingFluid.java:410-427): a
-// LiquidBlockContainer always holds fluid whatever its collision shape says,
-// otherwise a non-blocking-motion state does, minus the block classes the
-// vanilla test excludes. Doors, signs, ladders, sugar cane, bubble columns,
-// portals and structure voids are not registered here, so the exclusion list
-// has no member in this subset yet.
+// LiquidBlockContainer always holds fluid whatever its collision shape says;
+// otherwise a non-blocking-motion state does, minus doors, signs, ladders,
+// sugar cane, bubble columns, portals and structure voids.
 bool canHoldAnyFluid(const BlockState &state) {
   if (state.block().isLiquidContainer())
     return true;
-  return !blocksMotion(state);
+  if (blocksMotion(state))
+    return false;
+  return !state.block().hasClassFlag(BlockClassFlag::Door) &&
+         !state.block().hasClassFlag(BlockClassFlag::Sign) &&
+         !state.is(Blocks::LADDER) && !state.is(Blocks::SUGAR_CANE) &&
+         !state.is(Blocks::BUBBLE_COLUMN) && !state.is(Blocks::NETHER_PORTAL) &&
+         !state.is(Blocks::END_PORTAL) && !state.is(Blocks::END_GATEWAY) &&
+         !state.is(Blocks::STRUCTURE_VOID);
 }
 
 // FlowingFluid.canHoldSpecificFluid (FlowingFluid.java:433-435): a container
@@ -56,9 +61,7 @@ bool canHoldSpecificFluid(World &, Pos, const BlockState &state,
                           const Fluid &newFluid) {
   if (!state.block().isLiquidContainer())
     return true;
-  // SimpleWaterloggedBlock.canPlaceLiquid(level, pos, state, type) is
-  // `type == Fluids.WATER`, independent of the state and of the level.
-  return newFluid.is(Fluids::water());
+  return canPlaceLiquid(state, newFluid);
 }
 
 // FlowingFluid.canHoldFluid: canHoldAnyFluid(state) && canHoldSpecificFluid
@@ -837,7 +840,19 @@ bool isWaterloggedHost(const BlockState &state) {
   return state.hasProperty("waterlogged");
 }
 
-bool canPlaceLiquid(const BlockState &, const Fluid &type) {
+namespace {
+bool isNonFillableLiquidContainer(const BlockState &state) {
+  // SlabBlock.java: canPlaceLiquid / placeLiquid reject double slabs.
+  if (state.block().isSlab() && state.getView("type") == "double")
+    return true;
+  return state.is(Blocks::SEAGRASS) || state.is(Blocks::TALL_SEAGRASS) ||
+         state.is(Blocks::KELP) || state.is(Blocks::KELP_PLANT);
+}
+} // namespace
+
+bool canPlaceLiquid(const BlockState &state, const Fluid &type) {
+  if (isNonFillableLiquidContainer(state))
+    return false;
   // SimpleWaterloggedBlock.canPlaceLiquid ignores the level and the current
   // waterlogged value: any water source may fill any waterlogged host, and
   // nothing else may. The dry/wet decision belongs to placeLiquid.
@@ -846,7 +861,8 @@ bool canPlaceLiquid(const BlockState &, const Fluid &type) {
 
 bool placeLiquid(World &world, Pos pos, const BlockState &state,
                  const FluidState &fluidState) {
-  if (waterloggedOf(state) || !fluidState.is(Fluids::water()))
+  if (isNonFillableLiquidContainer(state) || waterloggedOf(state) ||
+      !fluidState.is(Fluids::water()))
     return false;
   world.setBlock(pos,
                  state.with(PropertyKind::Waterlogged, std::uint8_t{1}), 3);

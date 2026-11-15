@@ -1,19 +1,34 @@
 #include "redstone/engine.hpp"
+#include "redstone/block_tags.hpp"
+#include "redstone/containers.hpp"
 #include "redstone/entity.hpp"
 #include "redstone/fluid_flow.hpp"
 #include "redstone/light.hpp"
 #include "redstone/piston.hpp"
 #include "redstone/rail.hpp"
+#include "redstone/random_tick.hpp"
+#include "redstone/redstone.hpp"
 #include "redstone/shapes.hpp"
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
 
 namespace redstone {
+BlockState rotatePillar(BlockState state, Rotation rotation) {
+  if (rotation != Rotation::Clockwise90 &&
+      rotation != Rotation::Counterclockwise90)
+    return state;
+  const auto axis = state.getView("axis");
+  if (axis == "x") return state.with("axis", "z");
+  if (axis == "z") return state.with("axis", "x");
+  return state;
+}
 namespace {
 // Java long arithmetic wraps modulo 2^64, including subTickCount++.
 std::int64_t nextSubTick(std::int64_t value) {
@@ -250,6 +265,9 @@ const std::vector<ItemType> &itemRegistry() {
     add("minecraft:detector_rail");
     add("minecraft:activator_rail");
     add("minecraft:minecart", 1);
+    for (const auto *axe : {"wooden_axe", "copper_axe", "stone_axe", "golden_axe",
+                            "iron_axe", "diamond_axe", "netherite_axe"})
+      add(axe, 1);
     return result;
   }();
   return entries;
@@ -270,18 +288,26 @@ namespace {
 // ScheduledTick.UNIQUE_TICK_HASH hashes the position and the ticked object's
 // identity. The target type is the queue's template parameter: Block for block
 // ticks and Fluid for fluid ticks, both interned singletons.
+constexpr std::uint64_t packTickPos(Pos pos) noexcept {
+  return ((static_cast<std::uint64_t>(pos.x) & 0x3FFFFFFull) << 38) |
+         ((static_cast<std::uint64_t>(pos.z) & 0x3FFFFFFull) << 12) |
+         (static_cast<std::uint64_t>(pos.y) & 0xFFFull);
+}
+constexpr Pos unpackTickPos(std::uint64_t packed) noexcept {
+  return Pos{
+      static_cast<int>(static_cast<std::int64_t>(packed) >> 38),
+      static_cast<int>(static_cast<std::int64_t>(packed << 52) >> 52),
+      static_cast<int>(static_cast<std::int64_t>(packed << 26) >> 38),
+  };
+}
 template <class Target> struct TickKey {
-  Pos pos;
+  std::uint64_t packedPos = 0;
   const Target *target = nullptr;
 };
+static_assert(sizeof(TickKey<Block>) == 16);
 template <class Target>
 std::size_t tickKeyHash(const TickKey<Target> &key) {
-  auto hash = static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.pos.x)) *
-              0x9E3779B97F4A7C15ull;
-  hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.pos.y)) *
-          0xC2B2AE3D27D4EB4Full;
-  hash ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.pos.z)) *
-          0x165667B19E3779F9ull;
+  auto hash = key.packedPos * 0x9E3779B97F4A7C15ull;
   hash ^= static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(key.target)) *
           0x9E3779B185EBCA87ull;
   hash ^= hash >> 29;
@@ -291,21 +317,22 @@ std::size_t tickKeyHash(const TickKey<Target> &key) {
 }
 template <class Target>
 bool tickKeyEquals(const TickKey<Target> &a, const TickKey<Target> &b) {
-  return a.pos == b.pos && a.target == b.target;
+  return a.packedPos == b.packedPos && a.target == b.target;
 }
-// Open-addressed set of (position, block) keys with tombstone deletion and a
-// capacity-preserving clear, replacing a node-allocating std::unordered_set.
+// Open-addressed set of (packedPos, target) keys with tombstone deletion,
+// capacity-preserving clear, and periodic/empty shrink support.
 template <class Target> class TickKeySet {
 public:
   std::size_t size() const { return count_; }
+  std::size_t capacity() const { return slots_.size(); }
   bool contains(const TickKey<Target> &key) const { return slotOf(key) != kNone; }
   bool insert(const TickKey<Target> &key) {
     if (slots_.empty())
-      rehash(64);
+      rehash(16);
     if (slotOf(key) != kNone)
       return false;
     if ((used_ + 1) * 3 >= slots_.size() * 2)
-      rehash(roundUp(std::max<std::size_t>(64, (count_ + 1) * 4)));
+      rehash(roundUp(std::max<std::size_t>(16, (count_ + 1) * 2)));
     std::size_t index = tickKeyHash(key) & mask_;
     std::size_t empty = kNone;
     for (;;) {
@@ -334,12 +361,28 @@ public:
     std::fill(state_.begin(), state_.end(), static_cast<std::uint8_t>(kEmpty));
     count_ = used_ = 0;
   }
+  void release() {
+    std::vector<TickKey<Target>>{}.swap(slots_);
+    std::vector<std::uint8_t>{}.swap(state_);
+    mask_ = count_ = used_ = 0;
+  }
+  void compactIfNeeded() {
+    if (count_ == 0) {
+      if (!slots_.empty())
+        release();
+      return;
+    }
+    const std::size_t cap = slots_.size();
+    const std::size_t tombstones = used_ - count_;
+    if ((cap > 32 && count_ * 6 <= cap) || (cap > 32 && tombstones * 2 >= cap))
+      rehash(roundUp(std::max<std::size_t>(16, (count_ + 1) * 2)));
+  }
 
 private:
   static constexpr std::uint8_t kEmpty = 0, kUsed = 1, kDeleted = 2;
   static constexpr std::size_t kNone = static_cast<std::size_t>(-1);
   static std::size_t roundUp(std::size_t value) {
-    std::size_t power = 64;
+    std::size_t power = 16;
     while (power < value)
       power <<= 1;
     return power;
@@ -492,17 +535,44 @@ private:
 // ticked object stays a typed pointer instead of an erased one.
 // ---------------------------------------------------------------------------
 template <class Target> struct QueuedTick {
-  ScheduledTick tick;
+  std::uint64_t packedPos = 0;
   const Target *target = nullptr;
+  std::int64_t trigger = 0;
+  std::int32_t priority = 0;
+  std::int32_t order = 0;
+
+  static QueuedTick fromScheduled(const ScheduledTick &tick,
+                                  const Target *t) noexcept {
+    return QueuedTick{packTickPos(tick.pos), t, tick.trigger,
+                      static_cast<std::int32_t>(tick.priority),
+                      static_cast<std::int32_t>(tick.order)};
+  }
+  ScheduledTick toBlockScheduledTick() const {
+    return ScheduledTick{unpackTickPos(packedPos),
+                         target ? BlockRef(*target) : BlockRef{}, trigger,
+                         priority, static_cast<std::int64_t>(order)};
+  }
+  ScheduledTick toFluidScheduledTick() const {
+    return ScheduledTick{unpackTickPos(packedPos), BlockRef{}, trigger,
+                         priority, static_cast<std::int64_t>(order)};
+  }
 };
+static_assert(sizeof(QueuedTick<Block>) == 32);
+static_assert(sizeof(QueuedTick<Fluid>) == 32);
 template <class Target> struct QueuedDrainOrder {
   bool operator()(const QueuedTick<Target> &a, const QueuedTick<Target> &b) const {
-    return ScheduledTickDrainOrder{}(a.tick, b.tick);
+    if (a.trigger != b.trigger)
+      return a.trigger > b.trigger;
+    if (a.priority != b.priority)
+      return a.priority > b.priority;
+    return a.order > b.order;
   }
 };
 template <class Target> struct QueuedIntraOrder {
   bool operator()(const QueuedTick<Target> &a, const QueuedTick<Target> &b) const {
-    return ScheduledTickIntraOrder{}(a.tick, b.tick);
+    if (a.priority != b.priority)
+      return a.priority > b.priority;
+    return a.order > b.order;
   }
 };
 
@@ -515,29 +585,57 @@ template <class Target> struct ChunkTicksOf {
   }
   std::size_t count() const { return heap.size(); }
   bool has(Pos pos, const Target *target) const {
-    return ticksPerPosition.contains(TickKey<Target>{pos, target});
+    return ticksPerPosition.contains(TickKey<Target>{packTickPos(pos), target});
   }
-  void push(const ScheduledTick &tick, const Target *target) {
-    heap.push_back(QueuedTick<Target>{tick, target});
+  void releaseStorage() {
+    std::vector<QueuedTick<Target>>{}.swap(heap);
+    ticksPerPosition.release();
+  }
+  void compact() {
+    if (heap.empty()) {
+      if (heap.capacity() > 0 || ticksPerPosition.capacity() > 0)
+        releaseStorage();
+      return;
+    }
+    if (heap.capacity() > 32 && heap.size() * 4 <= heap.capacity()) {
+      std::vector<QueuedTick<Target>> shrunk;
+      shrunk.reserve(std::max<std::size_t>(16, heap.size() * 2));
+      shrunk.assign(heap.begin(), heap.end());
+      heap.swap(shrunk);
+    }
+    ticksPerPosition.compactIfNeeded();
+  }
+  QueuedTick<Target> push(const ScheduledTick &tick, const Target *target) {
+    const auto entry = QueuedTick<Target>::fromScheduled(tick, target);
+    heap.push_back(entry);
     std::push_heap(heap.begin(), heap.end(), QueuedDrainOrder<Target>{});
+    return entry;
   }
-  bool schedule(const ScheduledTick &tick, const Target *target) {
-    if (!ticksPerPosition.insert(TickKey<Target>{tick.pos, target}))
+  bool schedule(const ScheduledTick &tick, const Target *target,
+                QueuedTick<Target> *addedOut = nullptr) {
+    const auto packedPos = packTickPos(tick.pos);
+    if (!ticksPerPosition.insert(TickKey<Target>{packedPos, target}))
       return false;
-    push(tick, target);
+    const auto entry = push(tick, target);
+    if (addedOut)
+      *addedOut = entry;
     return true;
   }
-  void scheduleUnchecked(const ScheduledTick &tick, const Target *target) {
+  QueuedTick<Target> scheduleUnchecked(const ScheduledTick &tick,
+                                       const Target *target) {
     // LevelChunkTicks.scheduleUnchecked: saved lists may repeat an entry; the
     // duplicates stay in the queue while the set records one of them.
-    ticksPerPosition.insert(TickKey<Target>{tick.pos, target});
-    push(tick, target);
+    ticksPerPosition.insert(TickKey<Target>{packTickPos(tick.pos), target});
+    return push(tick, target);
   }
   QueuedTick<Target> poll() {
     std::pop_heap(heap.begin(), heap.end(), QueuedDrainOrder<Target>{});
     QueuedTick<Target> entry = heap.back();
     heap.pop_back();
-    ticksPerPosition.erase(TickKey<Target>{entry.tick.pos, entry.target});
+    ticksPerPosition.erase(TickKey<Target>{entry.packedPos, entry.target});
+    if (heap.empty() &&
+        (heap.capacity() > 64 || ticksPerPosition.capacity() > 64))
+      releaseStorage();
     return entry;
   }
 };
@@ -570,7 +668,10 @@ template <class Target> struct TickQueueOf {
   FlatChunkMap<std::int64_t> nextTickForContainer;
   std::vector<Entry> containersToTick; // min-heap under EntryOrder
   std::deque<QueuedTick<Target>> toRunThisTick;
+  mutable TickKeySet<Target> toRunThisTickSet;
+  mutable bool toRunSetBuilt = false;
   std::vector<std::uint64_t> dueScratch;
+  std::uint64_t ticksSinceCompact = 0;
 
   // LevelTicks.addContainer: one empty container per ticking chunk.
   void addContainer(std::uint64_t key) {
@@ -594,11 +695,11 @@ template <class Target> struct TickQueueOf {
     std::make_heap(containersToTick.begin(), containersToTick.end(),
                    EntryOrder{});
     std::erase_if(toRunThisTick, [key](const QueuedTick<Target> &entry) {
+      const Pos pos = unpackTickPos(entry.packedPos);
       const std::uint64_t entryKey =
-          (static_cast<std::uint64_t>(
-               static_cast<std::uint32_t>(entry.tick.pos.x >> 4))
+          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(pos.x >> 4))
            << 32) |
-          static_cast<std::uint32_t>(entry.tick.pos.z >> 4);
+          static_cast<std::uint32_t>(pos.z >> 4);
       return entryKey == key;
     });
     containers.erase(key);
@@ -617,8 +718,10 @@ template <class Target> struct TickQueueOf {
   void onTickAdded(std::uint64_t key, ChunkTicks &container,
                    const QueuedTick<Target> &tick) {
     const QueuedTick<Target> *head = container.peek();
-    if (head && head->tick == tick.tick && head->target == tick.target)
-      updateContainerScheduling(key, head->tick.trigger);
+    if (head && head->packedPos == tick.packedPos &&
+        head->target == tick.target && head->trigger == tick.trigger &&
+        head->priority == tick.priority && head->order == tick.order)
+      updateContainerScheduling(key, head->trigger);
   }
   // LevelTicks.schedule: drop ticks whose chunk has no container.
   bool schedule(std::uint64_t key, const ScheduledTick &tick,
@@ -626,9 +729,10 @@ template <class Target> struct TickQueueOf {
     auto *container = containers.find(key);
     if (!container)
       return false; // "Trying to schedule tick in not loaded position"
-    if (!(*container)->schedule(tick, target))
+    QueuedTick<Target> entry{};
+    if (!(*container)->schedule(tick, target, &entry))
       return false;
-    onTickAdded(key, **container, QueuedTick<Target>{tick, target});
+    onTickAdded(key, **container, entry);
     return true;
   }
   bool restore(std::uint64_t key, const ScheduledTick &tick,
@@ -636,8 +740,8 @@ template <class Target> struct TickQueueOf {
     auto *container = containers.find(key);
     if (!container)
       return false;
-    (*container)->scheduleUnchecked(tick, target);
-    onTickAdded(key, **container, QueuedTick<Target>{tick, target});
+    const QueuedTick<Target> entry = (*container)->scheduleUnchecked(tick, target);
+    onTickAdded(key, **container, entry);
     return true;
   }
   std::size_t count() const {
@@ -670,9 +774,30 @@ template <class Target> struct TickQueueOf {
     while (!toRunThisTick.empty()) {
       QueuedTick<Target> entry = std::move(toRunThisTick.front());
       toRunThisTick.pop_front();
-      run(entry.tick.pos, entry.target);
+      if (toRunSetBuilt) {
+        const TickKey<Target> key{entry.packedPos, entry.target};
+        const bool duplicateRemains = std::any_of(
+            toRunThisTick.begin(), toRunThisTick.end(),
+            [&](const QueuedTick<Target> &other) {
+              return other.packedPos == key.packedPos &&
+                     other.target == key.target;
+            });
+        if (!duplicateRemains)
+          toRunThisTickSet.erase(key);
+      }
+      run(unpackTickPos(entry.packedPos), entry.target);
     }
     cleanupAfterTick();
+  }
+  bool willTickThisTick(Pos pos, const Target *target) const {
+    const auto packedPos = packTickPos(pos);
+    if (!toRunSetBuilt && !toRunThisTick.empty()) {
+      for (const auto &entry : toRunThisTick)
+        toRunThisTickSet.insert(TickKey<Target>{entry.packedPos, entry.target});
+      toRunSetBuilt = true;
+    }
+    return toRunSetBuilt &&
+           toRunThisTickSet.contains(TickKey<Target>{packedPos, target});
   }
   void collectTicks(World &world, std::int64_t gameTime, int maxTicks) {
     sortContainersToTick(world, gameTime);
@@ -697,19 +822,20 @@ template <class Target> struct TickQueueOf {
         nextTickForContainer.erase(key);
         continue;
       }
-      if (head->tick.trigger > gameTime) {
-        updateContainerScheduling(key, head->tick.trigger);
+      if (head->trigger > gameTime) {
+        updateContainerScheduling(key, head->trigger);
         continue;
       }
+      const Pos headPos = unpackTickPos(head->packedPos);
       // LevelTicks tickCheck: chunks that are not ticking keep their container
       // registered (pending ticks resume when the chunk ticks again).
-      if (!world.isChunkLoaded(head->tick.pos.x >> 4, head->tick.pos.z >> 4))
+      if (!world.isChunkLoaded(headPos.x >> 4, headPos.z >> 4))
         continue;
       if (world.blockTickPositionReady &&
-          !world.blockTickPositionReady(head->tick.pos)) {
+          !world.blockTickPositionReady(headPos)) {
         // Keep the due tick at the head. It becomes runnable when manager
         // readiness changes; no queue rebuild or per-world scan is needed.
-        updateContainerScheduling(key, head->tick.trigger);
+        updateContainerScheduling(key, head->trigger);
         continue;
       }
       nextTickForContainer.erase(key);
@@ -724,10 +850,10 @@ template <class Target> struct TickQueueOf {
       drainFromCurrentContainer(world, container, gameTime, maxTicks);
       const QueuedTick<Target> *next = container.peek();
       if (next) {
-        if (next->tick.trigger <= gameTime && canScheduleMoreTicks(maxTicks))
+        if (next->trigger <= gameTime && canScheduleMoreTicks(maxTicks))
           pushContainer(entry);
         else
-          updateContainerScheduling(entry.key, next->tick.trigger);
+          updateContainerScheduling(entry.key, next->trigger);
       }
     }
   }
@@ -741,7 +867,7 @@ template <class Target> struct TickQueueOf {
     while (canScheduleMoreTicks(maxTicks)) {
       const QueuedTick<Target> *next = current.peek();
       // ScheduledTick.INTRA_TICK_DRAIN_ORDER.compare(next, nextOfNext) > 0
-      if (!next || next->tick.trigger > gameTime ||
+      if (!next || next->trigger > gameTime ||
           (nextFromNextContainer &&
            QueuedIntraOrder<Target>{}(*next, *nextFromNextContainer)))
         break;
@@ -753,12 +879,24 @@ template <class Target> struct TickQueueOf {
     for (const Entry &entry : containersToTick) {
       const QueuedTick<Target> *head = entry.container->peek();
       if (head)
-        updateContainerScheduling(entry.key, head->tick.trigger);
+        updateContainerScheduling(entry.key, head->trigger);
     }
+  }
+  void compactContainers() {
+    containers.forEach(
+        [](std::uint64_t, ChunkTicks *container) { container->compact(); });
+    if (toRunThisTickSet.capacity() > 1024)
+      toRunThisTickSet.release();
   }
   void cleanupAfterTick() {
     toRunThisTick.clear();
     containersToTick.clear();
+    toRunThisTickSet.clear();
+    toRunSetBuilt = false;
+    if (++ticksSinceCompact >= 100) {
+      ticksSinceCompact = 0;
+      compactContainers();
+    }
   }
 };
 
@@ -805,6 +943,19 @@ World::~World() { disableLighting(); }
 World::World(World &&) noexcept = default;
 World &World::operator=(World &&) noexcept = default;
 
+BlockTagRegistry::ReloadResult World::reloadBlockTags(const std::vector<std::filesystem::path> &packs) {
+  auto next = std::make_shared<BlockTagRegistry>();
+  auto result = next->reload(packs);
+  if (result.applied) {
+    blockTags_ = std::move(next);
+    ++blockTagRevision_;
+  }
+  return result;
+}
+std::optional<bool> World::hasBlockTag(const BlockState &state, std::string_view tag) const {
+  return blockTags_ ? blockTags_->contains(tag, state.nameView()) : blockHasTag(state, tag);
+}
+
 bool ScheduledTickDrainOrder::operator()(const ScheduledTick &a,
                                          const ScheduledTick &b) const {
   if (a.trigger != b.trigger)
@@ -838,6 +989,8 @@ std::size_t BlockEventHash::operator()(const BlockEvent &event) const {
 void World::setSeed(std::uint64_t value) {
   seed = value;
   random.setSeed(static_cast<std::int64_t>(value));
+  randValue_ = static_cast<std::uint32_t>(
+      (value ^ (value >> 32)) * 0x9E3779B9u + 1013904223u);
 }
 void World::setPistonEntity(Pos pos,
                             std::shared_ptr<PistonMovingBlockEntity> entity) {
@@ -916,6 +1069,161 @@ void World::sweepPistonTickers() {
   }
   pistonTickers.resize(kept);
 }
+
+void World::setContainerEntity(Pos pos,
+                               std::shared_ptr<ContainerBlockEntity> entity,
+                               bool registerTicker) {
+  auto &current = containerEntities[pos];
+  if (!current) {
+    const auto chunk = chunkKey(pos.x >> 4, pos.z >> 4);
+    containerPositionsByChunk_[chunk].push_back(pos);
+  }
+  if (current && current != entity) {
+    current->removed = true;
+    current->wakeWatchers(*this);
+  }
+  current = std::move(entity);
+  if (registerTicker && current) {
+    registerContainerTicker(pos, current);
+  } else if (auto it = containerTickerSlots.find(pos);
+             it != containerTickerSlots.end()) {
+    it->second->removed = true;
+    containerTickerSlots.erase(pos);
+  }
+}
+
+void World::registerContainerTicker(
+    Pos pos, std::shared_ptr<ContainerBlockEntity> entity) {
+  if (!entity)
+    return;
+  if (auto it = containerTickerSlots.find(pos); it != containerTickerSlots.end()) {
+    it->second->entity = std::move(entity);
+    it->second->sleepMode = ContainerSleepMode::Active;
+    it->second->removed = false;
+    return;
+  }
+  auto slot = std::make_unique<ContainerTickerSlot>();
+  slot->pos = pos;
+  slot->entity = std::move(entity);
+  ContainerTickerSlot *raw = slot.get();
+  containerTickerSlots[pos] = raw;
+  (tickingContainerBlockEntities ? pendingContainerTickers : containerTickers)
+      .push_back(std::move(slot));
+}
+
+void World::removeContainerEntity(Pos pos, bool dropContents, bool notify) {
+  if (auto it = containerEntities.find(pos); it != containerEntities.end()) {
+    auto existing = it->second;
+    if (existing) {
+      if (dropContents)
+        dropContainerContents(*this, pos, *existing);
+      existing->removed = true;
+      existing->wakeWatchers(*this);
+    }
+    containerEntities.erase(pos);
+    const auto key = chunkKey(pos.x >> 4, pos.z >> 4);
+    auto positions = containerPositionsByChunk_.find(key);
+    if (positions != containerPositionsByChunk_.end()) {
+      std::erase(positions->second, pos);
+      if (positions->second.empty())
+        containerPositionsByChunk_.erase(key);
+    }
+  }
+  if (auto it = containerTickerSlots.find(pos); it != containerTickerSlots.end()) {
+    it->second->removed = true;
+    containerTickerSlots.erase(pos);
+  }
+  if (notify) {
+    updateNeighborsAt(pos, Blocks::TRAPPED_CHEST);
+    updateNeighborsAt(pos.relative(Direction::Down), Blocks::TRAPPED_CHEST);
+  }
+}
+
+std::shared_ptr<ContainerBlockEntity> World::containerEntity(Pos pos) const {
+  auto it = containerEntities.find(pos);
+  return it == containerEntities.end() ? nullptr : it->second;
+}
+
+void World::mergePendingContainerTickers() {
+  if (pendingContainerTickers.empty())
+    return;
+  containerTickers.reserve(containerTickers.size() +
+                           pendingContainerTickers.size());
+  for (auto &slot : pendingContainerTickers)
+    containerTickers.push_back(std::move(slot));
+  pendingContainerTickers.clear();
+}
+
+void World::sweepContainerTickers() {
+  std::size_t kept = 0;
+  for (std::size_t i = 0; i < containerTickers.size(); ++i) {
+    if (containerTickers[i]->removed)
+      continue;
+    if (kept != i)
+      containerTickers[kept] = std::move(containerTickers[i]);
+    ++kept;
+  }
+  containerTickers.resize(kept);
+}
+
+void World::watchHopperBlock(Pos pos,
+                             const std::shared_ptr<HopperBlockEntity> &hopper) {
+  if (!hopper)
+    return;
+  auto &list = hopperBlockWatchersByPos_[pos];
+  for (const auto &w : list) {
+    if (w.lock().get() == hopper.get())
+      return;
+  }
+  list.push_back(hopper);
+}
+
+void World::watchHopperItemSection(
+    std::uint64_t sectionKey,
+    const std::shared_ptr<HopperBlockEntity> &hopper) {
+  if (!hopper)
+    return;
+  auto &list = hopperItemWatchersBySection_[sectionKey];
+  for (const auto &w : list) {
+    if (w.lock().get() == hopper.get())
+      return;
+  }
+  list.push_back(hopper);
+}
+
+void World::wakeHopperBlockWatchers(Pos pos) {
+  auto it = hopperBlockWatchersByPos_.find(pos);
+  if (it == hopperBlockWatchersByPos_.end())
+    return;
+  auto watchers = std::move(it->second);
+  hopperBlockWatchersByPos_.erase(pos);
+  for (const auto &weak : watchers) {
+    if (auto h = weak.lock()) {
+      if (!h->removed)
+        h->wake(*this);
+    }
+  }
+}
+
+void World::wakeHopperItemWatchers(Vec3 pos) {
+  const int sx = static_cast<int>(std::floor(pos.x)) >> 4;
+  const int sy = static_cast<int>(std::floor(pos.y)) >> 4;
+  const int sz = static_cast<int>(std::floor(pos.z)) >> 4;
+  const std::uint64_t key = (static_cast<std::uint64_t>(sx) & 0x3FFFFFFull) << 38 |
+                            (static_cast<std::uint64_t>(sz) & 0x3FFFFFFull) << 12 |
+                            (static_cast<std::uint64_t>(sy) & 0xFFFull);
+  auto it = hopperItemWatchersBySection_.find(key);
+  if (it == hopperItemWatchersBySection_.end())
+    return;
+  auto watchers = std::move(it->second);
+  hopperItemWatchersBySection_.erase(key);
+  for (const auto &weak : watchers) {
+    if (auto h = weak.lock()) {
+      if (!h->removed)
+        h->wake(*this);
+    }
+  }
+}
 const World::Chunk *World::chunkAtCached(int x, int z) const {
   const auto key = chunkKey(x, z);
   ChunkCacheSlot &slot = blockReadCache_.chunks[(key * 0x9E3779B97F4A7C15ull) >> 58];
@@ -939,14 +1247,102 @@ BlockState::Id World::Section::get(int index) const {
   if (!base)
     return single;
   const auto cell = static_cast<std::size_t>(index);
-  if (base->bits == 8) {
-    const auto *block = static_cast<const SectionStorage8 *>(base);
-    return block->palette[block->indices[cell]];
-  }
-  const auto *block = static_cast<const SectionStorage16 *>(base);
-  return block->palette[block->indices[cell]];
+  return visitSectionStorage(base, [cell](const auto *block) {
+    return block->palette[block->indexAt(cell)];
+  });
 }
-BlockState::Id World::Section::set(int index, BlockState::Id state) {
+bool World::Section::tryGetRandomlyTicking(int index,
+                                          BlockState::Id &outId) const {
+  const SectionStorage *base = storage.get();
+  if (!base) {
+    if (!stateIsRandomlyTickingId(single))
+      return false;
+    outId = single;
+    return true;
+  }
+  const auto cell = static_cast<std::size_t>(index);
+  return visitSectionStorage(base, [cell, &outId](const auto *block) {
+    const auto idx = block->indexAt(cell);
+    if (!block->paletteTicking[idx])
+      return false;
+    outId = block->palette[idx];
+    return true;
+  });
+}
+void World::Section::initSingleRandomTick(BlockState::Id state) {
+  const bool ticking = stateIsRandomlyTickingId(state);
+  tickingBlockCount = ticking ? static_cast<std::uint16_t>(kLightVolume) : 0;
+  if (ticking) {
+    randomTickByMinisection.fill(
+        static_cast<std::uint8_t>(kRandomTickMinisectionSize));
+    randomTickByMinisection.back() =
+        static_cast<std::uint8_t>(kRandomTickLastMinisectionSize);
+  } else {
+    randomTickByMinisection.fill(0);
+  }
+}
+void World::Chunk::refreshRandomTickMask(int count) {
+  std::uint32_t mask = 0;
+  for (int i = 0; i < count; ++i) {
+    if (sections[static_cast<std::size_t>(i)].isRandomlyTicking())
+      mask |= (std::uint32_t{1} << i);
+  }
+  randomTickingSectionMask = mask;
+}
+void World::Chunk::refreshPersistedLightIndex(int minSectionY,
+                                              int numSections) {
+  persistedLightSectionIndex.fill(-1);
+  if (!persistedLight || !persistedLight->isLightOn)
+    return;
+  for (std::size_t i = 0; i < persistedLight->sections.size(); ++i) {
+    const int rel = persistedLight->sections[i].sectionY - minSectionY;
+    if (rel >= 0 && rel < numSections &&
+        persistedLightSectionIndex[static_cast<std::size_t>(rel)] < 0) {
+      persistedLightSectionIndex[static_cast<std::size_t>(rel)] =
+          static_cast<std::int16_t>(i);
+    }
+  }
+}
+namespace {
+std::uint8_t nextSectionBitsForWidth(std::uint8_t bits) noexcept {
+  if (bits < 7)
+    return static_cast<std::uint8_t>(bits + 1);
+  if (bits == 7)
+    return 8;
+  return 16;
+}
+void updateSectionCounters(
+    std::uint16_t &nonEmpty, std::uint16_t &tickingBlockCount,
+    std::array<std::uint8_t, World::kRandomTickMinisectionCount> &minisections,
+    int index, BlockState::Id previous, BlockState::Id state) {
+  const bool previousAir = BlockState::fromId(previous).isAir();
+  const bool stateAir = BlockState::fromId(state).isAir();
+  std::uint16_t nextNonEmpty = nonEmpty;
+  if (previousAir && !stateAir)
+    ++nextNonEmpty;
+  else if (!previousAir && stateAir)
+    --nextNonEmpty;
+  if (nextNonEmpty != nonEmpty)
+    std::atomic_ref<std::uint16_t>(nonEmpty).store(nextNonEmpty,
+                                                   std::memory_order_relaxed);
+  const bool prevTicking = stateIsRandomlyTickingId(previous);
+  const bool nextTicking = stateIsRandomlyTickingId(state);
+  if (prevTicking != nextTicking) {
+    const std::size_t mini =
+        static_cast<std::size_t>(index) / World::kRandomTickMinisectionSize;
+    if (nextTicking) {
+      ++tickingBlockCount;
+      ++minisections[mini];
+    } else {
+      --tickingBlockCount;
+      --minisections[mini];
+    }
+  }
+}
+} // namespace
+BlockState::Id World::Section::set(int index, BlockState::Id state,
+                                   bool compact,
+                                   std::shared_mutex *resizeMutex) {
   // PalettedContainer.getAndSet + LevelChunkSection.setBlockState counters.
   const auto previous = get(index);
   if (previous == state)
@@ -956,68 +1352,83 @@ BlockState::Id World::Section::set(int index, BlockState::Id state) {
   if (!base) {
     // A default block is value-initialised, so every cell already reads
     // palette[0] == single and only the written cell needs an index.
-    auto block = std::make_shared<SectionStorage8>();
-    block->palette[0] = single;
-    block->palette[1] = state;
-    block->paletteSize = 2;
-    block->indices[cell] = 1;
-    storage = std::move(block);
-  } else if (base->bits == 8) {
-    auto *block = static_cast<SectionStorage8 *>(base);
-    const auto end = block->palette.begin() + block->paletteSize;
-    auto found = std::find(block->palette.begin(), end, state);
-    if (found == end) {
-      if (block->paletteSize < block->palette.size()) {
-        block->palette[block->paletteSize] = state;
-        found = block->palette.begin() + block->paletteSize;
-        ++block->paletteSize;
-      } else {
-        // HashMapPalette.grow: widen every stored index to 16 bits.
-        auto wide = std::make_shared<SectionStorage16>();
-        std::copy(block->palette.begin(), end, wide->palette.begin());
-        wide->palette[block->paletteSize] = state;
-        wide->paletteSize = static_cast<std::uint16_t>(block->paletteSize + 1);
-        for (std::size_t i = 0; i < kLightVolume; ++i)
-          wide->indices[i] = block->indices[i];
-        wide->indices[cell] = block->paletteSize;
-        storage = std::move(wide);
-        if (BlockState::fromId(previous).isAir() &&
-            !BlockState::fromId(state).isAir())
-          ++nonEmpty;
-        else if (!BlockState::fromId(previous).isAir() &&
-                 BlockState::fromId(state).isAir())
-          --nonEmpty;
-        return previous;
-      }
+    auto next = makeSectionStorageForBits(compact ? 1 : 8);
+    visitSectionStorage(next.get(), [&](auto *block) {
+      block->palette[0] = single;
+      block->paletteTicking[0] = stateIsRandomlyTickingId(single) ? 1 : 0;
+      block->palette[1] = state;
+      block->paletteTicking[1] = stateIsRandomlyTickingId(state) ? 1 : 0;
+      block->paletteSize = 2;
+      block->setIndexAt(cell, 1);
+    });
+    if (resizeMutex) {
+      std::unique_lock lock(*resizeMutex);
+      storage = std::move(next);
+    } else {
+      storage = std::move(next);
     }
-    block->indices[cell] =
-        static_cast<std::uint8_t>(found - block->palette.begin());
   } else {
-    auto *block = static_cast<SectionStorage16 *>(base);
-    const auto end = block->palette.begin() + block->paletteSize;
-    auto found = std::find(block->palette.begin(), end, state);
-    if (found == end) {
-      // TODO(T-4/W-2): the append-only palette records historical states even
-      // after their last cell moved away. Before full chunk persistence, compact
-      // unreferenced slots (or maintain a reusable free list) so a long-lived
-      // section is bounded by its current states, not its update history.
-      // Unreachable: kLightVolume cells cannot hold more than kLightVolume
-      // distinct states. Fail loudly instead of writing past the palette.
-      if (block->paletteSize == block->palette.size())
-        throw std::logic_error("section palette overflow");
-      block->palette[block->paletteSize] = state;
-      found = block->palette.begin() + block->paletteSize;
-      ++block->paletteSize;
-    }
-    block->indices[cell] =
-        static_cast<std::uint16_t>(found - block->palette.begin());
+    visitSectionStorage(base, [&](auto *block) {
+      using BlockT = std::remove_pointer_t<decltype(block)>;
+      const auto end = block->palette.begin() + block->paletteSize;
+      auto found = std::find(block->palette.begin(), end, state);
+      std::uint16_t targetIdx = 0;
+      if (found == end) {
+        if (block->paletteSize < BlockT::kPaletteCapacity) {
+          targetIdx = block->paletteSize;
+          // Store palette slot BEFORE publishing paletteSize & cell index so a
+          // lockless reader observing targetIdx sees an initialized state id.
+          std::atomic_ref<BlockState::Id>(block->palette[targetIdx])
+              .store(state, std::memory_order_release);
+          block->paletteTicking[targetIdx] =
+              stateIsRandomlyTickingId(state) ? 1 : 0;
+          std::atomic_ref<std::uint16_t>(block->paletteSize)
+              .store(static_cast<std::uint16_t>(targetIdx + 1),
+                     std::memory_order_release);
+        } else {
+          if constexpr (std::is_same_v<BlockT, SectionStorage16>) {
+            // Unreachable: kLightVolume cells cannot hold more than
+            // kLightVolume distinct states. Fail loudly instead of overflowing.
+            throw std::logic_error("section palette overflow");
+          } else {
+            // HashMapPalette.grow: widen stored indices outside lock, then take
+            // resizeMutex only to swap storage.
+            auto nextStorage =
+                makeSectionStorageForBits(nextSectionBitsForWidth(block->bits));
+            visitSectionStorage(nextStorage.get(), [&](auto *wider) {
+              std::copy(block->palette.begin(), end, wider->palette.begin());
+              std::copy(block->paletteTicking.begin(),
+                        block->paletteTicking.begin() + block->paletteSize,
+                        wider->paletteTicking.begin());
+              wider->palette[block->paletteSize] = state;
+              wider->paletteTicking[block->paletteSize] =
+                  stateIsRandomlyTickingId(state) ? 1 : 0;
+              wider->paletteSize =
+                  static_cast<std::uint16_t>(block->paletteSize + 1);
+              for (std::size_t i = 0; i < kLightVolume; ++i)
+                wider->setIndexAt(i, block->indexAt(i));
+              wider->setIndexAt(cell, block->paletteSize);
+            });
+            if (resizeMutex) {
+              std::unique_lock lock(*resizeMutex);
+              storage = std::move(nextStorage);
+            } else {
+              storage = std::move(nextStorage);
+            }
+            return;
+          }
+        }
+      } else {
+        targetIdx = static_cast<std::uint16_t>(found - block->palette.begin());
+      }
+      if (resizeMutex)
+        block->atomicSetIndexAt(cell, targetIdx);
+      else
+        block->setIndexAt(cell, targetIdx);
+    });
   }
-  const bool previousAir = BlockState::fromId(previous).isAir();
-  const bool stateAir = BlockState::fromId(state).isAir();
-  if (previousAir && !stateAir)
-    ++nonEmpty;
-  else if (!previousAir && stateAir)
-    --nonEmpty;
+  updateSectionCounters(nonEmpty, tickingBlockCount, randomTickByMinisection,
+                        index, previous, state);
   return previous;
 }
 bool World::installManagedChunk(
@@ -1031,7 +1442,15 @@ bool World::installManagedChunk(
   if (chunks_.contains(key))
     return false;
   chunk.loaded = false;
-  auto inserted = chunks_.emplace(key, std::move(chunk));
+  chunk.randomTickIndex = Chunk::kInvalidRandomTickIndex;
+  decltype(chunks_)::iterator insertedIt;
+  {
+    std::unique_lock<std::shared_mutex> resizeLock;
+    if (std::shared_mutex *mu = directResizeMutex())
+      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
+    insertedIt = chunks_.emplace(key, std::move(chunk)).first;
+  }
+  insertedIt->second.refreshPersistedLightIndex(minY_ >> 4, sectionCount());
   try {
     tickQueue_->addContainer(key);
     fluidTickQueue_->addContainer(key);
@@ -1092,7 +1511,13 @@ bool World::installManagedChunk(
     sweepPistonTickers();
     tickQueue_->removeContainer(key);
     fluidTickQueue_->removeContainer(key);
-    chunks_.erase(inserted.first);
+    removeRandomTickingChunk(insertedIt->second);
+    {
+      std::unique_lock<std::shared_mutex> resizeLock;
+      if (std::shared_mutex *mu = directResizeMutex())
+        resizeLock = std::unique_lock<std::shared_mutex>(*mu);
+      chunks_.erase(insertedIt);
+    }
     blockReadCache_.reset();
     throw;
   }
@@ -1136,6 +1561,11 @@ bool World::managedChunkPersistenceState(int x, int z,
       }
     }
   }
+  if (containerPositionsByChunk_.contains(key)) {
+    reason = "chunk contains container block entities outside supported "
+             "managed persistence";
+    return true;
+  }
   return false;
 }
 
@@ -1173,6 +1603,14 @@ bool World::removeManagedChunk(int x, int z, std::string &error,
     removePistonEntity(pos, false);
   if (!pistonPositions.empty())
     sweepPistonTickers();
+  std::vector<Pos> containerPositions;
+  if (auto indexed = containerPositionsByChunk_.find(key);
+      indexed != containerPositionsByChunk_.end())
+    containerPositions = indexed->second;
+  for (const Pos &pos : containerPositions)
+    removeContainerEntity(pos, false, false);
+  if (!containerPositions.empty())
+    sweepContainerTickers();
   const std::vector<Entity *> chunkEntities =
       entitiesInSectionRange(x, x, z, z);
   for (Entity *entity : chunkEntities) {
@@ -1182,19 +1620,79 @@ bool World::removeManagedChunk(int x, int z, std::string &error,
       return owned.get() == entity;
     });
   }
-  chunks_.erase(found);
+  removeRandomTickingChunk(found->second);
+  {
+    std::unique_lock<std::shared_mutex> resizeLock;
+    if (std::shared_mutex *mu = directResizeMutex())
+      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
+    chunks_.erase(found);
+  }
   blockReadCache_.reset();
   return true;
+}
+
+void World::addRandomTickingChunk(Chunk &chunk, std::uint64_t key) {
+  if (chunk.randomTickIndex != Chunk::kInvalidRandomTickIndex)
+    return;
+  chunk.randomTickIndex = static_cast<std::uint32_t>(randomTickingChunks_.size());
+  const int chunkX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+  const int chunkZ =
+      static_cast<int>(static_cast<std::int32_t>(key & 0xffffffffu));
+  randomTickingChunks_.push_back(TickingChunkEntry{key, &chunk, chunkX, chunkZ});
+  randomTickingDirty_ = true;
+}
+
+void World::removeRandomTickingChunk(Chunk &chunk) {
+  const std::uint32_t idx = chunk.randomTickIndex;
+  if (idx == Chunk::kInvalidRandomTickIndex)
+    return;
+  const std::size_t lastIdx = randomTickingChunks_.size() - 1;
+  if (idx != lastIdx) {
+    TickingChunkEntry moved = randomTickingChunks_[lastIdx];
+    randomTickingChunks_[idx] = moved;
+    moved.chunk->randomTickIndex = idx;
+    randomTickingDirty_ = true;
+  }
+  randomTickingChunks_.pop_back();
+  chunk.randomTickIndex = Chunk::kInvalidRandomTickIndex;
+}
+
+void World::updateChunkRandomTickMask(Chunk &chunk, std::uint64_t key,
+                                      int sectionIdx, bool sectionTicking) {
+  if (sectionIdx < 0 || sectionIdx >= kSectionCapacity)
+    return;
+  const std::uint32_t bit = std::uint32_t{1} << sectionIdx;
+  const std::uint32_t prevMask = chunk.randomTickingSectionMask;
+  const std::uint32_t nextMask =
+      sectionTicking ? (prevMask | bit) : (prevMask & ~bit);
+  if (nextMask == prevMask)
+    return;
+  chunk.randomTickingSectionMask = nextMask;
+  if (!chunk.loaded)
+    return;
+  if (prevMask == 0 && nextMask != 0)
+    addRandomTickingChunk(chunk, key);
+  else if (prevMask != 0 && nextMask == 0)
+    removeRandomTickingChunk(chunk);
 }
 
 void World::loadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
   const auto key = chunkKey(x, z);
-  auto &c = chunks_[key];
+  auto it = chunks_.find(key);
+  if (it == chunks_.end()) {
+    std::unique_lock<std::shared_mutex> resizeLock;
+    if (std::shared_mutex *mu = directResizeMutex())
+      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
+    it = chunks_.emplace(key, Chunk{}).first;
+  }
+  auto &c = it->second;
   const bool wasLoaded = c.loaded;
   c.loaded = true;
   if (!wasLoaded)
     ++c.lightLifecycleEpoch;
+  if (c.randomTickingSectionMask != 0)
+    addRandomTickingChunk(c, key);
   if (!c.heightmaps)
     c.heightmaps = std::make_unique<ChunkHeightmaps>(minY_, sectionCount() * 16);
   // Publish the fresh node so a cached miss cannot mask the load.
@@ -1220,10 +1718,13 @@ void World::loadChunk(int x, int z) {
 }
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
-  auto it = chunks_.find(chunkKey(x, z));
+  const auto key = chunkKey(x, z);
+  auto it = chunks_.find(key);
   const bool wasLoaded = it != chunks_.end() && it->second.loaded;
-  if (wasLoaded)
+  if (wasLoaded) {
     it->second.loaded = false;
+    removeRandomTickingChunk(it->second);
+  }
   if (lightService_) {
     flushPendingLightCells();
     // The lifecycle tombstone invalidates both full snapshots and queued owned
@@ -1234,13 +1735,71 @@ void World::unloadChunk(int x, int z) {
   }
 }
 
+LightSectionView World::sectionToLightView(const Section &data,
+                                           bool atomicHeader) noexcept {
+  LightSectionView view;
+  const std::uint16_t nonEmpty =
+      atomicHeader
+          ? std::atomic_ref<std::uint16_t>(
+                const_cast<std::uint16_t &>(data.nonEmpty))
+                .load(std::memory_order_relaxed)
+          : data.nonEmpty;
+  view.empty = nonEmpty == 0;
+  const SectionStorage *base = data.storage.get();
+  if (!base) {
+    view.bits = 0;
+    view.single = data.single;
+    return view;
+  }
+  const std::uint16_t paletteSize =
+      atomicHeader
+          ? std::atomic_ref<std::uint16_t>(
+                const_cast<std::uint16_t &>(base->paletteSize))
+                .load(std::memory_order_acquire)
+          : base->paletteSize;
+  view.bits = base->bits;
+  if (atomicHeader)
+    view.storageOwner = data.storage;
+  visitSectionStorage(base, [&](const auto *block) {
+    view.palette =
+        std::span<const BlockState::Id>(block->palette.data(), paletteSize);
+    if constexpr (std::is_same_v<std::remove_cv_t<
+                                     std::remove_pointer_t<decltype(block)>>,
+                                 SectionStorage8>) {
+      view.cells8 = std::span<const std::uint8_t>(block->indices.data(),
+                                                  block->indices.size());
+    } else if constexpr (std::is_same_v<
+                             std::remove_cv_t<
+                                 std::remove_pointer_t<decltype(block)>>,
+                             SectionStorage16>) {
+      view.cells16 = std::span<const std::uint16_t>(block->indices.data(),
+                                                    block->indices.size());
+    } else {
+      view.packedWords = std::span<const std::uint64_t>(block->words.data(),
+                                                        block->words.size());
+    }
+  });
+  return view;
+}
+
+LightSectionView World::directReadSection(const void *context, int chunkX,
+                                          int chunkZ, int sectionY) noexcept {
+  const auto *self = static_cast<const World *>(context);
+  const int idx = sectionY - (self->minY_ >> 4);
+  if (idx < 0 || idx >= self->sectionCount())
+    return LightSectionView{};
+  std::shared_lock<std::shared_mutex> lock(*self->lightDirectMutex_);
+  const auto it = self->chunks_.find(chunkKey(chunkX, chunkZ));
+  if (it == self->chunks_.end())
+    return LightSectionView{};
+  return sectionToLightView(
+      it->second.sections[static_cast<std::size_t>(idx)], true);
+}
+
 std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const {
   const Chunk *chunk = chunkAt(x, z);
   if (!chunk || !lightService_)
     return nullptr;
-  const auto optical = lightService_->opticalTable();
-  if (!optical)
-    throw std::logic_error("light service has no optical table");
 
   auto input = std::make_unique<LightChunkInput>();
   input->chunkX = x;
@@ -1249,35 +1808,18 @@ std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const 
   input->minBlockSectionY = minY_ >> 4;
   input->blockSectionCount = sectionCount();
   input->persistedLight = chunk->persistedLight;
+  if (lowMemoryMode_) {
+    input->directGeometry = true;
+    return input;
+  }
+  const auto optical = lightService_->opticalTable();
+  if (!optical)
+    throw std::logic_error("light service has no optical table");
   input->geometrySections.reserve(static_cast<std::size_t>(sectionCount()));
   for (int section = 0; section < sectionCount(); ++section) {
     const Section &data = chunk->sections[section];
-    LightSectionView view;
-    view.empty = data.hasOnlyAir();
-    if (!data.storage) {
-      view.bits = 0;
-      view.single = data.single;
-    } else if (const SectionStorage8 *block = data.as8()) {
-      view.bits = 8;
-      view.palette =
-          std::span<const BlockState::Id>(block->palette.data(),
-                                          block->paletteSize);
-      view.cells8 =
-          std::span<const std::uint8_t>(block->indices.data(),
-                                        block->indices.size());
-    } else if (const SectionStorage16 *wide = data.as16()) {
-      view.bits = 16;
-      view.palette =
-          std::span<const BlockState::Id>(wide->palette.data(),
-                                          wide->paletteSize);
-      view.cells16 =
-          std::span<const std::uint16_t>(wide->indices.data(),
-                                         wide->indices.size());
-    } else {
-      throw std::logic_error("unknown World section storage");
-    }
     input->geometrySections.push_back(
-        makeLightGeometrySection(*optical, view));
+        makeLightGeometrySection(*optical, sectionToLightView(data, false)));
   }
   return input;
 }
@@ -1302,6 +1844,13 @@ int World::getBrightness(Pos pos, int skyDarken) const {
   return std::max(block, sky);
 }
 
+void World::setLowMemoryMode(bool enabled) {
+  if (lightService_)
+    throw std::logic_error(
+        "cannot change low-memory mode while lighting is active");
+  lowMemoryMode_ = enabled;
+}
+
 void World::enableLighting(LightWorkerOptions options) {
   if (lightService_)
     return;
@@ -1310,6 +1859,11 @@ void World::enableLighting(LightWorkerOptions options) {
   if ((minY_ & 15) != 0)
     throw std::invalid_argument(
         "lighting requires minY aligned to a 16-block section");
+  if (lowMemoryMode_ && !options.directWorld.context) {
+    options.directWorld.context = this;
+    options.directWorld.resizeMutex = lightDirectMutex_.get();
+    options.directWorld.readSection = &World::directReadSection;
+  }
   lightService_ = std::make_unique<LightService>(
       minY_ >> 4, sectionCount(), options);
   lightOptical_ = lightService_->opticalTable().get();
@@ -1341,8 +1895,10 @@ void World::flushPendingLightCells() {
 }
 
 void World::setChunkPersistedLight(int x, int z, PersistedChunkLight persisted) {
-  if (Chunk *c = chunkAt(x, z))
+  if (Chunk *c = chunkAt(x, z)) {
     c->persistedLight = std::move(persisted);
+    c->refreshPersistedLightIndex(minY_ >> 4, sectionCount());
+  }
 }
 
 void World::refreshLightSnapshots() {
@@ -1417,26 +1973,40 @@ void World::primeHeightmaps() {
         });
   }
 }
-BlockState World::getBlock(Pos p) const {
+const World::Section *World::loadedSectionAt(Pos p) const {
   if (p.y < minY_ || p.y >= maxY_)
-    return airState();
+    return nullptr;
   const int x = chunkIndex(p.x), z = chunkIndex(p.z);
   const auto key = chunkKey(x, z);
   const int index = sectionIndex(p.y);
   auto &cache = blockReadCache_;
-  const Section *s;
-  if (cache.sectionIndex == index && cache.sectionKey == key) {
-    s = cache.section;
-  } else {
-    const Chunk *c = chunkAt(x, z);
-    if (!c || index >= sectionCount())
-      return airState();
-    s = &c->sections[index];
-    cache.sectionKey = key;
-    cache.sectionIndex = index;
-    cache.section = s;
-  }
+  if (cache.sectionIndex == index && cache.sectionKey == key)
+    return cache.section;
+  const Chunk *c = chunkAt(x, z);
+  if (!c || index >= sectionCount())
+    return nullptr;
+  const Section *s = &c->sections[index];
+  cache.sectionKey = key;
+  cache.sectionIndex = index;
+  cache.section = s;
+  return s;
+}
+std::optional<BlockState> World::getBlockIfLoaded(Pos p) const {
+  if (p.y < minY_ || p.y >= maxY_)
+    return isChunkLoaded(chunkIndex(p.x), chunkIndex(p.z))
+               ? std::optional<BlockState>(airState())
+               : std::nullopt;
+  const Section *s = loadedSectionAt(p);
+  if (!s)
+    return std::nullopt;
   if (s->hasOnlyAir())
+    return airState();
+  const int cell = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
+  return BlockState::fromId(s->get(cell));
+}
+BlockState World::getBlock(Pos p) const {
+  const Section *s = loadedSectionAt(p);
+  if (!s || s->hasOnlyAir())
     return airState();
   const int cell = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
   return BlockState::fromId(s->get(cell));
@@ -1458,14 +2028,22 @@ ChunkSnapshot World::snapshotChunk(int chunkX, int chunkZ) const {
       out.single = section.single;
       // The snapshot stays an owning copy: the network encoder runs off the
       // tick thread, so it must not read the live container.
-      if (const SectionStorage8 *block = section.as8()) {
-        out.palette.assign(block->palette.begin(),
-                           block->palette.begin() + block->paletteSize);
-        out.indices8.assign(block->indices.begin(), block->indices.end());
-      } else if (const SectionStorage16 *wide = section.as16()) {
-        out.palette.assign(wide->palette.begin(),
-                           wide->palette.begin() + wide->paletteSize);
-        out.indices16.assign(wide->indices.begin(), wide->indices.end());
+      if (const SectionStorage *base = section.storage.get()) {
+        visitSectionStorage(base, [&](const auto *block) {
+          out.palette.assign(block->palette.begin(),
+                             block->palette.begin() + block->paletteSize);
+          if (block->bits <= 8) {
+            out.bits = 8;
+            out.indices8.resize(static_cast<std::size_t>(kLightVolume));
+            for (std::size_t k = 0; k < kLightVolume; ++k)
+              out.indices8[k] = static_cast<std::uint8_t>(block->indexAt(k));
+          } else {
+            out.bits = 16;
+            out.indices16.resize(static_cast<std::size_t>(kLightVolume));
+            for (std::size_t k = 0; k < kLightVolume; ++k)
+              out.indices16[k] = block->indexAt(k);
+          }
+        });
       }
     }
   }
@@ -1497,15 +2075,21 @@ World::snapshotChunkPistons(int chunkX, int chunkZ) const {
 void World::rawSetBlock(Pos p, BlockState state) {
   if (p.y < minY_ || p.y >= maxY_)
     return;
-  Chunk *c = chunkAt(chunkIndex(p.x), chunkIndex(p.z));
+  const int cx = chunkIndex(p.x);
+  const int cz = chunkIndex(p.z);
+  Chunk *c = chunkAt(cx, cz);
   if (!c)
     return;
   // Writing the value a fresh section already holds (air, state id 0) is a
   // no-op in Section::set, so an untouched section never materialises storage.
-  Section &section = c->sections[sectionIndex(p.y)];
+  const int si = sectionIndex(p.y);
+  Section &section = c->sections[si];
   const int index = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
-  const BlockState::Id previous = section.set(index, state.id());
+  const BlockState::Id previous =
+      section.set(index, state.id(), lowMemoryMode_, directResizeMutex());
   if (previous != state.id()) {
+    updateChunkRandomTickMask(*c, chunkKey(cx, cz), si,
+                              section.isRandomlyTicking());
     c->persistedLight.reset();
     if (managedBlockMutationObserver) {
       const BlockState old = BlockState::fromId(previous);
@@ -1520,6 +2104,90 @@ void World::rawSetBlock(Pos p, BlockState state) {
         c->requiredLightGeneration = std::max(c->requiredLightGeneration, seq);
     }
   }
+}
+void World::importSectionBlocks(
+    int cx, int cz, int sectionY, std::span<const BlockState::Id> palette,
+    std::span<const std::uint16_t, kLightVolume> indices) {
+  if (palette.empty() || palette.size() > static_cast<std::size_t>(kLightVolume))
+    return;
+  Chunk *c = chunkAt(cx, cz);
+  if (!c)
+    return;
+  const int secBaseY = sectionY * 16;
+  if ((minY_ & 15) != 0 || secBaseY < minY_ || secBaseY + 15 >= maxY_) {
+    for (int i = 0; i < kLightVolume; ++i) {
+      const BlockState::Id sid =
+          palette.size() == 1 ? palette[0] : palette[indices[i]];
+      const BlockState s = BlockState::fromId(sid);
+      if (s.isAir())
+        continue;
+      const int y = secBaseY + (i >> 8);
+      if (y >= minY_ && y < maxY_)
+        rawSetBlock({cx * 16 + (i & 15), y, cz * 16 + ((i >> 4) & 15)}, s);
+    }
+    return;
+  }
+  const int si = sectionIndex(secBaseY);
+  Section &sec = c->sections[si];
+  blockReadCache_.sectionIndex = -1;
+  if (palette.size() == 1) {
+    const BlockState::Id sid = palette[0];
+    if (BlockState::fromId(sid).isAir())
+      return;
+    std::unique_lock<std::shared_mutex> resizeLock;
+    if (std::shared_mutex *mu = directResizeMutex())
+      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
+    sec.storage.reset();
+    sec.single = sid;
+    sec.nonEmpty = static_cast<std::uint16_t>(kLightVolume);
+    sec.initSingleRandomTick(sid);
+  } else {
+    const std::uint8_t targetBits =
+        palette.size() > 256
+            ? 16
+            : (lowMemoryMode_ ? minBitsForPaletteSize(palette.size()) : 8);
+    auto block = makeSectionStorageForBits(targetBits);
+    std::uint16_t nonEmpty = 0;
+    std::uint16_t tickingCount = 0;
+    sec.randomTickByMinisection.fill(0);
+    visitSectionStorage(block.get(), [&](auto *typed) {
+      using BlockT = std::remove_pointer_t<decltype(typed)>;
+      const std::size_t paletteCount =
+          std::min(palette.size(), BlockT::kPaletteCapacity);
+      typed->paletteSize = static_cast<std::uint16_t>(paletteCount);
+      std::array<bool, kLightVolume> isNonAir{};
+      for (std::size_t p = 0; p < paletteCount; ++p) {
+        const BlockState::Id sid = palette[p];
+        typed->palette[p] = sid;
+        typed->paletteTicking[p] = stateIsRandomlyTickingId(sid) ? 1 : 0;
+        isNonAir[p] = !BlockState::fromId(sid).isAir();
+      }
+      for (int i = 0; i < kLightVolume; ++i) {
+        const std::uint16_t pi = indices[static_cast<std::size_t>(i)];
+        typed->setIndexAt(static_cast<std::size_t>(i), pi);
+        if (isNonAir[pi])
+          ++nonEmpty;
+        if (typed->paletteTicking[pi]) {
+          ++tickingCount;
+          ++sec.randomTickByMinisection[static_cast<std::size_t>(i) /
+                                        kRandomTickMinisectionSize];
+        }
+      }
+    });
+    std::unique_lock<std::shared_mutex> resizeLock;
+    if (std::shared_mutex *mu = directResizeMutex())
+      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
+    sec.nonEmpty = nonEmpty;
+    sec.tickingBlockCount = tickingCount;
+    if (nonEmpty == 0) {
+      sec.storage.reset();
+      sec.single = 0;
+    } else {
+      sec.storage = std::move(block);
+    }
+  }
+  updateChunkRandomTickMask(*c, chunkKey(cx, cz), si, sec.isRandomlyTicking());
+  c->persistedLight.reset();
 }
 std::map<Pos, BlockState> World::allBlocks() const {
   std::map<Pos, BlockState> result;
@@ -1550,10 +2218,13 @@ std::map<Pos, BlockState> World::allBlocks() const {
 bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
   if (p.y < minY_ || p.y >= maxY_)
     return false;
-  Chunk *changedChunk = chunkAt(chunkIndex(p.x), chunkIndex(p.z));
+  const int targetCx = chunkIndex(p.x);
+  const int targetCz = chunkIndex(p.z);
+  Chunk *changedChunk = chunkAt(targetCx, targetCz);
   if (!changedChunk)
     return false;
-  Section &targetSection = changedChunk->sections[sectionIndex(p.y)];
+  const int targetSi = sectionIndex(p.y);
+  Section &targetSection = changedChunk->sections[targetSi];
   const int localIndex =
       ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
   const BlockState old = targetSection.hasOnlyAir()
@@ -1561,7 +2232,10 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
                              : BlockState::fromId(targetSection.get(localIndex));
   if (old == state)
     return false;
-  targetSection.set(localIndex, state.id());
+  targetSection.set(localIndex, state.id(), lowMemoryMode_,
+                    directResizeMutex());
+  updateChunkRandomTickMask(*changedChunk, chunkKey(targetCx, targetCz),
+                            targetSi, targetSection.isRandomlyTicking());
   if (managedBlockMutationObserver)
     managedBlockMutationObserver(p, old, state);
   if (!changedChunk->heightmaps)
@@ -1658,10 +2332,16 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
       pistonPreRemoveSideEffects(*this, p);
     removePistonEntity(p);
   }
+  if (!old.sameBlock(state) && containerKindForState(old).has_value())
+    preRemoveContainerSideEffects(*this, p, old, !(flags & 256));
+  if (old.is(Blocks::COMPARATOR) && !state.is(Blocks::COMPARATOR))
+    comparatorSignals_.erase(p);
   if (!old.sameBlock(state) && (flags & (1 | 64))) {
-    affectNeighborsAfterRemoval(p, old, (flags & 64) != 0);
+    // High-frequency fast path for rails; per-block hooks live on Block.
     if (isRailBlock(old))
       railAffectNeighborsAfterRemoval(*this, p, old, (flags & 64) != 0);
+    else
+      old.block().affectNeighborsAfterRemoval(*this, p, old, (flags & 64) != 0);
   }
   if (!getBlock(p).sameBlock(state))
     return false;
@@ -1672,26 +2352,25 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
     // onPlace, whatever the old block was. LiquidBlock.onPlace has no
     // same-type early return, so re-levelling water onto water (level 0 -> 1)
     // requests a fresh tick too; the sink's (pos, fluid) dedupe then decides.
-    if (isLiquidBlock(state))
+    // High-frequency fast paths (air/fluid/piston/rail/falling); remaining blocks
+    // dispatch via Block::onPlace function pointer.
+    if (state.isAir()) {
+    } else if (isLiquidBlock(state)) {
       liquidOnPlace(*this, p, state);
-    // FallingBlock.onPlace is a type-change callback, including piston moves.
-    if (state.is(Blocks::SAND) && !old.sameBlock(state))
-      scheduleTick(p, state.block(), 2);
-    if (state.is(Blocks::OBSERVER) && !old.sameBlock(state) &&
-        poweredOf(state) &&
-        !hasScheduledTick(p, state.block())) {
-      setBlock(p, state.with(PropertyKind::Powered, std::uint8_t{0}), 18);
-      observerNotify(p, state.with(PropertyKind::Powered, std::uint8_t{0}));
-    }
-    if (state.is(Blocks::TNT) && !old.sameBlock(state) &&
-        hasNeighborSignal(p) && primeTntBlock(p)) {
-      // primeTntBlock performs TntBlock.prime; onPlace then removes the block.
-    }
-    if (piston(state))
+    } else if (piston(state)) {
       pistonOnPlace(*this, p, state, old);
-    if (isRailBlock(state))
+    } else if (isRailBlock(state)) {
       railOnPlace(*this, p, state, old, (flags & 64) != 0);
+    } else {
+      if (state.block().isFalling() && !old.sameBlock(state))
+        scheduleTick(p, state.block(), 2);
+      state.block().onPlace(*this, p, state, old, (flags & 64) != 0);
+    }
+  } else if (containerKindForState(state).has_value()) {
+    ensureContainerBlockEntity(*this, p, state);
   }
+  if (old != state)
+    wakeHopperBlockWatchers(p);
   if (getBlock(p) == state) {
     if ((flags & 2) && blockUpdateObserver)
       blockUpdateObserver(p, state, flags);
@@ -1737,95 +2416,25 @@ std::optional<BlockState> World::coralPlacementState(Pos pos,
 BlockState World::updateShapeState(Pos p, const BlockState &state,
                                    Direction direction, Pos neighborPos,
                                    const BlockState &neighbor) {
-  // FallingBlock.updateShape schedules on every direction, even if the sand
+  // High-frequency fast paths: air, fluids, falling tick, waterlogged fluid
+  // tick; remaining per-block shape logic dispatches via Block::updateShape.
+  if (state.isAir())
+    return state;
+  // FallingBlock.updateShape schedules on every direction, even if the block
   // currently has support. Scheduled-tick deduplication preserves the first due time.
-  if (state.is(Blocks::SAND))
+  if (state.block().isFalling())
     scheduleTick(p, state.block(), 2);
   // LiquidBlock.updateShape: only a source on either side requests a fluid tick.
-  if (isLiquidBlock(state))
+  if (isLiquidBlock(state)) {
     liquidUpdateShape(*this, p, state, neighbor);
-  // BaseRailBlock/WallBlock/BaseCoralPlantTypeBlock/BaseCoralWallFanBlock
-  // .updateShape each schedule their own water tick while waterlogged, before
-  // their own shape logic runs. The four entry points stay separate because
-  // they live on four different blocks; only the waterlogged test is shared.
-  if ((isRailBlock(state) || isWallBlock(state) || isDeadCoralFan(state)) &&
-      waterloggedOf(state))
+    return state;
+  }
+  // SimpleWaterloggedBlock.updateShape schedules a water tick when waterlogged.
+  if (state.block().isWaterloggedHost() && waterloggedOf(state))
     scheduleFluidTick(p, FluidRef(Fluids::water()),
                       Fluids::water().tickDelay());
-  if (isWoolCarpet(state)) {
-    auto below = getBlock(p.relative(Direction::Down));
-    if (below.isAir())
-      return airState();
-  }
-  if (isDeadCoralFan(state)) {
-    const auto supportDirection =
-        isDeadCoralWallFan(state)
-            ? opposite(directionOf(state))
-            : Direction::Down;
-    // BaseCoralPlantTypeBlock.java:84 (DOWN and unsupported) and
-    // BaseCoralWallFanBlock.java:72 (the facing support and unsupported)
-    // answer AIR themselves, so the destroy path -- not this result -- decides
-    // what the cell ends up holding. Returning air here lets
-    // World::updateOrDestroy keep the drained water.
-    if (direction == supportDirection && !coralCanSurvive(*this, p, state))
-      return airState();
-  }
-  if (state.is(Blocks::GRASS_BLOCK) && direction == Direction::Up) {
-    const bool snowy = neighbor.is(Blocks::SNOW) ||
-                       neighbor.is(Blocks::SNOW_BLOCK) ||
-                       neighbor.is(Blocks::POWDER_SNOW);
-    return state.with(PropertyKind::Snowy, snowy ? std::uint8_t{1} : std::uint8_t{0});
-  }
-  if (isFenceGate(state)) {
-    const auto facing = directionOf(state);
-    const bool facingZ = facing == Direction::North || facing == Direction::South;
-    const bool directionX = direction == Direction::East || direction == Direction::West;
-    const bool directionZ = direction == Direction::North || direction == Direction::South;
-    if ((facingZ && directionX) || (!facingZ && directionZ)) {
-      const bool inWall = isWallBlock(neighbor) ||
-          isWallBlock(getBlock(p.relative(opposite(direction))));
-      return state.with("in_wall", inWall ? "true" : "false");
-    }
-  }
-  // Water simulation is outside the current scope; waterlogged values persist.
-  if (isWallBlock(state) && direction != Direction::Down)
-    return wallUpdateShape(*this, p, state, direction, neighbor);
-  if (state.is(Blocks::PISTON_HEAD) &&
-      opposite(direction) ==
-          directionOf(state)) {
-    const auto base = getBlock(neighborPos);
-    if (!fittingBase(state, base) &&
-        !(base.is(Blocks::MOVING_PISTON) &&
-          facingOf(base) == facingOf(state)))
-      return airState();
-  }
-  if (state.is(Blocks::OBSERVER) &&
-      directionOf(state, Direction::South) == direction &&
-      !poweredOf(state) &&
-      !hasScheduledTick(p, state.block()))
-    scheduleTick(p, state.block(), 2);
-  if (state.is(Blocks::NOTE_BLOCK) &&
-      (direction == Direction::Up || direction == Direction::Down)) {
-    const auto below = getBlock(p.relative(Direction::Down));
-    std::string_view instrument = "harp";
-    if (below.is(Blocks::GLASS))
-      instrument = "hat";
-    else if (below.is(Blocks::SAND))
-      instrument = "snare";
-    else if (below.is(Blocks::SMOOTH_STONE) || isWallBlock(below) ||
-             below.is(Blocks::WHITE_TERRACOTTA) || below.is(Blocks::BEDROCK) ||
-             below.is(Blocks::OBSIDIAN) || below.is(Blocks::OBSERVER) ||
-             below.is(Blocks::STONE_BRICKS) || isDeadCoralFan(below))
-      instrument = "basedrum";
-    else if (below.is(Blocks::NOTE_BLOCK) || isFenceGate(below))
-      instrument = "bass";
-    // TODO: unknown instrument overrides and skull-backed sounds need registry
-    // data.
-    return state.with("instrument", instrument);
-  }
-  // TODO: unsupported blocks retain their stored state; their updateShape is
-  // unknown.
-  return state;
+  return state.block().updateShape(*this, p, state, direction, neighborPos,
+                                   neighbor);
 }
 bool World::removeBlock(Pos p, bool movedByPiston) {
   // Level.java:276-280 reads the fluid BEFORE the write; for a waterlogged
@@ -1876,22 +2485,13 @@ void World::updateNeighbourShapes(Pos p, const BlockState &state, int flags,
   for (auto d : shapeOrder)
     shapeUpdate(p.relative(d), opposite(d), p, state, flags, limit);
 }
-void World::updateIndirectNeighbourShapes(
-    Pos, const BlockState &, int,
-    int) { /* No supported block currently overrides this hook. */ }
-void World::affectNeighborsAfterRemoval(Pos p, const BlockState &state, bool) {
-  if (state.is(Blocks::PISTON_HEAD)) {
-    auto q =
-        p.relative(opposite(directionOf(state)));
-    if (fittingBase(state, getBlock(q))) {
-      for (const auto &drop : blockDrops(getBlock(q)))
-        spawnItem(q, drop.id, drop.count);
-      setBlock(q, airState(), 3);
-    }
-  }
-  if (state.is(Blocks::OBSERVER) && poweredOf(state) &&
-      hasScheduledTick(p, state.block()))
-    observerNotify(p, state.with(PropertyKind::Powered, std::uint8_t{0}));
+void World::updateIndirectNeighbourShapes(Pos p, const BlockState &state,
+                                         int flags, int limit) {
+  redstoneUpdateIndirectNeighbourShapes(*this, p, state, flags, limit);
+}
+void World::affectNeighborsAfterRemoval(Pos p, const BlockState &state,
+                                        bool movedByPiston) {
+  state.block().affectNeighborsAfterRemoval(*this, p, state, movedByPiston);
 }
 void World::neighborChanged(Pos p, const BlockRef &source) {
   Update u{};
@@ -2002,91 +2602,114 @@ bool World::runNext(Update &u) {
 void World::executeNeighbor(Pos p, const BlockState &state,
                             const BlockRef &source, bool movedByPiston) {
   // TODO: orientation and movedByPiston for unsupported blocks.
-  (void)movedByPiston;
   if (traceUpdates)
     log.push_back({"neighbor", p, source.str()});
+  // High-frequency fast paths (air/piston/liquid/rail); remaining blocks
+  // dispatch via Block::neighborChanged function pointer.
+  if (state.isAir())
+    return;
   if (piston(state))
     pistonNeighborChanged(*this, p, state);
-  else if (state.is(Blocks::PISTON_HEAD)) {
-    auto d = directionOf(state);
-    auto basePos = p.relative(opposite(d));
-    auto base = getBlock(basePos);
-    if (fittingBase(state, base) ||
-        (base.is(Blocks::MOVING_PISTON) && facingOf(base) == facingOf(state)))
-      neighborChanged(basePos, source.str());
-  } else if (state.is(Blocks::TNT) && hasNeighborSignal(p) && tntExplodes) {
-    primeTntBlock(p);
-  } else if (isLiquidBlock(state)) {
-    // LiquidBlock.neighborChanged: a separate path from onPlace and updateShape.
+  else if (isLiquidBlock(state))
     liquidNeighborChanged(*this, p, state);
-  } else if (isRailBlock(state)) {
+  else if (isRailBlock(state))
     railNeighborChanged(*this, p, state, source, movedByPiston);
-  } else if (state.is(Blocks::REDSTONE_LAMP)) {
-    const bool lit = litOf(state);
-    if (lit != hasNeighborSignal(p)) {
-      if (lit)
-        scheduleTick(p, state.block(), 4);
-      else
-        setBlock(p, state.with(PropertyKind::Lit, std::uint8_t{1}), 2);
-    }
-  } else if (isFenceGate(state)) {
-    const bool signal = hasNeighborSignal(p);
-    const bool powered = poweredOf(state);
-    if (signal != powered) {
-      setBlock(p,
-               state.with(PropertyKind::Powered,
-                          signal ? std::uint8_t{1} : std::uint8_t{0})
-                   .with(PropertyKind::Open,
-                         signal ? std::uint8_t{1} : std::uint8_t{0}),
-               2);
-      if (openOf(state) != signal) {
-        (void)random.nextFloat();
-        // TODO: fence gate sound and BLOCK_OPEN/BLOCK_CLOSE game events.
-      }
-    }
-  } else if (state.is(Blocks::NOTE_BLOCK)) {
-    bool signal = hasNeighborSignal(p), powered = poweredOf(state);
-    if (signal != powered) {
-      if (signal && getBlock(p.relative(Direction::Up)).isAir())
-        blockEvent(p, state.block(), 0, 0);
-      setBlock(p,
-               state.with(PropertyKind::Powered,
-                          signal ? std::uint8_t{1} : std::uint8_t{0}),
-               3);
-    }
-  }
+  else
+    state.block().neighborChanged(*this, p, state, source, movedByPiston);
+}
+int World::getDirectSignal(Pos p, Direction d) const {
+  return redstoneBlockDirectSignal(*this, p, getBlock(p), d);
+}
+int World::getDirectSignalTo(Pos p) const {
+  int signal = 0;
+  signal = std::max(signal, getDirectSignal(p.relative(Direction::Down),
+                                            Direction::Down));
+  if (signal >= 15)
+    return signal;
+  signal =
+      std::max(signal, getDirectSignal(p.relative(Direction::Up), Direction::Up));
+  if (signal >= 15)
+    return signal;
+  signal = std::max(
+      signal, getDirectSignal(p.relative(Direction::North), Direction::North));
+  if (signal >= 15)
+    return signal;
+  signal = std::max(
+      signal, getDirectSignal(p.relative(Direction::South), Direction::South));
+  if (signal >= 15)
+    return signal;
+  signal = std::max(
+      signal, getDirectSignal(p.relative(Direction::West), Direction::West));
+  if (signal >= 15)
+    return signal;
+  return std::max(
+      signal, getDirectSignal(p.relative(Direction::East), Direction::East));
+}
+int World::getControlInputSignal(Pos p, Direction d, bool diodesOnly) const {
+  const auto state = getBlock(p);
+  if (diodesOnly)
+    return isDiodeBlock(state) ? getDirectSignal(p, d) : 0;
+  if (state.is(Blocks::REDSTONE_BLOCK))
+    return 15;
+  if (state.is(Blocks::REDSTONE_WIRE))
+    return static_cast<int>(propertyValue(state, PropertyKind::Power));
+  return isRedstoneSignalSource(*this, state)
+             ? redstoneBlockDirectSignal(*this, p, state, d)
+             : 0;
 }
 int World::getSignal(Pos p, Direction d) const {
-  auto s = getBlock(p);
-  if (s.is(Blocks::REDSTONE_BLOCK))
-    return 15;
-  if (s.is(Blocks::OBSERVER) && poweredOf(s) &&
-      directionOf(s, Direction::South) == d)
-    return 15;
-  if (isRailBlock(s) && railSignal(s) > 0)
-    return railSignal(s);
-  // TODO: generic block registries and redstone wire direct signals.
-  if (isRedstoneConductor(s)) {
-    for (auto n : neighborOrder) {
-      auto q = p.relative(n);
-      auto x = getBlock(q);
-      if (x.is(Blocks::OBSERVER) && poweredOf(x) &&
-          directionOf(x, Direction::South) == n)
-        return 15;
-      // DetectorRailBlock.getDirectSignal returns 15 only toward UP. With the
-      // SignalGetter convention (direction from the conductor to the source),
-      // this reaches the block below a powered detector rail.
-      if (n == Direction::Up && x.is(Blocks::DETECTOR_RAIL) && poweredOf(x))
-        return 15;
-    }
-  }
-  return 0;
+  const auto s = getBlock(p);
+  const int signal = redstoneBlockSignal(*this, p, s, d);
+  return isRedstoneConductor(s) ? std::max(signal, getDirectSignalTo(p)) : signal;
 }
+int World::getBestNeighborSignal(Pos p) const {
+  int best = 0;
+  for (auto d : neighborOrder) {
+    const int signal = getSignal(p.relative(d), d);
+    if (signal >= 15)
+      return 15;
+    if (signal > best)
+      best = signal;
+  }
+  return best;
+}
+bool World::hasSignal(Pos p, Direction d) const { return getSignal(p, d) > 0; }
 bool World::hasNeighborSignal(Pos p) const {
   for (auto d : neighborOrder)
     if (getSignal(p.relative(d), d) > 0)
       return true;
   return false;
+}
+int World::comparatorOutput(Pos pos) const {
+  auto it = comparatorSignals_.find(pos);
+  return it == comparatorSignals_.end() ? 0 : it->second;
+}
+void World::setComparatorOutput(Pos pos, int value) {
+  if (value == 0)
+    comparatorSignals_.erase(pos);
+  else
+    comparatorSignals_[pos] = value;
+}
+
+void World::updateNeighbourForOutputSignal(Pos pos,
+                                           const BlockRef &changedBlock) {
+  for (Direction d :
+       {Direction::North, Direction::East, Direction::South, Direction::West}) {
+    Pos rp = pos.relative(d);
+    if (!isLoaded(rp))
+      continue;
+    BlockState rs = getBlock(rp);
+    if (rs.is(Blocks::COMPARATOR)) {
+      neighborChanged(rs, rp, changedBlock, false);
+    } else if (isRedstoneConductor(rs)) {
+      rp = rp.relative(d);
+      if (isLoaded(rp)) {
+        rs = getBlock(rp);
+        if (rs.is(Blocks::COMPARATOR))
+          neighborChanged(rs, rp, changedBlock, false);
+      }
+    }
+  }
 }
 
 
@@ -2119,6 +2742,9 @@ bool World::hasScheduledTick(Pos p, const BlockRef &block) const {
   auto *container = tickQueue_->containers.find(key);
   return container && (*container)->has(p, block.block());
 }
+bool World::willTickThisTick(Pos p, const BlockRef &block) const {
+  return tickQueue_->willTickThisTick(p, block.block());
+}
 std::size_t World::scheduledTickCount() const { return tickQueue_->count(); }
 std::vector<ScheduledTick> World::scheduledTicks() const {
   // Deterministic snapshot: chunk order, then each chunk's own DRAIN_ORDER.
@@ -2132,11 +2758,11 @@ std::vector<ScheduledTick> World::scheduledTicks() const {
     auto ordered = (*tickQueue_->containers.find(key))->heap;
     std::sort(ordered.begin(), ordered.end(),
               [](const QueuedTick<Block> &x, const QueuedTick<Block> &y) {
-                return std::tie(x.tick.trigger, x.tick.priority, x.tick.order) <
-                       std::tie(y.tick.trigger, y.tick.priority, y.tick.order);
+                return std::tie(x.trigger, x.priority, x.order) <
+                       std::tie(y.trigger, y.priority, y.order);
               });
     for (const auto &entry : ordered)
-      ticks.push_back(entry.tick);
+      ticks.push_back(entry.toBlockScheduledTick());
   }
   return ticks;
 }
@@ -2147,7 +2773,7 @@ ChunkTickSnapshot World::snapshotChunkTicks(int chunkX,
   if (const auto *container = tickQueue_->containers.find(key)) {
     result.blockTicks.reserve((*container)->heap.size());
     for (const auto &entry : (*container)->heap)
-      result.blockTicks.push_back(entry.tick);
+      result.blockTicks.push_back(entry.toBlockScheduledTick());
     std::sort(result.blockTicks.begin(), result.blockTicks.end(),
               [](const ScheduledTick &a, const ScheduledTick &b) {
                 return std::tie(a.trigger, a.priority, a.order) <
@@ -2157,7 +2783,8 @@ ChunkTickSnapshot World::snapshotChunkTicks(int chunkX,
   if (const auto *container = fluidTickQueue_->containers.find(key)) {
     result.fluidTicks.reserve((*container)->heap.size());
     for (const auto &entry : (*container)->heap)
-      result.fluidTicks.emplace_back(entry.tick, FluidRef(*entry.target));
+      result.fluidTicks.emplace_back(entry.toFluidScheduledTick(),
+                                     FluidRef(*entry.target));
     std::sort(result.fluidTicks.begin(), result.fluidTicks.end(),
               [](const auto &a, const auto &b) {
                 return std::tie(a.first.trigger, a.first.priority,
@@ -2183,13 +2810,11 @@ ChunkTickSnapshot World::takeChunkTicks(int chunkX, int chunkZ) {
   ChunkTickSnapshot result = snapshotChunkTicks(chunkX, chunkZ);
   const std::uint64_t key = chunkKey(chunkX, chunkZ);
   if (auto *container = tickQueue_->containers.find(key)) {
-    (*container)->heap.clear();
-    (*container)->ticksPerPosition.clear();
+    (*container)->releaseStorage();
     tickQueue_->nextTickForContainer.erase(key);
   }
   if (auto *container = fluidTickQueue_->containers.find(key)) {
-    (*container)->heap.clear();
-    (*container)->ticksPerPosition.clear();
+    (*container)->releaseStorage();
     fluidTickQueue_->nextTickForContainer.erase(key);
   }
   if (tickMutationObserver)
@@ -2249,11 +2874,11 @@ std::vector<std::pair<ScheduledTick, FluidRef>> World::fluidTicks() const {
     auto ordered = (*fluidTickQueue_->containers.find(key))->heap;
     std::sort(ordered.begin(), ordered.end(),
               [](const QueuedTick<Fluid> &x, const QueuedTick<Fluid> &y) {
-                return std::tie(x.tick.trigger, x.tick.priority, x.tick.order) <
-                       std::tie(y.tick.trigger, y.tick.priority, y.tick.order);
+                return std::tie(x.trigger, x.priority, x.order) <
+                       std::tie(y.trigger, y.priority, y.order);
               });
     for (const auto &entry : ordered)
-      ticks.emplace_back(entry.tick, FluidRef(*entry.target));
+      ticks.emplace_back(entry.toFluidScheduledTick(), FluidRef(*entry.target));
   }
   return ticks;
 }
@@ -2288,23 +2913,12 @@ void World::tickBlockAt(Pos pos, const Block *expected) {
   const auto s = getBlock(pos);
   if (s.blockOrNull() != expected)
     return;
-  if (s.is(Blocks::OBSERVER)) {
-    bool on = poweredOf(s);
-    setBlock(pos, s.with(PropertyKind::Powered, on ? std::uint8_t{0} : std::uint8_t{1}), 2);
-    if (!on)
-      scheduleTick(pos, s.block(), 2);
-    observerNotify(pos, s);
-  } else if (isRailBlock(s)) {
+  if (s.isAir())
+    return;
+  if (isRailBlock(s))
     railScheduledTick(*this, pos, s);
-  } else if (s.is(Blocks::REDSTONE_LAMP)) {
-    if (litOf(s) && !hasNeighborSignal(pos))
-      setBlock(pos, s.with("lit", "false"), 2);
-  } else if (s.is(Blocks::SAND)) {
-    // TODO: FIRE tags and replaceable blocks outside the implemented registry.
-    if (pos.y >= minY_ &&
-        isReplaceable(getBlock(pos.relative(Direction::Down))))
-      FallingBlockEntity::fall(*this, pos, s);
-  }
+  else
+    s.block().tick(*this, pos, s);
 }
 // ServerLevel.tickFluid: `fluidState.is(type)` is the exact identity test, not
 // the "is a source" test, so a flowing tick must not run source logic and vice
@@ -2371,18 +2985,519 @@ void World::runEvents() {
     bool accepted = false;
     if (piston(s))
       accepted = pistonBlockEvent(*this, e.pos, s, e.type, e.data);
-    else if (s.is(Blocks::NOTE_BLOCK)) {
-      log.push_back({"note", e.pos,
-                     s.get("instrument", "harp") + ":" + s.get("note", "0")});
-      accepted = true;
-    }
+    else
+      accepted = s.block().triggerEvent(*this, e.pos, s, e.type, e.data);
     if (accepted && blockEventObserver)
       blockEventObserver(e);
   }
   for (auto &e : blockEventsToReschedule_)
     blockEventQueue_->add(e);
 }
-// TODO: random ticks, weather, and the remaining world systems are absent.
+namespace {
+int readNibbleLight(const std::optional<std::array<std::uint8_t, 2048>> &layer,
+                    Pos pos) {
+  if (!layer)
+    return 0;
+  const std::size_t idx = lightIndex(pos.x, pos.y, pos.z);
+  const std::uint8_t byteVal = (*layer)[idx >> 1];
+  return static_cast<int>((idx & 1u) ? (byteVal >> 4) : (byteVal & 0x0fu));
+}
+
+void dispatchRandomTickCell(World &world, RandomTickAccess &access, Pos pos,
+                            const BlockState &state) {
+  if (state.isRandomlyTicking().value_or(true)) {
+    ++world.randomTickStats.blocksTicked;
+    const RandomTickResult res = state.randomTick(access, pos, world.random);
+    if (res == RandomTickResult::Applied)
+      ++world.randomTickStats.ticksApplied;
+    else {
+      ++world.randomTickStats.ticksUnsupported;
+      if (world.unsupportedRandomTickObserver)
+        world.unsupportedRandomTickObserver(pos, state, false);
+    }
+  }
+  const FluidState fluid = fluidStateOf(state);
+  if (fluid.isRandomlyTicking()) {
+    ++world.randomTickStats.fluidsTicked;
+    const RandomTickResult res = fluid.randomTick(access, pos, world.random);
+    if (res == RandomTickResult::Applied)
+      ++world.randomTickStats.ticksApplied;
+    else {
+      ++world.randomTickStats.ticksUnsupported;
+      if (world.unsupportedRandomTickObserver)
+        world.unsupportedRandomTickObserver(pos, state, true);
+    }
+  }
+}
+
+[[noreturn]] [[gnu::cold]] void throwRandomTickError(const char *msg) {
+  throw std::logic_error(msg);
+}
+
+inline void dispatchRandomTickIndex(World &world, RandomTickAccess &access,
+                                    int sectionBlockX, int sectionBaseY,
+                                    int sectionBlockZ, int blockIndex,
+                                    BlockState::Id id) {
+  const Pos targetPos{sectionBlockX + (blockIndex & 15),
+                      sectionBaseY + ((blockIndex >> 8) & 15),
+                      sectionBlockZ + ((blockIndex >> 4) & 15)};
+  dispatchRandomTickCell(world, access, targetPos, BlockState::fromId(id));
+}
+
+class WorldRandomTickAccess final : public RandomTickAccess {
+public:
+  explicit WorldRandomTickAccess(World &world) : world_(world) {}
+
+  BlockState getBlock(Pos pos) const override { return world_.getBlock(pos); }
+
+  std::optional<bool> isFullFluid(Pos pos) const override {
+    const auto state = world_.getBlockIfLoaded(pos);
+    if (!state)
+      return std::nullopt;
+    return fluidStateOf(*state).isFull();
+  }
+
+  std::optional<bool> isWaterFluid(Pos pos) const override {
+    const auto state = world_.getBlockIfLoaded(pos);
+    if (!state)
+      return std::nullopt;
+    return fluidHasTag(fluidStateOf(*state).getType(), FluidTag::Water);
+  }
+
+  std::optional<int> lightBlockIntoUp(BlockState from,
+                                      Pos above) const override {
+    const auto to = world_.getBlockIfLoaded(above);
+    if (!to)
+      return std::nullopt;
+    return lightBlockIntoUpFromStates(from, *to);
+  }
+
+  std::optional<int> maxLocalRawBrightness(Pos pos) const override {
+    return world_.rawBrightness(pos);
+  }
+
+  std::optional<bool> isSnowySetting(Pos above) const override {
+    const auto state = world_.getBlockIfLoaded(above);
+    if (!state)
+      return std::nullopt;
+    return world_.hasBlockTag(*state, "minecraft:snow");
+  }
+
+  std::optional<bool> canSpreadGrassSurvive(BlockState state,
+                                            Pos above) const override {
+    const auto aboveState = world_.getBlockIfLoaded(above);
+    if (!aboveState)
+      return std::nullopt;
+    return canStayAliveFromAboveState(state, *aboveState);
+  }
+
+  SpreadTargetResult canSpreadGrassTarget(BlockState spreadDefault,
+                                          Pos targetAbove) const override {
+    const auto aboveState = world_.getBlockIfLoaded(targetAbove);
+    if (!aboveState)
+      return SpreadTargetResult::Unsupported;
+    const auto survives = canStayAliveFromAboveState(spreadDefault, *aboveState);
+    if (!survives)
+      return SpreadTargetResult::Unsupported;
+    if (!*survives)
+      return SpreadTargetResult::CannotSpread;
+    if (fluidHasTag(fluidStateOf(*aboveState).getType(), FluidTag::Water))
+      return SpreadTargetResult::CannotSpread;
+    const auto snowy = world_.hasBlockTag(*aboveState, "minecraft:snow");
+    if (!snowy)
+      return SpreadTargetResult::Unsupported;
+    return *snowy ? SpreadTargetResult::SpreadSnowy
+                  : SpreadTargetResult::SpreadClear;
+  }
+
+  void setBlockAndUpdate(Pos pos, BlockState state) override {
+    world_.setBlock(pos, state, 3, 512);
+  }
+
+  void setBlock(Pos pos, BlockState state, int flags) override {
+    world_.setBlock(pos, state, flags, 512);
+  }
+
+  std::optional<bool> growSaplingTree(Pos, BlockState, Random &) override {
+    // TODO: TreeGrower / world generation is not implemented yet.
+    return std::nullopt;
+  }
+
+  std::optional<bool> canMushroomSurvive(Pos pos,
+                                         BlockState) const override {
+    const Pos belowPos = pos.relative(Direction::Down);
+    const auto belowState = world_.getBlockIfLoaded(belowPos);
+    if (!belowState)
+      return std::nullopt;
+    const auto overrides = world_.hasBlockTag(
+        *belowState, "minecraft:overrides_mushroom_light_requirement");
+    if (overrides && *overrides)
+      return true;
+    const auto brightness = world_.rawBrightness(pos);
+    if (!brightness)
+      return std::nullopt;
+    return *brightness < 13 && isSolidRender(*belowState);
+  }
+
+  int minY() const override { return world_.minY(); }
+  int maxBlockY() const override { return world_.maxY() - 1; }
+  bool isLoaded(Pos pos) const override { return world_.isLoaded(pos); }
+  bool hasChunkAt(Pos pos) const override { return inLoadedColumn(pos); }
+  std::optional<int> blockBrightness(Pos pos) const override {
+    return world_.blockBrightness(pos);
+  }
+  std::optional<bool> hasBlockTag(BlockState state,
+                                  std::string_view tag) const override {
+    return world_.hasBlockTag(state, tag);
+  }
+  bool isFaceSturdy(Pos pos, BlockState state, Direction dir) const override {
+    return faceSturdy(world_, pos, state, dir);
+  }
+  bool isFaceFullBlockSupportOrCollision(Pos pos, BlockState state,
+                                         Direction dir) const override {
+    // Support and collision shapes are both checked via faceSturdy for full
+    // face attachment; leaves are solid collision cubes in registered shapes.
+    return faceSturdy(world_, pos, state, dir);
+  }
+  bool hasCollisionIntersecting(Pos pos, double x0, double y0, double z0,
+                                double x1, double y1,
+                                double z1) const override {
+    const BlockState state = world_.getBlock(pos);
+    const auto intersects = [&](const VoxelShape &boxes) {
+      for (const ShapeBox &b : boxes) {
+        if (b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1 && b.z1 > z0 &&
+            b.z0 < z1)
+          return true;
+      }
+      return false;
+    };
+    return state.is(Blocks::MOVING_PISTON)
+               ? intersects(collisionShape(world_, pos, state))
+               : intersects(collisionShape(state));
+  }
+  void removeBlock(Pos pos, bool movedByPiston) override {
+    world_.setBlock(pos, Blocks::AIR.defaultState(),
+                    movedByPiston ? 67 : 3, 512);
+  }
+  void neighborChanged(Pos pos, const BlockRef &source) override {
+    world_.neighborChanged(pos, source);
+  }
+  void scheduleTick(Pos pos, const BlockRef &block, int delay) override {
+    world_.scheduleTick(pos, block, delay);
+  }
+  bool hasScheduledTick(Pos pos, const BlockRef &block) const override {
+    return world_.hasScheduledTick(pos, block);
+  }
+  bool canSpreadFireAround(Pos pos) const override {
+    return world_.anyPlayerCloseEnoughForFireSpread(pos);
+  }
+  bool spreadVinesEnabled() const override { return world_.spreadVines; }
+  bool waterEvaporates() const override { return world_.waterEvaporates; }
+  std::optional<bool> isRainingAt(Pos) const override {
+    // TODO: weather and biome precipitation are not implemented yet.
+    return std::nullopt;
+  }
+
+private:
+  static std::optional<int> lightBlockIntoUpFromStates(BlockState from,
+                                                       BlockState to) {
+    const BlockLightProperties &fromProps = blockLightProperties(from);
+    const BlockLightProperties &toProps = blockLightProperties(to);
+    if (!fromProps.supported || !toProps.supported)
+      return std::nullopt;
+    if (lightFaceShapesOcclude(fromProps, toProps, LightDirection::Up))
+      return 15;
+    return static_cast<int>(toProps.dampening);
+  }
+
+  static std::optional<bool> canStayAliveFromAboveState(BlockState state,
+                                                        BlockState aboveState) {
+    if (aboveState.is(Blocks::SNOW)) {
+      if (!aboveState.hasProperty("layers"))
+        return std::nullopt;
+      if (aboveState.getView("layers") == "1")
+        return true;
+    }
+    if (fluidStateOf(aboveState).isFull())
+      return false;
+    const auto blocked = lightBlockIntoUpFromStates(state, aboveState);
+    if (!blocked)
+      return std::nullopt;
+    return *blocked < 15;
+  }
+
+  bool inLoadedColumn(Pos pos) const {
+    return world_.isChunkLoaded(pos.x >> 4, pos.z >> 4);
+  }
+
+  World &world_;
+};
+} // namespace
+
+bool World::anyPlayerCloseEnoughForFireSpread(Pos pos) const {
+  if (fireSpreadRadiusAroundPlayer == -1)
+    return true;
+  if (fireSpreadRadiusAroundPlayer <= 0)
+    return false;
+  const double maxDistSq = static_cast<double>(fireSpreadRadiusAroundPlayer) *
+                           static_cast<double>(fireSpreadRadiusAroundPlayer);
+  const double tx = static_cast<double>(pos.x) + 0.5;
+  const double ty = static_cast<double>(pos.y) + 0.5;
+  const double tz = static_cast<double>(pos.z) + 0.5;
+  for (const Vec3 &playerPos : fireSpreadPlayerPositions) {
+    const double dx = playerPos.x - tx;
+    const double dy = playerPos.y - ty;
+    const double dz = playerPos.z - tz;
+    if (dx * dx + dy * dy + dz * dz < maxDistSq)
+      return true;
+  }
+  return false;
+}
+
+template <class ChunkPtr>
+static std::optional<int> readWorldBrightness(const LightService *lightService,
+                                              ChunkPtr chunk, Pos pos, int cx,
+                                              int cz, int minY, int maxY,
+                                              bool blockOnly) {
+  if (!chunk)
+    return std::nullopt;
+  if (lightService) {
+    const auto blockView = lightService->latestLayerChunk(LightLayer::Block, cx, cz);
+    if (blockView) {
+      if (blockOnly) {
+        if (pos.y >= maxY || pos.y < minY)
+          return 0;
+        return blockView->lightValue(LightLayer::Block, pos.x, pos.y, pos.z);
+      }
+      const auto skyView = lightService->latestLayerChunk(LightLayer::Sky, cx, cz);
+      if (skyView) {
+        if (pos.y >= maxY)
+          return skyView->skyLightEnabled ? 15 : 0;
+        if (pos.y < minY)
+          return 0;
+        const int block = blockView->lightValue(LightLayer::Block, pos.x, pos.y, pos.z);
+        const int sky = skyView->lightValue(LightLayer::Sky, pos.x, pos.y, pos.z);
+        return std::max(block, sky);
+      }
+    }
+  }
+  if (chunk->persistedLight && chunk->persistedLight->isLightOn) {
+    if (pos.y >= maxY)
+      return blockOnly ? 0 : 15;
+    if (pos.y < minY)
+      return 0;
+    const int syRel = (pos.y >> 4) - (minY >> 4);
+    if (syRel < 0 ||
+        syRel >= static_cast<int>(chunk->persistedLightSectionIndex.size()))
+      return 0;
+    const int secIdx =
+        chunk->persistedLightSectionIndex[static_cast<std::size_t>(syRel)];
+    if (secIdx < 0)
+      return 0;
+    const PersistedLightSection &sec =
+        chunk->persistedLight->sections[static_cast<std::size_t>(secIdx)];
+    const int block = readNibbleLight(sec.blockLight, pos);
+    if (blockOnly)
+      return block;
+    return std::max(block, readNibbleLight(sec.skyLight, pos));
+  }
+  return std::nullopt;
+}
+
+std::optional<int> World::rawBrightness(Pos pos) const {
+  const int cx = chunkIndex(pos.x);
+  const int cz = chunkIndex(pos.z);
+  return readWorldBrightness(lightService_.get(), chunkAt(cx, cz), pos, cx, cz,
+                             minY_, maxY_, false);
+}
+
+std::optional<int> World::blockBrightness(Pos pos) const {
+  const int cx = chunkIndex(pos.x);
+  const int cz = chunkIndex(pos.z);
+  return readWorldBrightness(lightService_.get(), chunkAt(cx, cz), pos, cx, cz,
+                             minY_, maxY_, true);
+}
+
+std::uint16_t World::sectionTickingBlockCountForTest(int chunkX, int sectionY,
+                                                    int chunkZ) const {
+  const Chunk *c = chunkAt(chunkX, chunkZ);
+  if (!c)
+    return 0;
+  const int idx = sectionY - (minY_ >> 4);
+  if (idx < 0 || idx >= sectionCount())
+    return 0;
+  return c->sections[static_cast<std::size_t>(idx)].tickingBlockCount;
+}
+
+std::uint8_t World::sectionStorageBitsForTest(int chunkX, int sectionY,
+                                              int chunkZ) const {
+  const Chunk *c = chunkAt(chunkX, chunkZ);
+  if (!c)
+    return 0;
+  const int idx = sectionY - (minY_ >> 4);
+  if (idx < 0 || idx >= sectionCount())
+    return 0;
+  return c->sections[static_cast<std::size_t>(idx)].bits();
+}
+
+std::array<std::uint8_t, World::kRandomTickMinisectionCount>
+World::sectionRandomTickMinisectionsForTest(int chunkX, int sectionY,
+                                            int chunkZ) const {
+  std::array<std::uint8_t, kRandomTickMinisectionCount> out{};
+  const Chunk *c = chunkAt(chunkX, chunkZ);
+  if (!c)
+    return out;
+  const int idx = sectionY - (minY_ >> 4);
+  if (idx < 0 || idx >= sectionCount())
+    return out;
+  return c->sections[static_cast<std::size_t>(idx)].randomTickByMinisection;
+}
+
+int World::nextRandomBlockIndex() {
+  // Level.getBlockRandomPos LCG packed directly into YZX cell index [0..4095].
+  randValue_ = randValue_ * 3u + 1013904223u;
+  const std::uint32_t r = randValue_ >> 2;
+  return static_cast<int>((r & 15u) | ((r >> 8) & 0xf00u) |
+                          ((r >> 4) & 0xf0u));
+}
+
+[[gnu::noinline]] void World::tickSparseRandomTickHit(
+    int chunkX, int sectionBaseY, int chunkZ, Section &section, int nth,
+    RandomTickAccess &access) {
+  int mini = 0;
+  for (; mini < kRandomTickMinisectionCount; ++mini) {
+    const int countInMini =
+        section.randomTickByMinisection[static_cast<std::size_t>(mini)];
+    if (nth >= countInMini)
+      nth -= countInMini;
+    else
+      break;
+  }
+  if (mini >= kRandomTickMinisectionCount)
+    throwRandomTickError(
+        "random-tick minisection count mismatch during sparse lookup");
+  const int sectionBlockX = chunkX * 16;
+  const int sectionBlockZ = chunkZ * 16;
+  const int start = mini * kRandomTickMinisectionSize;
+  const SectionStorage *base = section.storage.get();
+  if (!base) {
+    if (!stateIsRandomlyTickingId(section.single))
+      throwRandomTickError(
+          "single-value section marked ticking without ticking state");
+    const int blockIndex = start + nth;
+    if (blockIndex >= kLightVolume)
+      throwRandomTickError("random-tick single-value index out of bounds");
+    dispatchRandomTickIndex(*this, access, sectionBlockX, sectionBaseY,
+                            sectionBlockZ, blockIndex, section.single);
+    return;
+  }
+  const int end = std::min(start + kRandomTickMinisectionSize, kLightVolume);
+  const bool found = visitSectionStorage(base, [&](const auto *block) -> bool {
+    for (int blockIndex = start; blockIndex < end; ++blockIndex) {
+      const auto idx = block->indexAt(static_cast<std::size_t>(blockIndex));
+      if (block->paletteTicking[idx] && nth-- == 0) {
+        dispatchRandomTickIndex(*this, access, sectionBlockX, sectionBaseY,
+                                sectionBlockZ, blockIndex, block->palette[idx]);
+        return true;
+      }
+    }
+    return false;
+  });
+  if (!found)
+    throwRandomTickError(
+        "failed to find nth randomly ticking block inside section");
+}
+
+[[gnu::noinline]] void World::tickDenseRandomTickSection(
+    int chunkX, int sectionBaseY, int chunkZ, Section &section, int tickSpeed,
+    RandomTickAccess &access) {
+  ++randomTickStats.sectionsDensePath;
+  randomTickStats.positionsProbed += static_cast<std::uint64_t>(tickSpeed);
+  const int sectionBlockX = chunkX * 16;
+  const int sectionBlockZ = chunkZ * 16;
+  for (int p = 0; p < tickSpeed; ++p) {
+    const int blockIndex = nextRandomBlockIndex();
+    BlockState::Id id = 0;
+    if (section.tryGetRandomlyTicking(blockIndex, id)) {
+      dispatchRandomTickIndex(*this, access, sectionBlockX, sectionBaseY,
+                              sectionBlockZ, blockIndex, id);
+    }
+  }
+}
+
+void World::tickRandomChunkSection(int chunkX, int sectionBaseY, int chunkZ,
+                                   Section &section, int tickSpeed,
+                                   RandomTickAccess &access) {
+  std::uint16_t tickingCount = section.tickingBlockCount;
+  if (tickingCount == 0)
+    return;
+  ++randomTickStats.sectionsVisited;
+
+  // Lithium ServerLevelMixin: when ticking blocks <= 384, draw random index r;
+  // only if r < tickingCount (N/4096 chance) scan from minisection offset.
+  if (tickingCount <= kRandomTickSparseThreshold) {
+    ++randomTickStats.sectionsSparsePath;
+    randomTickStats.positionsProbed += static_cast<std::uint64_t>(tickSpeed);
+    for (int p = 0; p < tickSpeed; ++p) {
+      const int r = nextRandomBlockIndex();
+      if (r < tickingCount) {
+        tickSparseRandomTickHit(chunkX, sectionBaseY, chunkZ, section, r,
+                                access);
+        tickingCount = section.tickingBlockCount;
+      }
+    }
+    return;
+  }
+
+  tickDenseRandomTickSection(chunkX, sectionBaseY, chunkZ, section, tickSpeed,
+                             access);
+}
+
+void World::tickChunks() {
+  // TODO: weather/precipitation/ice-and-snow and remaining chunk-tick systems
+  // are absent (requires biomes, climate, and weather state).
+  if (randomTickSpeed <= 0 || randomTickingChunks_.empty())
+    return;
+  if (randomTickingDirty_) {
+    std::sort(randomTickingChunks_.begin(), randomTickingChunks_.end(),
+              [](const TickingChunkEntry &a, const TickingChunkEntry &b) {
+                return a.key < b.key;
+              });
+    for (std::size_t i = 0; i < randomTickingChunks_.size(); ++i) {
+      randomTickingChunks_[i].chunk->randomTickIndex =
+          static_cast<std::uint32_t>(i);
+    }
+    randomTickingDirty_ = false;
+  }
+  randomTickChunkScratch_ = randomTickingChunks_;
+  WorldRandomTickAccess access(*this);
+  const int maxSections = sectionCount();
+  for (const TickingChunkEntry &entry : randomTickChunkScratch_) {
+    Chunk *chunk = entry.chunk;
+    if (!chunk->loaded)
+      continue;
+    std::uint32_t mask = chunk->randomTickingSectionMask;
+    if (mask == 0)
+      continue;
+    if (entityTickPositionReady &&
+        !entityTickPositionReady(Pos{entry.x * 16, minY_, entry.z * 16}))
+      continue;
+    ++randomTickStats.chunksVisited;
+    while (mask != 0) {
+      const int si = std::countr_zero(mask);
+      mask &= (mask - 1);
+      if (si >= maxSections)
+        break;
+      Section &section = chunk->sections[static_cast<std::size_t>(si)];
+      if (!section.isRandomlyTicking())
+        continue;
+      tickRandomChunkSection(entry.x, minY_ + si * 16, entry.z, section,
+                             randomTickSpeed, access);
+    }
+  }
+}
+
+// TODO: weather, biomes, and the remaining world systems are absent.
 void World::tick() {
   struct TickLightGuard {
     World &world;
@@ -2408,6 +3523,15 @@ void World::tick() {
                         [this](Pos pos, const Fluid *fluid) {
                           tickFluidAt(pos, fluid);
                         });
+  // ServerLevel.tick -> ServerChunkCache.tick -> ServerChunkCache.tickChunks:
+  // random block/fluid ticks run after scheduled ticks and before broadcasting
+  // dirty block updates.
+  const auto rtStart = std::chrono::steady_clock::now();
+  tickChunks();
+  const auto rtEnd = std::chrono::steady_clock::now();
+  randomTickStats.lastTickNs = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(rtEnd - rtStart)
+          .count());
   // ServerChunkCache.tick broadcasts ChunkHolder's dirty block positions
   // after scheduled ticks and before block events. Event-induced piston
   // source changes stay pending until the following chunk broadcast phase.
@@ -2426,10 +3550,524 @@ void World::tick() {
   if (traceUpdates)
     log.push_back({"block_entities", {}, ""});
   pistonTickBlockEntities(*this);
+  tickContainerBlockEntities(*this);
   if (blockEntityTicker)
     blockEntityTicker(*this);
   // Observe removals caused by block entities without altering the core's
   // existing cleanup timing. Network trackers must not wait one more tick.
   broadcastEntityRemovals();
+}
+
+namespace detail {
+struct WorldBehaviours {
+  // ---- onPlace ----
+  static void observerOnPlace(World &world, Pos p, const BlockState &state,
+                              const BlockState &oldState, bool) {
+    if (!oldState.sameBlock(state) && poweredOf(state) &&
+        !world.hasScheduledTick(p, state.block())) {
+      const BlockState next =
+          state.with(PropertyKind::Powered, std::uint8_t{0});
+      world.setBlock(p, next, 18);
+      world.observerNotify(p, next);
+    }
+  }
+
+  static void tntOnPlace(World &world, Pos p, const BlockState &state,
+                         const BlockState &oldState, bool) {
+    if (!oldState.sameBlock(state) && world.hasNeighborSignal(p) &&
+        world.primeTntBlock(p)) {
+      // primeTntBlock performs TntBlock.prime; onPlace then removes the block.
+    }
+  }
+
+  // ---- affectNeighborsAfterRemoval ----
+  static void pistonHeadAffectRemoval(World &world, Pos p,
+                                      const BlockState &state, bool) {
+    const Pos q = p.relative(opposite(directionOf(state)));
+    if (fittingBase(state, world.getBlock(q))) {
+      for (const auto &drop : blockDrops(world.getBlock(q)))
+        world.spawnItem(q, drop.id, drop.count);
+      world.setBlock(q, airState(), 3);
+    }
+  }
+
+  static void observerAffectRemoval(World &world, Pos p,
+                                    const BlockState &state, bool) {
+    if (poweredOf(state) && world.hasScheduledTick(p, state.block()))
+      world.observerNotify(p,
+                           state.with(PropertyKind::Powered, std::uint8_t{0}));
+  }
+
+  // ---- neighborChanged ----
+  static void pistonHeadNeighborChanged(World &world, Pos p,
+                                        const BlockState &state,
+                                        const BlockRef &source, bool) {
+    const Direction d = directionOf(state);
+    const Pos basePos = p.relative(opposite(d));
+    const BlockState base = world.getBlock(basePos);
+    if (fittingBase(state, base) ||
+        (base.is(Blocks::MOVING_PISTON) && facingOf(base) == facingOf(state)))
+      world.neighborChanged(basePos, source.str());
+  }
+
+  static void tntNeighborChanged(World &world, Pos p, const BlockState &,
+                                 const BlockRef &, bool) {
+    if (world.hasNeighborSignal(p) && world.tntExplodes)
+      world.primeTntBlock(p);
+  }
+
+  static void redstoneLampNeighborChanged(World &world, Pos p,
+                                          const BlockState &state,
+                                          const BlockRef &, bool) {
+    const bool lit = litOf(state);
+    if (lit != world.hasNeighborSignal(p)) {
+      if (lit)
+        world.scheduleTick(p, state.block(), 4);
+      else
+        world.setBlock(p, state.with(PropertyKind::Lit, std::uint8_t{1}), 2);
+    }
+  }
+
+  static void fenceGateNeighborChanged(World &world, Pos p,
+                                       const BlockState &state,
+                                       const BlockRef &, bool) {
+    const bool signal = world.hasNeighborSignal(p);
+    const bool powered = poweredOf(state);
+    if (signal != powered) {
+      world.setBlock(p,
+                     state
+                         .with(PropertyKind::Powered,
+                               signal ? std::uint8_t{1} : std::uint8_t{0})
+                         .with(PropertyKind::Open,
+                               signal ? std::uint8_t{1} : std::uint8_t{0}),
+                     2);
+      if (openOf(state) != signal) {
+        (void)world.random.nextFloat();
+        // TODO: fence gate sound and BLOCK_OPEN/BLOCK_CLOSE game events.
+      }
+    }
+  }
+
+  static void noteBlockNeighborChanged(World &world, Pos p,
+                                       const BlockState &state,
+                                       const BlockRef &, bool) {
+    const bool signal = world.hasNeighborSignal(p);
+    const bool powered = poweredOf(state);
+    if (signal != powered) {
+      if (signal && world.getBlock(p.relative(Direction::Up)).isAir())
+        world.blockEvent(p, state.block(), 0, 0);
+      world.setBlock(
+          p,
+          state.with(PropertyKind::Powered,
+                     signal ? std::uint8_t{1} : std::uint8_t{0}),
+          3);
+    }
+  }
+
+  // ---- updateShape ----
+  static BlockState seagrassUpdateShape(World &world, Pos p,
+                                        const BlockState &state, Direction, Pos,
+                                        const BlockState &) {
+    const Pos below = p.relative(Direction::Down);
+    const BlockState support = world.getBlock(below);
+    const bool survives =
+        faceSturdy(world, below, support, Direction::Up) &&
+        !world.hasBlockTag(support, "minecraft:cannot_support_seagrass")
+             .value_or(false);
+    if (!survives)
+      return airState();
+    world.scheduleFluidTick(p, FluidRef(Fluids::water()),
+                            Fluids::water().tickDelay());
+    return state;
+  }
+
+  static BlockState tallSeagrassUpdateShape(World &world, Pos p,
+                                            const BlockState &state,
+                                            Direction direction, Pos,
+                                            const BlockState &neighbor) {
+    const bool lower = state.getView("half") == "lower";
+    if (((lower && direction == Direction::Up) ||
+         (!lower && direction == Direction::Down)) &&
+        (!neighbor.is(Blocks::TALL_SEAGRASS) ||
+         neighbor.getView("half") == state.getView("half")))
+      return airState();
+    const Pos below = p.relative(Direction::Down);
+    const BlockState support = world.getBlock(below);
+    const bool survives =
+        lower
+            ? faceSturdy(world, below, support, Direction::Up) &&
+                  !world.hasBlockTag(support, "minecraft:cannot_support_seagrass")
+                       .value_or(false)
+            : support.is(Blocks::TALL_SEAGRASS) &&
+                  support.getView("half") == "lower";
+    return survives ? state : airState();
+  }
+
+  static BlockState checkSupportTag(World &world, Pos p,
+                                    const BlockState &state,
+                                    std::string_view tag) {
+    const BlockState support = world.getBlock(p.relative(Direction::Down));
+    return world.hasBlockTag(support, tag).value_or(false) ? state : airState();
+  }
+
+  static BlockState dryVegetationUpdateShape(World &world, Pos p,
+                                             const BlockState &state,
+                                             Direction, Pos,
+                                             const BlockState &) {
+    return checkSupportTag(world, p, state,
+                           "minecraft:supports_dry_vegetation");
+  }
+
+  static BlockState witherRoseUpdateShape(World &world, Pos p,
+                                          const BlockState &state, Direction,
+                                          Pos, const BlockState &) {
+    return checkSupportTag(world, p, state, "minecraft:supports_wither_rose");
+  }
+
+  static BlockState vegetationUpdateShape(World &world, Pos p,
+                                          const BlockState &state, Direction,
+                                          Pos, const BlockState &) {
+    return checkSupportTag(world, p, state, "minecraft:supports_vegetation");
+  }
+
+  static BlockState carpetUpdateShape(World &world, Pos p,
+                                      const BlockState &state, Direction, Pos,
+                                      const BlockState &) {
+    return world.getBlock(p.relative(Direction::Down)).isAir() ? airState()
+                                                               : state;
+  }
+
+  static BlockState coralFanUpdateShape(World &world, Pos p,
+                                        const BlockState &state,
+                                        Direction direction, Pos,
+                                        const BlockState &) {
+    const Direction supportDirection = isDeadCoralWallFan(state)
+                                           ? opposite(directionOf(state))
+                                           : Direction::Down;
+    if (direction == supportDirection && !coralCanSurvive(world, p, state))
+      return airState();
+    return state;
+  }
+
+  static BlockState snowyUpdateShape(World &world, Pos,
+                                     const BlockState &state,
+                                     Direction direction, Pos,
+                                     const BlockState &neighbor) {
+    if (direction == Direction::Up) {
+      const bool snowy =
+          world.hasBlockTag(neighbor, "minecraft:snow").value_or(false);
+      return state.with(PropertyKind::Snowy,
+                        snowy ? std::uint8_t{1} : std::uint8_t{0});
+    }
+    return state;
+  }
+
+  static BlockState fenceGateUpdateShape(World &world, Pos p,
+                                         const BlockState &state,
+                                         Direction direction, Pos,
+                                         const BlockState &neighbor) {
+    const Direction facing = directionOf(state);
+    const bool facingZ =
+        facing == Direction::North || facing == Direction::South;
+    const bool directionX =
+        direction == Direction::East || direction == Direction::West;
+    const bool directionZ =
+        direction == Direction::North || direction == Direction::South;
+    if ((facingZ && directionX) || (!facingZ && directionZ)) {
+      const bool inWall =
+          isWallBlock(neighbor) ||
+          isWallBlock(world.getBlock(p.relative(opposite(direction))));
+      return state.with("in_wall", inWall ? "true" : "false");
+    }
+    return state;
+  }
+
+  static BlockState wallBlockUpdateShape(World &world, Pos p,
+                                         const BlockState &state,
+                                         Direction direction, Pos,
+                                         const BlockState &neighbor) {
+    if (direction != Direction::Down)
+      return wallUpdateShape(world, p, state, direction, neighbor);
+    return state;
+  }
+
+  static BlockState stairBlockUpdateShape(World &world, Pos p,
+                                          const BlockState &state,
+                                          Direction direction, Pos,
+                                          const BlockState &neighbor) {
+    return stairUpdateShape(world, p, state, direction, neighbor);
+  }
+
+  static BlockState fenceBlockUpdateShape(World &world, Pos p,
+                                          const BlockState &state,
+                                          Direction direction, Pos,
+                                          const BlockState &neighbor) {
+    return fenceUpdateShape(world, p, state, direction, neighbor);
+  }
+
+  static BlockState ironBarsBlockUpdateShape(World &world, Pos p,
+                                             const BlockState &state,
+                                             Direction direction, Pos,
+                                             const BlockState &neighbor) {
+    return ironBarsUpdateShape(world, p, state, direction, neighbor);
+  }
+
+  static BlockState pistonHeadUpdateShape(World &world, Pos,
+                                          const BlockState &state,
+                                          Direction direction, Pos neighborPos,
+                                          const BlockState &) {
+    if (opposite(direction) == directionOf(state)) {
+      const BlockState base = world.getBlock(neighborPos);
+      if (!fittingBase(state, base) &&
+          !(base.is(Blocks::MOVING_PISTON) && facingOf(base) == facingOf(state)))
+        return airState();
+    }
+    return state;
+  }
+
+  static BlockState observerUpdateShape(World &world, Pos p,
+                                        const BlockState &state,
+                                        Direction direction, Pos,
+                                        const BlockState &) {
+    if (directionOf(state, Direction::South) == direction &&
+        !poweredOf(state) && !world.hasScheduledTick(p, state.block()))
+      world.scheduleTick(p, state.block(), 2);
+    return state;
+  }
+
+  static BlockState noteBlockUpdateShape(World &world, Pos p,
+                                         const BlockState &state,
+                                         Direction direction, Pos,
+                                         const BlockState &) {
+    if (direction == Direction::Up || direction == Direction::Down) {
+      const Instrument aboveInst =
+          world.getBlock(p.relative(Direction::Up))
+              .block()
+              .metadata()
+              .instrument;
+      Instrument chosen = Instrument::Harp;
+      if (static_cast<std::uint8_t>(aboveInst) >=
+          static_cast<std::uint8_t>(Instrument::Zombie)) {
+        chosen = aboveInst;
+      } else {
+        const Instrument belowInst =
+            world.getBlock(p.relative(Direction::Down))
+                .block()
+                .metadata()
+                .instrument;
+        chosen = static_cast<std::uint8_t>(belowInst) >=
+                         static_cast<std::uint8_t>(Instrument::Zombie)
+                     ? Instrument::Harp
+                     : belowInst;
+      }
+      return state.with(PropertyKind::Instrument,
+                        static_cast<std::uint8_t>(chosen));
+    }
+    return state;
+  }
+
+  // ---- scheduled tick ----
+  static void observerTick(World &world, Pos pos, const BlockState &s) {
+    const bool on = poweredOf(s);
+    world.setBlock(
+        pos, s.with(PropertyKind::Powered, on ? std::uint8_t{0} : std::uint8_t{1}),
+        2);
+    if (!on)
+      world.scheduleTick(pos, s.block(), 2);
+    world.observerNotify(pos, s);
+  }
+
+  static void redstoneLampTick(World &world, Pos pos, const BlockState &s) {
+    if (litOf(s) && !world.hasNeighborSignal(pos))
+      world.setBlock(pos, s.with("lit", "false"), 2);
+  }
+
+  static void fallingBlockTick(World &world, Pos pos, const BlockState &s) {
+    // TODO: FIRE tags and replaceable blocks outside the implemented registry.
+    if (pos.y >= world.minY_ &&
+        isReplaceable(world.getBlock(pos.relative(Direction::Down))))
+      FallingBlockEntity::fall(world, pos, s);
+  }
+
+  // ---- block event ----
+  static bool noteBlockTriggerEvent(World &world, Pos pos, const BlockState &s,
+                                    int, int) {
+    world.log.push_back(
+        {"note", pos, s.get("instrument", "harp") + ":" + s.get("note", "0")});
+    return true;
+  }
+};
+
+void bindBlockBehaviours(Block &block) {
+  auto &b = block.behaviours_;
+  if (&block == &Blocks::OBSERVER) {
+    b.onPlace = &WorldBehaviours::observerOnPlace;
+    b.affectNeighborsAfterRemoval = &WorldBehaviours::observerAffectRemoval;
+    b.updateShape = &WorldBehaviours::observerUpdateShape;
+    b.tick = &WorldBehaviours::observerTick;
+  } else if (&block == &Blocks::TNT) {
+    b.onPlace = &WorldBehaviours::tntOnPlace;
+    b.neighborChanged = &WorldBehaviours::tntNeighborChanged;
+  } else if (&block == &Blocks::PISTON_HEAD) {
+    b.affectNeighborsAfterRemoval = &WorldBehaviours::pistonHeadAffectRemoval;
+    b.neighborChanged = &WorldBehaviours::pistonHeadNeighborChanged;
+    b.updateShape = &WorldBehaviours::pistonHeadUpdateShape;
+  } else if (&block == &Blocks::REDSTONE_WIRE) {
+    b.onPlace = &redstoneWireOnPlace;
+    b.affectNeighborsAfterRemoval = &redstoneWireAffectRemoval;
+    b.neighborChanged = &redstoneWireNeighborChanged;
+    b.updateShape = &redstoneWireUpdateShape;
+  } else if (&block == &Blocks::REDSTONE_TORCH) {
+    b.onPlace = &redstoneTorchOnPlace;
+    b.affectNeighborsAfterRemoval = &redstoneTorchAffectRemoval;
+    b.neighborChanged = &redstoneTorchNeighborChanged;
+    b.updateShape = &redstoneTorchUpdateShape;
+    b.tick = &redstoneTorchTick;
+  } else if (&block == &Blocks::REDSTONE_WALL_TORCH) {
+    b.onPlace = &redstoneTorchOnPlace;
+    b.affectNeighborsAfterRemoval = &redstoneTorchAffectRemoval;
+    b.neighborChanged = &redstoneTorchNeighborChanged;
+    b.updateShape = &redstoneWallTorchUpdateShape;
+    b.tick = &redstoneTorchTick;
+  } else if (&block == &Blocks::REPEATER) {
+    b.onPlace = &repeaterOnPlace;
+    b.affectNeighborsAfterRemoval = &repeaterAffectRemoval;
+    b.neighborChanged = &repeaterNeighborChanged;
+    b.updateShape = &repeaterUpdateShape;
+    b.tick = &repeaterTick;
+  } else if (&block == &Blocks::COMPARATOR) {
+    b.onPlace = &comparatorOnPlace;
+    b.affectNeighborsAfterRemoval = &comparatorAffectRemoval;
+    b.neighborChanged = &comparatorNeighborChanged;
+    b.tick = &comparatorTick;
+  } else if (&block == &Blocks::LEVER) {
+    b.affectNeighborsAfterRemoval = &leverAffectRemoval;
+    b.updateShape = &leverUpdateShape;
+  } else if (block.isButton()) {
+    b.affectNeighborsAfterRemoval = &buttonAffectRemoval;
+    b.updateShape = &buttonUpdateShape;
+    b.tick = &buttonTick;
+  } else if (&block == &Blocks::TARGET) {
+    b.onPlace = &targetOnPlace;
+    b.tick = &targetTick;
+  } else if (block.isPressurePlate()) {
+    b.affectNeighborsAfterRemoval = &pressurePlateAffectRemoval;
+    b.updateShape = &pressurePlateUpdateShape;
+    b.tick = &pressurePlateTick;
+  } else if (block.isDoor()) {
+    b.neighborChanged = &doorNeighborChanged;
+    b.updateShape = &doorUpdateShape;
+  } else if (block.isTrapdoor()) {
+    b.neighborChanged = &trapdoorNeighborChanged;
+  } else if (block.isCopperBulb()) {
+    b.onPlace = &copperBulbOnPlace;
+    b.neighborChanged = &copperBulbNeighborChanged;
+  } else if (&block == &Blocks::REDSTONE_LAMP) {
+    b.neighborChanged = &WorldBehaviours::redstoneLampNeighborChanged;
+    b.tick = &WorldBehaviours::redstoneLampTick;
+  } else if (block.isChest()) {
+    b.onPlace = &chestOnPlace;
+    b.affectNeighborsAfterRemoval = &chestAffectRemoval;
+    b.updateShape = &chestUpdateShape;
+  } else if (&block == &Blocks::BARREL) {
+    b.onPlace = &barrelOnPlace;
+    b.affectNeighborsAfterRemoval = &barrelAffectRemoval;
+    b.tick = &barrelTick;
+  } else if (&block == &Blocks::DISPENSER) {
+    b.onPlace = &dispenserOnPlace;
+    b.affectNeighborsAfterRemoval = &dispenserAffectRemoval;
+    b.neighborChanged = &dispenserNeighborChanged;
+    b.tick = &dispenserTick;
+  } else if (&block == &Blocks::DROPPER) {
+    b.onPlace = &dispenserOnPlace;
+    b.affectNeighborsAfterRemoval = &dispenserAffectRemoval;
+    b.neighborChanged = &dispenserNeighborChanged;
+    b.tick = &dropperTick;
+  } else if (&block == &Blocks::HOPPER) {
+    b.onPlace = &hopperOnPlace;
+    b.affectNeighborsAfterRemoval = &hopperAffectRemoval;
+    b.neighborChanged = &hopperNeighborChanged;
+  } else if (&block == &Blocks::COMPOSTER) {
+    b.onPlace = &composterOnPlace;
+    b.tick = &composterTick;
+  } else if (&block == &Blocks::NOTE_BLOCK) {
+    b.neighborChanged = &WorldBehaviours::noteBlockNeighborChanged;
+    b.updateShape = &WorldBehaviours::noteBlockUpdateShape;
+    b.triggerEvent = &WorldBehaviours::noteBlockTriggerEvent;
+  } else if (block.isFenceGate()) {
+    b.neighborChanged = &WorldBehaviours::fenceGateNeighborChanged;
+    b.updateShape = &WorldBehaviours::fenceGateUpdateShape;
+  } else if (block.isWall()) {
+    b.updateShape = &WorldBehaviours::wallBlockUpdateShape;
+  } else if (block.isStairs()) {
+    b.updateShape = &WorldBehaviours::stairBlockUpdateShape;
+  } else if (block.isFence()) {
+    b.updateShape = &WorldBehaviours::fenceBlockUpdateShape;
+  } else if (isIronBarsBlock(block.defaultState())) {
+    b.updateShape = &WorldBehaviours::ironBarsBlockUpdateShape;
+  } else if (block.isCarpet()) {
+    b.updateShape = &WorldBehaviours::carpetUpdateShape;
+  } else if (block.isSnowy()) {
+    b.updateShape = &WorldBehaviours::snowyUpdateShape;
+  } else if ((block.isCoralFan() || block.isCoralWallFan()) &&
+             block.supported()) {
+    b.updateShape = &WorldBehaviours::coralFanUpdateShape;
+  } else if (&block == &Blocks::SEAGRASS) {
+    b.updateShape = &WorldBehaviours::seagrassUpdateShape;
+  } else if (&block == &Blocks::TALL_SEAGRASS) {
+    b.updateShape = &WorldBehaviours::tallSeagrassUpdateShape;
+  } else if (&block == &Blocks::DEAD_BUSH ||
+             &block == &Blocks::SHORT_DRY_GRASS ||
+             &block == &Blocks::TALL_DRY_GRASS) {
+    b.updateShape = &WorldBehaviours::dryVegetationUpdateShape;
+  } else if (&block == &Blocks::WITHER_ROSE) {
+    b.updateShape = &WorldBehaviours::witherRoseUpdateShape;
+  } else if (&block == &Blocks::SHORT_GRASS || &block == &Blocks::FERN ||
+             &block == &Blocks::BUSH ||
+             isRegisteredSmallFlower(block.defaultState())) {
+    b.updateShape = &WorldBehaviours::vegetationUpdateShape;
+  }
+  if (block.isFalling())
+    b.tick = &WorldBehaviours::fallingBlockTick;
+}
+} // namespace detail
+
+void Block::onPlace(World &world, Pos pos, const BlockState &state,
+                    const BlockState &oldState, bool movedByPiston) const {
+  if (behaviours_.onPlace)
+    behaviours_.onPlace(world, pos, state, oldState, movedByPiston);
+}
+
+void Block::affectNeighborsAfterRemoval(World &world, Pos pos,
+                                        const BlockState &state,
+                                        bool movedByPiston) const {
+  if (behaviours_.affectNeighborsAfterRemoval)
+    behaviours_.affectNeighborsAfterRemoval(world, pos, state, movedByPiston);
+}
+
+void Block::neighborChanged(World &world, Pos pos, const BlockState &state,
+                            const BlockRef &source, bool movedByPiston) const {
+  if (behaviours_.neighborChanged)
+    behaviours_.neighborChanged(world, pos, state, source, movedByPiston);
+}
+
+BlockState Block::updateShape(World &world, Pos pos, const BlockState &state,
+                              Direction direction, Pos neighborPos,
+                              const BlockState &neighbor) const {
+  if (behaviours_.updateShape)
+    return behaviours_.updateShape(world, pos, state, direction, neighborPos,
+                                   neighbor);
+  return state;
+}
+
+void Block::tick(World &world, Pos pos, const BlockState &state) const {
+  if (behaviours_.tick)
+    behaviours_.tick(world, pos, state);
+}
+
+bool Block::triggerEvent(World &world, Pos pos, const BlockState &state,
+                         int type, int data) const {
+  return behaviours_.triggerEvent &&
+         behaviours_.triggerEvent(world, pos, state, type, data);
 }
 } // namespace redstone

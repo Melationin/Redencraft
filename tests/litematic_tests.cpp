@@ -313,7 +313,7 @@ int main(int argc, char **argv) {
       .compound["one"]
       .compound["BlockStatePalette"]
       .list[2]
-      .compound["Name"] = string("minecraft:diamond_block");
+      .compound["Name"] = string("minecraft:beacon");
   rejects([&] { loadLitematic(malformed); });
   LitematicOptions options;
   options.offset.y = 320;

@@ -1,13 +1,17 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <deque>
+#include <limits>
 #include <optional>
 #include <queue>
 #include <set>
+#include <shared_mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -15,6 +19,7 @@
 #include <vector>
 
 #include "redstone/block.hpp"
+#include "redstone/block_tags.hpp"
 #include "redstone/entity_codec.hpp"
 #include "redstone/fluid.hpp"
 #include "redstone/flat_hash_map.hpp"
@@ -24,6 +29,9 @@
 namespace redstone {
 enum class Direction { Down, Up, North, South, West, East };
 Direction opposite(Direction d);
+enum class Rotation { None, Clockwise90, Clockwise180, Counterclockwise90 };
+// RotatedPillarBlock.rotatePillar; state must have an axis property.
+BlockState rotatePillar(BlockState state, Rotation rotation);
 Direction directionFromString(std::string_view s);
 std::string directionName(Direction d);
 // Facing and Direction share the Down..East order, so the property field can be
@@ -173,6 +181,24 @@ struct PistonTickerSlot {
   std::shared_ptr<PistonMovingBlockEntity> entity;
   bool removed = false;
 };
+struct ContainerBlockEntity;
+struct HopperBlockEntity;
+enum class ContainerSleepMode : std::uint8_t {
+  Active = 0,
+  SleepIndefinite = 1,
+  SleepUntil = 2,
+};
+// Lithium-style SleepingBlockEntity / SleepUntilTimeBlockEntityTickInvoker slot:
+// preserves registration order in World::containerTickers while allowing idle
+// or cooled containers (hoppers) to skip ticking at zero cost until woken by
+// an inventory mutation, neighbor/block change, or nearby ItemEntity event.
+struct ContainerTickerSlot {
+  Pos pos;
+  std::shared_ptr<ContainerBlockEntity> entity;
+  ContainerSleepMode sleepMode = ContainerSleepMode::Active;
+  std::int64_t wakeGameTime = 0;
+  bool removed = false;
+};
 class Entity;
 class WorldChunkManager;
 // Chunk data exported for the network encoder: palette + index copies and the
@@ -207,6 +233,9 @@ template <class Target> struct TickQueueOf;
 using BlockTickQueue = TickQueueOf<Block>;
 using FluidTickQueue = TickQueueOf<Fluid>;
 
+namespace detail {
+struct WorldBehaviours;
+}
 class World {
 public:
   explicit World(int minY = -64, int maxY = 320,
@@ -220,10 +249,18 @@ public:
   void unloadChunk(int x, int z);
   bool isChunkLoaded(int x, int z) const;
   bool isLoaded(Pos pos) const;
+  // Explicit ordered pack list, lowest priority first. Reload replaces this
+  // world's snapshot only after the new definitions have been built.
+  BlockTagRegistry::ReloadResult reloadBlockTags(const std::vector<std::filesystem::path> &packs);
+  std::optional<bool> hasBlockTag(const BlockState &state, std::string_view tag) const;
+  const BlockTagRegistry *customBlockTags() const { return blockTags_.get(); }
+  std::uint64_t blockTagRevision() const { return blockTagRevision_; }
   // Opt-in L-1 handoff. Production servers currently leave this disabled; the
   // profile still has neither propagation nor a protocol-ready light snapshot.
   void enableLighting(LightWorkerOptions options = {});
   void disableLighting();
+  void setLowMemoryMode(bool enabled);
+  bool lowMemoryMode() const noexcept { return lowMemoryMode_; }
   bool lightingEnabled() const { return lightService_ != nullptr; }
   LightService *lightService() const { return lightService_.get(); }
   // Main-thread result handoff. It is also valid to call while the world tick
@@ -234,6 +271,7 @@ public:
   // max(block, sky - skyDarken), without creating a combined section.
   int getBrightness(Pos pos, int skyDarken = 0) const;
   BlockState getBlock(Pos pos) const;
+  std::optional<BlockState> getBlockIfLoaded(Pos pos) const;
   // Heightmap.Types final maps. The four live maps are primed on import or
   // explicitly after raw construction; normal setBlock updates them in the
   // LevelChunk.setBlockState order.
@@ -252,6 +290,10 @@ public:
   // (Level.java:276-280). `movedByPiston` sets flag 64 exactly like vanilla.
   bool removeBlock(Pos pos, bool movedByPiston = false);
   void rawSetBlock(Pos pos, BlockState state);
+  // Bulk-imports one decoded 16x16x16 section directly into a loaded chunk.
+  void importSectionBlocks(int cx, int cz, int sectionY,
+                           std::span<const BlockState::Id> palette,
+                           std::span<const std::uint16_t, kLightVolume> indices);
   std::map<Pos, BlockState> allBlocks() const;
   int minY() const { return minY_; }
   int maxY() const { return maxY_; }
@@ -259,6 +301,19 @@ public:
   // covers the default -64..320 dimension. Chunk section storage is a fixed
   // inline array of this size, so the constructor rejects taller worlds.
   static constexpr int kSectionCapacity = 24;
+  // Lithium random-tick minisection layout: 4096 cells divided into 17 slices
+  // of <= 248 cells so per-slice counts fit in uint8_t without overflow.
+  static constexpr int kRandomTickMinisectionSize = 248;
+  static constexpr int kRandomTickMinisectionCount =
+      (kLightVolume + kRandomTickMinisectionSize - 1) /
+      kRandomTickMinisectionSize;
+  static constexpr int kRandomTickLastMinisectionSize =
+      kLightVolume -
+      kRandomTickMinisectionSize * (kRandomTickMinisectionCount - 1);
+  // ServerLevelMixin.MAX_COUNT_FOR_BLOCK_SEARCH_AFTER_RANDOM_CHANCE = 4096 * 0.09375.
+  static constexpr int kRandomTickSparseThreshold = 384;
+  static_assert(kSectionCapacity <= 32,
+                "randomTickingSectionMask requires <= 32 sections");
   std::optional<BlockState> coralPlacementState(Pos pos,
                                                 const BlockState &selected,
                                                 Direction clickedFace);
@@ -277,6 +332,11 @@ public:
                        const BlockRef &source, bool movedByPiston = false);
   void updateNeighborsAt(Pos pos, const BlockRef &source,
                          std::optional<Direction> skip = {});
+  void updateNeighborsAtExceptFromFacing(Pos pos, const BlockRef &source,
+                                         Direction skip) {
+    updateNeighborsAt(pos, source, skip);
+  }
+  void updateNeighbourForOutputSignal(Pos pos, const BlockRef &changedBlock);
   void scheduleTick(Pos pos, const BlockRef &block, int delay,
                     int priority = 0);
   // LevelTicks.schedule: insert an already created tick (restored saves, test
@@ -285,6 +345,7 @@ public:
   // LevelChunkTicks.scheduleUnchecked: keeps duplicates found in saved lists.
   bool restoreScheduledTick(const ScheduledTick &tick);
   bool hasScheduledTick(Pos pos, const BlockRef &block) const;
+  bool willTickThisTick(Pos pos, const BlockRef &block) const;
   std::size_t scheduledTickCount() const;
   // Deterministic snapshot in drain order, for logs, tools and tests.
   std::vector<ScheduledTick> scheduledTicks() const;
@@ -309,8 +370,22 @@ public:
   void blockEvent(Pos pos, const BlockRef &block, int type, int data);
   std::size_t blockEventCount() const;
   std::vector<BlockEvent> pendingBlockEvents() const;
+  int getDirectSignal(Pos pos, Direction direction) const;
+  int getDirectSignalTo(Pos pos) const;
+  int getControlInputSignal(Pos pos, Direction direction, bool diodesOnly) const;
   int getSignal(Pos pos, Direction direction) const;
+  int getBestNeighborSignal(Pos pos) const;
+  bool hasSignal(Pos pos, Direction direction) const;
   bool hasNeighborSignal(Pos pos) const;
+  bool wireShouldSignal() const { return wireShouldSignal_; }
+  void setWireShouldSignal(bool value) const { wireShouldSignal_ = value; }
+  int comparatorOutput(Pos pos) const;
+  void setComparatorOutput(Pos pos, int value);
+  struct TorchToggle {
+    Pos pos;
+    std::int64_t when = 0;
+  };
+  std::deque<TorchToggle> &recentTorchToggles() { return recentTorchToggles_; }
   void tick();
   std::int64_t gameTime() const { return time_; }
   void setGameTime(std::int64_t value) { time_ = value; }
@@ -341,6 +416,7 @@ public:
   std::function<void(const Entity &)> entityAddedObserver;
   std::function<void(int)> entityRemovedObserver;
   std::function<void(Vec3, float, int)> explosionObserver;
+  std::function<void(Pos, BlockState, bool isFluid)> unsupportedRandomTickObserver;
   // Opt-in WorldChunkManager hook. Every successful state-changing write,
   // including nested setBlock calls, reports the previous and final state.
   std::function<void(Pos, const BlockState &, const BlockState &)>
@@ -399,6 +475,41 @@ public:
   }
   void mergePendingPistonTickers();
   void sweepPistonTickers();
+
+  struct ContainerTickStats {
+    std::uint64_t activeTicks = 0;
+    std::uint64_t sleepingSkippedTicks = 0;
+    std::uint64_t sleepTransitions = 0;
+    std::uint64_t wakeups = 0;
+    std::uint64_t cachedEmptyChecks = 0;
+    std::uint64_t cachedFullChecks = 0;
+    std::uint64_t cachedNoOpTransfers = 0;
+  };
+  ContainerTickStats containerTickStats;
+  void setContainerEntity(Pos pos, std::shared_ptr<ContainerBlockEntity> entity,
+                          bool registerTicker = false);
+  void removeContainerEntity(Pos pos, bool dropContents = false,
+                             bool notify = true);
+  std::shared_ptr<ContainerBlockEntity> containerEntity(Pos pos) const;
+  void registerContainerTicker(Pos pos,
+                               std::shared_ptr<ContainerBlockEntity> entity);
+  void mergePendingContainerTickers();
+  void sweepContainerTickers();
+  void wakeHopperBlockWatchers(Pos pos);
+  void wakeHopperItemWatchers(Vec3 pos);
+  void watchHopperBlock(Pos pos, const std::shared_ptr<HopperBlockEntity> &hopper);
+  void watchHopperItemSection(std::uint64_t sectionKey,
+                              const std::shared_ptr<HopperBlockEntity> &hopper);
+  PosMap<std::shared_ptr<ContainerBlockEntity>> containerEntities;
+  PosMap<ContainerTickerSlot *> containerTickerSlots;
+  std::vector<std::unique_ptr<ContainerTickerSlot>> containerTickers;
+  std::vector<std::unique_ptr<ContainerTickerSlot>> pendingContainerTickers;
+  bool tickingContainerBlockEntities = false;
+  std::size_t currentContainerTickerIndex_ = 0;
+  std::unordered_map<std::uint64_t, std::vector<Pos>> containerPositionsByChunk_;
+  std::unordered_map<std::uint64_t, std::vector<std::weak_ptr<HopperBlockEntity>>>
+      hopperItemWatchersBySection_;
+  PosMap<std::vector<std::weak_ptr<HopperBlockEntity>>> hopperBlockWatchersByPos_;
   // Entity phase. Java EntityTickList iterates its active insertion-ordered
   // map; entities added during the pass are copied to the next active map and
   // therefore tick on the following tick. tickEntities() uses a snapshot of
@@ -484,9 +595,42 @@ public:
   // water on and lava off; FlowingFluid.canConvertToSource reads them.
   bool waterSourceConversion = true;
   bool lavaSourceConversion = false;
+  bool spreadVines = true;
+  int fireSpreadRadiusAroundPlayer = 128;
+  bool waterEvaporates = false;
+  std::vector<Vec3> fireSpreadPlayerPositions;
+  int randomTickSpeed = 3;
   bool traceUpdates = false;
+  bool anyPlayerCloseEnoughForFireSpread(Pos pos) const;
+  struct RandomTickStats {
+    std::uint64_t chunksVisited = 0;
+    std::uint64_t sectionsVisited = 0;
+    std::uint64_t sectionsSparsePath = 0;
+    std::uint64_t sectionsDensePath = 0;
+    std::uint64_t positionsProbed = 0;
+    std::uint64_t blocksTicked = 0;
+    std::uint64_t fluidsTicked = 0;
+    std::uint64_t ticksApplied = 0;
+    std::uint64_t ticksUnsupported = 0;
+    std::uint64_t lastTickNs = 0;
+    void reset() { *this = {}; }
+  };
+  RandomTickStats randomTickStats;
+  // Local raw light max(block, sky) and LightLayer::BLOCK from published
+  // LightService snapshots or persisted chunk light.
+  std::optional<int> rawBrightness(Pos pos) const;
+  std::optional<int> blockBrightness(Pos pos) const;
+  std::uint16_t sectionTickingBlockCountForTest(int chunkX, int sectionY,
+                                                int chunkZ) const;
+  std::uint8_t sectionStorageBitsForTest(int chunkX, int sectionY,
+                                         int chunkZ) const;
+  std::array<std::uint8_t, kRandomTickMinisectionCount>
+  sectionRandomTickMinisectionsForTest(int chunkX, int sectionY,
+                                       int chunkZ) const;
 
 private:
+  std::shared_ptr<const BlockTagRegistry> blockTags_;
+  std::uint64_t blockTagRevision_ = 0;
   struct Update {
     enum class Kind { Simple, Full, Multi, Shape } kind;
     Pos pos;
@@ -529,21 +673,177 @@ private:
   // never move the arrays, so a block's address is stable for its whole life.
   struct SectionStorage {
     std::uint16_t paletteSize = 0;
-    std::uint8_t bits = 0; // 8 or 16; fixed when the block is constructed
+    std::uint8_t bits = 0; // 1..8 or 16; fixed when the block is constructed
+  };
+  template <std::uint8_t Bits>
+  struct SectionStoragePacked final : SectionStorage {
+    static_assert(Bits >= 1 && Bits <= 7);
+    static constexpr std::size_t kPerWord = std::size_t{64} / Bits;
+    static constexpr std::size_t kWords =
+        (kLightVolume + kPerWord - 1) / kPerWord;
+    static constexpr std::size_t kPaletteCapacity = std::size_t{1} << Bits;
+    static constexpr std::uint64_t kMask = (std::uint64_t{1} << Bits) - 1u;
+
+    SectionStoragePacked() { bits = Bits; }
+    std::array<std::uint64_t, kWords> words{};
+    std::array<BlockState::Id, kPaletteCapacity> palette{};
+    std::array<std::uint8_t, kPaletteCapacity> paletteTicking{};
+
+    std::uint16_t indexAt(std::size_t cell) const noexcept {
+      const std::size_t word = cell / kPerWord;
+      const std::size_t shift = (cell % kPerWord) * Bits;
+      return static_cast<std::uint16_t>((words[word] >> shift) & kMask);
+    }
+    void setIndexAt(std::size_t cell, std::uint16_t value) noexcept {
+      const std::size_t word = cell / kPerWord;
+      const std::size_t shift = (cell % kPerWord) * Bits;
+      words[word] = (words[word] & ~(kMask << shift)) |
+                    ((static_cast<std::uint64_t>(value) & kMask) << shift);
+    }
+    void atomicSetIndexAt(std::size_t cell, std::uint16_t value) noexcept {
+      const std::size_t word = cell / kPerWord;
+      const std::size_t shift = (cell % kPerWord) * Bits;
+      const std::uint64_t next =
+          (words[word] & ~(kMask << shift)) |
+          ((static_cast<std::uint64_t>(value) & kMask) << shift);
+      std::atomic_ref<std::uint64_t>(words[word])
+          .store(next, std::memory_order_release);
+    }
   };
   struct SectionStorage8 final : SectionStorage {
+    static constexpr std::size_t kPaletteCapacity = 256;
     SectionStorage8() { bits = 8; }
     std::array<std::uint8_t, kLightVolume> indices{}; // value-initialised
     std::array<BlockState::Id, 256> palette{};
+    std::array<std::uint8_t, 256> paletteTicking{};
+
+    std::uint16_t indexAt(std::size_t cell) const noexcept {
+      return indices[cell];
+    }
+    void setIndexAt(std::size_t cell, std::uint16_t value) noexcept {
+      indices[cell] = static_cast<std::uint8_t>(value);
+    }
+    void atomicSetIndexAt(std::size_t cell, std::uint16_t value) noexcept {
+      std::atomic_ref<std::uint8_t>(indices[cell])
+          .store(static_cast<std::uint8_t>(value), std::memory_order_release);
+    }
   };
   struct SectionStorage16 final : SectionStorage {
+    static constexpr std::size_t kPaletteCapacity = kLightVolume;
     SectionStorage16() { bits = 16; }
     std::array<std::uint16_t, kLightVolume> indices{};
     std::array<BlockState::Id, kLightVolume> palette{};
+    std::array<std::uint8_t, kLightVolume> paletteTicking{};
+
+    std::uint16_t indexAt(std::size_t cell) const noexcept {
+      return indices[cell];
+    }
+    void setIndexAt(std::size_t cell, std::uint16_t value) noexcept {
+      indices[cell] = value;
+    }
+    void atomicSetIndexAt(std::size_t cell, std::uint16_t value) noexcept {
+      std::atomic_ref<std::uint16_t>(indices[cell])
+          .store(value, std::memory_order_release);
+    }
   };
+  static std::uint8_t minBitsForPaletteSize(std::size_t paletteSize) noexcept {
+    if (paletteSize <= 2)
+      return 1;
+    if (paletteSize <= 4)
+      return 2;
+    if (paletteSize <= 8)
+      return 3;
+    if (paletteSize <= 16)
+      return 4;
+    if (paletteSize <= 32)
+      return 5;
+    if (paletteSize <= 64)
+      return 6;
+    if (paletteSize <= 128)
+      return 7;
+    if (paletteSize <= 256)
+      return 8;
+    return 16;
+  }
+  static std::shared_ptr<SectionStorage>
+  makeSectionStorageForBits(std::uint8_t bits) {
+    switch (bits) {
+    case 1:
+      return std::make_shared<SectionStoragePacked<1>>();
+    case 2:
+      return std::make_shared<SectionStoragePacked<2>>();
+    case 3:
+      return std::make_shared<SectionStoragePacked<3>>();
+    case 4:
+      return std::make_shared<SectionStoragePacked<4>>();
+    case 5:
+      return std::make_shared<SectionStoragePacked<5>>();
+    case 6:
+      return std::make_shared<SectionStoragePacked<6>>();
+    case 7:
+      return std::make_shared<SectionStoragePacked<7>>();
+    case 8:
+      return std::make_shared<SectionStorage8>();
+    case 16:
+      return std::make_shared<SectionStorage16>();
+    default:
+      return nullptr;
+    }
+  }
+  template <typename StoragePtr, typename Fn>
+  static decltype(auto) visitSectionStorage(StoragePtr *base, Fn &&fn) {
+    if constexpr (std::is_const_v<StoragePtr>) {
+      switch (base->bits) {
+      case 1:
+        return fn(static_cast<const SectionStoragePacked<1> *>(base));
+      case 2:
+        return fn(static_cast<const SectionStoragePacked<2> *>(base));
+      case 3:
+        return fn(static_cast<const SectionStoragePacked<3> *>(base));
+      case 4:
+        return fn(static_cast<const SectionStoragePacked<4> *>(base));
+      case 5:
+        return fn(static_cast<const SectionStoragePacked<5> *>(base));
+      case 6:
+        return fn(static_cast<const SectionStoragePacked<6> *>(base));
+      case 7:
+        return fn(static_cast<const SectionStoragePacked<7> *>(base));
+      case 8:
+        return fn(static_cast<const SectionStorage8 *>(base));
+      case 16:
+        return fn(static_cast<const SectionStorage16 *>(base));
+      }
+      return fn(static_cast<const SectionStorage16 *>(base));
+    } else {
+      switch (base->bits) {
+      case 1:
+        return fn(static_cast<SectionStoragePacked<1> *>(base));
+      case 2:
+        return fn(static_cast<SectionStoragePacked<2> *>(base));
+      case 3:
+        return fn(static_cast<SectionStoragePacked<3> *>(base));
+      case 4:
+        return fn(static_cast<SectionStoragePacked<4> *>(base));
+      case 5:
+        return fn(static_cast<SectionStoragePacked<5> *>(base));
+      case 6:
+        return fn(static_cast<SectionStoragePacked<6> *>(base));
+      case 7:
+        return fn(static_cast<SectionStoragePacked<7> *>(base));
+      case 8:
+        return fn(static_cast<SectionStorage8 *>(base));
+      case 16:
+        return fn(static_cast<SectionStorage16 *>(base));
+      }
+      return fn(static_cast<SectionStorage16 *>(base));
+    }
+  }
   struct Section {
     std::uint16_t nonEmpty = 0;
+    std::uint16_t tickingBlockCount = 0;
     BlockState::Id single = 0;
+    std::array<std::uint8_t, kRandomTickMinisectionCount>
+        randomTickByMinisection{};
     std::shared_ptr<SectionStorage> storage; // null = single value
     Section() = default;
     // Copying would alias the container, so the value is move-only. Nothing
@@ -565,12 +865,20 @@ private:
                  : nullptr;
     }
     bool hasOnlyAir() const { return nonEmpty == 0; }
+    bool isRandomlyTicking() const { return tickingBlockCount > 0; }
+    void initSingleRandomTick(BlockState::Id state);
     BlockState::Id get(int index) const;
-    BlockState::Id set(int index, BlockState::Id state);
+    bool tryGetRandomlyTicking(int index, BlockState::Id &outId) const;
+    BlockState::Id set(int index, BlockState::Id state, bool compact = false,
+                       std::shared_mutex *resizeMutex = nullptr);
   };
   struct Chunk {
+    static constexpr std::uint32_t kInvalidRandomTickIndex =
+        std::numeric_limits<std::uint32_t>::max();
     bool loaded = true;
     bool hasPendingLightCell = false;
+    std::uint32_t randomTickingSectionMask = 0;
+    std::uint32_t randomTickIndex = kInvalidRandomTickIndex;
     // LightService generation token for this loaded lifetime. A reload at the
     // same address advances it, so queued old-lifetime cells are discarded.
     std::uint64_t lightLifecycleEpoch = 1;
@@ -579,6 +887,7 @@ private:
     // generation >= requiredLightGeneration before marking isLightOn=1.
     std::uint64_t requiredLightGeneration = 0;
     std::optional<PersistedChunkLight> persistedLight;
+    std::array<std::int16_t, kSectionCapacity> persistedLightSectionIndex{};
     // The sections live inline: one pointer step from the chunk to the section
     // header, no per-section allocation, and every header of a chunk is
     // contiguous. A default Section is a single air value with no storage, so
@@ -586,6 +895,8 @@ private:
     // the palette on the first real write.
     std::array<Section, kSectionCapacity> sections;
     std::unique_ptr<ChunkHeightmaps> heightmaps;
+    void refreshRandomTickMask(int count);
+    void refreshPersistedLightIndex(int minSectionY, int numSections);
   };
   static int chunkIndex(int v) {
     // C++20 arithmetic right shift rounds negative coordinates down.
@@ -627,8 +938,36 @@ private:
       section = nullptr;
     }
   };
+  struct TickingChunkEntry {
+    std::uint64_t key = 0;
+    Chunk *chunk = nullptr;
+    int x = 0;
+    int z = 0;
+  };
   mutable BlockReadCache blockReadCache_;
   std::unordered_map<std::uint64_t, Chunk> chunks_;
+  // Loaded chunks whose randomTickingSectionMask != 0, kept lazily sorted by
+  // key for deterministic chunk iteration and O(1) swap-and-pop updates.
+  std::vector<TickingChunkEntry> randomTickingChunks_;
+  std::vector<TickingChunkEntry> randomTickChunkScratch_;
+  bool randomTickingDirty_ = false;
+  std::uint32_t randValue_ = 0x61c88647u;
+  int nextRandomBlockIndex();
+  const Section *loadedSectionAt(Pos p) const;
+  void addRandomTickingChunk(Chunk &chunk, std::uint64_t key);
+  void removeRandomTickingChunk(Chunk &chunk);
+  void updateChunkRandomTickMask(Chunk &chunk, std::uint64_t key,
+                                 int sectionIdx, bool sectionTicking);
+  void tickChunks();
+  void tickSparseRandomTickHit(int chunkX, int sectionBaseY, int chunkZ,
+                               Section &section, int nth,
+                               RandomTickAccess &access);
+  void tickDenseRandomTickSection(int chunkX, int sectionBaseY, int chunkZ,
+                                  Section &section, int tickSpeed,
+                                  RandomTickAccess &access);
+  void tickRandomChunkSection(int chunkX, int sectionY, int chunkZ,
+                              Section &section, int tickSpeed,
+                              RandomTickAccess &access);
   // EntitySectionStorage: 16^3 sections keyed by SectionPos.asLong (vanilla
   // entity section storage); queries visit only the sections a box overlaps.
   std::map<std::uint64_t, std::vector<Entity *>> entitySections_;
@@ -664,12 +1003,26 @@ private:
   std::unique_ptr<FluidTickQueue> fluidTickQueue_;
   std::unique_ptr<LightService> lightService_;
   const LightOpticalTable *lightOptical_ = nullptr;
+  bool lowMemoryMode_ = false;
+  mutable std::unique_ptr<std::shared_mutex> lightDirectMutex_ =
+      std::make_unique<std::shared_mutex>();
+  std::shared_mutex *directResizeMutex() const noexcept {
+    return (lowMemoryMode_ && lightService_) ? lightDirectMutex_.get() : nullptr;
+  }
+  static LightSectionView sectionToLightView(const Section &section,
+                                             bool atomicHeader) noexcept;
+  static LightSectionView directReadSection(const void *context, int chunkX,
+                                            int chunkZ, int sectionY) noexcept;
   bool inWorldTick_ = false;
+  mutable bool wireShouldSignal_ = true;
+  PosMap<int> comparatorSignals_;
+  std::deque<TorchToggle> recentTorchToggles_;
   std::vector<LightCellUpdate> pendingLightCells_;
   std::vector<std::uint64_t> pendingLightChunkKeys_;
   void flushPendingLightCells();
 
   friend class WorldChunkManager;
+  friend struct detail::WorldBehaviours;
   friend void pistonForgetWorld(World &);
   bool installManagedChunk(
       int x, int z, Chunk &&chunk,

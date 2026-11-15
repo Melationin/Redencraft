@@ -40,8 +40,8 @@ public:
 
   void enqueueCheck(LightPos position);
   void seedChunk(std::uint64_t key);
-  void seedIncoming(std::uint64_t key);
-  void seedOutgoing(std::uint64_t key);
+  void seedIncoming(std::uint64_t key, std::uint8_t directionMask = 0b111100);
+  void seedOutgoing(std::uint64_t key, std::uint8_t directionMask = 0b111100);
   void clearIncomingFrom(std::uint64_t removedKey);
   void run();
   void commitLayers();

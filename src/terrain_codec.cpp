@@ -52,7 +52,11 @@ std::optional<std::size_t> packedCell(std::size_t bits,
   return static_cast<std::size_t>((data[longIndex] >> offset) &
                                   ((std::uint64_t{1} << bits) - 1));
 }
-bool parseBlockState(const nbt::Tag &tag, PaletteEntry &entry) {
+bool parseBlockState(const nbt::Tag &tag, PaletteEntry &entry,
+                     bool allowUnimplementedBlocks = false,
+                     bool *resolved = nullptr) {
+  if (resolved)
+    *resolved = false;
   if (tag.type != 10)
     return false;
   entry.name = stringValue(tag, "Name");
@@ -69,7 +73,10 @@ bool parseBlockState(const nbt::Tag &tag, PaletteEntry &entry) {
     }
   }
   const Block *block = findBlockByName(entry.name);
-  if (!block) {
+  // Registry identity and state schemas may be present before simulation is
+  // implemented. Do not make such chunks writable as if behavior were complete.
+  // TODO: provide a read-only representation for unsupported block behavior.
+  if (!block || (!allowUnimplementedBlocks && !block->supported())) {
     entry.supported = false;
     entry.state = {};
     return true;
@@ -80,13 +87,16 @@ bool parseBlockState(const nbt::Tag &tag, PaletteEntry &entry) {
     entry.state = {};
     return true;
   }
-  entry.supported = true;
+  if (resolved)
+    *resolved = true;
+  entry.supported = block->supported();
   entry.state = BlockState::fromId(block->firstState() + variant);
   return true;
 }
 std::optional<PackedBlockStates>
 parseBlockStates(const nbt::Tag &sectionTag, std::string &error,
-                 bool &unsupportedBlock) {
+                 bool &unsupportedBlock,
+                 bool allowUnimplementedBlocks = false) {
   const nbt::Tag *container = field(sectionTag, "block_states");
   if (!container)
     return std::nullopt;
@@ -108,11 +118,12 @@ parseBlockStates(const nbt::Tag &sectionTag, std::string &error,
   result.palette.reserve(palette->list.size());
   for (const nbt::Tag &entry : palette->list) {
     PaletteEntry decoded;
-    if (!parseBlockState(entry, decoded)) {
+    bool resolved = false;
+    if (!parseBlockState(entry, decoded, allowUnimplementedBlocks, &resolved)) {
       error = "block_states palette entry is invalid";
       return std::nullopt;
     }
-    if (!decoded.supported) {
+    if (!resolved || (!allowUnimplementedBlocks && !decoded.supported)) {
       error = "unsupported block state: " + decoded.name;
       unsupportedBlock = true;
       return std::nullopt;
@@ -795,8 +806,8 @@ DecodedChunk decodeChunkNbt(std::span<const std::uint8_t> bytes,
     Section section;
     section.y = y;
     bool unsupportedBlock = false;
-    section.blockStates =
-        parseBlockStates(sectionTag, error, unsupportedBlock);
+    section.blockStates = parseBlockStates(
+        sectionTag, error, unsupportedBlock, options.allowUnimplementedBlocks);
     if (!error.empty()) {
       result.status = unsupportedBlock ? DecodeStatus::Unsupported
                                        : DecodeStatus::Corrupt;

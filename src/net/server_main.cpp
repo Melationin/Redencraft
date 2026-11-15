@@ -548,11 +548,14 @@ int runServer(int argc, char **argv) {
   try {
     std::filesystem::path assets = REDSTONE_PROTOCOL_DIR, worldPath,
                           schematicPath, ticketedWorldPath;
+    std::vector<std::filesystem::path> blockTagPacks;
     int port = 25565, maxTicks = 0, forceMargin = 2;
     int simulationDistance = 10;
     bool explicitSpawn = false, explicitOffset = false;
-    bool consoleEnabled = true, fluidFixture = false;
+    bool consoleEnabled = true, fluidFixture = false, singlePlatform = false;
+    bool lowMemory = false;
     LitematicOptions schematicOptions;
+    AnvilLoadOptions anvilOptions;
     ServerOptions options;
     LightWorkerOptions lightOptions;
     for (int i = 1; i < argc; ++i) {
@@ -564,9 +567,11 @@ int runServer(int argc, char **argv) {
                "--ticketed-world directory]\n"
                "  [--chunk x,z ...] [--ticks N] [--spawn x,y,z] "
                "[--offset x,y,z] [--view-distance 3] [--force-margin 2]\n"
-               "  [--allow-unsupported] [--fluid-basin] [--no-console] "
+               "  [--allow-unsupported] [--skip-non-full-chunks] [--low-memory]\n"
+               "  [--fluid-basin] [--single-platform] [--no-console] "
                "[--light-workers 1] [--ticket-view-distance 3] "
-               "[--simulation-distance 10] [--command-permission-level 0]\n"
+               "[--simulation-distance 10] [--command-permission-level 0] "
+               "[--data-pack path ...]\n"
                "Offline --world/--schematic modes do not save. "
                "--ticketed-world opens the overworld region and session.lock "
                "for writes; entities, block entities, level.dat and tickets "
@@ -583,11 +588,23 @@ int runServer(int argc, char **argv) {
         schematicOptions.substituteUnsupported = true;
         continue;
       }
+      if (arg == "--skip-non-full-chunks") {
+        anvilOptions.skipNonFullChunks = true;
+        continue;
+      }
+      if (arg == "--low-memory") {
+        lowMemory = true;
+        continue;
+      }
       if (arg == "--fluid-basin") {
         // Validation fixture for validation/protocol775/backpressure_test.py:
         // a set of sealed 1x1 shafts whose falling water touches several Y
         // sections. It is not a world generator and does not run in normal use.
         fluidFixture = true;
+        continue;
+      }
+      if (arg == "--single-platform") {
+        singlePlatform = true;
         continue;
       }
       if (i + 1 >= argc)
@@ -599,6 +616,8 @@ int runServer(int argc, char **argv) {
         maxTicks = integer(value, 1, 10000000);
       else if (arg == "--assets")
         assets = utf8Path(value);
+      else if (arg == "--data-pack")
+        blockTagPacks.push_back(utf8Path(value));
       else if (arg == "--world")
         worldPath = utf8Path(value);
       else if (arg == "--ticketed-world")
@@ -669,8 +688,31 @@ int runServer(int argc, char **argv) {
     }
     if (schematicPath.empty() && explicitOffset)
       throw ProtocolError("--offset requires --schematic");
+    if (anvilOptions.skipNonFullChunks && worldPath.empty())
+      throw ProtocolError("--skip-non-full-chunks requires --world");
     ProtocolData data(assets);
     World world;
+    if (lowMemory)
+      world.setLowMemoryMode(true);
+    const auto explicitBlockTagPacks = blockTagPacks;
+    auto selectPacks = [&](const std::filesystem::path &path,
+                           const nbt::RootTag &root) {
+      auto selection = selectWorldDataPacks(path, root);
+      for (const auto &message : selection.diagnostics)
+        std::cerr << "BLOCK_TAGS: " << message << std::endl;
+      blockTagPacks = std::move(selection.paths);
+      blockTagPacks.insert(blockTagPacks.end(), explicitBlockTagPacks.begin(),
+                           explicitBlockTagPacks.end());
+    };
+    auto loadBlockTags = [&] {
+      if (blockTagPacks.empty()) return;
+      const auto reload = world.reloadBlockTags(blockTagPacks);
+      for (const auto &message : reload.diagnostics)
+        std::cerr << "BLOCK_TAGS: " << message << std::endl;
+      if (!reload.applied) throw ProtocolError("cannot load block tag packs");
+      std::cout << "BLOCK_TAGS loaded packs=" << blockTagPacks.size() << std::endl;
+    };
+    if (worldPath.empty() && ticketedWorldPath.empty()) loadBlockTags();
     std::optional<WorldMetadata> ticketedMetadata;
     std::vector<PersistentTicketRecord> persistentTickets;
     const auto ticketRecordLess = [](const PersistentTicketRecord &a,
@@ -688,6 +730,8 @@ int runServer(int argc, char **argv) {
       if (!std::filesystem::is_directory(region))
         throw ProtocolError("--ticketed-world has no overworld region");
       ticketedMetadata = loadWorldMetadata(ticketedWorldPath);
+      selectPacks(ticketedWorldPath, ticketedMetadata->levelRoot);
+      loadBlockTags();
       world.setGameTime(ticketedMetadata->gameTime);
       world.setSeed(static_cast<std::uint64_t>(ticketedMetadata->seed));
       world.tntExplodes = ticketedMetadata->gameRules.tntExplodes;
@@ -695,11 +739,13 @@ int runServer(int argc, char **argv) {
           ticketedMetadata->gameRules.waterSourceConversion;
       world.lavaSourceConversion =
           ticketedMetadata->gameRules.lavaSourceConversion;
+      world.randomTickSpeed = ticketedMetadata->gameRules.randomTickSpeed;
       std::cout << "TICKETED_GAME_RULES advanceTime="
                 << ticketedMetadata->gameRules.advanceTime
                 << " tntExplodes=" << world.tntExplodes
                 << " waterSourceConversion=" << world.waterSourceConversion
                 << " lavaSourceConversion=" << world.lavaSourceConversion
+                << " randomTickSpeed=" << world.randomTickSpeed
                 << std::endl;
       for (const BuiltinWorldClock clock :
            {BuiltinWorldClock::Overworld, BuiltinWorldClock::TheEnd}) {
@@ -800,35 +846,49 @@ int runServer(int argc, char **argv) {
                   << " unsupported_entities="
                   << imported.skippedUnsupportedEntities << std::endl;
     } else if (!worldPath.empty()) {
-      auto loaded =
-          loadAnvilWorld(worldPath, defaultRegionDirectory(worldPath));
-      importWorld(loaded, world);
-      if (options.chunks.empty())
-        options.chunks = loaded.chunks;
-      else
-        for (auto [x, z] : loaded.chunks) {
-          if (std::find(options.chunks.begin(), options.chunks.end(),
-                        std::pair{x, z}) == options.chunks.end())
-            world.unloadChunk(x, z);
-        }
-      for (auto [x, z] : options.chunks)
-        if (!world.isChunkLoaded(x, z))
-          throw ProtocolError("requested chunk absent from save");
+      selectPacks(worldPath, loadWorldMetadata(worldPath).levelRoot);
+      loadBlockTags();
+      std::set<std::pair<int, int>> requestedChunks(options.chunks.begin(),
+                                                    options.chunks.end());
+      if (!requestedChunks.empty()) {
+        anvilOptions.chunkFilter = [&requestedChunks](int cx, int cz) {
+          return requestedChunks.contains({cx, cz});
+        };
+      }
+      const AnvilWorldImportSummary summary = loadAnvilWorldInto(
+          worldPath, defaultRegionDirectory(worldPath), world, anvilOptions);
+      if (options.chunks.empty()) {
+        options.chunks = summary.loadedChunks;
+      } else {
+        for (auto [x, z] : options.chunks)
+          if (!world.isChunkLoaded(x, z))
+            throw ProtocolError("requested chunk absent from save");
+      }
+      std::cout << "WORLD loaded_chunks=" << summary.loadedChunks.size()
+                << " skipped_non_full_chunks=" << summary.skippedNonFullChunks
+                << " block_ticks=" << summary.loadedBlockTicks
+                << " fluid_ticks=" << summary.loadedFluidTicks
+                << " block_entities=" << summary.loadedBlockEntities
+                << " entities=" << summary.loadedEntities << std::endl;
     } else if (ticketedManager) {
       // Opt-in async managed world. startup read only metadata; region reads
       // happen on the lifecycle worker.
     } else {
-      if (options.chunks.empty())
-        for (int x = -1; x <= 1; ++x)
-          for (int z = -1; z <= 1; ++z)
+      if (options.chunks.empty()) {
+        const int radius = singlePlatform ? options.viewDistance : 1;
+        for (int x = -radius; x <= radius; ++x)
+          for (int z = -radius; z <= radius; ++z)
             options.chunks.emplace_back(x, z);
+      }
       // Explicit in-memory demonstration fixture, not a world generator.
       for (auto [cx, cz] : options.chunks) {
         world.loadChunk(cx, cz);
-        for (int x = 0; x < 16; ++x)
-          for (int z = 0; z < 16; ++z)
-            world.rawSetBlock({cx * 16 + x, 64, cz * 16 + z},
-                              defaultState("smooth_stone"));
+        if (!singlePlatform || (cx == 0 && cz == 0)) {
+          for (int x = 0; x < 16; ++x)
+            for (int z = 0; z < 16; ++z)
+              world.rawSetBlock({cx * 16 + x, 64, cz * 16 + z},
+                                defaultState("smooth_stone"));
+        }
       }
       if (fluidFixture) {
         std::size_t columns = 0;
@@ -1053,6 +1113,22 @@ int runServer(int argc, char **argv) {
           if (line == "stop" || line == "quit" || line == "exit") {
             stopRequested = 1;
             break;
+          }
+          if (line == "reload") {
+            const auto reload = world.reloadBlockTags(blockTagPacks);
+            for (const auto &message : reload.diagnostics)
+              std::cerr << "BLOCK_TAGS: " << message << std::endl;
+            if (!reload.applied) {
+              std::cout << "BLOCK_TAGS reload failed; previous snapshot retained" << std::endl;
+            } else {
+              for (auto &c : connections)
+                if (!c->dead && !c->session.closed()) {
+                  c->session.sendBlockTagUpdate();
+                  writer.submit(c, c->session.takeOutputItems());
+                }
+              std::cout << "BLOCK_TAGS reload complete" << std::endl;
+            }
+            continue;
           }
           if (line.empty())
             continue;

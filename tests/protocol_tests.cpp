@@ -1,6 +1,7 @@
 #include "redstone/net/session.hpp"
 #include "redstone/piston.hpp"
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -70,20 +71,110 @@ void use(Session &s, Pos clicked, Direction face, int seq = 1) {
   out.varInt(seq);
   s.receive(frame(66, out.data));
 }
+void useAt(Session &s, Pos clicked, Direction face, float hitY, int seq = 1) {
+  Writer out;
+  out.varInt(0);
+  out.position(clicked);
+  out.varInt(int(face));
+  out.f32(.5f);
+  out.f32(hitY);
+  out.f32(.5f);
+  out.bool_(false);
+  out.bool_(false);
+  out.varInt(seq);
+  s.receive(frame(66, out.data));
+}
+void rotateLook(Session &s, const ProtocolData &data, float yaw, float pitch) {
+  Writer out;
+  out.f32(yaw);
+  out.f32(pitch);
+  out.u8(0);
+  s.receive(frame(data.packet("play", "serverbound", "move_player_rot"),
+                  out.data));
+}
 void select(Session &s, int slot) {
   Writer out;
   out.i16(static_cast<short>(slot));
   s.receive(frame(53, out.data));
 }
 void creative(Session &s, const ProtocolData &data, int slot,
-              const std::string &name) {
+              const std::string &name, int count = 64) {
   Writer out;
   out.i16(static_cast<short>(36 + slot));
-  out.varInt(64);
+  out.varInt(count);
   out.varInt(data.registry.itemId("minecraft:" + name));
   out.varInt(0);
   out.varInt(0);
   s.receive(frame(56, out.data));
+}
+void customBlockTags(const ProtocolData &data) {
+  const auto base = std::filesystem::temp_directory_path() /
+      ("redstone-protocol-tags-" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count()));
+  const auto path = base / "data/minecraft/tags/block";
+  std::filesystem::create_directories(path);
+  { std::ofstream(path / "snow.json") << R"({"replace":true,"values":["minecraft:stone"]})"; }
+  World world;
+  assert(world.reloadBlockTags({base}).applied);
+  world.loadChunk(0, 0);
+  ServerOptions options;
+  options.chunks = {{0, 0}};
+  Session session(world, data, options);
+  hello(session);
+  Writer login;
+  login.string("Tester"); login.raw(Uuid{});
+  session.receive(frame(0, login.data));
+  (void)drain(session);
+  session.receive(frame(3, {}));
+  (void)drain(session);
+  Writer known;
+  known.varInt(0);
+  session.receive(frame(7, known.data));
+  auto verify = [&](Bytes bytes, int expectedId, const std::string &expected) {
+    auto body = popFrame(bytes);
+    assert(body && bytes.empty());
+    Reader reader(*body);
+    if (reader.varInt() != expectedId) return false;
+    const int registries = reader.varInt();
+    bool found = false;
+    for (int i = 0; i < registries; ++i) {
+      const auto registry = reader.string();
+      const int tags = reader.varInt();
+      for (int t = 0; t < tags; ++t) {
+        const auto name = reader.string();
+        const int count = reader.varInt();
+        std::vector<int> ids;
+        for (int j = 0; j < count; ++j) ids.push_back(reader.varInt());
+        if (registry == "minecraft:block" && name == "minecraft:snow") {
+          assert(ids == std::vector<int>{data.blockIds.at(expected)});
+          found = true;
+        }
+      }
+    }
+    assert(reader.empty() && found);
+    return true;
+  };
+  bool found = false;
+  for (auto &bytes : session.takeOutput())
+    found |= verify(bytes, data.packet("configuration", "clientbound", "update_tags"), "minecraft:stone");
+  assert(found);
+  // Reload while this connection is between its configuration packet and join.
+  { std::ofstream(path / "snow.json") << R"({"replace":true,"values":["minecraft:glass"]})"; }
+  assert(world.reloadBlockTags({base}).applied);
+  session.receive(frame(3, {}));
+  found = false;
+  for (auto &bytes : session.takeOutput())
+    found |= verify(bytes, data.packet("play", "clientbound", "update_tags"), "minecraft:glass");
+  assert(found);
+  // A connected play client receives later reloads through the same packet.
+  { std::ofstream(path / "snow.json") << R"({"replace":true,"values":["minecraft:stone"]})"; }
+  assert(world.reloadBlockTags({base}).applied);
+  session.sendBlockTagUpdate();
+  found = false;
+  for (auto &bytes : session.takeOutput())
+    found |= verify(bytes, data.packet("play", "clientbound", "update_tags"), "minecraft:stone");
+  assert(found);
+  std::filesystem::remove_all(base);
 }
 void viewDistanceTen(const ProtocolData &data) {
   World world;
@@ -985,6 +1076,88 @@ void placementRules(const ProtocolData &data) {
   options.chunks = {{0, 0}};
   Session session(world, data, options);
   join(session, data);
+  // RotatedPillarBlock takes its axis from the clicked face.
+  creative(session, data, 0, "oak_log");
+  select(session, 0);
+  use(session, {5, 64, 7}, Direction::Up);
+  assert(world.getBlock({5, 65, 7}).is(Blocks::OAK_LOG));
+  assert(world.getBlock({5, 65, 7}).get("axis") == "y");
+  world.rawSetBlock({5, 65, 7}, airState());
+  world.rawSetBlock({5, 65, 7}, defaultState("smooth_stone"));
+  use(session, {5, 65, 7}, Direction::East);
+  assert(world.getBlock({6, 65, 7}).get("axis") == "x");
+  use(session, {5, 65, 7}, Direction::North);
+  assert(world.getBlock({5, 65, 6}).get("axis") == "z");
+  creative(session, data, 0, "diamond_axe", 1);
+  select(session, 0);
+  for (const auto *axis : {"x", "y", "z"}) {
+    world.rawSetBlock({5, 65, 7}, Blocks::SPRUCE_LOG.defaultState().with("axis", axis));
+    use(session, {5, 65, 7}, Direction::Up);
+    assert(world.getBlock({5, 65, 7}).is(Blocks::STRIPPED_SPRUCE_LOG));
+    assert(world.getBlock({5, 65, 7}).get("axis") == axis);
+  }
+  for (const auto *axis : {"x", "y", "z"}) {
+    world.rawSetBlock({5, 65, 7}, Blocks::BIRCH_LOG.defaultState().with("axis", axis));
+    use(session, {5, 65, 7}, Direction::Up);
+    assert(world.getBlock({5, 65, 7}).is(Blocks::STRIPPED_BIRCH_LOG));
+    assert(world.getBlock({5, 65, 7}).get("axis") == axis);
+  }
+  for (const auto *axis : {"x", "y", "z"}) {
+    world.rawSetBlock({5, 65, 7}, Blocks::JUNGLE_LOG.defaultState().with("axis", axis));
+    use(session, {5, 65, 7}, Direction::Up);
+    assert(world.getBlock({5, 65, 7}).is(Blocks::STRIPPED_JUNGLE_LOG));
+    assert(world.getBlock({5, 65, 7}).get("axis") == axis);
+  }
+  for (const auto &[source, target] : {
+           std::pair{&Blocks::ACACIA_LOG, &Blocks::STRIPPED_ACACIA_LOG},
+           std::pair{&Blocks::CHERRY_LOG, &Blocks::STRIPPED_CHERRY_LOG},
+           std::pair{&Blocks::DARK_OAK_LOG, &Blocks::STRIPPED_DARK_OAK_LOG},
+           std::pair{&Blocks::PALE_OAK_LOG, &Blocks::STRIPPED_PALE_OAK_LOG},
+           std::pair{&Blocks::MANGROVE_LOG, &Blocks::STRIPPED_MANGROVE_LOG},
+           std::pair{&Blocks::BAMBOO_BLOCK, &Blocks::STRIPPED_BAMBOO_BLOCK},
+           std::pair{&Blocks::OAK_WOOD, &Blocks::STRIPPED_OAK_WOOD},
+           std::pair{&Blocks::SPRUCE_WOOD, &Blocks::STRIPPED_SPRUCE_WOOD},
+           std::pair{&Blocks::BIRCH_WOOD, &Blocks::STRIPPED_BIRCH_WOOD},
+           std::pair{&Blocks::JUNGLE_WOOD, &Blocks::STRIPPED_JUNGLE_WOOD},
+           std::pair{&Blocks::ACACIA_WOOD, &Blocks::STRIPPED_ACACIA_WOOD},
+           std::pair{&Blocks::CHERRY_WOOD, &Blocks::STRIPPED_CHERRY_WOOD},
+           std::pair{&Blocks::DARK_OAK_WOOD, &Blocks::STRIPPED_DARK_OAK_WOOD},
+           std::pair{&Blocks::PALE_OAK_WOOD, &Blocks::STRIPPED_PALE_OAK_WOOD},
+           std::pair{&Blocks::MANGROVE_WOOD, &Blocks::STRIPPED_MANGROVE_WOOD}}) {
+    for (const auto *axis : {"x", "y", "z"}) {
+      world.rawSetBlock({5, 65, 7}, source->defaultState().with("axis", axis));
+      use(session, {5, 65, 7}, Direction::Up);
+      assert(world.getBlock({5, 65, 7}).is(*target));
+      assert(world.getBlock({5, 65, 7}).get("axis") == axis);
+    }
+  }
+  // AxeItem.getStripped maps oak_log to stripped_oak_log without changing axis.
+  for (const auto *axe : {"wooden_axe", "copper_axe", "stone_axe", "golden_axe",
+                          "iron_axe", "diamond_axe", "netherite_axe"}) {
+    creative(session, data, 0, axe, 1);
+    select(session, 0);
+    for (const auto *axis : {"x", "y", "z"}) {
+      world.rawSetBlock({5, 65, 7}, Blocks::OAK_LOG.defaultState().with("axis", axis));
+      use(session, {5, 65, 7}, Direction::Up);
+      assert(world.getBlock({5, 65, 7}).is(Blocks::STRIPPED_OAK_LOG));
+      assert(world.getBlock({5, 65, 7}).get("axis") == axis);
+    }
+  }
+  creative(session, data, 0, "stripped_oak_log");
+  select(session, 0);
+  world.rawSetBlock({6, 65, 7}, airState());
+  use(session, {5, 65, 7}, Direction::East);
+  assert(world.getBlock({6, 65, 7}).is(Blocks::STRIPPED_OAK_LOG));
+  assert(world.getBlock({6, 65, 7}).get("axis") == "x");
+  creative(session, data, 0, "pale_oak_wood");
+  world.rawSetBlock({6, 65, 7}, airState());
+  use(session, {5, 65, 7}, Direction::East);
+  assert(world.getBlock({6, 65, 7}).is(Blocks::PALE_OAK_WOOD));
+  assert(world.getBlock({6, 65, 7}).get("axis") == "x");
+  world.rawSetBlock({5, 65, 7}, airState());
+  world.rawSetBlock({6, 65, 7}, airState());
+  world.rawSetBlock({5, 65, 6}, airState());
+  drain(session, true);
   // Gate opens away from a player facing its back, then closes without
   // changing the powered property. Placement uses horizontal player facing.
   world.rawSetBlock({7, 65, 8}, defaultState("birch_fence_gate"));
@@ -1083,10 +1256,159 @@ void placementRules(const ProtocolData &data) {
   assert(invalid.closed());
   assert(world.getBlock({11, 65, 8}).name() == "minecraft:glass");
 }
+
+void buildingBlockPlacementRules(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  for (int x = 0; x < 16; ++x)
+    for (int z = 0; z < 16; ++z)
+      world.rawSetBlock({x, 64, z}, defaultState("smooth_stone"));
+  ServerOptions options;
+  options.chunks = {{0, 0}};
+  options.spawn = {8.5, 65, 8.5};
+  Session session(world, data, options);
+  join(session, data);
+  drain(session, true);
+
+  // 1. Slabs: top vs bottom placement, merging wet single slab -> dry double slab,
+  //    and non-merging when using different slab.
+  creative(session, data, 0, "oak_slab");
+  creative(session, data, 1, "spruce_slab");
+  select(session, 0);
+  useAt(session, {4, 64, 4}, Direction::Up, 1.0f, 1);
+  assert(world.getBlock({4, 65, 4}).is(Blocks::OAK_SLAB) &&
+         world.getBlock({4, 65, 4}).getView("type") == "bottom");
+  // Place spruce slab onto top face of oak bottom slab -> stacks at y=66 instead of merging.
+  select(session, 1);
+  useAt(session, {4, 65, 4}, Direction::Up, 0.5f, 2);
+  assert(world.getBlock({4, 65, 4}).getView("type") == "bottom");
+  assert(world.getBlock({4, 66, 4}).is(Blocks::SPRUCE_SLAB) &&
+         world.getBlock({4, 66, 4}).getView("type") == "bottom");
+  // Mark {4, 65, 4} waterlogged and click its top with oak_slab -> double + waterlogged=false.
+  world.rawSetBlock({4, 66, 4}, airState());
+  world.rawSetBlock(
+      {4, 65, 4},
+      defaultState("oak_slab").with("type", "bottom").with("waterlogged", "true"));
+  select(session, 0);
+  useAt(session, {4, 65, 4}, Direction::Up, 0.5f, 3);
+  assert(world.getBlock({4, 65, 4}).is(Blocks::OAK_SLAB) &&
+         world.getBlock({4, 65, 4}).getView("type") == "double" &&
+         world.getBlock({4, 65, 4}).getView("waterlogged") == "false");
+  // Clicking horizontal upper half next to a block places a top slab.
+  useAt(session, {4, 65, 4}, Direction::East, 0.8f, 4);
+  assert(world.getBlock({5, 65, 4}).is(Blocks::OAK_SLAB) &&
+         world.getBlock({5, 65, 4}).getView("type") == "top");
+
+  // 2. Stairs: horizontal facing, top/bottom half, corner shape.
+  creative(session, data, 2, "oak_stairs");
+  select(session, 2);
+  rotateLook(session, data, 180.0f, 0.0f); // North (-Z)
+  useAt(session, {10, 64, 10}, Direction::Up, 1.0f, 5);
+  assert(world.getBlock({10, 65, 10}).is(Blocks::OAK_STAIRS) &&
+         world.getBlock({10, 65, 10}).getView("facing") == "north" &&
+         world.getBlock({10, 65, 10}).getView("half") == "bottom" &&
+         world.getBlock({10, 65, 10}).getView("shape") == "straight");
+  rotateLook(session, data, -90.0f, 0.0f); // East (+X)
+  world.rawSetBlock({10, 65, 8}, defaultState("smooth_stone"));
+  useAt(session, {10, 65, 8}, Direction::South, 0.8f, 6);
+  assert(world.getBlock({10, 65, 9}).is(Blocks::OAK_STAIRS) &&
+         world.getBlock({10, 65, 9}).getView("facing") == "east" &&
+         world.getBlock({10, 65, 9}).getView("half") == "top");
+  world.setBlock({10, 65, 9}, airState());
+  useAt(session, {10, 64, 9}, Direction::Up, 1.0f, 7);
+  assert(world.getBlock({10, 65, 9}).getView("facing") == "east" &&
+         world.getBlock({10, 65, 9}).getView("half") == "bottom");
+  // {10, 65, 10} (north) now has behind = {10, 65, 9} (east) -> outer_right.
+  assert(world.getBlock({10, 65, 10}).getView("shape") == "outer_right");
+
+  // 3. Fences, panes, rotated pillars (quartz_pillar / iron_chain), glazed terracotta.
+  creative(session, data, 3, "oak_fence");
+  creative(session, data, 4, "nether_brick_fence");
+  select(session, 3);
+  use(session, {12, 64, 4}, Direction::Up, 8);
+  select(session, 4);
+  use(session, {13, 64, 4}, Direction::Up, 9);
+  assert(world.getBlock({12, 65, 4}).is(Blocks::OAK_FENCE) &&
+         world.getBlock({12, 65, 4}).getView("east") == "false");
+
+  creative(session, data, 5, "glass_pane");
+  creative(session, data, 6, "quartz_pillar");
+  select(session, 6);
+  world.rawSetBlock({13, 65, 12}, defaultState("smooth_stone"));
+  use(session, {13, 65, 12}, Direction::West, 10);
+  assert(world.getBlock({12, 65, 12}).is(Blocks::QUARTZ_PILLAR) &&
+         world.getBlock({12, 65, 12}).getView("axis") == "x");
+  select(session, 5);
+  use(session, {12, 64, 13}, Direction::Up, 11);
+  assert(world.getBlock({12, 65, 13}).is(Blocks::GLASS_PANE) &&
+         world.getBlock({12, 65, 13}).getView("north") == "true");
+
+  // Glazed terracotta while pitched steeply downward must not throw and faces opposite horizontal yaw.
+  creative(session, data, 7, "white_glazed_terracotta");
+  select(session, 7);
+  rotateLook(session, data, 0.0f, 85.0f); // South horizontal, looking down
+  use(session, {6, 64, 10}, Direction::Up, 12);
+  assert(world.getBlock({6, 65, 10}).is(Blocks::WHITE_GLAZED_TERRACOTTA) &&
+         world.getBlock({6, 65, 10}).getView("facing") == "north");
+
+  // 4. Buckets: creative pickup allowed, water_bucket/lava_bucket/empty bucket via use_item.
+  creative(session, data, 0, "water_bucket", 1);
+  creative(session, data, 1, "lava_bucket", 1);
+  creative(session, data, 2, "bucket", 1);
+  assert(session.inventory()[0].id == "minecraft:water_bucket");
+  assert(session.inventory()[1].id == "minecraft:lava_bucket");
+  assert(session.inventory()[2].id == "minecraft:bucket");
+
+  const auto sendUseItem = [&](int slot, float yaw, float pitch, int seq) {
+    select(session, slot);
+    Writer out;
+    out.varInt(0);
+    out.varInt(seq);
+    out.f32(yaw);
+    out.f32(pitch);
+    session.receive(frame(data.packet("play", "serverbound", "use_item"),
+                           out.data));
+  };
+  // Spawn is {8.5, 65, 8.5} (eye y=66.62); aim at center of z=10.5:
+  // floor top y=65.0 -> ~39 deg, single slab top y=65.5 -> ~29 deg,
+  // water top y=65.89 -> ~20 deg, double slab top y=66.0 -> ~17 deg.
+  world.rawSetBlock({8, 65, 10}, airState());
+  sendUseItem(0, 0.0f, 39.0f, 13);
+  assert(world.getBlock({8, 65, 10}).is(Blocks::WATER) &&
+         world.getBlock({8, 65, 10}).getView("level") == "0");
+  // Empty bucket scoops water back out.
+  sendUseItem(2, 0.0f, 20.0f, 14);
+  assert(world.getBlock({8, 65, 10}).isAir());
+  // Water bucket waterlogs a single slab.
+  world.rawSetBlock({8, 65, 10}, defaultState("oak_slab").with("type", "bottom"));
+  sendUseItem(0, 0.0f, 29.0f, 15);
+  assert(world.getBlock({8, 65, 10}).is(Blocks::OAK_SLAB) &&
+         world.getBlock({8, 65, 10}).getView("waterlogged") == "true");
+  // Empty bucket drains a waterlogged slab without removing the slab.
+  sendUseItem(2, 0.0f, 29.0f, 16);
+  assert(world.getBlock({8, 65, 10}).is(Blocks::OAK_SLAB) &&
+         world.getBlock({8, 65, 10}).getView("waterlogged") == "false");
+  // Double slab refuses waterlogging and places water on top instead.
+  world.rawSetBlock({8, 65, 10}, defaultState("oak_slab").with("type", "double"));
+  world.rawSetBlock({8, 66, 10}, airState());
+  sendUseItem(0, 0.0f, 17.0f, 17);
+  assert(world.getBlock({8, 65, 10}).is(Blocks::OAK_SLAB) &&
+         world.getBlock({8, 65, 10}).getView("type") == "double" &&
+         world.getBlock({8, 65, 10}).getView("waterlogged") == "false");
+  assert(world.getBlock({8, 66, 10}).is(Blocks::WATER) &&
+         world.getBlock({8, 66, 10}).getView("level") == "0");
+  // Lava bucket places lava source on floor.
+  world.rawSetBlock({8, 66, 10}, airState());
+  world.rawSetBlock({8, 65, 10}, airState());
+  sendUseItem(1, 0.0f, 39.0f, 18);
+  assert(world.getBlock({8, 65, 10}).is(Blocks::LAVA) &&
+         world.getBlock({8, 65, 10}).getView("level") == "0");
+}
 } // namespace
 int main(int argc, char **argv) {
   assert(argc == 2);
   ProtocolData data(argv[1]);
+  customBlockTags(data);
   viewDistanceTen(data);
   chunkViewAndTiming(data);
   fallingLandingPacketOrder(data);
@@ -1095,6 +1417,7 @@ int main(int argc, char **argv) {
   entityBroadcastPhase(data);
   sessionOutputLimit(data);
   placementRules(data);
+  buildingBlockPlacementRules(data);
   fluidSectionSnapshot(data);
   fluidTicksAndPistonSameTick(data);
   slowSessionDoesNotStallFluid(data);
@@ -1154,8 +1477,25 @@ int main(int argc, char **argv) {
   use(session, {10, 64, 8}, Direction::Up, 6);
   assert(world.getBlock({10, 65, 8}).name() == "minecraft:glass");
   drain(session, true);
-  // Unsupported creative blocks are explicitly rejected and corrected.
+  // Supported redstone items map and interact via protocol: redstone -> redstone_wire,
+  // repeater places oriented and right-click cycles delay 1 -> 2.
+  creative(session, data, 2, "redstone");
+  assert(session.inventory()[2].id == "minecraft:redstone");
+  select(session, 2);
+  use(session, {11, 64, 8}, Direction::Up, 7);
+  assert(world.getBlock({11, 65, 8}).name() == "minecraft:redstone_wire");
+  drain(session, true);
   creative(session, data, 2, "repeater");
+  assert(session.inventory()[2].id == "minecraft:repeater");
+  select(session, 2);
+  use(session, {11, 64, 9}, Direction::Up, 8);
+  assert(world.getBlock({11, 65, 9}).name() == "minecraft:repeater");
+  assert(world.getBlock({11, 65, 9}).get("delay") == "1");
+  use(session, {11, 65, 9}, Direction::Up, 9);
+  assert(world.getBlock({11, 65, 9}).get("delay") == "2");
+  drain(session, true);
+  // Unsupported creative blocks are explicitly rejected and corrected.
+  creative(session, data, 2, "white_bed");
   assert(session.inventory()[2].empty());
   drain(session, true);
   // Piston event is delivered after its server callbacks, then entity/BE
@@ -1303,6 +1643,134 @@ int main(int argc, char **argv) {
       allPlay.push_back(std::move(*body));
     }
     assert(found == 1);
+    // Dropping redstone_wire / redstone_wall_torch must spawn valid item IDs
+    // (minecraft:redstone / minecraft:redstone_torch) so connected and
+    // newly-joining sessions do not disconnect on syncEntities().
+    World redstoneDropWorld;
+    redstoneDropWorld.loadChunk(0, 0);
+    redstoneDropWorld.setBlock({4, 63, 4}, defaultState("smooth_stone"), 3);
+    redstoneDropWorld.setBlock({4, 64, 4}, defaultState("redstone_wire"), 3);
+    redstoneDropWorld.setBlock({5, 64, 4}, defaultState("smooth_stone"), 3);
+    redstoneDropWorld.setBlock(
+        {6, 64, 4},
+        defaultState("redstone_wall_torch").with("facing", "east"), 3);
+    Session activeDropSession(redstoneDropWorld, data, options);
+    join(activeDropSession, data);
+    // Pick block on redstone_wire and redstone_wall_torch must succeed cleanly.
+    for (Pos pickPos : {Pos{4, 64, 4}, Pos{6, 64, 4}}) {
+      Writer pick;
+      pick.position(pickPos);
+      pick.bool_(false);
+      activeDropSession.receive(frame(
+          data.packet("play", "serverbound", "pick_item_from_block"), pick.data));
+      assert(!activeDropSession.closed());
+    }
+    // Remove supports so both redstone blocks pop off as ItemEntities.
+    redstoneDropWorld.removeBlock({4, 63, 4}, false);
+    redstoneDropWorld.removeBlock({5, 64, 4}, false);
+    redstoneDropWorld.tick();
+    assert(!activeDropSession.closed());
+    Session lateJoinSession(redstoneDropWorld, data, options);
+    join(lateJoinSession, data);
+    assert(!lateJoinSession.closed());
+    // Container placement, GUI open/click/close, trapped chest signal & composter interaction.
+    {
+      World cw;
+      cw.loadChunk(0, 0);
+      for (int x = 0; x <= 12; ++x)
+        for (int z = 0; z <= 12; ++z)
+          cw.setBlock({x, 63, z}, defaultState("smooth_stone"), 3);
+      Session cs(cw, data, options);
+      join(cs, data);
+      drain(cs, true);
+
+      // Move player close to container test pad (around y=64, x=6, z=6).
+      Writer mv;
+      mv.f64(6.5);
+      mv.f64(64.0);
+      mv.f64(6.5);
+      mv.f32(0.0f); // look south
+      mv.f32(0.0f);
+      mv.u8(1);
+      cs.receive(frame(data.packet("play", "serverbound", "move_player_pos_rot"), mv.data));
+
+      creative(cs, data, 0, "trapped_chest");
+      creative(cs, data, 1, "smooth_stone");
+      creative(cs, data, 2, "hopper");
+      creative(cs, data, 3, "composter");
+      creative(cs, data, 4, "wheat_seeds");
+      assert(cs.inventory()[0].id == "minecraft:trapped_chest");
+      assert(cs.inventory()[2].id == "minecraft:hopper");
+      assert(cs.inventory()[4].id == "minecraft:wheat_seeds");
+
+      // Place trapped chest at {6, 64, 8} and wire at {7, 64, 8}.
+      select(cs, 0);
+      use(cs, {6, 63, 8}, Direction::Up, 20);
+      assert(cw.getBlock({6, 64, 8}).is(Blocks::TRAPPED_CHEST));
+      assert(cw.getBlock({6, 64, 8}).getView("type") == "single");
+      cw.setBlock({7, 64, 8}, defaultState("redstone_wire"), 3);
+      drain(cs, true);
+
+      // Right-click trapped chest -> opens GUI, increments openCount, powers adjacent wire.
+      use(cs, {6, 64, 8}, Direction::Up, 21);
+      assert(cs.openContainerId() > 0);
+      assert(trappedChestSignal(cw, {6, 64, 8}) == 1);
+      assert(cw.getBlock({7, 64, 8}).getView("power") == "1");
+      auto openPackets = drain(cs, true);
+      const int openScreenId = data.packet("play", "clientbound", "open_screen");
+      const int setContentId = data.packet("play", "clientbound", "container_set_content");
+      assert(std::find(openPackets.begin(), openPackets.end(), openScreenId) != openPackets.end());
+      assert(std::find(openPackets.begin(), openPackets.end(), setContentId) != openPackets.end());
+
+      // Shift-click (QUICK_MOVE) hotbar slot 1 (smooth_stone x64, menu slot 27 + 27 + 1 = 55) into chest.
+      const int cid = cs.openContainerId();
+      Writer click;
+      click.varInt(cid);
+      click.varInt(1);         // stateId
+      click.i16(55);           // hotbar slot 1 inside generic_9x3
+      click.u8(0);             // buttonNum
+      click.varInt(1);         // QUICK_MOVE
+      click.varInt(0);         // changedSlots empty
+      click.bool_(false);      // carried empty
+      cs.receive(frame(data.packet("play", "serverbound", "container_click"), click.data));
+      assert(cs.inventory()[1].empty());
+      auto be = chestEntityAt(cw, {6, 64, 8});
+      assert(be && be->getItem(0).id == "minecraft:smooth_stone" && be->getItem(0).count == 64);
+
+      // Close container -> openCount returns to 0 and redstone wire turns off.
+      Writer closePkt;
+      closePkt.varInt(cid);
+      cs.receive(frame(data.packet("play", "serverbound", "container_close"), closePkt.data));
+      assert(cs.openContainerId() == 0);
+      assert(trappedChestSignal(cw, {6, 64, 8}) == 0);
+      assert(cw.getBlock({7, 64, 8}).getView("power") == "0");
+
+      // Blocked chest above (solid stone) refuses to open via right-click.
+      cw.setBlock({6, 65, 8}, defaultState("smooth_stone"), 3);
+      use(cs, {6, 64, 8}, Direction::Up, 22);
+      assert(cs.openContainerId() == 0);
+
+      // Hopper placement (sneak-click west face of chest) -> facing=east.
+      Writer sneak;
+      sneak.u8(32);
+      cs.receive(frame(data.packet("play", "serverbound", "player_input"), sneak.data));
+      select(cs, 2);
+      use(cs, {6, 64, 8}, Direction::West, 24);
+      Writer unsneak;
+      unsneak.u8(0);
+      cs.receive(frame(data.packet("play", "serverbound", "player_input"), unsneak.data));
+      assert(cw.getBlock({5, 64, 8}).is(Blocks::HOPPER));
+      assert(cw.getBlock({5, 64, 8}).getView("facing") == "east");
+
+      // Composter right-click with oak_leaves / pumpkin_pie (chance 1.0 -> guaranteed level 0->1).
+      creative(cs, data, 5, "pumpkin_pie");
+      select(cs, 3);
+      use(cs, {8, 63, 6}, Direction::Up, 25);
+      assert(cw.getBlock({8, 64, 6}).is(Blocks::COMPOSTER));
+      select(cs, 5);
+      use(cs, {8, 64, 6}, Direction::Up, 26);
+      assert(cw.getBlock({8, 64, 6}).getView("level") == "1");
+    }
     // A failed network mapping disconnects that connection without skipping
     // World::tick's remaining events/entity/block-entity stages.
     world.setBlock({6, 65, 11}, BlockState("minecraft:unmapped_test_state"),
