@@ -530,6 +530,13 @@ public:
   // entities. IDs remain unique after entity removal and connection churn.
   int allocateEntityId();
   void removeEntity(const std::shared_ptr<Entity> &entity);
+  bool detachEntityForDimensionTransfer(const std::shared_ptr<Entity> &entity);
+  struct PendingPortalTransfer {
+    std::shared_ptr<Entity> entity;
+    Pos portalEntryPos{};
+  };
+  void queuePortalTransfer(const Entity &entity, Pos entryPos);
+  std::vector<PendingPortalTransfer> takePendingPortalTransfers();
   // EntitySectionStorage.getEntities: only sections overlapping the box are
   // visited; results keep the previous spawn-order (entity id) ordering.
   std::vector<Entity *> entitiesIn(const Aabb &box) const;
@@ -1017,6 +1024,7 @@ private:
   // collected and drained after blockTicks and before the chunk stage.
   std::unique_ptr<FluidTickQueue> fluidTickQueue_;
   std::unique_ptr<LightService> lightService_;
+  std::vector<std::pair<int, Pos>> pendingPortalTransferIds_;
   std::unique_ptr<PoiStorage> poiStorage_;
   const LightOpticalTable *lightOptical_ = nullptr;
   bool lowMemoryMode_ = false;

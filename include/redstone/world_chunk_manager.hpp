@@ -126,6 +126,8 @@ public:
   TicketSourceUpdate setViewDistance(int distance);
   TicketSourceUpdate setSimulationDistance(int distance);
   TicketSystemUpdate setForced(const ChunkTicketPos &position, bool forced);
+  TicketSystemUpdate addPortalTicket(const ChunkTicketPos &position,
+                                     int radius = 3);
   // One startup batch: installs every validated persistent ticket with exact
   // identity/ticks and forwards loading changes to the lifecycle owner.
   TicketSystemUpdate restorePersistentTickets(

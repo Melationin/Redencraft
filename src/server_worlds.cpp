@@ -1,5 +1,7 @@
 #include "redstone/server_worlds.hpp"
 
+#include "redstone/portal.hpp"
+
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_set>
@@ -185,6 +187,7 @@ void ServerWorldSet::tick(bool runsNormally, bool tickChunks) {
     }
     level->world->setGameTime(nextTime);
   }
+  processPendingPortalTransfers(*this);
   metadata_.gameTime = nextTime;
 }
 

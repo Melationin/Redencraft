@@ -62,7 +62,15 @@ public:
   bool verticalCollisionBelow = false;
   bool noPhysics = false;
   int remainingFireTicks = 0;
+  int portalCooldown = 0;
   double fallDistance = 0.0;
+
+  struct PortalProcessState {
+    bool active = false;
+    Pos entryPosition{};
+    int portalTime = 0;
+    bool insidePortalThisTick = false;
+  };
 
   Aabb boundingBox() const;
   Vec3 eyePosition() const { return position + Vec3{0, eyeHeight(), 0}; }
@@ -86,6 +94,19 @@ public:
 
   void baseTick(World &world);
   void checkBelowWorld(World &world);
+  virtual int dimensionChangingDelay() const { return 300; }
+  virtual bool canUsePortal(bool allowVehicles = false) const;
+  bool isOnPortalCooldown() const noexcept { return portalCooldown > 0; }
+  void setPortalCooldown() { portalCooldown = dimensionChangingDelay(); }
+  void setPortalCooldown(int cooldown) { portalCooldown = cooldown; }
+  void processPortalCooldown();
+  void setAsInsidePortal(Pos pos);
+  void handlePortal(World &world);
+  void applyFireBlockEffect(World &world, float fireDamage);
+  void clearPortalProcess() noexcept { portalProcess_ = {}; }
+  const PortalProcessState &portalProcess() const noexcept {
+    return portalProcess_;
+  }
   void move(World &world, Vec3 movement, bool piston = false);
   void push(double x, double y, double z);
   void push(const Vec3 &value);
@@ -113,6 +134,7 @@ private:
   bool removalObserved_ = false;
   // Used only during the callback-free collision collection and resolution.
   std::vector<ShapeBox> movementColliders_;
+  PortalProcessState portalProcess_{};
 };
 
 class ItemEntity : public Entity {

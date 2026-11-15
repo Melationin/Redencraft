@@ -441,7 +441,61 @@ void Entity::lavaHurt(World &world) {
   igniteForSeconds(15.0f);
   hurt(world, DamageKind::Lava, 4.0f);
 }
+bool Entity::canUsePortal(bool allowVehicles) const {
+  (void)allowVehicles;
+  return !isRemoved();
+}
+void Entity::processPortalCooldown() {
+  if (portalCooldown > 0)
+    --portalCooldown;
+}
+void Entity::setAsInsidePortal(Pos pos) {
+  if (isOnPortalCooldown()) {
+    setPortalCooldown();
+    return;
+  }
+  if (!portalProcess_.active) {
+    portalProcess_.active = true;
+    portalProcess_.entryPosition = pos;
+    portalProcess_.portalTime = 0;
+    portalProcess_.insidePortalThisTick = true;
+  } else if (!portalProcess_.insidePortalThisTick) {
+    portalProcess_.entryPosition = pos;
+    portalProcess_.insidePortalThisTick = true;
+  }
+}
+void Entity::handlePortal(World &world) {
+  processPortalCooldown();
+  if (!portalProcess_.active)
+    return;
+  const bool allowed = canUsePortal(false);
+  bool ready = false;
+  if (!portalProcess_.insidePortalThisTick) {
+    portalProcess_.portalTime = std::max(portalProcess_.portalTime - 4, 0);
+  } else {
+    portalProcess_.insidePortalThisTick = false;
+    // Non-player entities have transition time 0 in NetherPortalBlock.
+    ready = allowed && portalProcess_.portalTime++ >= 0;
+  }
+  if (ready) {
+    setPortalCooldown();
+    world.queuePortalTransfer(*this, portalProcess_.entryPosition);
+  } else if (!portalProcess_.insidePortalThisTick &&
+             portalProcess_.portalTime <= 0) {
+    portalProcess_ = {};
+  }
+}
+void Entity::applyFireBlockEffect(World &world, float fireDamage) {
+  if (!fireImmune()) {
+    if (remainingFireTicks < 0)
+      ++remainingFireTicks;
+    if (remainingFireTicks >= 0)
+      igniteForSeconds(8.0f);
+  }
+  hurt(world, DamageKind::Fire, fireDamage);
+}
 void Entity::baseTick(World &world) {
+  handlePortal(world);
   if (remainingFireTicks > 0) {
     if (fireImmune())
       clearFire();
@@ -695,6 +749,18 @@ void Entity::applyEffectsFromBlocks(World &world) {
           if (isRemoved())
             return;
         }
+        if (state.is(Blocks::FIRE)) {
+          applyFireBlockEffect(world, 1.0f);
+          if (isRemoved())
+            return;
+        }
+        if (state.is(Blocks::SOUL_FIRE)) {
+          applyFireBlockEffect(world, 2.0f);
+          if (isRemoved())
+            return;
+        }
+        if (state.is(Blocks::NETHER_PORTAL) && canUsePortal(false))
+          setAsInsidePortal(pos);
         if (state.is(Blocks::DETECTOR_RAIL))
           railEntityInside(world, pos, state, *this);
         if (state.is(Blocks::HOPPER))
@@ -852,6 +918,7 @@ PrimedTnt::PrimedTnt(World &, Vec3 pos, Vec3 motion)
   oldPosition = position;
 }
 void PrimedTnt::tick(World &world) {
+  handlePortal(world);
   deltaMovement.y -= 0.04;
   move(world, deltaMovement);
   applyEffectsFromBlocks(world);
@@ -900,6 +967,7 @@ void FallingBlockEntity::tick(World &world) {
     discard();
     return;
   }
+  handlePortal(world);
   ++time;
   deltaMovement.y -= 0.04;
   move(world, deltaMovement);
@@ -1030,6 +1098,7 @@ void Minecart::tick(World &world) {
   if (damage > 0)
     damage = std::max(0.0f, damage - 1.0f);
   checkBelowWorld(world);
+  handlePortal(world);
   tickOldBehavior(world);
   if (isRemoved())
     return;
@@ -1347,6 +1416,45 @@ void World::entitySectionUpdate(Entity &entity) {
 void World::removeEntity(const std::shared_ptr<Entity> &entity) {
   if (entity)
     entity->discard();
+}
+bool World::detachEntityForDimensionTransfer(
+    const std::shared_ptr<Entity> &entity) {
+  if (!entity)
+    return false;
+  auto it = std::find(entities.begin(), entities.end(), entity);
+  if (it == entities.end())
+    return false;
+  if (managedEntityMutationObserver)
+    managedEntityMutationObserver(entity->position, entity->position,
+                                  entity->uuid, true);
+  notifyEntityRemoved(*entity);
+  entityUuids_.erase(entity->uuid);
+  entitySectionRemove(*entity);
+  entities.erase(it);
+  entity->removed_ = false;
+  entity->removalObserved_ = false;
+  return true;
+}
+void World::queuePortalTransfer(const Entity &entity, Pos entryPos) {
+  if (entity.id > 0)
+    pendingPortalTransferIds_.emplace_back(entity.id, entryPos);
+}
+std::vector<World::PendingPortalTransfer> World::takePendingPortalTransfers() {
+  std::vector<PendingPortalTransfer> out;
+  if (pendingPortalTransferIds_.empty())
+    return out;
+  auto queued = std::move(pendingPortalTransferIds_);
+  pendingPortalTransferIds_.clear();
+  out.reserve(queued.size());
+  for (const auto &[entityId, entryPos] : queued) {
+    for (const auto &entity : entities) {
+      if (entity && entity->id == entityId && !entity->isRemoved()) {
+        out.push_back({entity, entryPos});
+        break;
+      }
+    }
+  }
+  return out;
 }
 std::vector<Entity *> World::entitiesIn(const Aabb &box) const {
   std::vector<Entity *> result;

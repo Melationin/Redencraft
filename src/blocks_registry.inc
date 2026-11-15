@@ -301,9 +301,9 @@ const Block OBSIDIAN{"minecraft:obsidian", BlockMetadata{50.0f, true, "normal", 
 const Block TORCH{"minecraft:torch", BlockMetadata{0.0f, false, "destroy", false, 0.6f, 1.0f, 0.0f, false, false, false, false, false, Instrument::Harp, 0x0ULL}};
 const Block WALL_TORCH{"minecraft:wall_torch", BlockMetadata{0.0f, false, "destroy", false, 0.6f, 1.0f, 0.0f, false, false, false, false, false, Instrument::Harp, 0x0ULL},
     StateDefinition{{Property{"facing", {"north", "south", "west", "east"}, "north"}}}};
-const Block FIRE{"minecraft:fire", BlockMetadata{0.0f, false, "destroy", false, 0.6f, 1.0f, 0.0f, false, false, false, true, false, Instrument::Harp, 0x0ULL},
+const Block FIRE{"minecraft:fire", BlockMetadata{0.0f, false, "destroy", true, 0.6f, 1.0f, 0.0f, false, false, false, true, false, Instrument::Harp, 0x0ULL},
     StateDefinition{{Property{"age", {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"}, "0"}, Property{"east", {"true", "false"}, "false"}, Property{"north", {"true", "false"}, "false"}, Property{"south", {"true", "false"}, "false"}, Property{"up", {"true", "false"}, "false"}, Property{"west", {"true", "false"}, "false"}}}};
-const Block SOUL_FIRE{"minecraft:soul_fire", BlockMetadata{0.0f, false, "destroy", false, 0.6f, 1.0f, 0.0f, false, false, false, true, false, Instrument::Harp, 0x0ULL}};
+const Block SOUL_FIRE{"minecraft:soul_fire", BlockMetadata{0.0f, false, "destroy", true, 0.6f, 1.0f, 0.0f, false, false, false, true, false, Instrument::Harp, 0x0ULL}};
 const Block SPAWNER{"minecraft:spawner", BlockMetadata{5.0f, true, "normal", false, 0.6f, 1.0f, 5.0f, false, false, false, false, false, Instrument::Basedrum, 0x0ULL}};
 const Block CREAKING_HEART{"minecraft:creaking_heart", BlockMetadata{10.0f, true, "normal", false, 0.6f, 1.0f, 10.0f, false, false, false, false, false, Instrument::Basedrum, 0x0ULL},
     StateDefinition{{Property{"axis", {"x", "y", "z"}, "y"}, Property{"creaking_heart_state", {"uprooted", "dormant", "awake"}, "uprooted"}, Property{"natural", {"true", "false"}, "false"}}}};
@@ -483,7 +483,7 @@ const Block COPPER_TORCH{"minecraft:copper_torch", BlockMetadata{0.0f, false, "d
 const Block COPPER_WALL_TORCH{"minecraft:copper_wall_torch", BlockMetadata{0.0f, false, "destroy", false, 0.6f, 1.0f, 0.0f, false, false, false, false, false, Instrument::Harp, 0x0ULL},
     StateDefinition{{Property{"facing", {"north", "south", "west", "east"}, "north"}}}};
 const Block GLOWSTONE{"minecraft:glowstone", BlockMetadata{0.3f, false, "normal", true, 0.6f, 1.0f, 0.3f, false, false, false, false, false, Instrument::Pling, 0x0ULL}};
-const Block NETHER_PORTAL{"minecraft:nether_portal", BlockMetadata{-1.0f, false, "block", false, 0.6f, 1.0f, 0.0f, false, false, false, false, false, Instrument::Harp, 0x0ULL},
+const Block NETHER_PORTAL{"minecraft:nether_portal", BlockMetadata{-1.0f, false, "block", true, 0.6f, 1.0f, 0.0f, false, false, false, false, false, Instrument::Harp, 0x0ULL},
     StateDefinition{{Property{"axis", {"x", "z"}, "x"}}}};
 const Block CARVED_PUMPKIN{"minecraft:carved_pumpkin", BlockMetadata{1.0f, true, "destroy", false, 0.6f, 1.0f, 1.0f, false, false, false, false, false, Instrument::Harp, 0x0ULL},
     StateDefinition{{Property{"facing", {"north", "south", "west", "east"}, "north"}}}};

@@ -5,6 +5,7 @@
 #include "redstone/fluid_flow.hpp"
 #include "redstone/light.hpp"
 #include "redstone/piston.hpp"
+#include "redstone/portal.hpp"
 #include "redstone/rail.hpp"
 #include "redstone/random_tick.hpp"
 #include "redstone/redstone.hpp"
@@ -3963,6 +3964,73 @@ struct WorldBehaviours {
     return state;
   }
 
+  static bool fireCanSurvive(World &world, Pos p) {
+    const Pos below = p.relative(Direction::Down);
+    const BlockState belowState = world.getBlock(below);
+    if (faceSturdy(world, below, belowState, Direction::Up, SupportType::Full))
+      return true;
+    for (Direction d : {Direction::Down, Direction::Up, Direction::North,
+                        Direction::South, Direction::West, Direction::East}) {
+      if (world.getBlock(p.relative(d)).block().metadata().ignitedByLava)
+        return true;
+    }
+    return false;
+  }
+
+  static bool soulFireCanSurvive(World &world, Pos p) {
+    const BlockState belowState = world.getBlock(p.relative(Direction::Down));
+    return world.hasBlockTag(belowState, "minecraft:soul_fire_base_blocks")
+        .value_or(false);
+  }
+
+  static void fireOnPlace(World &world, Pos p, const BlockState &state,
+                          const BlockState &oldState, bool) {
+    if (oldState.sameBlock(state))
+      return;
+    if (isInPortalDimension(world)) {
+      if (auto shape =
+              PortalShape::findEmptyPortalShape(world, p, PortalAxis::X);
+          shape.has_value()) {
+        shape->createPortalBlocks(world);
+        return;
+      }
+    }
+    const bool survives = state.is(Blocks::SOUL_FIRE)
+                              ? soulFireCanSurvive(world, p)
+                              : fireCanSurvive(world, p);
+    if (!survives)
+      world.removeBlock(p, false);
+  }
+
+  static BlockState fireUpdateShape(World &world, Pos p,
+                                    const BlockState &state, Direction, Pos,
+                                    const BlockState &) {
+    return fireCanSurvive(world, p) ? state : airState();
+  }
+
+  static BlockState soulFireUpdateShape(World &world, Pos p,
+                                        const BlockState &state, Direction, Pos,
+                                        const BlockState &) {
+    return soulFireCanSurvive(world, p) ? state : airState();
+  }
+
+  static BlockState netherPortalUpdateShape(World &world, Pos p,
+                                            const BlockState &state,
+                                            Direction direction, Pos,
+                                            const BlockState &neighbor) {
+    const BlockAxis updateAxis = axisOfDirection(direction);
+    const PortalAxis portalAxis = portalAxisOfState(state);
+    const BlockAxis portalBlockAxis =
+        portalAxis == PortalAxis::X ? BlockAxis::X : BlockAxis::Z;
+    const bool wrongAxis =
+        portalBlockAxis != updateAxis && isHorizontalDirection(direction);
+    if (!wrongAxis && !neighbor.is(Blocks::NETHER_PORTAL) &&
+        !PortalShape::findAnyShape(world, p, portalAxis).isComplete()) {
+      return airState();
+    }
+    return state;
+  }
+
   static BlockState noteBlockUpdateShape(World &world, Pos p,
                                          const BlockState &state,
                                          Direction direction, Pos,
@@ -4122,6 +4190,17 @@ void bindBlockBehaviours(Block &block) {
     b.neighborChanged = &WorldBehaviours::noteBlockNeighborChanged;
     b.updateShape = &WorldBehaviours::noteBlockUpdateShape;
     b.triggerEvent = &WorldBehaviours::noteBlockTriggerEvent;
+  } else if (&block == &Blocks::FIRE) {
+    b.onPlace = &WorldBehaviours::fireOnPlace;
+    b.updateShape = &WorldBehaviours::fireUpdateShape;
+    // TODO: FireBlock flammable tick/spread & burn-out remain unimplemented.
+  } else if (&block == &Blocks::SOUL_FIRE) {
+    b.onPlace = &WorldBehaviours::fireOnPlace;
+    b.updateShape = &WorldBehaviours::soulFireUpdateShape;
+  } else if (&block == &Blocks::NETHER_PORTAL) {
+    b.updateShape = &WorldBehaviours::netherPortalUpdateShape;
+    // TODO: NetherPortalBlock::randomTick ZombifiedPiglin spawning remains
+    // unimplemented (no mob entity implementation yet).
   } else if (block.isFenceGate()) {
     b.neighborChanged = &WorldBehaviours::fenceGateNeighborChanged;
     b.updateShape = &WorldBehaviours::fenceGateUpdateShape;

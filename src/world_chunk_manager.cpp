@@ -294,6 +294,19 @@ WorldChunkManager::setForced(const ChunkTicketPos &position, bool forced) {
   return update;
 }
 
+TicketSystemUpdate
+WorldChunkManager::addPortalTicket(const ChunkTicketPos &position, int radius) {
+  if (!accepting())
+    return {};
+  TicketSystemUpdate update;
+  tickets_.tickets().addTicket(
+      position,
+      Ticket(ticket_types::Portal, ticket_levels::FullChunkLevel - radius),
+      &update);
+  applyTicketUpdate(update);
+  return update;
+}
+
 void WorldChunkManager::applyTicketUpdate(const TicketSystemUpdate &update) {
   if (!accepting())
     return;

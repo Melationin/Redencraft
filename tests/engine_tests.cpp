@@ -1320,7 +1320,7 @@ int main() {
          gates.getBlock(gatePos).get("open") == "false");
 
   // All 1,168 vanilla blocks & 29,873 states basic invariants.
-  assert(blockRegistry().size() == 607);
+  assert(blockRegistry().size() == 610);
   assert(registeredStateCount() >= 29873);
   assert(Blocks::AIR.index() == 0 && Blocks::AIR.firstState() == 0);
   assert(Blocks::FIREFLY_BUSH.index() == 1167);
