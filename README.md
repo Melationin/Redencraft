@@ -1,94 +1,117 @@
-# Minecraft 26.1 服务端模拟器（C++20）
+# Redencraft — Minecraft 26.1 C++20 服务端模拟器
 
-已新增带原版纹理的 Windows 极轻量 3D 调试客户端及 16 色羊毛地毯；使用方式见 [客户端说明](docs/client.md)。
+以 **C++20** 实现、行为对齐 **Minecraft Java Edition 26.1**（协议 **775** / DataVersion **4786**）的服务端与红石核心模拟器。  
+所有机制以仓库上一级只读 26.1 Java 源码与原版导出数据为行为依据，持续逼近原版；完整长期目标见 [AGENTS.md](AGENTS.md) 与 [路线图](PLAN.md)。
 
-新增可选原生 C++ 协议 775 服务端，支持离线登录、固定区块、创造物品选择和放置/破坏方块、活塞事件、简单实体同步；构建和启动命令见 [原版连接说明](docs/protocol775.md)。已用无界面 TCP 测试和原版 Java codec 验证；没有启动真实客户端，实际连接和渲染仍待验证。
+> **状态边界提示**：本项目仍在分阶段演进中，**当前并非“全部原版等价”**。文档严格区分「目标形态」与「当前已实现边界」，未运行真实 26.1 服务端逐刻差分的系统不声称等价；已确认边界与待移植项见 [兼容性说明](docs/compatibility.md) 与 [BLOCK_TODO.md](BLOCK_TODO.md)。
 
-本批补入简单实体（物品、TNT、下落方块、空矿车）、四种铁轨方块、物品注册与空工具掉落表、TNT 爆炸和实体存档导入；行为依据和剩余差异见 [简单实体、铁轨与物品](docs/entities.md)。当前未提交状态、构建/验证结果、剩余 TODO 与原版客户端直连调研见 [交接文档](docs/handover.md)。
+---
 
-SafeSave2 顺序场景对比已完成：[七项原版 26.1 对比与修复记录](validation/safesave_order/README.md)。已修复负 subTickOrder 及存档刻解包顺序，新增 CTest 对比项。
+## 核心能力与当前边界
 
-项目目标是 **C++20 实现的 Minecraft Java Edition 26.1 服务端**：多维度、加载票、世界生成、世界保存、时间与光照，分期见 [路线图](PLAN.md)，目标形态见 [项目约束](AGENTS.md)。**目前代码处在它之前的子集阶段**：单维度（主世界）、无世界生成、无完整原版存档/自定义维度/玩家睡眠，用这个子集逐项对照原版。当前已实现 L-1…L-3 方块/天空光计算与 775 协议分发（尚无 Anvil 光照读写）、流体计划刻与传播（F-1…F-8）、内置 World Clocks 与 `/time`（无睡眠跳转或自定义时钟）；原生协议 775 服务端的显式 `--ticketed-world` 入口已支持加载票、真实区块卸载与 Anvil 写回，但仅限于 26.1（协议 775 / DataVersion 4786）已有且可安全处理的 FULL 区块与受支持子集，旧 `--world` 与 `--schematic` 入口仍为只读导入。性能优化的阶段结果、测量方法和开销分布见 [性能优化记录](docs/performance.md)。行为依据是本目录上一级的 26.1 Java 源码，不以社区机制概述替代源码。**当前不是“全部原版红石已经等价”的承诺**；未移植依赖和验证边界见 [兼容性说明](docs/compatibility.md)。
+| 模块 | 当前已实现边界 | 尚未完成（目标阶段） |
+|---|---|---|
+| **世界与维度** | 单世界容器（默认主世界 `-64..320`，可用 `--region` / `--min-y` / `--max-y` 显式挂载单个其它维度目录），Chunk → 16×16×16 `Section` 组织 | 多维度同服、维度注册与 `dimensions/<ns>/<path>` 自动发现、传送门（`D-1 ~ D-3`）；世界生成（`G-1 ~ G-4`） |
+| **区块加载与存档** | `redstone_cli` 与 `--world` / `--schematic` 为只读导入；`redstone_vanilla_server --ticketed-world <dir>` 支持基于加载票的异步加载/卸载与 Anvil 写回（26.1 FULL 区块、计划刻、移动活塞、简单实体、`level.dat` `Time`、内置 `world_clocks` 与持久票）；不支持内容在写回路径显式拒绝 | 缺失区块不会自动生成；不提供跨文件崩溃事务原子性 |
+| **方块、红石与刻顺序** | 按 `ServerLevel.tick` 阶段分离推进；`NeighborUpdater` / `CollectingNeighborUpdater`、`updateShape`、`neighborChanged`、方块/流体计划刻、方块事件、方块实体（移动活塞等）、容器、随机刻、26.1 方块标签与 16 色羊毛地毯 | 原版全部方块/实验性红石规则持续补齐中，进度见 [BLOCK_TODO.md](BLOCK_TODO.md) |
+| **流体** | 水与岩浆状态、传播/坡度/反应、含水宿主与 `fluid_ticks` 调度（[流体文档](docs/fluid-testing.md)） | 桶交互、实体推流及与真服逐刻全量差分（`F-9a / F-9b`） |
+| **光照** | 双光层（BlockLight + SkyLight）独立 4-bit 压缩快照、后台 worker + SPSC 无锁交接、Anvil 光照读写及协议 775 初始/增量发送（[光照文档](docs/light-engine.md)） | 独立多维度下的逐维度光学实例与全量真服差分 |
+| **实体** | 简单实体（物品、TNT、下落方块、空矿车）、4 种铁轨（`OldMinecartBehavior`）、活塞扫掠推动与粘液/蜂蜜块相互作用（[实体文档](docs/entities.md)） | 生物/玩家 AI 之外的大多数复杂实体仍仅作注册或日志占位 |
+| **网络协议（775）** | 可选原生 TCP 服务端 `redstone_vanilla_server`，支持离线登录、区块/光照分发、放置/破坏方块、容器基础交互、`/tick` 与 `/time`（[协议文档](docs/protocol775.md)） | 多维度 `respawn` 切维、真实客户端渲染完整全链路验证 |
+| **调试客户端** | 可选 Windows 极轻量 3D OpenGL 调试客户端 `redstone_client`（[客户端说明](docs/client.md)） | 非完整游戏客户端 |
+| **内存与分配** | 默认通过 `allocator.hpp` 使用 `jemalloc`；`--low-memory` 开启光影/几何直读共享，计划刻使用 32 B `QueuedTick` / 16 B `TickKey` 紧凑布局并支持排空回收与周期压缩 | 光照快照页进一步压缩与跨页去重 |
 
-## 本批范围
+---
 
-- 基础方块/实体/物品类型注册与方块状态属性；未支持的方块名称和属性在内存和只读路径保留，未知/不支持内容在 `--ticketed-world` 写回路径明确拒绝而非降级抹除。
-- 内存按 Chunk → 16×16×16 Section 组织；负坐标必须按向下取整划分。
-- `--world` / `--schematic` 与 `redstone_cli` 仍是只读导入（`level.dat`、Anvil `.mca`、区块调度信息、移动活塞方块实体和简单实体），不生成或写回地图；显式 `redstone_vanilla_server --ticketed-world <dir>` 额外支持同版本 Anvil 写回（已有 FULL 区块、方块/流体计划刻、移动活塞方块实体、受支持简单实体、核心 `level.dat` Time、内置 `world_clocks` 与支持的持久票），不生成缺失区块，也不提供跨文件崩溃原子性。
-- 可直接控制区块的加载/强加载（`--ticketed-world` 模式使用加载票）；方块计划刻、流体计划刻（水与岩浆状态、传播、参数/反应及含水宿主方块；桶交互、实体推流与 `fluid_ticks` 写回边界见 [兼容性说明](docs/compatibility.md)）、方块事件、实体刻和移动活塞方块实体刻；原版邻居更新栈及不同更新标志。
-- 空气、草方块、基岩、粘液块、蜂蜜块、平滑石、白色陶瓦、干枯珊瑚扇、圆石墙、黑曜石、玻璃、普通/粘性活塞、活塞头与 moving_piston（通常称 b36）、侦测器、音符盒、红石块、TNT、四种铁轨、水、岩浆。
-- 简单实体：物品、TNT、下落方块、空矿车。TNT 方块点燃、默认引信 80、威力 4 爆炸、方块破坏掉落与链式 TNT 已接入；物品会下落、合并、进液体和到期消失；矿车按非实验性 `OldMinecartBehavior` 在铁轨/离轨状态下移动。移动活塞按原版扫掠区域推动实体（含每刻 0.51 限制、NOCLIP、回缩基座挤出），粘液块会把简单实体沿移动轴弹到 ±1 初速，蜂蜜块水平粘性搬运实体。
-- 物品：方块物品注册、最大堆叠、空工具掉落表（草方块→泥土，玻璃/枯珊瑚扇/活塞头/移动活塞/基岩不掉落，不稳定 TNT 不掉落，其余掉自身）。
-- 后续新增：全部 16 色羊毛地毯（支撑更新、1/16 厚度、推动/拉回与真实掉落物）。
+## 快速构建与测试
 
-## 开发约定
+### 1. WSL / Linux（Ubuntu 24.04 推荐配置）
 
-全部后续工作放在本目录。源码路径索引和 tick/更新约束见 [兼容性说明](docs/compatibility.md)。默认通过独立的 `include/redstone/allocator.hpp` 选择 jemalloc；切换分配器用于基准比较时应使用独立构建目录，并记录配置。
-
-## 构建与运行
-
-### WSL / Linux
-
-Ubuntu 24.04 下使用 C++20 编译器、CMake、Ninja、zlib 和 jemalloc 开发头文件（Ubuntu 包名分别为 `build-essential`、`cmake`、`ninja-build`、`zlib1g-dev`、`libjemalloc-dev`）。在 WSL 仓库目录执行，构建和测试产物放在仓库外：
+依赖工具与库：`build-essential`、`cmake`（≥ 3.24）、`ninja-build`、`zlib1g-dev`、`libjemalloc-dev`。
 
 ```bash
-build="$HOME/.cache/redstone-cpp/release"
-cmake -S . -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DREDSTONE_BUILD_VANILLA_SERVER=ON -DREDSTONE_BUILD_BENCHMARKS=ON
-cmake --build "$build" --parallel 6
-PYTHONDONTWRITEBYTECODE=1 ctest --test-dir "$build" --output-on-failure
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DREDSTONE_BUILD_VANILLA_SERVER=ON \
+  -DREDSTONE_BUILD_BENCHMARKS=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
 ```
 
-世吞基准支持 Linux 线程 CPU 计时和绑核。下例仅适用于可用且不同核心的 CPU 2、CPU 4；换机器前用 `lscpu -e=CPU,CORE,SOCKET` 与当前允许的 CPU 列表核对。
+- 默认要求 `jemalloc`；若要对比系统分配器，请使用独立构建目录并显式传入 `-DREDSTONE_ALLOCATOR=system`。
+- 若 `jemalloc` 安装在自定义前缀（如 `$HOME/.local`），附加 `-DCMAKE_PREFIX_PATH="$HOME/.local"`。
 
-```bash
-"$build/redstone_tick_benchmark" /path/to/workload.litematic 1000 --lighting \
-  --process-affinity 0x14 --main-affinity 0x4 --light-affinity 0x10
-```
+### 2. Windows（MSVC + 静态 jemalloc）
 
-`--no-lighting` 可用于同版本对照。正式计时不要带 `--fingerprint`；指纹对照单独跑。未安装 jemalloc 开发包时，只有明确指定 `-DREDSTONE_ALLOCATOR=system` 才会使用系统分配器；性能对照双方使用同一分配器。
-
-### Windows（历史验证）
-
-已在 Windows 上验证 MSVC 2026 + jemalloc 5.3.0（静态 CRT），以及 GCC 15.2 + system 分配器。CMake 默认要求 jemalloc，找不到时会报错，不会静默切换。zlib 缺失时自动下载固定版本 1.3.1 并验证 SHA256；LZ4 1.10.0 的 C 源码和许可证在 `vendor/lz4`。
-
-当前机器的 jemalloc 已安装在本项目 `third_party/vcpkg-installed/x64-windows-static` 中。以本目录作为工作目录：
+仓库 `third_party/vcpkg-installed/x64-windows-static` 已包含静态 `jemalloc`（也可自行通过 vcpkg 安装 `jemalloc:x64-windows-static` 并指向对应前缀）：
 
 ```powershell
-cmake -S . -B build-jemalloc -G "Visual Studio 18 2026" -A x64 -DCMAKE_PREFIX_PATH="$PWD/third_party/vcpkg-installed/x64-windows-static"
+cmake -S . -B build-jemalloc -G "Visual Studio 18 2026" -A x64 `
+  -DCMAKE_PREFIX_PATH="$PWD/third_party/vcpkg-installed/x64-windows-static" `
+  -DREDSTONE_BUILD_VANILLA_SERVER=ON
 cmake --build build-jemalloc --config Release -j 6
 ctest --test-dir build-jemalloc -C Release --output-on-failure
-./build-jemalloc/Release/redstone_cli.exe --demo --ticks 6 --dump
 ```
 
-新机器可用 vcpkg 安装 `jemalloc:x64-windows-static`，再把 `CMAKE_PREFIX_PATH` 指向对应安装前缀。使用 MinGW 时，必须匹配 MinGW 构建的依赖，不能混用 MSVC 的静态 jemalloc 库。比较系统分配器时，单独配置 `-DREDSTONE_ALLOCATOR=system`。
+### 主要 CMake 选项
 
-读取存档、只让指定的两个区块参与运行：
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `REDSTONE_ALLOCATOR` | `jemalloc` | 分配后端（`jemalloc` 或 `system`） |
+| `REDSTONE_BUILD_VANILLA_SERVER` | `OFF` | 构建可选协议 775 服务端 `redstone_vanilla_server` 与协议测试 |
+| `REDSTONE_BUILD_BENCHMARKS` | `OFF` | 构建离线性能基准（`redstone_tick_benchmark` 等） |
+| `REDSTONE_BUILD_CLIENT` | `ON` | 在 Windows 上构建轻量调试客户端 `redstone_client` |
+| `REDSTONE_FETCH_ZLIB` | `ON` | 系统缺少 `zlib` 时自动拉取固定版本 1.3.1 |
 
-```powershell
-./build-jemalloc/Release/redstone_cli.exe --world "D:/Minecraft/saves/Test" --force 0 0 --force -1 0 --ticks 20 --dump
+---
+
+## 常用运行示例
+
+### CLI 离线模拟（`redstone_cli`）
+
+```bash
+# 运行内置示例 6 tick 并导出 JSON 快照
+./build/redstone_cli --demo --ticks 6 --dump
+
+# 只读导入指定 Anvil 存档的两个区块并推进 20 tick
+./build/redstone_cli --world /path/to/save --force 0 0 --force -1 0 --ticks 20 --dump
 ```
 
-`--force` 可以重复；未指定时加载 region 目录中找到的所有区块。`--region` 可指定单一其他维度的 region 路径；`--min-y` / `--max-y` 指定其建造高度，默认 [-64, 320)。当前读取器先读取所有 region 再筛选，尚未优化为仅访问指定区块。不会生成缺失区块或写回存档。`--dump` 把逐刻方块与简单实体快照写入 stdout；日志和不支持项统计写入 stderr（含 `simple_entities_imported` 和 `other_entities_not_simulated`）。
+- `--region <dir>` 可显式挂载单一维度目录（配合 `--min-y` / `--max-y`，默认 `-64..320`）。
 
-## 当前验证结果
+### 原生协议 775 服务端（`redstone_vanilla_server`）
 
-2026-11-06：默认 jemalloc 的 MSVC Release 构建及启用协议模块的 CTest **11/11 通过**，Release 下断言仍启用；关闭协议模块仍为原有 8 组。新增 wire、protocol、protocol_socket 验证编码、状态机、交互及真实 localhost TCP。新增内容本批只在 MSVC 下验证；本机 GCC 15.2 对空程序也返回 1，未作为本批验证依据。实际原版解码验证及限制见 [协议说明](docs/protocol775.md)。
+```bash
+# 仅内存只读模式加载 Anvil 存档（低内存模式，关闭控制台输入）
+./build/redstone_vanilla_server --world /path/to/save --skip-non-full-chunks --low-memory --port 25565 --no-console
 
-这仍是持续逼近原版的实现，不是“全部原版等价”的承诺。后续已实际运行原版 26.1 服务端，确认用户截图中的地毯复制结构与 C++ 的地毯位置和额外物品结果一致；证据见 [原版验证](validation/vanilla26_1/README.md)。简单实体的当前 8 组 CTest 全部通过。地毯复制结构已额外用真实 26.1 服务端读取物品 `Pos`/`Motion`：击中后的 X 速度序列与 C++ 一致（`-1.0, -0.98, -0.9604, ...`），证据见 [原版验证](validation/vanilla26_1/README.md)；但其余实体/铁轨/爆炸路径**尚未完成逐刻差分**，不能称为服务端等价。更新顺序审查见 [审查记录](docs/update-order-audit.md)，剩余差异见 [兼容性说明](docs/compatibility.md)，存档限制见 [读取说明](docs/storage.md)。
+# 显式启用加载票、异步加载/卸载与 Anvil 写回
+./build/redstone_vanilla_server --ticketed-world /path/to/save_copy --port 25565
+```
 
-## 代码入口
+- 常用选项：`--schematic <file>`、`--ticks <n>`（默认持续运行，传 `0` 仅加载校验）、`--view-distance <n>`、`--ticket-view-distance <n>`、`--simulation-distance <n>`、`--light-workers <n>`、`--allow-unsupported`。
 
-| 文件 | 职责 |
+---
+
+## 代码结构
+
+| 目录 / 文件 | 职责 |
 |---|---|
-| `include/redstone/engine.hpp` / `src/engine.cpp` | 注册、世界/区块、更新回调、调度与主循环 |
-| `include/redstone/entity.hpp` / `src/entity.cpp` | 实体基类与碰撞、物品/TNT/下落方块/矿车、掉落与爆炸 |
-| `include/redstone/rail.hpp` / `src/rail.cpp` | 四种铁轨的状态、支撑、连接、动力与探测 |
-| `include/redstone/piston.hpp` / `src/piston.cpp` | 结构解析、活塞事件、moving_piston 方块实体 |
-| `include/redstone/shapes.hpp` / `src/shapes.cpp` | 方块盒形状、面覆盖、墙连接和珊瑚支撑 |
-| `include/redstone/storage.hpp` / `src/storage.cpp` | Anvil 导入、调度与移动实体恢复 |
-| `include/redstone/nbt.hpp` / `src/nbt.cpp` | 有边界检查的只读 NBT 解析 |
-| `include/redstone/allocator.hpp` / `src/allocator.cpp` | 分配器选择、完整 new/delete 配对 |
-| `src/main.cpp` | 命令行演示、存档读取、快照 |
+| `include/redstone/engine.hpp`、`src/engine.cpp` | 世界状态、区块与区段存储、邻居/形状更新回调、计划刻与主循环 |
+| `src/redstone/`、`include/redstone/redstone.hpp` | 红石信号、线、火把、中继/比较器、输入控件与用电器 |
+| `src/blocks.cpp`、`src/state.cpp`、`src/block_tags.cpp`、`src/shapes.cpp` | 26.1 方块/状态注册表、方块标签与碰撞/遮挡形状 |
+| `src/fluid.cpp`、`src/fluid_flow.cpp`、`src/random_tick.cpp` | 流体状态/传播与随机刻系统 |
+| `src/piston.cpp`、`src/rail.cpp`、`src/containers.cpp`、`src/entity.cpp` | 活塞与移动方块实体、铁轨、容器与简单实体 |
+| `include/redstone/light/`、`src/light/` | 双光层光学表、块光/天空光传播器、异步光照服务与不可变快照 |
+| `src/storage.cpp`、`src/region.cpp`、`src/terrain_codec.cpp`、`src/entity_codec.cpp`、`src/nbt.cpp` | Anvil `.mca`、压缩 NBT、地形/实体编解码与 `level.dat` / `world_clocks` / `chunk_tickets` 持久化 |
+| `src/tickets.cpp`、`src/chunk_lifecycle.cpp`、`src/world_chunk_manager.cpp` | 加载票（`TicketStorage`）、区块生命周期状态机与异步区块管理器 |
+| `src/net/`（`wire.cpp`、`session.cpp`、`server_main.cpp`） | 协议 775 编解码、连接状态机、命令与服务端主入口 |
+| `src/litematic.cpp`、`src/command.cpp`、`src/allocator.cpp` | `.litematic` 投影导入、指令解析与统一分配器封装 |
+| `validation/`、`benchmarks/`、`tests/` | 26.1 Java 离线/真服差分探针、性能基准与 CTest 回归套件 |
 
-`rawSetBlock` 只用于无回调导入或测试布置；正常修改使用 `setBlock`。移动方块实体通过 `setPistonEntity` 注册，以保留 ticker 顺序。实体通过 `World::addEntity` 注册并参与实体刻；`spawnItem` 等辅助函数生成真实实体，同时写一条 `entity_spawn` 日志便于 CLI/客户端观察。`traceUpdates=true` 才记录每条邻居/形状/计划刻调试轨迹，避免默认运行时无限堆积更新日志。
+---
+
+## 延伸阅读
+
+- **总体设计**：[项目约束与目标形态](AGENTS.md) · [开发路线图](PLAN.md) · [兼容性边界](docs/compatibility.md)
+- **子系统文档**：[光照引擎](docs/light-engine.md) · [协议 775 说明](docs/protocol775.md) · [流体测试规格](docs/fluid-testing.md) · [简单实体、铁轨与物品](docs/entities.md) · [存档与投影](docs/storage.md) · [性能优化记录](docs/performance.md)
+- **调试客户端**：[Windows 调试客户端](docs/client.md)
