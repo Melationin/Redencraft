@@ -1,0 +1,2 @@
+# Preserve exact byte sequences for exported data verified by SHA-256 manifests.
+assets/light26_1/* -text
