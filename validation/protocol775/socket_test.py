@@ -172,6 +172,22 @@ def run(server):
                     assert frozen is True, payload
                     assert abs(tick_rate - 20.0) < 1e-4, payload
                     break
+            send(s, 7, string("/tick step 5"))
+            while True:
+                ident, payload = packet(s)
+                assert ident != 32, "disconnected after tick step"
+                if ident == 128:
+                    steps, _ = read_varint(payload, 0)
+                    assert steps == 5, steps
+                    break
+            send(s, 7, string("tick step stop"))
+            while True:
+                ident, payload = packet(s)
+                assert ident != 32, "disconnected after tick step stop"
+                if ident == 128:
+                    steps, _ = read_varint(payload, 0)
+                    assert steps == 0, steps
+                    break
             # The world is frozen: no further tick-driven packets are required,
             # so unfreeze again and check the state round-trips.
             send(s, 7, string("tick unfreeze"))

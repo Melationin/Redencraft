@@ -1,4 +1,6 @@
 #pragma once
+// 协议 775 线格式（Wire Format）底层编解码原语：定义字节流 Writer/Reader、包帧封装、
+// 协议注册表映射、线程安全的冻结区块/光照快照以及异步延迟发包描述符 OutPacket。
 #include "redstone/engine.hpp"
 #include <filesystem>
 #include <functional>
@@ -11,9 +13,11 @@ struct Node;
 }
 namespace redstone::net {
 using Bytes = std::vector<std::uint8_t>;
+// 协议解析/校验失败时抛出的异常（如非法 VarInt、截断载荷或越界数量），用于隔离单条异常连接。
 struct ProtocolError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
+// 协议字节流写入器：按 Minecraft 线格式（大端整数、VarInt/VarLong、UTF-8 字符串及打包坐标）追加编码数据。
 struct Writer {
   Bytes data;
   void u8(std::uint8_t);
@@ -29,6 +33,7 @@ struct Writer {
   void position(Pos);
   void raw(std::span<const std::uint8_t>);
 };
+// 协议字节流读取器：基于只读 span 零拷贝解码入站数据包，越界或格式错误时抛出 ProtocolError。
 struct Reader {
   explicit Reader(std::span<const std::uint8_t> input) : data(input) {}
   std::span<const std::uint8_t> data;
@@ -48,14 +53,14 @@ struct Reader {
   Pos position();
   std::span<const std::uint8_t> raw(std::size_t);
 };
-// Minecraft's Varint21FrameDecoder permits at most three prefix bytes.
+// Minecraft 的 Varint21FrameDecoder 最多允许 3 个长度前缀字节，单帧上限为 2097151 字节。
 inline constexpr std::size_t maxFrameSize = 2097151;
 Bytes frame(int packetId, std::span<const std::uint8_t> payload);
-// Returns a packet body (including ID), consuming exactly one complete frame.
-// Partial prefixes/payloads leave input untouched. No compression is
-// negotiated.
+// 从入站缓冲中消费恰好一个完整协议帧并返回包体（含包 ID）；
+// 若长度前缀或载荷尚不完整则保持 input 原封不动。本服务端不协商压缩。
 std::optional<Bytes> popFrame(Bytes &input);
 
+// 协议注册表映射：将原版导出的协议数值 ID 与本模拟器内部状态相互转换。
 class Registry {
 public:
   struct StateFlags {
@@ -70,11 +75,12 @@ public:
   int blockEntityTypeId(const std::string &) const;
   int biomeId(const std::string &) const;
   int stateBits() const;
+  int biomeBits() const;
   StateFlags stateFlags(int stateId) const;
 
 private:
-  // Dense tables indexed by this simulator's BlockState::Id (and by protocol
-  // state id for flags): packet paths never build a name/property string.
+  // 按本模拟器 BlockState::Id（以及按协议 stateId）索引的稠密查找表，
+  // 确保热路径封包过程无需构造任何方块名或属性字符串。
   std::vector<int> protocolByLocal_;
   std::vector<StateFlags> flagsByProtocol_;
   std::map<int, BlockState> states_;
@@ -83,28 +89,28 @@ private:
   std::map<int, std::string> itemNames_;
   std::map<int, StateFlags> flags_;
 };
-// Synchronous compatibility entry point, no packet ID. Background encoding
-// must use prepareChunkSnapshot on the world thread and the frozen overload.
+// 同步兼容编码入口（不含包 ID）；后台写线程异步编码必须改用在世界线程创建的
+// prepareChunkSnapshot 及其冻结快照重载，避免跨线程访问可变世界状态。
 Bytes encodeChunk(const ChunkSnapshot &, int chunkX, int chunkZ,
                   const Registry &);
-// ClientboundCommandsPacket body: node entries in breadth-first order followed by
-// the root index. Only the literal and the two argument types /tick needs are
-// supported (brigadier:float, minecraft:time, minecraft:resource).
+// 编码 ClientboundCommandsPacket 包体：按广度优先顺序输出节点条目并在末尾附加根节点索引；
+// 当前仅支持 /tick 与 /time 所需字面量以及 brigadier:float、minecraft:time、minecraft:resource 参数。
 Bytes encodeCommandTree(const redstone::command::Node &root);
 Bytes encodeMovingPistonNbt(const PistonSnapshot &);
-// Frozen on the world thread. Sections contain protocol IDs, and block entity
-// NBT is owned bytes, so encoding never touches the mutable state registry.
+// 在世界线程冻结的不可变区块协议快照：区段内已预转换为协议状态 ID，且方块实体 NBT 已转为
+// 独立拥有的字节数组，使写线程编码区块包时完全不触碰可变状态注册表或世界数据。
 struct ProtocolChunkSnapshot {
   struct BlockEntity {
     Pos pos;
     Bytes nbt;
   };
   int minY = 0, maxY = 0;
-  int airId = 0, stateBits = 0, biomeId = 0, pistonTypeId = 0;
+  int airId = 0, stateBits = 0, biomeId = 0, biomeBits = 0, pistonTypeId = 0;
   std::vector<SectionSnapshot> sections;
+  std::vector<std::vector<int>> sectionBiomes;
   std::vector<BlockEntity> blockEntities;
-  // Independently published layer views. The chunk packet combines their wire
-  // fields only; it never creates a combined light section or copies a page.
+  // 独立发布的单层光照视图。区块数据包仅在写线阶段拼接各自的位掩码与数据字段，
+  // 绝不创建合并光照区段或额外拷贝光照页。
   std::shared_ptr<const LightChunkSnapshot> blockLight;
   std::shared_ptr<const LightChunkSnapshot> skyLight;
   std::size_t retainedBytes() const noexcept;
@@ -116,9 +122,8 @@ ProtocolChunkSnapshot prepareChunkSnapshot(
 Bytes encodeChunk(const ProtocolChunkSnapshot &, int chunkX, int chunkZ,
                   const Registry &);
 
-// The main thread selects changed sections from immutable published layers;
-// the writer thread packs the referenced 2048-byte layers. Missing, stored zero,
-// stored full/mixed and a known old layer that must be cleared remain distinct.
+// 主线程基于不可变已发布光照层筛选变更区段，写线程再打包引用的 2048 字节光照数组；
+// 缺失层、全零存储、满/混合存储以及需要清空客户端旧数据的层在协议上保持严格区分。
 struct ProtocolLightSections {
   std::vector<int> dataSections;
   std::vector<int> emptySections;
@@ -134,9 +139,8 @@ struct ProtocolLightUpdate {
 ProtocolLightUpdate prepareLightUpdate(
     std::shared_ptr<const LightChunkSnapshot> current,
     std::shared_ptr<const LightChunkSnapshot> previous = {});
-// Network base for one layer. Deliberately contains no page pointers or light
-// bytes: the previous revision is used only to reject stale results and decide
-// whether the worker-provided dirty set spans the client's current base.
+// 单层光照的网络同步基准版本：刻意不持有任何光照页指针或字节缓冲，仅使用生命周期纪元与版本号
+// 拒绝过期工作线程结果，并判定脏区段集合是否仍覆盖客户端当前基准。
 struct LightLayerVersion {
   int chunkX = 0;
   int chunkZ = 0;
@@ -149,29 +153,27 @@ inline LightLayerVersion lightLayerVersion(const LightChunkSnapshot &view) {
   return {view.chunkX, view.chunkZ, view.minBlockSectionY,
           view.blockSectionCount, view.lifecycleEpoch, view.revision};
 }
-// Production incremental path: reads only the requested independently
-// published layer. changedSections came from that worker's write set.
+// 生产环境增量更新路径：仅读取请求的独立发布光照层，其中 changedSections 来自该层工作线程的写入集合。
 ProtocolLightUpdate prepareLayerLightUpdate(
     std::shared_ptr<const LightChunkSnapshot> current, LightLayer layer,
     const LightLayerVersion *previous = nullptr);
-// Full packet body for ClientboundLightUpdatePacket: VarInt x/z then light data.
+// 编码 ClientboundLightUpdatePacket 完整包体：先写入 VarInt 区块坐标 x/z，再写入光照数据。
 Bytes encodeLightUpdate(const ProtocolLightUpdate &);
-// One queued clientbound packet: already framed bytes, or a producer that
-// frames them on the writer thread.
+// 一条入队的下行客户端数据包：可以是已帧化字节/未帧化载荷，也可以是由写线程执行的延迟编码闭包。
 struct OutPacket {
-  Bytes bytes;                     // framed bytes, or payload if id >= 0
-  int packetId = -1;               // >= 0: frame(id, bytes) on the writer
-  std::function<Bytes()> deferred; // produced entirely off-thread (chunks)
-  std::size_t retainedBytes = 0;   // captured snapshot/storage owned by deferred
-  // Main-thread cancellation for unloaded/reloaded chunk generations. A
-  // cancelled item produces no bytes and never observes live World state.
+  Bytes bytes;                     // 已帧化字节；若 packetId >= 0 则为待帧化载荷
+  int packetId = -1;               // >= 0 时由写线程执行 frame(packetId, bytes)
+  std::function<Bytes()> deferred; // 完全在工作/写线程生成的包体（如区块数据包）
+  std::size_t retainedBytes = 0;   // deferred 闭包捕获的快照/存储估算内存占用
+  // 主线程设置的取消令牌，用于在区块卸载或重载代际更替时跳过过期任务；
+  // 已取消的条目不产生任何字节且绝不访问实时 World 状态。
   std::function<bool()> stillValid;
 };
 inline constexpr std::size_t maxQueuedOutputBytes = 16 * 1024 * 1024;
 inline constexpr std::size_t maxQueuedOutputPackets = 65536;
-// Account retained capacity before encoding, not just the eventual wire size.
-// Unknown producers still have a minimum charge; chunk producers supply their
-// actual captured snapshot footprint. Saturate to make overflow a rejection.
+// 在编码前按实际保留的内存容量计费，而非仅按最终网络线长计费；
+// 未标明大小的延迟生产者默认按至少 4096 字节计费，区块生产者则提供实际快照内存占用，
+// 溢出时饱和到上限 + 1 以触发队列拒绝入队。
 inline std::size_t outPacketCharge(const OutPacket &packet) noexcept {
   std::size_t result = sizeof(OutPacket) + 6;
   const auto add = [&](std::size_t amount) {

@@ -1,6 +1,8 @@
 #pragma once
+// 轻量调试客户端纹理管理器：基于 Windows WIC 解码方块 PNG 并上传为 OpenGL 1.1 2D 纹理，
+// 同时提供方块状态到各面贴图文件名的轻量映射（无需解析完整原版 JSON 模型）。
 #include "redstone/engine.hpp"
-// Windows' OpenGL 1.1 header requires the Win32 calling-convention macros.
+// Windows 的 OpenGL 1.1 头文件依赖 Win32 调用约定宏，必须在 <gl/GL.h> 之前引入 <windows.h>。
 // clang-format off
 #include <windows.h>
 #include <gl/GL.h>
@@ -14,12 +16,15 @@
 #include <vector>
 
 namespace redstone::client {
+// COM 接口指针的 std::unique_ptr 自定义删除器，保证 WIC 对象在任意早退路径下都能自动释放引用计数。
 template <class T> struct ReleaseCom {
   void operator()(T *p) const {
     if (p)
       p->Release();
   }
 };
+// 按需加载并缓存方块纹理的 OpenGL 纹理管理器；加载失败时自动回退到 16x16 紫黑棋盘格占位纹理，
+// 避免启动阶段全量解码导致卡顿，并兼容离线调试环境。
 class Textures {
   std::map<std::string, GLuint> loaded_;
   std::filesystem::path root_;
@@ -72,7 +77,7 @@ public:
                     frame.get(), GUID_WICPixelFormat32bppRGBA,
                     WICBitmapDitherTypeNone, nullptr, 0,
                     WICBitmapPaletteTypeCustom))) {
-              // Animated PNG strips use the first square frame in this client.
+              // 动态 PNG 序列条带在本轻量客户端中仅取第一帧正方形区域。
               width = w;
               height = std::min(w, h);
               pixels.resize(size_t(width) * height * 4);
@@ -112,6 +117,8 @@ public:
     return id;
   }
 };
+// 将方块状态及指定朝向面映射为对应的 PNG 贴图基名，用于调试客户端在未接入原版 JSON 模型时
+// 正确显示多面贴图与红石状态（如观察者、活塞、铁轨、红石灯、TNT 等）。
 inline std::string faceTexture(const redstone::BlockState &s,
                                redstone::Direction d) {
   using namespace redstone;

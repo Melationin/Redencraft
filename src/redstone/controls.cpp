@@ -1,4 +1,5 @@
 #include "redstone/internal.hpp"
+#include "redstone/entity.hpp"
 #include "redstone/shapes.hpp"
 
 #include <algorithm>
@@ -37,11 +38,14 @@ int pressurePlateComputeSignalStrength(const World &world, Pos pos,
                  pos.x + 15.0 / 16.0, pos.y + 0.25, pos.z + 15.0 / 16.0};
   const auto candidates = world.entitiesIn(box);
   int count = 0;
-  // TODO: Stone plates require LivingEntity; players are not World entities yet.
   const bool mobsOnly = state.is(Blocks::STONE_PRESSURE_PLATE) ||
                         state.is(Blocks::POLISHED_BLACKSTONE_PRESSURE_PLATE);
-  if (!mobsOnly)
-    count = static_cast<int>(candidates.size());
+  for (Entity *entity : candidates) {
+    if (!entity || entity->isRemoved() || entity->isIgnoringBlockTriggers())
+      continue;
+    if (!mobsOnly || entity->isLiving())
+      ++count;
+  }
   if (count == 0)
     return 0;
   if (state.is(Blocks::LIGHT_WEIGHTED_PRESSURE_PLATE)) {
@@ -59,6 +63,23 @@ void pressurePlateUpdateNeighbours(World &world, Pos pos,
                                    const BlockState &state) {
   world.updateNeighborsAt(pos, state.block());
   world.updateNeighborsAt(pos.relative(Direction::Down), state.block());
+}
+
+void pressurePlateApplySignal(World &world, Pos pos, const BlockState &state,
+                              int oldSignal, int signal) {
+  if (oldSignal != signal) {
+    const bool weighted = state.is(Blocks::LIGHT_WEIGHTED_PRESSURE_PLATE) ||
+                          state.is(Blocks::HEAVY_WEIGHTED_PRESSURE_PLATE);
+    const BlockState next =
+        weighted ? state.with(PropertyKind::Power,
+                              static_cast<std::uint8_t>(signal))
+                 : state.with(PropertyKind::Powered,
+                              signal > 0 ? std::uint8_t{1} : std::uint8_t{0});
+    world.setBlock(pos, next, 2);
+    pressurePlateUpdateNeighbours(world, pos, next);
+  }
+  if (signal > 0)
+    world.scheduleTick(pos, state.block(), pressurePlatePressedTime(state));
 }
 
 } // namespace
@@ -144,7 +165,18 @@ BlockState buttonUpdateShape(World &world, Pos pos, const BlockState &state,
 void buttonTick(World &world, Pos pos, const BlockState &state) {
   if (!poweredOf(state))
     return;
-  // TODO: wooden buttons stay pressed while shot arrows overlap their AABB.
+  if (buttonPressedTime(state) == 30) {
+    const Aabb blockBox{static_cast<double>(pos.x), static_cast<double>(pos.y),
+                        static_cast<double>(pos.z), pos.x + 1.0, pos.y + 1.0,
+                        pos.z + 1.0};
+    for (Entity *entity : world.entitiesIn(blockBox)) {
+      if (auto *arrow = dynamic_cast<AbstractArrow *>(entity);
+          arrow && !arrow->isRemoved()) {
+        world.scheduleTick(pos, state.block(), buttonPressedTime(state));
+        return;
+      }
+    }
+  }
   const BlockState next = state.with(PropertyKind::Powered, std::uint8_t{0});
   world.setBlock(pos, next, 3);
   faceAttachedUpdateNeighbours(world, pos, next);
@@ -185,19 +217,100 @@ void pressurePlateTick(World &world, Pos pos, const BlockState &state) {
   if (oldSignal <= 0)
     return;
   const int signal = pressurePlateComputeSignalStrength(world, pos, state);
-  if (oldSignal != signal) {
-    const bool weighted = state.is(Blocks::LIGHT_WEIGHTED_PRESSURE_PLATE) ||
-                          state.is(Blocks::HEAVY_WEIGHTED_PRESSURE_PLATE);
-    const BlockState next =
-        weighted ? state.with(PropertyKind::Power,
-                              static_cast<std::uint8_t>(signal))
-                 : state.with(PropertyKind::Powered,
-                              signal > 0 ? std::uint8_t{1} : std::uint8_t{0});
-    world.setBlock(pos, next, 2);
-    pressurePlateUpdateNeighbours(world, pos, next);
+  pressurePlateApplySignal(world, pos, state, oldSignal, signal);
+}
+
+void pressurePlateEntityInside(World &world, Pos pos, const BlockState &state,
+                               Entity &entity) {
+  if (entity.isIgnoringBlockTriggers())
+    return;
+  const int oldSignal = pressurePlateSignalOf(state);
+  if (oldSignal > 0)
+    return;
+  const int signal = pressurePlateComputeSignalStrength(world, pos, state);
+  pressurePlateApplySignal(world, pos, state, oldSignal, signal);
+}
+
+namespace {
+
+void updateConnectedTripwireHooks(World &world, Pos wirePos,
+                                  const BlockState &wireState) {
+  const bool powered = wireState.getView("powered") == "true";
+  for (Direction dir :
+       {Direction::South, Direction::North, Direction::West, Direction::East}) {
+    Pos p = wirePos;
+    for (int step = 1; step <= 42; ++step) {
+      p = p.relative(dir);
+      const BlockState s = world.getBlock(p);
+      if (s.is(Blocks::TRIPWIRE_HOOK)) {
+        const Direction hookFacing = directionOf(s);
+        if (hookFacing == opposite(dir) && s.getView("attached") == "true") {
+          const BlockState nextHook = s.with(
+              PropertyKind::Powered, powered ? std::uint8_t{1} : std::uint8_t{0});
+          if (nextHook != s) {
+            world.setBlock(p, nextHook, 3);
+            world.updateNeighborsAt(p, Blocks::TRIPWIRE_HOOK);
+            world.updateNeighborsAt(p.relative(opposite(hookFacing)),
+                                    Blocks::TRIPWIRE_HOOK);
+          }
+        }
+        break;
+      }
+      if (!s.is(Blocks::TRIPWIRE))
+        break;
+    }
   }
-  if (signal > 0)
-    world.scheduleTick(pos, state.block(), pressurePlatePressedTime(state));
+}
+
+void checkTripwirePressed(World &world, Pos pos, const BlockState &state) {
+  const bool wasPowered = state.getView("powered") == "true";
+  const Aabb box{pos.x + 0.0, pos.y + 0.0, pos.z + 0.0,
+                 pos.x + 1.0, pos.y + 0.5, pos.z + 1.0};
+  bool shouldPower = false;
+  for (Entity *e : world.entitiesIn(box)) {
+    if (e && !e->isRemoved() && !e->isIgnoringBlockTriggers()) {
+      shouldPower = true;
+      break;
+    }
+  }
+  BlockState next = state;
+  if (shouldPower != wasPowered) {
+    next = state.with(PropertyKind::Powered,
+                      shouldPower ? std::uint8_t{1} : std::uint8_t{0});
+    world.setBlock(pos, next, 3);
+    updateConnectedTripwireHooks(world, pos, next);
+  }
+  if (shouldPower)
+    world.scheduleTick(pos, Blocks::TRIPWIRE, 10);
+}
+
+} // namespace
+
+void tripWireEntityInside(World &world, Pos pos, const BlockState &state,
+                          Entity &entity) {
+  if (entity.isIgnoringBlockTriggers() || state.getView("powered") == "true")
+    return;
+  checkTripwirePressed(world, pos, state);
+}
+
+void tripWireTick(World &world, Pos pos, const BlockState &state) {
+  if (state.getView("powered") == "true")
+    checkTripwirePressed(world, pos, state);
+}
+
+void redstoneOreStepOn(World &world, Pos pos, const BlockState &state,
+                       Entity &entity) {
+  if (entity.isShiftKeyDown())
+    return;
+  if (state.getView("lit") != "true") {
+    world.setBlock(pos, state.with(PropertyKind::Lit, std::uint8_t{1}), 3);
+    world.scheduleTick(pos, state.block(), 600);
+  }
+}
+
+void redstoneOreTick(World &world, Pos pos, const BlockState &state) {
+  if (state.getView("lit") == "true")
+    world.setBlock(pos, state.with(PropertyKind::Lit, std::uint8_t{0}), 3);
 }
 
 } // namespace redstone

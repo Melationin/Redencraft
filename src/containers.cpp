@@ -1,5 +1,6 @@
 #include "redstone/containers.hpp"
 #include "redstone/fluid_flow.hpp"
+#include "redstone/item.hpp"
 #include "redstone/redstone.hpp"
 #include "redstone/shapes.hpp"
 #include <algorithm>
@@ -21,8 +22,7 @@ inline int effectiveMaxStack(const ItemStack &stack) {
 }
 
 inline bool stacksCanMerge(const ItemStack &a, const ItemStack &b) {
-  return !a.empty() && !b.empty() && a.id == b.id &&
-         a.count < effectiveMaxStack(a);
+  return a.isSameItemSameComponents(b) && a.count < effectiveMaxStack(a);
 }
 
 inline Direction horizontalClockWise(Direction d) {
@@ -136,132 +136,11 @@ bool doesAboveBlockBlockHopperSuck(World &world, Pos /*abovePos*/,
 
 // Compostables probability table (ComposterBlock.bootStrap, Java 26.1).
 float lookupComposterChance(std::string_view id) {
-  struct Entry {
-    std::string_view id;
-    float chance;
-  };
-  static constexpr Entry kTable[] = {
-      {"minecraft:jungle_leaves", 0.3f},
-      {"minecraft:oak_leaves", 0.3f},
-      {"minecraft:spruce_leaves", 0.3f},
-      {"minecraft:dark_oak_leaves", 0.3f},
-      {"minecraft:pale_oak_leaves", 0.3f},
-      {"minecraft:acacia_leaves", 0.3f},
-      {"minecraft:cherry_leaves", 0.3f},
-      {"minecraft:birch_leaves", 0.3f},
-      {"minecraft:azalea_leaves", 0.3f},
-      {"minecraft:mangrove_leaves", 0.3f},
-      {"minecraft:oak_sapling", 0.3f},
-      {"minecraft:spruce_sapling", 0.3f},
-      {"minecraft:birch_sapling", 0.3f},
-      {"minecraft:jungle_sapling", 0.3f},
-      {"minecraft:acacia_sapling", 0.3f},
-      {"minecraft:cherry_sapling", 0.3f},
-      {"minecraft:dark_oak_sapling", 0.3f},
-      {"minecraft:pale_oak_sapling", 0.3f},
-      {"minecraft:mangrove_propagule", 0.3f},
-      {"minecraft:beetroot_seeds", 0.3f},
-      {"minecraft:dried_kelp", 0.3f},
-      {"minecraft:short_grass", 0.3f},
-      {"minecraft:kelp", 0.3f},
-      {"minecraft:melon_seeds", 0.3f},
-      {"minecraft:pumpkin_seeds", 0.3f},
-      {"minecraft:seagrass", 0.3f},
-      {"minecraft:sweet_berries", 0.3f},
-      {"minecraft:glow_berries", 0.3f},
-      {"minecraft:wheat_seeds", 0.3f},
-      {"minecraft:moss_carpet", 0.3f},
-      {"minecraft:pale_moss_carpet", 0.3f},
-      {"minecraft:pale_hanging_moss", 0.3f},
-      {"minecraft:pink_petals", 0.3f},
-      {"minecraft:wildflowers", 0.3f},
-      {"minecraft:leaf_litter", 0.3f},
-      {"minecraft:small_dripleaf", 0.3f},
-      {"minecraft:hanging_roots", 0.3f},
-      {"minecraft:mangrove_roots", 0.3f},
-      {"minecraft:torchflower_seeds", 0.3f},
-      {"minecraft:pitcher_pod", 0.3f},
-      {"minecraft:firefly_bush", 0.3f},
-      {"minecraft:bush", 0.3f},
-      {"minecraft:cactus_flower", 0.3f},
-      {"minecraft:short_dry_grass", 0.3f},
-      {"minecraft:tall_dry_grass", 0.3f},
-      {"minecraft:dried_kelp_block", 0.5f},
-      {"minecraft:tall_grass", 0.5f},
-      {"minecraft:flowering_azalea_leaves", 0.5f},
-      {"minecraft:cactus", 0.5f},
-      {"minecraft:sugar_cane", 0.5f},
-      {"minecraft:vine", 0.5f},
-      {"minecraft:nether_sprouts", 0.5f},
-      {"minecraft:weeping_vines", 0.5f},
-      {"minecraft:twisting_vines", 0.5f},
-      {"minecraft:melon_slice", 0.5f},
-      {"minecraft:glow_lichen", 0.5f},
-      {"minecraft:sea_pickle", 0.65f},
-      {"minecraft:lily_pad", 0.65f},
-      {"minecraft:pumpkin", 0.65f},
-      {"minecraft:carved_pumpkin", 0.65f},
-      {"minecraft:melon", 0.65f},
-      {"minecraft:apple", 0.65f},
-      {"minecraft:beetroot", 0.65f},
-      {"minecraft:carrot", 0.65f},
-      {"minecraft:cocoa_beans", 0.65f},
-      {"minecraft:potato", 0.65f},
-      {"minecraft:wheat", 0.65f},
-      {"minecraft:brown_mushroom", 0.65f},
-      {"minecraft:red_mushroom", 0.65f},
-      {"minecraft:mushroom_stem", 0.65f},
-      {"minecraft:crimson_fungus", 0.65f},
-      {"minecraft:warped_fungus", 0.65f},
-      {"minecraft:nether_wart", 0.65f},
-      {"minecraft:crimson_roots", 0.65f},
-      {"minecraft:warped_roots", 0.65f},
-      {"minecraft:shroomlight", 0.65f},
-      {"minecraft:dandelion", 0.65f},
-      {"minecraft:poppy", 0.65f},
-      {"minecraft:blue_orchid", 0.65f},
-      {"minecraft:allium", 0.65f},
-      {"minecraft:azure_bluet", 0.65f},
-      {"minecraft:red_tulip", 0.65f},
-      {"minecraft:orange_tulip", 0.65f},
-      {"minecraft:white_tulip", 0.65f},
-      {"minecraft:pink_tulip", 0.65f},
-      {"minecraft:oxeye_daisy", 0.65f},
-      {"minecraft:cornflower", 0.65f},
-      {"minecraft:lily_of_the_valley", 0.65f},
-      {"minecraft:wither_rose", 0.65f},
-      {"minecraft:open_eyeblossom", 0.65f},
-      {"minecraft:closed_eyeblossom", 0.65f},
-      {"minecraft:fern", 0.65f},
-      {"minecraft:sunflower", 0.65f},
-      {"minecraft:lilac", 0.65f},
-      {"minecraft:rose_bush", 0.65f},
-      {"minecraft:peony", 0.65f},
-      {"minecraft:large_fern", 0.65f},
-      {"minecraft:spore_blossom", 0.65f},
-      {"minecraft:azalea", 0.65f},
-      {"minecraft:moss_block", 0.65f},
-      {"minecraft:pale_moss_block", 0.65f},
-      {"minecraft:big_dripleaf", 0.65f},
-      {"minecraft:hay_block", 0.85f},
-      {"minecraft:brown_mushroom_block", 0.85f},
-      {"minecraft:red_mushroom_block", 0.85f},
-      {"minecraft:nether_wart_block", 0.85f},
-      {"minecraft:warped_wart_block", 0.85f},
-      {"minecraft:flowering_azalea", 0.85f},
-      {"minecraft:bread", 0.85f},
-      {"minecraft:baked_potato", 0.85f},
-      {"minecraft:cookie", 0.85f},
-      {"minecraft:torchflower", 0.85f},
-      {"minecraft:pitcher_plant", 0.85f},
-      {"minecraft:cake", 1.0f},
-      {"minecraft:pumpkin_pie", 1.0f},
-  };
-  for (const auto &entry : kTable) {
-    if (entry.id == id)
-      return entry.chance;
-  }
-  return -1.0f;
+  const Item *item = itemByName(id);
+  if (!item)
+    return -1.0f;
+  const float c = item->compostChance();
+  return c > 0.0f ? c : -1.0f;
 }
 
 int composterLevelOf(const BlockState &state) {
@@ -551,7 +430,33 @@ bool hopperEjectItems(World &world, Pos pos, HopperBlockEntity &self) {
 
   ResolvedContainerView dest = resolveContainerView(world, targetPos, true);
   if (!dest.valid()) {
-    // TODO: ContainerEntity (chest_minecart / hopper_minecart) destination.
+    const Aabb destBox{static_cast<double>(targetPos.x),
+                       static_cast<double>(targetPos.y),
+                       static_cast<double>(targetPos.z), targetPos.x + 1.0,
+                       targetPos.y + 1.0, targetPos.z + 1.0};
+    for (Entity *entity : world.entitiesIn(destBox)) {
+      if (entity->isRemoved())
+        continue;
+      if (auto *containerEntity = dynamic_cast<ContainerEntity *>(entity)) {
+        if (containerEntity->isContainerFull())
+          return false;
+        for (int slot = 0; slot < self.containerSize(); ++slot) {
+          const ItemStack &slotStack = self.getItem(slot);
+          if (slotStack.empty())
+            continue;
+          const ItemStack original = slotStack;
+          ItemStack single = self.removeItem(slot, 1);
+          ItemStack remainder =
+              containerEntity->addItemToContainer(world, single);
+          if (remainder.empty()) {
+            self.setChanged(world);
+            return true;
+          }
+          self.setItem(slot, original);
+        }
+        return false;
+      }
+    }
     return false;
   }
   if (isResolvedContainerFull(world, dest))
@@ -639,19 +544,58 @@ bool hopperSuckInItems(World &world, HopperBlockEntity &self) {
     return false;
   }
 
-  // No container block at abovePos: check if blocked, otherwise suck ItemEntities.
+  // No container block at abovePos: check ContainerEntity at abovePos, else ItemEntities.
+  const Aabb aboveEntityBox{
+      static_cast<double>(abovePos.x), static_cast<double>(abovePos.y),
+      static_cast<double>(abovePos.z), abovePos.x + 1.0, abovePos.y + 1.0,
+      abovePos.z + 1.0};
+  for (Entity *entity : world.entitiesIn(aboveEntityBox)) {
+    if (entity->isRemoved())
+      continue;
+    if (auto *containerEntity = dynamic_cast<ContainerEntity *>(entity)) {
+      if (containerEntity->isContainerEmpty())
+        continue;
+      ResolvedContainerView destView;
+      destView.first = world.containerEntity(self.pos);
+      for (int i = 0; i < containerEntity->containerSize(); ++i) {
+        const ItemStack &itemStack = containerEntity->getContainerItem(i);
+        if (itemStack.empty())
+          continue;
+        const ItemStack original = itemStack;
+        ItemStack single = containerEntity->removeContainerItem(i, 1);
+        ItemStack remainder =
+            addItemToResolved(world, nullptr, destView, single, Direction::Up);
+        if (remainder.empty()) {
+          containerEntity->setContainerChanged(world);
+          self.setChanged(world);
+          return true;
+        }
+        containerEntity->setContainerItem(i, original);
+      }
+      return false;
+    }
+  }
+
   if (doesAboveBlockBlockHopperSuck(world, abovePos, aboveState))
     return false;
 
   const Aabb suckBox = hopperSuckAabbWorld(self.pos);
-  for (Entity *entity : world.entitiesIn(suckBox)) {
-    auto *itemEntity = dynamic_cast<ItemEntity *>(entity);
-    if (!itemEntity || itemEntity->isRemoved() || itemEntity->item.empty())
-      continue;
-    if (addItemFromWorldEntity(world, self, *itemEntity))
-      return true;
-  }
-  return false;
+  bool sucked = false;
+  world.forEachEntityInFlags(
+      suckBox, static_cast<std::uint8_t>(EntitySectionFlag::Item),
+      [&](Entity &entity) -> bool {
+        if (!entity.isItemEntity() || entity.isRemoved())
+          return true;
+        auto &itemEntity = static_cast<ItemEntity &>(entity);
+        if (itemEntity.item.empty())
+          return true;
+        if (addItemFromWorldEntity(world, self, itemEntity)) {
+          sucked = true;
+          return false;
+        }
+        return true;
+      });
+  return sucked;
 }
 
 template <class F>
@@ -1507,15 +1451,109 @@ void executeDispenseItem(World &world, Pos pos, const BlockState &state,
     const BlockState targetState = world.getBlock(target);
     if (targetState.is(Blocks::TNT)) {
       if (world.primeTntBlock(target)) {
-        // TODO: decrement ItemStack durability when item durability/components
-        // exist.
+        stack.hurtAndBreak(1, false);
+        entity.setItem(slot, stack);
+        entity.setChanged(world);
         world.log.push_back({"dispense_ignite_tnt", pos, "minecraft:tnt"});
       }
     }
     return;
   }
 
-  if (stack.id == "minecraft:minecart") {
+  if (stack.id == "minecraft:powder_snow_bucket") {
+    const BlockState front = world.getBlock(target);
+    if (isAirState(front) || isReplaceable(front)) {
+      world.setBlock(target, defaultState("powder_snow"), 3);
+      const ItemStack updated = consumeDispenseRemainder(
+          world, pos, facing, entity, stack, itemStack("minecraft:bucket", 1));
+      entity.setItem(slot, updated);
+      entity.setChanged(world);
+      world.log.push_back({"dispense_powder_snow", pos, stack.id});
+      return;
+    }
+  }
+
+  const auto facingStep = [&](int &x, int &y, int &z) {
+    switch (facing) {
+    case Direction::Down:
+      y -= 1;
+      break;
+    case Direction::Up:
+      y += 1;
+      break;
+    case Direction::North:
+      z -= 1;
+      break;
+    case Direction::South:
+      z += 1;
+      break;
+    case Direction::West:
+      x -= 1;
+      break;
+    case Direction::East:
+      x += 1;
+      break;
+    }
+  };
+
+  if (stack.id == "minecraft:arrow" || stack.id == "minecraft:spectral_arrow" ||
+      stack.id == "minecraft:trident" || stack.id == "minecraft:snowball" ||
+      stack.id == "minecraft:egg" || stack.id == "minecraft:ender_pearl" ||
+      stack.id == "minecraft:experience_bottle" ||
+      stack.id == "minecraft:wind_charge") {
+    int sx = 0, sy = 0, sz = 0;
+    facingStep(sx, sy, sz);
+    const Vec3 spawnPos{pos.x + 0.5 + sx * 0.7, pos.y + 0.5 + sy * 0.7,
+                        pos.z + 0.5 + sz * 0.7};
+    std::shared_ptr<Projectile> proj;
+    float velocity = 1.1f;
+    float inaccuracy = 6.0f;
+    if (stack.id == "minecraft:arrow") {
+      auto p = std::make_shared<Arrow>();
+      p->pickup = AbstractArrow::Pickup::Allowed;
+      proj = std::move(p);
+    } else if (stack.id == "minecraft:spectral_arrow") {
+      auto p = std::make_shared<SpectralArrow>();
+      p->pickup = AbstractArrow::Pickup::Allowed;
+      proj = std::move(p);
+    } else if (stack.id == "minecraft:trident") {
+      auto p = std::make_shared<ThrownTrident>();
+      p->pickup = AbstractArrow::Pickup::Allowed;
+      proj = std::move(p);
+    } else if (stack.id == "minecraft:snowball") {
+      proj = std::make_shared<Snowball>();
+    } else if (stack.id == "minecraft:egg") {
+      proj = std::make_shared<ThrownEgg>();
+    } else if (stack.id == "minecraft:ender_pearl") {
+      proj = std::make_shared<ThrownEnderpearl>();
+    } else if (stack.id == "minecraft:experience_bottle") {
+      proj = std::make_shared<ThrownExperienceBottle>();
+      velocity = 1.25f;
+      inaccuracy = 3.0f;
+    } else if (stack.id == "minecraft:wind_charge") {
+      proj = std::make_shared<WindCharge>();
+      velocity = 1.0f;
+      inaccuracy = 6.6666665f;
+    }
+    if (proj) {
+      proj->setPos(spawnPos);
+      proj->shoot(world, static_cast<double>(sx),
+                  static_cast<double>(sy) + 0.1, static_cast<double>(sz),
+                  velocity, inaccuracy);
+      world.addEntity(std::move(proj));
+      --stack.count;
+      entity.setItem(slot, stack);
+      entity.setChanged(world);
+      world.log.push_back({"dispense_projectile", pos, stack.id});
+      return;
+    }
+  }
+
+  if (stack.id == "minecraft:minecart" ||
+      stack.id == "minecraft:chest_minecart" ||
+      stack.id == "minecraft:hopper_minecart" ||
+      stack.id == "minecraft:tnt_minecart" ||
+      stack.id == "minecraft:furnace_minecart") {
     const BlockState front = world.getBlock(target);
     double yOffset = 0.0;
     bool placeCart = false;
@@ -1533,43 +1571,71 @@ void executeDispenseItem(World &world, Pos pos, const BlockState &state,
       }
     }
     if (placeCart) {
-      const auto step = [&](int &x, int &y, int &z) {
-        switch (facing) {
-        case Direction::Down:
-          y -= 1;
-          break;
-        case Direction::Up:
-          y += 1;
-          break;
-        case Direction::North:
-          z -= 1;
-          break;
-        case Direction::South:
-          z += 1;
-          break;
-        case Direction::West:
-          x -= 1;
-          break;
-        case Direction::East:
-          x += 1;
-          break;
-        }
-      };
       int sx = 0, sy = 0, sz = 0;
-      step(sx, sy, sz);
-      world.spawnMinecart({pos.x + 0.5 + sx * 1.125,
-                           std::floor(pos.y + 0.5) + sy + yOffset,
-                           pos.z + 0.5 + sz * 1.125});
+      facingStep(sx, sy, sz);
+      const Vec3 cartPos{pos.x + 0.5 + sx * 1.125,
+                         std::floor(pos.y + 0.5) + sy + yOffset,
+                         pos.z + 0.5 + sz * 1.125};
+      if (stack.id == "minecraft:chest_minecart") {
+        world.addEntity(std::make_shared<MinecartChest>(world, cartPos));
+      } else if (stack.id == "minecraft:hopper_minecart") {
+        world.addEntity(std::make_shared<MinecartHopper>(world, cartPos));
+      } else if (stack.id == "minecraft:tnt_minecart") {
+        world.addEntity(std::make_shared<MinecartTNT>(world, cartPos));
+      } else if (stack.id == "minecraft:furnace_minecart") {
+        world.addEntity(std::make_shared<MinecartFurnace>(world, cartPos));
+      } else {
+        world.spawnMinecart(cartPos);
+      }
       --stack.count;
       entity.setItem(slot, stack);
       entity.setChanged(world);
-      world.log.push_back({"dispense_minecart", pos, "minecraft:minecart"});
+      world.log.push_back({"dispense_minecart", pos, stack.id});
       return;
     }
   }
 
-  // TODO: remaining special DispenseItemBehavior entries (arrows, fire_charge,
-  // bone_meal, shears, spawn_eggs, boats, shulker_boxes, armor, potions).
+  const auto isBoatId = [](const std::string &id) {
+    return id.ends_with("_boat") || id.ends_with("_chest_boat") ||
+           id == "minecraft:bamboo_raft" || id == "minecraft:bamboo_chest_raft";
+  };
+  if (isBoatId(stack.id)) {
+    int sx = 0, sy = 0, sz = 0;
+    facingStep(sx, sy, sz);
+    const BlockState front = world.getBlock(target);
+    double yOffset = 0.0;
+    bool canPlaceBoat = false;
+    if (Fluids::water().isSame(fluidStateOf(front).getType())) {
+      yOffset = 1.0;
+      canPlaceBoat = true;
+    } else if (isAirState(front) &&
+               Fluids::water().isSame(
+                   fluidStateOf(world.getBlock(target.relative(Direction::Down)))
+                       .getType())) {
+      yOffset = 0.0;
+      canPlaceBoat = true;
+    }
+    if (canPlaceBoat) {
+      const Vec3 boatPos{pos.x + 0.5 + sx * 1.125,
+                         pos.y + 0.5 + sy * 1.125 + yOffset,
+                         pos.z + 0.5 + sz * 1.125};
+      if (stack.id.find("_chest_") != std::string::npos) {
+        world.addEntity(
+            std::make_shared<ChestBoat>(world, boatPos, stack.id, stack.id));
+      } else {
+        world.addEntity(
+            std::make_shared<Boat>(world, boatPos, stack.id, stack.id));
+      }
+      --stack.count;
+      entity.setItem(slot, stack);
+      entity.setChanged(world);
+      world.log.push_back({"dispense_boat", pos, stack.id});
+      return;
+    }
+  }
+
+  // TODO: remaining special DispenseItemBehavior entries (fire_charge,
+  // bone_meal, shears, spawn_eggs, shulker_boxes, armor, potions).
   ItemStack split = itemStack(stack.id, 1);
   --stack.count;
   entity.setItem(slot, stack);

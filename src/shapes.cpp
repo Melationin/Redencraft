@@ -16,11 +16,49 @@ consteval std::array<std::uint8_t, kRandomTickFlagCount> makeRandomTickFlags() {
   return flags;
 }
 inline constexpr auto kRandomTickFlags = makeRandomTickFlags();
+consteval std::array<std::uint8_t, kRandomTickFlagCount>
+makeCollisionKindFlags() {
+  std::array<std::uint8_t, kRandomTickFlagCount> flags{};
+  for (std::size_t i = 0; i < kRandomTickFlagCount; ++i) {
+    const ShapeSpan span = kBlockShapeSpans[kStateBasicInfo[i].collisionShape];
+    if (span.count == 0u) {
+      flags[i] = static_cast<std::uint8_t>(BlockCollisionKind::Empty);
+      continue;
+    }
+    bool oversized = false;
+    for (std::uint16_t j = 0; j < span.count; ++j) {
+      const ShapeBox &b = kBlockShapeBoxes[span.offset + j];
+      if (b.x0 < 0.0 || b.y0 < 0.0 || b.z0 < 0.0 || b.x1 > 16.0 ||
+          b.y1 > 16.0 || b.z1 > 16.0) {
+        oversized = true;
+        break;
+      }
+    }
+    if (oversized) {
+      flags[i] = static_cast<std::uint8_t>(BlockCollisionKind::Oversized);
+      continue;
+    }
+    if (span.count == 1u) {
+      const ShapeBox &b = kBlockShapeBoxes[span.offset];
+      if (b.x0 <= 0.0 && b.y0 <= 0.0 && b.z0 <= 0.0 && b.x1 >= 16.0 &&
+          b.y1 >= 16.0 && b.z1 >= 16.0) {
+        flags[i] = static_cast<std::uint8_t>(BlockCollisionKind::FullCube);
+        continue;
+      }
+    }
+    flags[i] = static_cast<std::uint8_t>(BlockCollisionKind::Partial);
+  }
+  return flags;
+}
+inline constexpr auto kCollisionKindFlags = makeCollisionKindFlags();
 } // namespace
 namespace detail {
 const std::uint8_t *const gRandomTickStateFlags = kRandomTickFlags.data();
 const std::uint32_t gRandomTickStateCount =
     static_cast<std::uint32_t>(kRandomTickFlags.size());
+const std::uint8_t *const gCollisionKindFlags = kCollisionKindFlags.data();
+const std::uint32_t gCollisionKindCount =
+    static_cast<std::uint32_t>(kCollisionKindFlags.size());
 } // namespace detail
 bool stateIsRandomlyTicking(const BlockState &state) {
   return state.isSchemaState() && state.id() < std::size(kStateBasicInfo) &&

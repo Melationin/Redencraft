@@ -1,5 +1,7 @@
 #pragma once
 
+// 光照快照与持久化数据结构：定义无锁共享的 4-bit 半字节光照页、轻量层描述符、区块输入载荷与可发布的区块光照快照。
+
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -18,12 +20,8 @@ static_assert(sizeof(std::atomic<std::uint8_t>) == 1,
 static_assert(std::atomic<std::uint8_t>::is_always_lock_free,
               "published light nibbles require lock-free atomic bytes");
 
-// One independently owned light-layer descriptor. The state byte's high nibble
-// is the uniform flag and its low nibble is the uniform value. Uniform and
-// missing descriptors allocate no page. Mixed owns exactly one shared
-// atomic<uint8_t>[2048] nibble page; its sole layer writer and all readers use
-// relaxed atomic byte loads/stores. Topology changes replace the descriptor in
-// a new section header, never its page pointer in place.
+// 独立持有的单层光照描述符。
+// 之所以采用 `state_` + `PackedPagePtr` 的双态布局，是为了让全缺失（`Missing`）或全均一（`Uniform`）的区块段完全不产生堆分配，仅用 `state_` 高半字节标记均一标志、低半字节存均一亮度；只有混合（`Mixed`）区块段才持有一个共享的 `atomic<uint8_t>[2048]` 半字节页。唯一写入线程与所有读取线程均通过 `relaxed` 原子字节加载/存储并发访问该页；拓扑切换（如均一与混合互转）会直接替换新区块段头中的描述符，绝不原地篡改 `packed_` 指针。
 class LightLayerSnapshot {
 public:
   enum class Storage : std::uint8_t { Missing, Uniform, Mixed };
@@ -46,7 +44,7 @@ public:
       const std::array<std::uint8_t, kLightVolume> &values);
   static LightLayerSnapshot mixedPacked(
       const std::array<std::uint8_t, kLightLayerBytes> &packed);
-  // Allocates the single 2048-byte page for a worker-owned mixed layer.
+  // 为工作线程自有的混合层分配唯一一份 2048 字节清零光照页。
   static LightLayerSnapshot mixedEmpty();
 
   Storage storage() const {
@@ -77,7 +75,7 @@ public:
       return 0;
     return packed_->bytes[index].load(std::memory_order_relaxed);
   }
-  // Only the layer's sole worker calls these writers. No CAS is required.
+  // 仅允许该光照层的唯一工作线程调用以下写入接口，因此无需使用 CAS。
   void writeCell(std::size_t index, std::uint8_t value);
   void writePackedByte(std::size_t byte, std::uint8_t value);
   void readPacked(std::array<std::uint8_t, kLightLayerBytes> &out) const;
@@ -90,9 +88,8 @@ private:
   PackedPagePtr packed_;
 };
 
-// Flat value descriptor for a light layer. Missing and Uniform allocate zero
-// heap objects; Mixed holds a single shared PackedPage (2048 atomic bytes)
-// directly with no intermediate LightLayerSnapshot heap node.
+// 扁平值语义的光照层引用描述符。
+// 之所以在 `LightSectionSnapshot` 中使用它而不是直接内嵌 `LightLayerSnapshot`，是因为 `LightLayerRef` 是普通值类型：`Missing` 和 `Uniform` 零堆分配，`Mixed` 直接共享同一个 `PackedPage`（2048 个原子字节），从而避免额外的中间堆节点与原子 `state_` 开销。
 class LightLayerRef {
 public:
   LightLayerRef() = default;
@@ -160,6 +157,7 @@ public:
   void writePackedByte(std::size_t byte, std::uint8_t value) const;
   void readPacked(std::array<std::uint8_t, kLightLayerBytes> &out) const;
   const LightLayerSnapshot::PackedPagePtr &shared() const { return packed_; }
+  // 通过比较状态字节与共享页指针快速判断底层载荷是否完全同一份，避免在提交阶段无谓拷贝区块段头。
   bool samePayload(const LightLayerRef &other) const {
     return state_ == other.state_ && packed_ == other.packed_;
   }
@@ -176,9 +174,8 @@ private:
   LightLayerSnapshot::PackedPagePtr packed_;
 };
 
-// A section header has two independent layer slots. Production views populate
-// only their own slot and leave the other Missing; optical direction masks are
-// owned by the coordinator geometry rather than copied into light publication.
+// 单个区块段的光照快照头部，持有方块光与天空光两个独立槽位。
+// 存在原因：在双层独立发布的架构下，生产视图只需填充自身对应层的槽位并把另一层留作 `Missing`；光学方向遮挡掩码仅由协调器内部的几何结构持有，不会冗余复制到发布给主线程/网络层的光照快照中。
 struct LightSectionSnapshot {
   explicit LightSectionSnapshot(
       int sectionY = 0, bool empty = true,
@@ -195,37 +192,40 @@ struct LightSectionSnapshot {
   }
 };
 
+// 从存档读取的单个区块段持久化光照数据（对应 Anvil `sections[].BlockLight` / `SkyLight`）。
 struct PersistedLightSection {
   int sectionY = 0;
   std::optional<std::array<std::uint8_t, 2048>> blockLight;
   std::optional<std::array<std::uint8_t, 2048>> skyLight;
 };
 
+// 整区块的持久化光照载荷；当 `isLightOn` 为 true 时，服务端可直接复原已有半字节数据而无需整区块重算。
 struct PersistedChunkLight {
   bool isLightOn = false;
   std::vector<PersistedLightSection> sections;
 };
 
+// 主线程向 `LightService::submitChunk` 提交区块加载/重载时使用的输入载荷。
+// 之所以同时支持 `geometrySections` 与 `directGeometry`，是为了兼顾独立测试/标准快照隔离模式与 `World` 直读低内存模式。
 struct LightChunkInput {
   int chunkX = 0;
   int chunkZ = 0;
-  // Optional world-owned lifecycle token. Leave zero for a standalone service;
-  // World supplies a token that changes on unload/reload so queued cell records
-  // from the old lifetime cannot be applied to the new one.
+  // 可选的 `World` 侧生命周期令牌。独立使用 `LightService` 时保持为 0；由 `World` 传入时会在每次卸载/重载后递增，确保旧生命周期内滞留队列的方块变更不会被误应用到新加载的同名区块上。
   std::uint64_t lifecycleEpoch = 0;
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
-  // Chunk load input has exactly blockSectionCount entries converted directly
-  // from World::Chunk::Section or test LightSectionView fixtures unless
-  // directGeometry is set (in which case geometrySections is omitted).
+  // 当 `directGeometry` 为 false 时，须包含恰好 `blockSectionCount` 个由 `World::Chunk::Section` 或测试用 `LightSectionView` 转换而来的区块段几何；若启用 `directGeometry`，则省略 `geometrySections` 并由工作线程按需直读。
   bool directGeometry = false;
   std::vector<GeometrySection> geometrySections;
   std::optional<PersistedChunkLight> persistedLight;
 
+  // 光照区块段比方块区块段在上下各多 1 个缓冲区段（对应原版 `minSection - 1 .. maxSection + 1`）。
   int minLightSectionY() const { return minBlockSectionY - 1; }
   int lightSectionCount() const { return blockSectionCount + 2; }
 };
 
+// 异步光照工作线程向主线程/协议编码发布的单层区块光照快照。
+// 存在原因：封装完整的区块段光照视图、生命周期代次、完成度标志以及面向网络协议的 `ready-to-ready` 增量脏区列表。
 struct LightChunkSnapshot {
   struct LayerChange {
     int sectionY = 0;
@@ -236,11 +236,9 @@ struct LightChunkSnapshot {
   int chunkZ = 0;
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
-  // Latest input request that touched this chunk.
+  // 触发本次快照的最近一次输入请求序号。
   std::uint64_t generation = 0;
-  // Lifecycle rejects unload/reload results; revision distinguishes completed
-  // results within one loaded lifetime and is ordered by the single writer,
-  // independently of the unordered batch's input generation.
+  // `lifecycleEpoch` 用于剔除已卸载/重载区块的过期结果；`revision` 由单一工作线程按单调顺序分配，用于区分同一加载生命周期内的不同完成版本，不受无序批处理中输入序号交错的影响。
   std::uint64_t lifecycleEpoch = 0;
   std::uint64_t revision = 0;
   bool skyLightEnabled = true;
@@ -248,19 +246,17 @@ struct LightChunkSnapshot {
   bool blockLightComplete = false;
   bool skyLightComplete = false;
   bool propagationComplete = false;
-  // Set only when every loaded chunk has complete optical metadata and the
-  // layer converged. Protocol encoding never exposes an unpublished result.
+  // 仅当所有已加载区块拥有完整光学元数据且该层传播完全收敛时置为 true；协议编码阶段绝不会向客户端暴露尚未收敛的结果。
   bool protocolReady = false;
   std::uint32_t unsupportedCells = 0;
   std::vector<std::shared_ptr<const LightSectionSnapshot>> sections;
-  // changedSections is a ready-to-ready delta. deltaBaseRevision identifies
-  // the last protocol-ready snapshot it was computed from; incomplete drained
-  // revisions do not advance that base.
+  // `changedSections` 表示两次 `protocolReady` 快照之间的增量脏段集合。`deltaBaseRevision` 指明该增量所基于的上一个 `protocolReady` 快照版本号；尚未收敛的中间排空版本不会推进该基准。
   std::uint64_t deltaBaseRevision = 0;
   std::vector<LayerChange> changedSections;
 
   int minLightSectionY() const { return minBlockSectionY - 1; }
   int lightSectionCount() const { return blockSectionCount + 2; }
+  // 按区块段 Y 坐标查找对应光照段快照（优先用标准偏移直算，兼容截断/自定义起始段回退）。
   const LightSectionSnapshot *section(int sectionY) const {
     const int index = sectionY - (minBlockSectionY - 1);
     if (index >= 0 && static_cast<std::size_t>(index) < sections.size()) {
@@ -276,10 +272,7 @@ struct LightChunkSnapshot {
     const auto &entry = sections[static_cast<std::size_t>(fallback)];
     return (entry && entry->sectionY == sectionY) ? entry.get() : nullptr;
   }
-  // Sky queries follow SkyLightSectionStorage: a missing section takes the
-  // bottom plane of the nearest stored section above it. Raw layer access stays
-  // available through section().Missing sky data therefore differs from a
-  // deliberately stored zero layer.
+  // 按原版 `SkyLightSectionStorage` 语义查询指定世界坐标的光照值：若天空光所在段为 `Missing`，则向上寻找最近一个非缺失已存储段并取其底面（`y = 0`）的值（若上方全缺失则返回 15）。通过 `section()` 仍可直接读取原始层状态，因此“缺失天空光段（向下继承）”与“显式存储全 0 层”语义严格区分。
   int lightValue(LightLayer layer, int x, int y, int z) const;
 };
 

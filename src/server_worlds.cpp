@@ -3,6 +3,7 @@
 #include "redstone/portal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -79,6 +80,7 @@ ServerWorldSet ServerWorldSet::open(const std::filesystem::path &worldDir,
     level->regionDirectory = dimensionRegionDirectory(worldDir, stem.id);
     level->world = std::make_unique<World>(
         stem.type, options.maxNeighborUpdates, stem.id);
+    level->world->setCleanupManager(set.cleanupManager_, false);
     if (options.lowMemoryMode)
       level->world->setLowMemoryMode(true);
     level->seed = deriveDimensionSeed(
@@ -165,6 +167,7 @@ void ServerWorldSet::enableLighting(LightWorkerOptions options) {
 }
 
 void ServerWorldSet::tick(bool runsNormally, bool tickChunks) {
+  const auto tickStart = std::chrono::steady_clock::now();
   // Vanilla MinecraftServer.tickChildren advances WorldClocks once per server
   // tick rather than once per ServerLevel.
   metadata_.worldClocks.tick(runsNormally, metadata_.gameRules.advanceTime);
@@ -189,6 +192,13 @@ void ServerWorldSet::tick(bool runsNormally, bool tickChunks) {
   }
   processPendingPortalTransfers(*this);
   metadata_.gameTime = nextTime;
+  if (runsNormally && tickChunks && cleanupManager_) {
+    const double elapsedMs =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - tickStart)
+            .count();
+    cleanupManager_->advanceTick(elapsedMs);
+  }
 }
 
 void ServerWorldSet::pumpAll() {

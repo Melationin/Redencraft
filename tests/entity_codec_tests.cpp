@@ -1,3 +1,5 @@
+#include "redstone/engine.hpp"
+#include "redstone/entity.hpp"
 #include "redstone/entity_codec.hpp"
 #include "redstone/region.hpp"
 
@@ -531,6 +533,164 @@ void testOfficial(const std::filesystem::path &regionDirectory) {
 }
 } // namespace
 
+void testGeneralStageE6Codec() {
+  World world;
+  world.loadChunk(0, 0);
+
+  // Boat with ArmorStand passenger carrying custom pose & helmet equipment.
+  auto boat = std::make_shared<Boat>(world, Vec3{4.5, 64.0, 4.5},
+                                     "minecraft:spruce_boat",
+                                     "minecraft:spruce_boat");
+  boat->uuid = {10, 20, 30, 40};
+  auto stand = std::make_shared<ArmorStand>(world, Vec3{4.5, 64.0, 4.5});
+  stand->uuid = {11, 21, 31, 41};
+  stand->setSmall(true);
+  stand->setShowArms(true);
+  stand->setHeadPose({15.0f, -20.0f, 5.0f});
+  stand->setItemSlot(EquipmentSlot::Head, itemStack("minecraft:iron_helmet", 1));
+  addEntityTreeToWorld(world, boat);
+  world.addEntity(stand);
+  require(stand->startRiding(*boat, true, false), "stand rides boat");
+
+  // MinecartChest with items.
+  auto chestCart =
+      std::make_shared<MinecartChest>(world, Vec3{8.5, 64.0625, 8.5});
+  chestCart->uuid = {12, 22, 32, 42};
+  chestCart->setContainerItem(3, itemStack("minecraft:redstone", 17));
+  world.addEntity(chestCart);
+
+  // Glow ItemFrame, EndCrystal, ExperienceOrb, Arrow, SpectralArrow, EnderPearl.
+  auto frame =
+      std::make_shared<ItemFrame>(Pos{2, 65, 2}, Direction::North, true);
+  frame->uuid = {13, 23, 33, 43};
+  frame->setFramedItem(world, itemStack("minecraft:comparator", 1));
+  frame->setRotation(world, 3);
+  frame->fixed = true;
+  world.addEntity(frame);
+
+  auto crystal = std::make_shared<EndCrystal>(world, Vec3{10.5, 66.0, 10.5});
+  crystal->uuid = {14, 24, 34, 44};
+  crystal->showBottom = false;
+  crystal->beamTarget = Pos{0, 128, 0};
+  world.addEntity(crystal);
+
+  auto orb = std::make_shared<ExperienceOrb>(world, Vec3{6.5, 64.0, 6.5}, 25);
+  orb->uuid = {15, 25, 35, 45};
+  world.addEntity(orb);
+
+  auto arrow = std::make_shared<Arrow>();
+  arrow->uuid = {16, 26, 36, 46};
+  arrow->setPos({7.5, 65.0, 7.5});
+  arrow->setCritArrow(true);
+  arrow->setPierceLevel(2);
+  world.addEntity(arrow);
+
+  auto pearl = std::make_shared<ThrownEnderpearl>();
+  pearl->uuid = {17, 27, 37, 47};
+  pearl->setPos({9.5, 66.0, 9.5});
+  pearl->setOwnerUuid({99, 98, 97, 96});
+  world.addEntity(pearl);
+
+  std::vector<const Entity *> roots{
+      boat.get(), chestCart.get(), frame.get(), crystal.get(),
+      orb.get(),  arrow.get(),     pearl.get(),
+  };
+  std::string error;
+  const std::vector<std::uint8_t> encoded =
+      encodeGeneralEntityChunk(0, 0, roots, error);
+  require(!encoded.empty(), "encodeGeneralEntityChunk failed: " + error);
+
+  World restored;
+  restored.loadChunk(0, 0);
+  DecodedGeneralEntityChunk decoded =
+      decodeGeneralEntityChunk(restored, encoded);
+  require(decoded.status == DecodeStatus::Ok,
+          "decodeGeneralEntityChunk failed: " + decoded.detail);
+  require(decoded.roots.size() == 7, "expected 7 decoded root entities");
+  for (const auto &e : decoded.entities)
+    restored.addEntity(e);
+
+  // 7 roots + 1 passenger ArmorStand = 8 entities.
+  require(restored.entities.size() == 8, "expected 8 restored entities");
+  auto *restoredBoat =
+      dynamic_cast<Boat *>(restored.entities[0].get());
+  require(restoredBoat != nullptr &&
+              restoredBoat->typeName() == "minecraft:spruce_boat",
+          "restored boat mismatch");
+  require(restoredBoat->getPassengers().size() == 1,
+          "restored boat must re-link ArmorStand passenger");
+  auto *restoredStand =
+      dynamic_cast<ArmorStand *>(restoredBoat->getPassengers().front().get());
+  require(restoredStand != nullptr && restoredStand->isSmall() &&
+              restoredStand->showArms(),
+          "restored ArmorStand flags mismatch");
+  require(restoredStand->headPose().x == 15.0f &&
+              restoredStand->headPose().y == -20.0f,
+          "restored ArmorStand head pose mismatch");
+  require(restoredStand->getItemBySlot(EquipmentSlot::Head).id ==
+              "minecraft:iron_helmet",
+          "restored ArmorStand equipment mismatch");
+
+  auto *restoredCart = dynamic_cast<MinecartChest *>(restored.entities[2].get());
+  require(restoredCart != nullptr &&
+              restoredCart->getContainerItem(3).id == "minecraft:redstone" &&
+              restoredCart->getContainerItem(3).count == 17,
+          "restored MinecartChest items mismatch");
+
+  auto *restoredFrame = dynamic_cast<ItemFrame *>(restored.entities[3].get());
+  require(restoredFrame != nullptr && restoredFrame->isGlow() &&
+              restoredFrame->fixed && restoredFrame->rotation() == 3 &&
+              restoredFrame->framedItem().id == "minecraft:comparator",
+          "restored glow ItemFrame mismatch");
+
+  auto *restoredCrystal = dynamic_cast<EndCrystal *>(restored.entities[4].get());
+  require(restoredCrystal != nullptr && !restoredCrystal->showBottom &&
+              restoredCrystal->beamTarget == std::optional<Pos>{{0, 128, 0}},
+          "restored EndCrystal mismatch");
+
+  auto *restoredOrb = dynamic_cast<ExperienceOrb *>(restored.entities[5].get());
+  require(restoredOrb != nullptr && restoredOrb->xpValue == 25,
+          "restored ExperienceOrb mismatch");
+
+  auto *restoredArrow = dynamic_cast<Arrow *>(restored.entities[6].get());
+  require(restoredArrow != nullptr && restoredArrow->isCritArrow() &&
+              restoredArrow->pierceLevel() == 2,
+          "restored Arrow mismatch");
+
+  auto *restoredPearl =
+      dynamic_cast<ThrownEnderpearl *>(restored.entities[7].get());
+  require(restoredPearl != nullptr &&
+              restoredPearl->ownerUuid() ==
+                  (std::array<std::int32_t, 4>{99, 98, 97, 96}),
+          "restored ThrownEnderpearl owner UUID mismatch");
+
+  // Unmodeled Stage E-5 AI mob must be rejected cleanly with Unsupported.
+  nbt::Tag zombieTag;
+  zombieTag.type = 10;
+  nbt::Tag zId;
+  zId.type = 8;
+  zId.text = "minecraft:zombie";
+  add(zombieTag, "id", std::move(zId));
+  nbt::Tag zPos;
+  zPos.type = 9;
+  zPos.listElementType = 6;
+  for (double coord : {4.5, 64.0, 4.5}) {
+    nbt::Tag d;
+    d.type = 6;
+    d.real = coord;
+    zPos.list.push_back(std::move(d));
+  }
+  add(zombieTag, "Pos", std::move(zPos));
+  DecodedGeneralEntity zResult = decodeEntityNbt(world, zombieTag);
+  require(zResult.status == DecodeStatus::Unsupported,
+          "Stage E-5 zombie must be rejected with Unsupported");
+
+  // Player entities must not be serialized into chunk entity lists.
+  auto player = std::make_shared<ServerPlayer>(world, Vec3{4.5, 64.0, 4.5}, "P");
+  require(encodeEntityNbt(*player, error).type == 0,
+          "player must not encode as chunk entity");
+}
+
 int main(int argc, char **argv) {
   try {
     if (argc == 3 && std::string(argv[1]) == "--decode-tnt") {
@@ -667,6 +827,7 @@ int main(int argc, char **argv) {
       testMixedEntitySequenceWithFalling();
       testMinecartRoundTrip();
       testMinecartSequenceOrder();
+      testGeneralStageE6Codec();
     }
     testRejections();
     if (argc == 2)

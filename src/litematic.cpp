@@ -206,7 +206,7 @@ LitematicImport loadLitematic(const nbt::Tag &root,
       result.substitutedBlocks[name] += count;
     for (auto entity : list(region, "Entities")) {
       const auto &id = required(entity, "id", 8).text;
-      if (!entityType(id)) {
+      if (const auto *et = entityType(id); !et || !et->simulated) {
         if (!options.substituteUnsupported)
           throw nbt::Error("unsupported schematic entity: " + id);
         ++result.skippedUnsupportedEntities;

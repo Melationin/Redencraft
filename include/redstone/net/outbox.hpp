@@ -1,11 +1,15 @@
 #pragma once
+// 协议发送队列：单生产者单消费者（SPSC）无锁有界环形队列，附带字节与包数背压计量，
+// 用于世界主线程向网络写线程异步移交待编码或已帧化的数据包。
 #include "redstone/net/wire.hpp"
 #include <atomic>
 #include <memory>
 
 namespace redstone::net {
-// One world-thread producer, one writer-thread consumer. Encoding an acquired
-// batch retains its charge until complete(), including work outside the ring.
+// 单生产者（世界线程）与单消费者（网络写线程）间的无锁发送队列。
+// 采用两阶段消费（tryPop 取出批次并在写线程完成编码后调用 complete）：
+// 这样延迟编码工作（如区块打包）在其占用的快照内存被释放前会持续计入队列积压配额，
+// 防止慢客户端导致主线程无限堆积内存。
 template <std::size_t Capacity = 4096> class OutboundQueue {
   static_assert(Capacity && (Capacity & (Capacity - 1)) == 0);
 

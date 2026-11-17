@@ -1,4 +1,6 @@
 #pragma once
+// 容器方块实体系统：定义箱子（含双箱合并）、木桶、发射器、投掷器与漏斗的库存基类、
+// 缓存摘要机制、休眠漏斗观察者唤醒、世界生命周期集成以及方块行为回调接口。
 
 #include "redstone/entity.hpp"
 #include <cstdint>
@@ -10,6 +12,7 @@
 
 namespace redstone {
 
+// 容器方块实体类型标识：用于在无 RTTI 开销下区分容器种类、槽位容量及 NBT 类型名。
 enum class ContainerKind : std::uint8_t {
   Chest = 0,
   TrappedChest = 1,
@@ -21,10 +24,9 @@ enum class ContainerKind : std::uint8_t {
 
 struct HopperBlockEntity;
 
-// Base state for container block entities (RandomizableContainerBlockEntity
-// subset). Maintains a Lithium-style modCount and lazy slot summary so
-// empty/full/signal checks avoid linear scans on unchanged inventories, and
-// notifies registered sleeping hopper watchers whenever slots mutate or break.
+// 容器方块实体的基础状态（对应原版 RandomizableContainerBlockEntity 子集）。
+// 维护类似 Lithium 的 modCount 与惰性槽位摘要缓存，避免未修改的容器在空/满判断或
+// 比较器信号查询时反复线性扫描；同时在槽位变动或容器被移除时唤醒已注册的休眠漏斗观察者。
 struct ContainerBlockEntity {
   explicit ContainerBlockEntity(ContainerKind kind, Pos pos, int slotCount);
   virtual ~ContainerBlockEntity() = default;
@@ -65,6 +67,7 @@ private:
   mutable int cachedSignal_ = 0;
 };
 
+// 箱子/陷阱箱方块实体（固定 27 槽）。
 struct ChestBlockEntity : ContainerBlockEntity {
   explicit ChestBlockEntity(Pos pos, bool trapped = false)
       : ContainerBlockEntity(trapped ? ContainerKind::TrappedChest
@@ -72,23 +75,26 @@ struct ChestBlockEntity : ContainerBlockEntity {
                              pos, 27) {}
 };
 
+// 木桶方块实体（固定 27 槽）。
 struct BarrelBlockEntity : ContainerBlockEntity {
   explicit BarrelBlockEntity(Pos pos)
       : ContainerBlockEntity(ContainerKind::Barrel, pos, 27) {}
 };
 
+// 发射器/投掷器方块实体（固定 9 槽）。
 struct DispenserBlockEntity : ContainerBlockEntity {
   explicit DispenserBlockEntity(Pos pos, bool dropper = false)
       : ContainerBlockEntity(dropper ? ContainerKind::Dropper
                                      : ContainerKind::Dispenser,
                              pos, 9) {}
-  // DispenserBlockEntity.getRandomSlot (reservoir sampling with World::random).
+  // 对应原版 DispenserBlockEntity.getRandomSlot：使用 World::random 进行蓄水池抽样选取非空槽。
   int getRandomSlot(World &world) const;
-  // DispenserBlockEntity.insertItem: merges into existing stacks first, then
-  // first empty slot; returns leftover stack.
+  // 对应原版 DispenserBlockEntity.insertItem：优先合并进已有堆叠，其次放入首个空槽；返回剩余物品。
   ItemStack insertItem(World &world, const ItemStack &stack);
 };
 
+// 漏斗方块实体（固定 5 槽）：继承 enable_shared_from_this 以便向相邻容器注册 weak_ptr 观察者，
+// 在无物品可传输时进入休眠，仅当邻近库存变化时被精确唤醒以减少逐刻轮询开销。
 struct HopperBlockEntity : ContainerBlockEntity,
                            std::enable_shared_from_this<HopperBlockEntity> {
   explicit HopperBlockEntity(Pos pos);
@@ -105,7 +111,7 @@ struct HopperBlockEntity : ContainerBlockEntity,
   void sleepOnlyCurrentTick(World &world);
 };
 
-// Container block classification & NBT identity helpers.
+// 容器方块分类与 NBT 实体类型标识辅助函数。
 bool isAnyChestBlock(const BlockState &state);
 bool canChestsConnect(const BlockState &a, const BlockState &b);
 std::optional<ContainerKind> containerKindForState(const BlockState &state);
@@ -114,21 +120,20 @@ bool isContainerEntityTypeId(std::string_view id);
 std::shared_ptr<ContainerBlockEntity>
 makeContainerEntityForState(const BlockState &state, Pos pos);
 
-// World lifecycle integration called from World::setBlock, World::tick, and
-// World::unloadChunk.
+// 世界生命周期集成接口：由 World::setBlock、World::tick 与 World::unloadChunk 调用。
 void ensureContainerBlockEntity(World &world, Pos pos, const BlockState &state);
 void preRemoveContainerSideEffects(World &world, Pos pos,
                                    const BlockState &oldState, bool dropItems);
 void dropContainerContents(World &world, Pos pos, ContainerBlockEntity &entity);
 void tickContainerBlockEntities(World &world);
 
-// Container block query & UI helpers (chest double-block combiner aware).
+// 容器方块状态查询与界面辅助函数（支持大箱子双端合并逻辑）。
 int containerComparatorSignal(World &world, Pos pos, const BlockState &state);
 int trappedChestSignal(const World &world, Pos pos);
 void containerUpdateOpenCount(World &world, Pos pos, const BlockState &state,
                               int delta);
 
-// Double-chest connection & placement helpers.
+// 大箱子连接方向判定及各类容器的放置方块状态计算辅助函数。
 Direction chestConnectedDirection(const BlockState &state);
 Pos chestConnectedBlockPos(Pos pos, const BlockState &state);
 BlockState chestPlacementState(World &world, Pos pos, const BlockState &base,
@@ -141,7 +146,7 @@ BlockState dispenserPlacementState(const BlockState &base,
 BlockState hopperPlacementState(World &world, Pos pos, const BlockState &base,
                                 Direction clickedFace);
 
-// BlockBehaviour callbacks bound in bindBlockBehaviours().
+// 在 bindBlockBehaviours() 中绑定的原版 BlockBehaviour 回调。
 void chestOnPlace(World &world, Pos pos, const BlockState &state,
                   const BlockState &oldState, bool movedByPiston);
 void chestAffectRemoval(World &world, Pos pos, const BlockState &state,
@@ -180,15 +185,14 @@ void composterTick(World &world, Pos pos, const BlockState &state);
 bool isCompostableItem(std::string_view itemId);
 float composterChance(std::string_view itemId);
 
-// Utility used by storage / tests to access typed container entities.
+// 供存档序列化与单元测试直接获取强类型容器方块实体的辅助函数。
 std::shared_ptr<HopperBlockEntity> hopperEntityAt(const World &world, Pos pos);
 std::shared_ptr<DispenserBlockEntity> dispenserEntityAt(const World &world,
                                                         Pos pos);
 std::shared_ptr<ChestBlockEntity> chestEntityAt(const World &world, Pos pos);
 std::shared_ptr<BarrelBlockEntity> barrelEntityAt(const World &world, Pos pos);
 
-// Unified container inventory handle covering single containers and
-// CompoundContainer double chests for GUI / Hopper access.
+// 统一容器库存视图句柄：将单容器与双箱（CompoundContainer）封装为统一接口，供 GUI 与漏斗访问。
 struct ContainerSlotRef {
   std::shared_ptr<ContainerBlockEntity> entity;
   int localSlot = 0;

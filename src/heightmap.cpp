@@ -11,11 +11,8 @@
 namespace redstone {
 namespace {
 
-bool leavesBlock(const BlockState &) {
-  // TODO(tree-blocks): LeavesBlock is not in this registry subset. Imported
-  // unsupported states cannot be classified without official block-class
-  // metadata; do not infer that identity from a block name.
-  return false;
+bool leavesBlock(const BlockState &state) {
+  return state.block().isLeaves();
 }
 
 bool matches(HeightmapType type, const BlockState &state) {
@@ -42,7 +39,8 @@ std::array<bool, 4> finalMapMatches(const BlockState &state) {
   const bool nonAir = !state.isAir();
   const bool motion = blocksMotion(state);
   const bool motionOrFluid = motion || !fluidStateOf(state).isEmpty();
-  return {nonAir, motion, motionOrFluid, motionOrFluid};
+  const bool motionNoLeaves = motionOrFluid && !leavesBlock(state);
+  return {nonAir, motion, motionOrFluid, motionNoLeaves};
 }
 
 int ceilLog2(int value) {
@@ -85,6 +83,10 @@ bool heightmapIsLive(HeightmapType type) {
   return heightmapKeepAfterWorldgen(type);
 }
 
+bool heightmapMatches(HeightmapType type, const BlockState &state) {
+  return redstone::matches(type, state);
+}
+
 Heightmap::Heightmap(HeightmapType type, int minY, int height)
     : type_(type), minY_(minY), height_(height),
       bits_(ceilLog2(height + 1)), valuesPerLong_(bits_ ? 64 / bits_ : 64),
@@ -125,6 +127,13 @@ int Heightmap::highestTaken(int x, int z) const {
 
 void Heightmap::setHeight(int x, int z, int height) {
   set(index(x & 15, z & 15), height - minY_);
+}
+
+bool Heightmap::raiseHeight(int x, int z, int firstAvailableY) {
+  if (firstAvailableY <= firstAvailable(x, z))
+    return false;
+  setHeight(x, z, firstAvailableY);
+  return true;
 }
 
 void Heightmap::reset() { std::fill(data_.begin(), data_.end(), 0); }

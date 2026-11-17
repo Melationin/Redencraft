@@ -1,4 +1,5 @@
 #include "redstone/internal.hpp"
+#include "redstone/entity.hpp"
 #include "redstone/shapes.hpp"
 
 #include <algorithm>
@@ -72,11 +73,31 @@ int comparatorGetInputSignal(World &world, Pos pos, const BlockState &state) {
   } else if (result < 15 && isRedstoneConductor(targetState)) {
     targetPos = targetPos.relative(dir);
     targetState = world.getBlock(targetPos);
-    if (hasAnalogOutputSignal(targetState)) {
-      result =
-          comparatorAnalogOutput(world, targetPos, targetState, opposite(dir));
+    const Aabb frameBox{static_cast<double>(targetPos.x),
+                        static_cast<double>(targetPos.y),
+                        static_cast<double>(targetPos.z),
+                        targetPos.x + 1.0, targetPos.y + 1.0,
+                        targetPos.z + 1.0};
+    ItemFrame *matchedFrame = nullptr;
+    int matchedCount = 0;
+    for (Entity *entity : world.entitiesIn(frameBox)) {
+      if (auto *frame = dynamic_cast<ItemFrame *>(entity);
+          frame && !frame->isRemoved() && frame->attachDirection() == dir) {
+        matchedFrame = frame;
+        ++matchedCount;
+      }
     }
-    // TODO: check ItemFrame entities on targetPos when ItemFrame is simulated.
+    const int frameSignal =
+        (matchedCount == 1 && matchedFrame) ? matchedFrame->getAnalogOutput()
+                                            : -1;
+    const int blockSignal =
+        hasAnalogOutputSignal(targetState)
+            ? comparatorAnalogOutput(world, targetPos, targetState,
+                                     opposite(dir))
+            : -1;
+    const int combined = std::max(frameSignal, blockSignal);
+    if (combined >= 0)
+      result = combined;
   }
   return result;
 }

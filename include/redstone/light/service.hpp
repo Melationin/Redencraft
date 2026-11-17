@@ -1,5 +1,7 @@
 #pragma once
 
+// 异步光照服务公开接口：负责主线程区块/方块变更投递、后台单工作线程调度以及主线程快照结果回收与状态查询。
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -14,16 +16,18 @@
 
 #include "redstone/light/snapshot.hpp"
 #include "redstone/light/types.hpp"
+#include "redstone/periodic_cleanup.hpp"
 
 namespace redstone {
 
 struct LightSectionView;
 
+// 异步光照工作线程的配置选项（批处理窗口、环形队列初始容量、直读世界回调及测试钩子）。
 struct LightWorkerOptions {
+  // 直读低内存模式下的世界几何回调源：允许工作线程在需要时直接从实时 `World` 区块段借用只读视图，避免维护整份区块几何镜像。
   struct DirectWorldGeometrySource {
     const void *context = nullptr;
-    // Taken in shared mode only for the brief readSection pointer+refcount
-    // acquisition, and exclusively by World when chunks_ or storage resizes.
+    // 仅在 `readSection` 获取区块段指针并增加引用计数的极短窗口内以共享模式加锁；`World` 仅在底层 `chunks_` 或存储区扩容时获取独占锁。
     std::shared_mutex *resizeMutex = nullptr;
     LightSectionView (*readSection)(const void *context, int chunkX, int chunkZ,
                                     int sectionY) = nullptr;
@@ -35,31 +39,26 @@ struct LightWorkerOptions {
   bool startPausedForTesting = false;
   bool hasSkyLight = true;
   bool collectDiagnostics = false;
-  // Affinity for the single light worker. Block and sky run sequentially on it.
+  // 单个光照工作线程的 CPU 亲和性掩码；方块光与天空光在该线程上顺序执行。
   std::uintptr_t workerAffinityMask = 0;
 
-  // Worker batch collection window in milliseconds: coalesces and deduplicates
-  // queued cell updates across ticks every 30 ms before propagating (0 runs
-  // immediately).
+  // 工作线程合批收集窗口（毫秒）：在触发传播前按 30 ms 窗口合并并去重跨 tick 积压的方块单元更新（设为 0 则立即执行）。
   int batchWindowMs = 30;
-  // Geometry input uses a 256 KiB circular SPSC ring by default and
-  // doubles automatically on burst overflow (like std::vector). Tests may
-  // provide a tiny explicit initial capacity.
+  // 几何变更输入队列默认采用 256 KiB 的环形 SPSC 缓冲区，突发溢出时自动成倍扩容（类似 `std::vector`）；测试代码可传入极小的显式初始容量。
   std::size_t cellQueueCapacity = 0;
   std::size_t geometryQueueBytes = std::size_t{256} << 10;
-  // One worker publishes complete block and sky layer results into this SPSC
-  // ring buffer. It also doubles automatically if a burst exceeds 256 KiB.
+  // 单工作线程通过该 SPSC 环形缓冲区发布已完成的方块光与天空光层结果；突发溢出 256 KiB 时同样自动倍增。
   std::size_t resultQueueBytes = std::size_t{256} << 10;
   DirectWorldGeometrySource directWorld{};
-  // Deterministic test seam invoked once per enabled layer, before propagation.
+  // 确定性测试注入钩子：在每个已启用光照层开始传播前调用一次。
   std::function<void(LightLayer)> beforeLayerForTesting;
 };
 
-// Main-thread submission and worker-thread owner. No method on the worker
-// borrows the live World: every input is a value snapshot. Publications are
-// drained on the main thread; the callback never runs on the light worker.
+// 主线程投递入口与后台光照工作线程的所有者（Pimpl 隔离实现细节）。
+// 存在原因：将昂贵的光照 BFS 传播从主游戏刻线程剥离到独立工作线程，同时保证工作线程绝不直接持有可变 `World` 引用——所有输入要么是值快照，要么受 `resizeMutex` 与 `atomic_ref` 保护；结果发布始终在主线程调用 `drainPublished()` 时完成，确保发布回调永远不会在工作线程上执行。
 class LightService {
 public:
+  // 服务运行与性能诊断统计快照（合并原子计数器与队列瞬时深度）。
   struct Stats {
     std::uint64_t submitted = 0;
     std::uint64_t rejected = 0;
@@ -98,40 +97,32 @@ public:
   LightService(const LightService &) = delete;
   LightService &operator=(const LightService &) = delete;
 
-  // The immutable state-id to optical-class table used for direct World-section
-  // conversion. It is fully built before the service starts its workers.
+  // 返回用于直读模式 `World` 区块段转换的不可变 `stateId -> opticalClass` 查找表；在服务启动工作线程前即已构建完毕。
   std::shared_ptr<const LightOpticalTable> opticalTable() const;
-  // Valid updates are coalesced per chunk and are not rejected by queue
-  // capacity. Returns 0 only when the service is closing or input is invalid.
+  // 提交区块加载或重载输入；有效更新会按区块合并，不会因队列容量受限而拒收，仅在服务正在关闭或输入非法时返回 0。
   std::uint64_t submitChunk(LightChunkInput input);
-  // Owned hot-path hand-off. The record contains every optical value the worker
-  // needs. A full ring merges the latest owned record into pending work instead
-  // of dropping it. Returns the assigned sequence number (0 if rejected).
+  // 热路径上的无锁方块单元变更投递入口，记录内仅含坐标与原始状态 ID，工作线程负责一切光学解析；环形缓冲区满时会自动扩容并合并到待处理工作中而不会静默丢弃。返回分配的单调请求序号（被拒绝时返回 0）。
   std::uint64_t reportBlockCell(LightCellUpdate update);
   std::uint64_t reportBlockCells(std::span<const LightCellUpdate> updates);
+  // 通知工作线程卸载指定区块并推进其生命周期代次，丢弃该区块遗留的过期光照状态。
   bool unloadChunk(int chunkX, int chunkZ);
 
-  // Main-thread publication handoff. Headers are copied at drain, while layer
-  // descriptors and atomic 2048-byte pages are shared with the worker. Mixed
-  // values may update in place after publication and readers may observe a
-  // mixture of old and new nibbles.
+  // 主线程结果排空与发布交接。排空时仅复制区块快照头部并触发回调，层描述符与 2048 字节原子页仍与工作线程共享；因此混合区块段中的半字节可能在发布后继续原地更新，并发读取方可能观察到新旧半字节的混合状态（但单字节内无撕裂风险）。
   void drainPublished();
-  // Returns the independently saved layer envelope. Block always exists; sky
-  // is null when that layer is absent.
+  // 返回主线程上各自独立保存的最新单层区块快照；方块光层在已就绪时总是非空，天空光层在未启用天空光时为空指针。
   std::shared_ptr<const LightChunkSnapshot> latestLayerChunk(
       LightLayer layer, int chunkX, int chunkZ) const;
-  // Test-only snapshot of the sky worker's 256 lowest direct-source heights.
-  // Returns nullopt unless the service is currently idle.
+  // 仅限测试：读取天空光引擎缓存的 256 列最低直射光源高度；仅当服务当前处于空闲状态时返回有效值。
   std::optional<std::array<int, 256>> skyColumnSourcesForTesting(
       int chunkX, int chunkZ) const;
-  // Test-only read of the coordinator's frozen optical mirror. Production
-  // light snapshots intentionally contain no secondary optical geometry.
+  // 仅限测试：读取工作线程侧冻结光学镜像中指定世界坐标的方块光学属性（生产环境光照快照刻意不携带二级光学几何）。
   std::optional<BlockLightProperties> opticalPropertiesForTesting(
       int x, int y, int z) const;
   void setPublishCallback(
       std::function<void(std::shared_ptr<const LightChunkSnapshot>)> callback);
 
   Stats stats() const;
+  // 单个区块在光照服务中的加载、收敛与邻域完整度状态，供主线程判断区块是否已可发送给客户端。
   struct ChunkStatus {
     bool loaded = false;
     bool pending = false;
@@ -142,25 +133,27 @@ public:
     std::uint64_t submittedGeneration = 0;
     std::uint64_t publishedBlockGeneration = 0;
     std::uint64_t publishedSkyGeneration = 0;
-    // Bits 0..3 correspond to -Z, +Z, -X, +X neighbors missing or unloaded.
+    // 第 0..3 位分别对应 -Z、+Z、-X、+X 方向邻居缺失或未加载。
     std::uint8_t unloadedNeighborMask = 0;
   };
   ChunkStatus chunkStatus(int chunkX, int chunkZ) const;
+  // 立即打破合批等待窗口并阻塞等待工作线程处理完所有已提交任务（`timeout == 0` 表示无限等待）。
   bool flushAndWait(std::chrono::milliseconds timeout = std::chrono::milliseconds{0});
-  // Resets monotonic counters after initial-lighting warmup. Pending work is
-  // left visible; benchmark callers must invoke it only after an idle drain.
+  // 检查后台传播器的 TaskQueue 是否存在过多空位可收缩，并在空闲/批间触发一次异步回缩。
+  bool needsTaskQueueCompact() const noexcept;
+  bool requestTaskQueueCompact(CleanupExecutionGate::Lease lease = {});
+  std::size_t scratchTaskQueueBytesForTesting() const noexcept;
+  // 在初始预热照明完成后重置单调性能计数器；仍保留待处理工作计数，基准测试调用方必须在空闲排空后再调用。
   void resetMeasurementStats();
   std::string workerError() const;
   bool waitIdleForTesting();
-  // Waits until the worker has published its pre-sleep state. The following
-  // report exercises the exact notify-before-wait window without a timing poll.
+  // 等待工作线程发布“即将休眠”状态；随后的投递可直接命中“唤醒前通知”竞争窗口，无需依赖定时轮询。
   bool waitWorkerSleepingForTesting();
   void pauseForTesting();
   void resumeForTesting();
-  // Lets a paused service choose exactly one pending chunk for the worker's
-  // next batch and pause again after it completes. Used to exercise publication
-  // ordering without depending on unordered_map iteration.
+  // 让处于暂停状态的服务精确挑选一个待处理区块作为工作线程下一批次，并在完成后再次暂停；用于在测试中构造确定性的发布顺序，避免依赖 `unordered_map` 的迭代顺序。
   bool processChunkBatchForTesting(int chunkX, int chunkZ);
+  // 停止接收新请求并等待工作线程安全退出。
   void close();
 
 private:

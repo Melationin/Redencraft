@@ -1,5 +1,6 @@
 #include "redstone/internal.hpp"
 #include "redstone/containers.hpp"
+#include "redstone/entity.hpp"
 
 namespace redstone {
 namespace {
@@ -117,7 +118,8 @@ bool hasAnalogOutputSignal(const BlockState &state) {
          state.is(Blocks::BEE_NEST) || state.block().isCopperBulb() ||
          state.is(Blocks::END_PORTAL_FRAME) || state.block().isChest() ||
          state.is(Blocks::BARREL) || state.is(Blocks::DISPENSER) ||
-         state.is(Blocks::DROPPER) || state.is(Blocks::HOPPER);
+         state.is(Blocks::DROPPER) || state.is(Blocks::HOPPER) ||
+         state.is(Blocks::DETECTOR_RAIL);
   // TODO: remaining analog-output blocks (furnace, smoker, blast_furnace,
   // brewing_stand, shulker_box, lectern, jukebox, chiseled_bookshelf,
   // decorated_pot, crafter) still lack BlockEntity storage.
@@ -125,6 +127,21 @@ bool hasAnalogOutputSignal(const BlockState &state) {
 
 int comparatorAnalogOutput(World &world, Pos pos, const BlockState &state,
                            Direction) {
+  if (state.is(Blocks::DETECTOR_RAIL)) {
+    if (propertyValue(state, PropertyKind::Powered) == 0)
+      return 0;
+    const Aabb box{pos.x + 0.2, static_cast<double>(pos.y), pos.z + 0.2,
+                   pos.x + 0.8, pos.y + 0.8, pos.z + 0.8};
+    for (Entity *entity : world.entitiesIn(box)) {
+      if (entity->isRemoved())
+        continue;
+      if (auto *cart = dynamic_cast<Minecart *>(entity)) {
+        if (auto *container = dynamic_cast<ContainerEntity *>(cart))
+          return container->comparatorSignal();
+      }
+    }
+    return 0;
+  }
   if (containerKindForState(state))
     return containerComparatorSignal(world, pos, state);
   if (state.is(Blocks::COMPOSTER))

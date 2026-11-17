@@ -157,10 +157,15 @@ Bytes encodeCommandTree(const redstone::command::Node &root) {
       queue.push_back(child.get());
   }
   constexpr std::uint8_t kFlagExecutable = 4;
+  constexpr std::uint8_t kFlagCustomSuggestions = 16;
   constexpr std::uint8_t kFlagRestricted = 32;
   Writer out;
   out.varInt(static_cast<std::int32_t>(order.size()));
   for (const redstone::command::Node *node : order) {
+    const bool hasCustomSuggestions =
+        node->kind == redstone::command::Node::Kind::Argument &&
+        (!node->suggestions.empty() ||
+         static_cast<bool>(node->dynamicSuggestions));
     std::uint8_t flags = 0;
     switch (node->kind) {
     case redstone::command::Node::Kind::Root:
@@ -174,6 +179,8 @@ Bytes encodeCommandTree(const redstone::command::Node &root) {
     }
     if (node->executable())
       flags |= kFlagExecutable;
+    if (hasCustomSuggestions)
+      flags |= kFlagCustomSuggestions;
     if (node->restricted())
       flags |= kFlagRestricted;
     out.u8(flags);
@@ -205,6 +212,8 @@ Bytes encodeCommandTree(const redstone::command::Node &root) {
         // SingletonArgumentInfo.contextFree(IdentifierArgument::id) has no
         // network payload.
       }
+      if (hasCustomSuggestions)
+        out.string("minecraft:ask_server");
     }
   }
   out.varInt(0); // root index
@@ -294,9 +303,11 @@ void packed(Writer &w, std::span<const int> values, int bits, bool length) {
     w.i64(std::bit_cast<std::int64_t>(word));
   }
 }
-void blockPalette(Writer &w, const std::vector<int> &ids, int globalBits) {
+void writePaletted(Writer &w, std::span<const int> ids, int minBits,
+                  int maxIndirectBits, int globalBits) {
   std::map<int, int> indices;
   std::vector<int> palette, values;
+  values.reserve(ids.size());
   for (auto id : ids) {
     auto [i, inserted] = indices.emplace(id, static_cast<int>(palette.size()));
     if (inserted)
@@ -308,8 +319,8 @@ void blockPalette(Writer &w, const std::vector<int> &ids, int globalBits) {
     w.varInt(palette[0]);
     return;
   }
-  int bits = std::max(4, int(std::bit_width(palette.size() - 1)));
-  if (bits > 8) {
+  int bits = std::max(minBits, int(std::bit_width(palette.size() - 1)));
+  if (bits > maxIndirectBits) {
     w.u8(static_cast<std::uint8_t>(globalBits));
     packed(w, ids, globalBits, false);
   } else {
@@ -432,6 +443,11 @@ Registry::StateFlags Registry::stateFlags(int id) const {
 int Registry::stateBits() const {
   return int(
       std::bit_width(static_cast<unsigned int>(states_.rbegin()->first)));
+}
+int Registry::biomeBits() const {
+  if (biomes_.size() <= 1)
+    return 1;
+  return int(std::bit_width(static_cast<unsigned int>(biomes_.size() - 1)));
 }
 
 Bytes encodeMovingPistonNbt(const PistonSnapshot &p) {
@@ -571,7 +587,10 @@ void appendLightSections(
 
 std::size_t ProtocolChunkSnapshot::retainedBytes() const noexcept {
   std::size_t bytes = sizeof(*this) + sections.capacity() * sizeof(SectionSnapshot) +
+                      sectionBiomes.capacity() * sizeof(std::vector<int>) +
                       blockEntities.capacity() * sizeof(BlockEntity);
+  for (const auto &biomes : sectionBiomes)
+    bytes += biomes.capacity() * sizeof(int);
   for (const auto &section : sections)
     bytes += section.palette.capacity() * sizeof(BlockState::Id) +
              section.indices8.capacity() + section.indices16.capacity() * 2;
@@ -593,14 +612,38 @@ ProtocolChunkSnapshot prepareChunkSnapshot(
   result.airId = registry.stateId(BlockState{});
   result.stateBits = registry.stateBits();
   result.biomeId = registry.biomeId("minecraft:plains");
+  result.biomeBits = registry.biomeBits();
   result.pistonTypeId = registry.blockEntityTypeId("minecraft:piston");
   result.sections = std::move(snapshot.sections);
-  for (auto &section : result.sections) {
+  bool hasCustomBiomes = false;
+  for (const auto &section : result.sections) {
+    if (section.biomes && !section.biomes->palette.empty()) {
+      hasCustomBiomes = true;
+      break;
+    }
+  }
+  if (hasCustomBiomes)
+    result.sectionBiomes.resize(result.sections.size());
+  for (std::size_t i = 0; i < result.sections.size(); ++i) {
+    auto &section = result.sections[i];
     if (section.bits == 0)
       section.single = registry.stateId(BlockState::fromId(section.single));
     else
       for (auto &id : section.palette)
         id = registry.stateId(BlockState::fromId(id));
+    if (hasCustomBiomes && section.biomes && !section.biomes->palette.empty()) {
+      std::vector<int> paletteIds(section.biomes->palette.size());
+      for (std::size_t p = 0; p < section.biomes->palette.size(); ++p)
+        paletteIds[p] = registry.biomeId(section.biomes->palette[p]);
+      auto &outBiomes = result.sectionBiomes[i];
+      outBiomes.resize(64);
+      for (std::size_t c = 0; c < 64; ++c) {
+        const std::uint8_t idx = section.biomes->indices[c];
+        outBiomes[c] =
+            idx < paletteIds.size() ? paletteIds[idx] : result.biomeId;
+      }
+      section.biomes.reset();
+    }
   }
   result.blockEntities.reserve(snapshot.pistons.size());
   for (const auto &piston : snapshot.pistons)
@@ -686,9 +729,16 @@ Bytes encodeChunk(const ProtocolChunkSnapshot &snapshot, int cx, int cz,
         }
     sections.i16(static_cast<std::int16_t>(nonEmpty));
     sections.i16(static_cast<std::int16_t>(fluid));
-    blockPalette(sections, ids, globalBits);
-    sections.u8(0);
-    sections.varInt(snapshot.biomeId);
+    writePaletted(sections, ids, 4, 8, globalBits);
+    if (i < static_cast<int>(snapshot.sectionBiomes.size()) &&
+        snapshot.sectionBiomes[static_cast<std::size_t>(i)].size() == 64) {
+      writePaletted(sections,
+                    snapshot.sectionBiomes[static_cast<std::size_t>(i)], 1, 3,
+                    snapshot.biomeBits);
+    } else {
+      sections.u8(0);
+      sections.varInt(snapshot.biomeId);
+    }
   }
   out.varInt(3);
   const int types[] = {1, 4, 5};

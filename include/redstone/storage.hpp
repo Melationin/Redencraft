@@ -1,4 +1,5 @@
 #pragma once
+// 世界存档、元数据、游戏规则、世界时钟、持久化加载票以及 Anvil 世界导入接口。
 #include "redstone/dimension.hpp"
 #include "redstone/engine.hpp"
 #include "redstone/nbt.hpp"
@@ -13,18 +14,19 @@
 #include <unordered_map>
 #include <vector>
 namespace redstone {
+// 用于在磁盘存档 / Litematica 投影与引擎内部计划刻队列之间传递单条延迟刻记录。
 struct SavedTickData {
   Pos pos;
   std::string type;
   int delay{}, priority{};
   bool fluid{};
-  // Litematica records the original ScheduledTick.subTickOrder as SubTick;
-  // vanilla's own chunk format does not, and rebuilds -N..-1 in saved-list
-  // order instead (LevelChunkTicks.unpack). Absent means "use the vanilla
-  // per-chunk sequence", present means "keep the schematic's own order", so
-  // the two rules never get mixed (LitematicaSchematic.java:1498,2834).
+  // Litematica 会把原始的 ScheduledTick.subTickOrder 记录为 SubTick；
+  // 原版区块存档格式不会记录该值，而是在加载时按已保存列表顺序重建为 -N..-1（LevelChunkTicks.unpack）。
+  // 缺失表示“使用原版按区块重建的序列”，存在表示“保留投影自带的子刻顺序”，
+  // 从而避免两种排序规则混用（见 LitematicaSchematic.java:1498,2834）。
   std::optional<std::int64_t> subTick;
 };
+// 封装当前模拟核心依赖的原版游戏规则子集，避免业务层直接耦合 game_rules.dat 的 NBT 结构。
 struct WorldGameRules {
   bool advanceTime = true;
   bool tntExplodes = true;
@@ -33,6 +35,7 @@ struct WorldGameRules {
   int randomTickSpeed = 3;
 };
 
+// 表示单个世界时钟的运行时状态（总刻数、子刻小数进度、倍率与暂停标志）。
 struct WorldClockState {
   std::int64_t totalTicks = 0;
   float partialTick = 0.0f;
@@ -40,24 +43,22 @@ struct WorldClockState {
   bool paused = false;
 };
 enum class BuiltinWorldClock : std::uint8_t { Overworld, TheEnd };
-// ServerClockManager kernel and the supported part of the 26.1
-// data/minecraft/world_clocks.dat SavedData. Unrecognised top-level data,
-// clock entries and fields remain in the loaded NBT document and are never
-// discarded when a supported clock changes.
+// 对应原版 ServerClockManager 内核及 26.1 版本 data/minecraft/world_clocks.dat SavedData 中已支持的部分。
+// 存在原因：26.1 将时间系统从单纯的 gameTime 拆分为独立时钟，且存档中可能带有未知的自定义时钟或扩展字段；
+// 本类内部保留完整 NBT 文档，修改已支持时钟时绝不丢弃未识别的顶层数据、时钟条目与字段。
 class WorldClocks {
 public:
   WorldClocks();
   static WorldClocks load(const std::filesystem::path &path);
   const WorldClockState &state(BuiltinWorldClock clock) const;
-  // Returns true only when the requested state differs. The next successful
-  // saveIfDirty writes the change.
+  // 仅当请求的状态与当前状态存在差异时返回 true 并标记脏状态；随后在 saveIfDirty 成功时写盘。
   bool setClock(BuiltinWorldClock clock, const WorldClockState &state);
-  // MinecraftServer.tickChildren calls clocks.tick only when the tick-rate
-  // manager runs normally, then ServerClockManager.tick applies advance_time.
+  // 遵循原版推进顺序：MinecraftServer.tickChildren 仅在 tick-rate 管理器正常运行（runsNormally）时
+  // 调用 clocks.tick，再由 ServerClockManager.tick 结合 advanceTime 规则决定是否推进时钟。
   void tick(bool runsNormally, bool advanceTime);
   bool dirty() const { return dirty_; }
-  // False means the on-disk bytes were left untouched. A successful write
-  // clears dirty; I/O and encoding errors propagate and keep it dirty.
+  // 返回 false 表示磁盘原有字节未被触动。写入成功后会清除 dirty 标志；
+  // 若发生 I/O 或编码错误则抛出异常并保持 dirty 状态。
   bool saveIfDirty(const std::filesystem::path &path);
 private:
   std::array<WorldClockState, 2> states_{};
@@ -65,40 +66,43 @@ private:
   bool dirty_ = false;
 };
 
+// 聚合跨维度共享的世界级元数据，供多维度运行时初始化、/time 控制与存档回写共享。
 struct WorldMetadata {
   std::int64_t gameTime = 0;
   std::int64_t seed = 0;
   WorldGameRules gameRules;
   WorldClocks worldClocks;
   std::vector<DimensionStem> dimensions;
-  // Parsed level.dat root remains the sole writable metadata template. The
-  // read path validates DataVersion/Data.Time before returning it.
+  // 已解析的 level.dat 根节点始终作为唯一的可写元数据模板（以保留未建模的原版字段）；
+  // 读取路径在返回前会校验 DataVersion 与 Data.Time。
   nbt::RootTag levelRoot;
 
   const DimensionStem *findDimension(std::string_view id) const;
 };
-// Loading is read-only. Updating Time mutates levelRoot in place; persistence
-// uses a temporary gzip file plus rename, retaining level.dat_old when a
-// current file exists. Failures leave the current level.dat untouched.
+// 加载为只读操作。setWorldMetadataTime 会原地修改 levelRoot 中的 Time；
+// saveWorldMetadata 通过“临时 gzip 文件 + 重命名”写入，若原文件存在则保留为 level.dat_old，
+// 任何失败都不会破坏现有的 level.dat。
 void setWorldMetadataTime(WorldMetadata &metadata, std::int64_t gameTime);
 void saveWorldMetadata(const std::filesystem::path &worldDir,
                        const WorldMetadata &metadata);
-// ticket path is <selected dimension root>/data/minecraft/chunk_tickets.dat.
+// 加载票数据文件路径固定为：<所选维度根目录>/data/minecraft/chunk_tickets.dat。
 std::filesystem::path ticketDataPath(const std::filesystem::path &regionDirectory);
+// 表示持久化在 chunk_tickets.dat 中的单条区块加载票（如 forced、portal），用于重启后恢复常加载需求。
 struct PersistentTicketRecord {
   std::int32_t x = 0, z = 0;
   std::string type;
   std::int32_t level = 0;
   std::int64_t ticksLeft = 0;
 };
-// Missing is an empty list; any malformed envelope or unsupported ticket type
-// is an error and must be rejected before startup installs any demand.
+// 文件缺失时返回空列表；若外层 SavedData 封包畸形或包含不支持的加载票类型，
+// 则必须报错并在启动流程安装任何加载需求之前拒绝加载。
 std::vector<PersistentTicketRecord>
 loadPersistentTickets(const std::filesystem::path &path);
-// Caller skips this when the file is absent and the list is empty. Writes the
-// exact 26.1 SavedDataStorage gzip envelope and replaces only that file.
+// 当文件不存在且列表为空时调用方可跳过写入，避免产生多余空文件。
+// 写入时使用严格的 26.1 SavedDataStorage gzip 封包格式，并仅替换该目标文件。
 void savePersistentTickets(const std::filesystem::path &path,
                            std::span<const PersistentTicketRecord> tickets);
+// 离线整世界加载快照，用于测试夹具或中小规模存档经由 importWorld 一次性导入 World。
 struct LoadedWorld {
   std::int64_t gameTime{};
   int minY = -64, maxY = 320;
@@ -110,34 +114,33 @@ struct LoadedWorld {
   std::unordered_map<std::uint64_t, PersistedChunkLight> persistedLights;
   std::int64_t seed = 0;
 };
-// 26.1's namespaced overworld path takes precedence over legacy world/region.
+// 26.1 命名空间化的主世界路径（dimensions/minecraft/overworld/region）优先于旧版 world/region。
 std::filesystem::path defaultRegionDirectory(const std::filesystem::path &worldDir);
-// regionDir is the selected dimension's region directory; its sibling entities
-// directory is read without generating/loading additional terrain chunks.
-// worldDir contains level.dat and namespaced data/minecraft saved data.
-// Reads level.dat and namespaced seed metadata only; no terrain scan.
+// regionDir 为所选维度的 region 目录；读取其同级 entities 目录时不会触发额外地形区块生成或加载。
+// worldDir 包含 level.dat 及命名空间化的 data/minecraft 持久化数据。
+// 仅读取 level.dat 与命名空间内的种子、规则及世界时钟元数据，不扫描地形区块。
 WorldMetadata loadWorldMetadata(const std::filesystem::path &worldDir);
-// Resolve file packs listed by level.dat in low-to-high priority order.
+// 按 level.dat 中启用的顺序（从低优先级到高优先级）解析文件数据包路径，供方块标签等数据叠加加载。
 struct WorldDataPackSelection {
   std::vector<std::filesystem::path> paths;
   std::vector<std::string> diagnostics;
 };
 WorldDataPackSelection selectWorldDataPacks(const std::filesystem::path &worldDir,
                                             const nbt::RootTag &levelRoot);
-// Reads only the existing 26.1 namespaced game_rules SavedData. Missing
-// returns the vanilla defaults; malformed present data is an error.
+// 仅读取已存在的 26.1 命名空间 game_rules SavedData（game_rules.dat）。
+// 文件缺失时返回原版默认值；文件存在但格式畸形时报错。
 WorldGameRules loadWorldGameRules(const std::filesystem::path &path);
+// 控制 Anvil 世界导入时的垂直范围、非完整区块策略及区块坐标过滤条件。
 struct AnvilLoadOptions {
   int minY = -64;
   int maxY = 320;
-  // Default false: non-"minecraft:full" proto-chunks raise nbt::Error so
-  // callers notice incomplete chunks. Set true (via --skip-non-full-chunks) to
-  // skip partially generated perimeter chunks until border/proto-chunk loading
-  // is implemented.
-  // TODO: load non-full border proto-chunks instead of only skipping them.
+  // 默认 false：遇到非 "minecraft:full" 状态的 proto-chunk 时抛出 nbt::Error，提醒调用方区块尚未生成完整。
+  // 设为 true（通过 --skip-non-full-chunks）可跳过边界处部分生成的区块，直到边界 proto-chunk 加载实现完成。
+  // TODO: 直接加载非 full 状态的边界 proto-chunk，而非仅跳过它们。
   bool skipNonFullChunks = false;
   std::function<bool(int, int)> chunkFilter{};
 };
+// 记录流式导入 Anvil 世界后的统计信息，便于日志输出与测试断言。
 struct AnvilWorldImportSummary {
   std::vector<std::pair<int, int>> loadedChunks;
   std::size_t skippedNonFullChunks = 0;
@@ -152,11 +155,12 @@ LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
 LoadedWorld loadAnvilWorld(const std::filesystem::path &worldDir,
                            const std::filesystem::path &regionDir,
                            int minY = -64, int maxY = 320);
-// Streams decoded Anvil sections directly into `world` without building an
-// intermediate LoadedWorld::blocks std::map (for multi-thousand-chunk saves).
+// 直接将解码后的 Anvil 区段流式写入 `world`，不在内存中构建中间产物 LoadedWorld::blocks std::map；
+// 专门面向包含数千个区块的大型存档，避免巨额峰值内存与红黑树构造开销。
 AnvilWorldImportSummary
 loadAnvilWorldInto(const std::filesystem::path &worldDir,
                    const std::filesystem::path &regionDir, World &world,
                    const AnvilLoadOptions &options = {});
+// 将离线加载的 LoadedWorld 快照批量写入运行中的 World 实例。
 void importWorld(const LoadedWorld &input, World &world);
 } // namespace redstone

@@ -96,15 +96,15 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 | 目录 / 文件 | 职责 |
 |---|---|
-| `include/redstone/engine.hpp`、`src/engine.cpp` | 世界状态、区块与区段存储、邻居/形状更新回调、计划刻与主循环 |
+| `include/redstone/engine.hpp`、`include/redstone/engine_types.hpp`、`src/engine/` | 世界状态、区块与区段存储（`chunk_storage.cpp`）、邻居/形状更新回调（`block_updates.cpp`）、计划刻与方块事件（`level_ticks.cpp`）、随机刻与主循环（`random_tick_world.cpp`）、方块行为分派（`block_behaviours.cpp`） |
 | `src/redstone/`、`include/redstone/redstone.hpp` | 红石信号、线、火把、中继/比较器、输入控件与用电器 |
 | `src/blocks.cpp`、`src/state.cpp`、`src/block_tags.cpp`、`src/shapes.cpp` | 26.1 方块/状态注册表、方块标签与碰撞/遮挡形状 |
 | `src/fluid.cpp`、`src/fluid_flow.cpp`、`src/random_tick.cpp` | 流体状态/传播与随机刻系统 |
-| `src/piston.cpp`、`src/rail.cpp`、`src/containers.cpp`、`src/entity.cpp` | 活塞与移动方块实体、铁轨、容器与简单实体 |
+| `src/piston.cpp`、`src/rail.cpp`、`src/containers.cpp`、`src/entity/` | 活塞与移动方块实体、铁轨、容器，以及实体模块（`entity_base.cpp`、`simple_entities.cpp`、`minecart.cpp`、`world_entities.cpp`、`explosion.cpp`） |
 | `include/redstone/light/`、`src/light/` | 双光层光学表、块光/天空光传播器、异步光照服务与不可变快照 |
 | `src/storage.cpp`、`src/region.cpp`、`src/terrain_codec.cpp`、`src/entity_codec.cpp`、`src/nbt.cpp` | Anvil `.mca`、压缩 NBT、地形/实体编解码与 `level.dat` / `world_clocks` / `chunk_tickets` 持久化 |
-| `src/tickets.cpp`、`src/chunk_lifecycle.cpp`、`src/world_chunk_manager.cpp` | 加载票（`TicketStorage`）、区块生命周期状态机与异步区块管理器 |
-| `src/net/`（`wire.cpp`、`session.cpp`、`server_main.cpp`） | 协议 775 编解码、连接状态机、命令与服务端主入口 |
+| `src/tickets.cpp`、`src/chunk_lifecycle.cpp`、`src/world_chunk_manager/` | 加载票（`TicketStorage`）、区块生命周期状态机与异步区块管理器（`lifecycle.cpp`、`residency_persistence.cpp`） |
+| `src/net/`（`wire.cpp`、`session.cpp`、`session_interaction.cpp`、`session_tracking.cpp`、`server_main.cpp`） | 协议 775 编解码、连接状态机、交互/容器同步、区块/光照/实体追踪与服务端主入口 |
 | `src/litematic.cpp`、`src/command.cpp`、`src/allocator.cpp` | `.litematic` 投影导入、指令解析与统一分配器封装 |
 | `validation/`、`benchmarks/`、`tests/` | 26.1 Java 离线/真服差分探针、性能基准与 CTest 回归套件 |
 
@@ -113,5 +113,6 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 ## 延伸阅读
 
 - **总体设计**：[项目约束与目标形态](AGENTS.md) · [开发路线图](PLAN.md) · [兼容性边界](docs/compatibility.md)
+- **专项详细实现规划**：[实体系统详细实现规划](docs/entity-implementation-plan.md) · [区块生成系统详细实现规划](docs/worldgen-implementation-plan.md)
 - **子系统文档**：[光照引擎](docs/light-engine.md) · [协议 775 说明](docs/protocol775.md) · [流体测试规格](docs/fluid-testing.md) · [简单实体、铁轨与物品](docs/entities.md) · [存档与投影](docs/storage.md) · [性能优化记录](docs/performance.md)
 - **调试客户端**：[Windows 调试客户端](docs/client.md)

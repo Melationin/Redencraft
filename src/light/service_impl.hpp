@@ -1,5 +1,7 @@
 #pragma once
 
+// `LightService::Impl` 内部实现类声明：协调无锁 SPSC 输入/结果队列、批处理合并、单工作线程调度循环与主线程快照发布状态。
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -25,6 +27,8 @@
 
 namespace redstone {
 
+// `LightService` 的 Pimpl 私有实现。
+// 存在原因：在主线程与单一后台工作线程之间划分严格的数据所有权边界——主线程仅操作 `versions`/`mainVersions`/`latestBlock`/`latestSky` 及三个 SPSC 队列的生产端，工作线程独占 `geometry`/`directChunks`/`lastReady*`/`protocolBase*` 及两个传播器的缓冲池，并通过 `atomic::wait` + 缓存行隔离降低唤醒与统计竞争。
 class LightService::Impl {
 public:
   Impl(int minSection, int sectionCount, LightWorkerOptions workerOptions);
@@ -55,6 +59,9 @@ public:
   Stats stats() const;
   ChunkStatus chunkStatus(int chunkX, int chunkZ) const;
   bool flushAndWait(std::chrono::milliseconds timeout);
+  bool needsTaskQueueCompact() const noexcept;
+  bool requestTaskQueueCompact(CleanupExecutionGate::Lease lease = {});
+  std::size_t scratchTaskQueueBytesForTesting() const noexcept;
   void resetMeasurementStats();
   std::string workerError() const;
   bool waitIdleForTesting();
@@ -65,11 +72,13 @@ public:
   void close();
 
 private:
+  // 应用单个格点状态变化后的光学影响摘要，用于判断是否需要把该坐标送入传播队列。
   struct RawCellResult {
     bool opticalChanged = false;
     bool emptyChanged = false;
   };
 
+  // `drainPublished()` 合并同批次多次发布结果时的去重键（按层、区块键与生命周期代次区分）。
   struct DrainResultKey {
     LightLayer layer = LightLayer::Block;
     std::uint64_t key = 0;
@@ -86,12 +95,12 @@ private:
     }
   };
 
+  // 区块生命周期与请求版本记录。
   struct ChunkVersion {
     std::uint64_t epoch = 0;
     std::uint64_t requestRevision = 0;
     std::uint64_t submittedGeneration = 0;
-    // Merged from the former inactive set: block-change reporting probed it
-    // with a second hash lookup on every write.
+    // 由原先独立的 `inactive` 集合合并而来：原先每次方块变更上报都要额外做一次哈希查找来探测是否已卸载。
     bool inactive = false;
   };
 
@@ -115,11 +124,13 @@ private:
   SectionMetaSummary sectionMetaSummary(std::uint64_t key, int sectionY) const;
   const std::shared_ptr<LightChunkSnapshot> &
   storedLayerSnapshot(LightLayer layer, std::uint64_t key) const;
+  // 为新加载区块生成只含段元数据与空层槽的原始快照外壳。
   std::shared_ptr<LightChunkSnapshot>
   makeRawLayerShell(std::uint64_t key, int chunkX, int chunkZ,
                     std::uint64_t generation, std::uint64_t epoch) const;
   void syncRawLayerGeometry(std::shared_ptr<LightChunkSnapshot> &snapshot,
                             std::uint64_t key) const;
+  // 将磁盘持久化读取到的半字节光照数据直接装填进区块原始快照外壳（仅在 `isLightOn == true` 时启用）。
   void applyPersistedChunkLight(std::uint64_t key,
                                 const PersistedChunkLight &persisted,
                                 std::uint64_t generation,
@@ -129,6 +140,7 @@ private:
   RawCellResult applyRawGeometryCell(std::uint64_t key, int sectionY,
                                      std::uint16_t localIndex,
                                      BlockState::Id stateId);
+  // 配合 `workerSleeping` 与 `wakeSequence` 实现无锁唤醒，避免每次方块变更都抢占互斥锁。
   void notifyWorkerSleeping();
   void signalWorkerLocked(bool batchWindow = false);
   bool applyOwnedCellLocked(std::uint64_t sequence,
@@ -138,6 +150,7 @@ private:
       const std::vector<LightChunkSnapshot::LayerChange> &extra);
   bool validSection(int sectionY) const;
   bool validInput(const LightChunkInput &input) const;
+  // 将 `(sectionY, localIndex[0..4095])` 压缩为单个 32 位键，用于合并同一格的连续变更。
   static std::uint32_t changeSlot(int sectionY, std::uint16_t localIndex) {
     return (static_cast<std::uint32_t>(sectionY) << 12) | localIndex;
   }
@@ -145,6 +158,7 @@ private:
   bool ringEmpty() const;
   bool orderedInputEmptyLocked() const;
   void applyOrderedControlLocked(light_internal::PendingChunk control);
+  // 按全局单调序号 `sequence`/`generation` 归并排空 `inputQueue` 与 `controlQueue`，保证区块加载/卸载与离散方块修改的因果顺序不被打乱。
   void drainCellChangesLocked();
   void notePendingLocked();
   std::size_t pendingChunkCountLocked() const;
@@ -165,6 +179,7 @@ private:
   void publishIndependentLayer(const light_internal::PreparedBatch &prepared,
                                light_internal::LayerOutcome &outcome,
                                LightLayer layer);
+  // 计算持久化加载区块需要与非持久化（或新重算）邻区执行边界衔接的方向掩码。
   std::uint8_t persistedBoundaryMask(
       std::uint64_t key,
       const light_internal::FlatSet<std::uint64_t, light_internal::UInt64Hash>
@@ -174,6 +189,8 @@ private:
                                     light_internal::UInt64Hash> &ready) const;
   void executeLayers(const light_internal::PreparedBatch &prepared);
   void processBatch(std::vector<light_internal::PendingChunk> &batch);
+  bool compactScratchTaskQueues();
+  void refreshScratchMetrics();
 
   int minBlockSectionY;
   int blockSectionCount;
@@ -202,12 +219,11 @@ private:
   light_internal::FlatMap<std::uint64_t, ChunkVersion,
                           light_internal::UInt64Hash>
       versions;
-  // Worker-maintained lifecycle view consumed with the SPSC control stream.
+  // 由工作线程随 SPSC 控制流同步维护的区块生命周期视图。
   light_internal::FlatMap<std::uint64_t, ChunkVersion,
                           light_internal::UInt64Hash>
       workerVersions;
-  // Main-thread-only lifecycle view used by result draining; never touched by
-  // the worker, so publication consumption cannot wait on input merging.
+  // 仅主线程访问的生命周期视图，供 `drainPublished()` 校验发布结果；工作线程永不触碰它，因此结果消费无需等待输入合并。
   light_internal::FlatMap<std::uint64_t, ChunkVersion,
                           light_internal::UInt64Hash>
       mainVersions;
@@ -226,12 +242,10 @@ private:
   light_internal::FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>,
                           light_internal::UInt64Hash>
       lastReadySky;
-  // Loaded chunks whose current light still matches persisted isLightOn data
-  // without dynamic edits or propagation modifications.
+  // 当前仍保持持久化 `isLightOn` 原始光照状态、尚未发生动态方块修改或传播改动的已加载区块集合。
   light_internal::FlatSet<std::uint64_t, light_internal::UInt64Hash>
       persistedLightChunks;
-  // Last network-visible complete metadata and dirty sections accumulated
-  // while one layer was incomplete.
+  // 记录各区块上一次网络可见的完全收敛版本元数据，以及某层未收敛期间累积的待发布脏段列表。
   light_internal::FlatMap<std::uint64_t, light_internal::ProtocolBaseMeta,
                           light_internal::UInt64Hash>
       protocolBaseBlock;
@@ -247,27 +261,29 @@ private:
   bool accepting = true;
   std::atomic<bool> closing{false};
   bool busy = false;
+  bool compacting = false;
   std::size_t busyChunks = 0;
   std::uint64_t nextPublicationRevision = 0;
   bool paused = false;
   bool pauseAfterBatch = false;
   bool flushRequested = false;
+  CleanupExecutionGate::Lease compactLease;
   std::chrono::steady_clock::time_point nextBatchCollectAt{};
   std::optional<std::uint64_t> forcedChunk;
   std::string error;
 
-  // Separate producer-written and worker-written atomics onto distinct cache
-  // lines so worker stats updates never invalidate main-thread control flags
-  // or submission counters.
+  // 将生产者写入与工作线程写入的原子变量隔离到不同缓存行（64 字节对齐），避免工作线程更新统计计数时使主线程的控制标志或提交计数器缓存行失效。
   alignas(64) std::atomic<std::uint64_t> nextGeneration{0};
   std::atomic<bool> acceptingCells{true};
+  std::atomic<bool> compactRequested{false};
+  std::atomic<bool> scratchCompactable{false};
+  std::atomic<std::size_t> scratchQueueBytes{0};
   mutable std::atomic<std::uint64_t> statsSubmitted{0};
   mutable std::atomic<std::uint64_t> statsRejected{0};
   mutable std::atomic<std::uint64_t> statsDroppedGeometry{0};
 
   alignas(64) std::atomic<std::uint64_t> wakeSequence{0};
-  // Only the worker sets this under mutex before waiting; producers read it
-  // with seq_cst after advancing wakeSequence.
+  // 仅由工作线程在持有 `mutex` 时于进入等待前置位；生产者在推进 `wakeSequence` 后以 `seq_cst` 栅栏读取该标志。
   alignas(64) std::atomic<bool> workerSleeping{false};
 
   alignas(64) mutable std::atomic<std::uint64_t> statsBatches{0};

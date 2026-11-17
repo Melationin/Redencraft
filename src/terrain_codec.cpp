@@ -168,6 +168,94 @@ parseBlockStates(const nbt::Tag &sectionTag, std::string &error,
 
 constexpr std::size_t kLightNibbleBytes = 2048;
 
+bool isValidChunkStatusName(std::string_view name) {
+  static constexpr std::array<std::string_view, 12> kShortNames{
+      "empty",
+      "structure_starts",
+      "structure_references",
+      "biomes",
+      "noise",
+      "surface",
+      "carvers",
+      "features",
+      "initialize_light",
+      "light",
+      "spawn",
+      "full",
+  };
+  std::string_view stripped = name;
+  if (stripped.rfind("minecraft:", 0) == 0)
+    stripped.remove_prefix(10);
+  for (std::string_view s : kShortNames) {
+    if (stripped == s)
+      return true;
+  }
+  return false;
+}
+
+std::optional<PackedBiomes>
+parseBiomes(const nbt::Tag &sectionTag, std::string &error) {
+  const nbt::Tag *container = field(sectionTag, "biomes");
+  if (!container)
+    return std::nullopt;
+  if (container->type != 10) {
+    error = "biomes is not a compound";
+    return std::nullopt;
+  }
+  const nbt::Tag *palette = field(*container, "palette");
+  if (!palette)
+    return std::nullopt;
+  if (palette->type != 9 || palette->list.empty()) {
+    error = "biomes palette is invalid";
+    return std::nullopt;
+  }
+  if (palette->list.size() > PackedBiomes::CellCount) {
+    error = "biomes palette exceeds 64 entries";
+    return std::nullopt;
+  }
+  PackedBiomes result;
+  result.palette.reserve(palette->list.size());
+  for (const nbt::Tag &entry : palette->list) {
+    if (entry.type != 8 || entry.text.empty()) {
+      error = "biomes palette entry is not a valid string";
+      return std::nullopt;
+    }
+    result.palette.push_back(entry.text);
+  }
+  const nbt::Tag *storage = field(*container, "data");
+  if (result.palette.size() == 1) {
+    if (storage && (storage->type != 12 || !storage->longs.empty())) {
+      error = "single biome palette has unexpected data";
+      return std::nullopt;
+    }
+    result.bitsPerEntry = 0;
+    return result;
+  }
+  if (!storage || storage->type != 12) {
+    error = "multi biome palette has no data";
+    return std::nullopt;
+  }
+  const unsigned bits =
+      static_cast<unsigned>(std::bit_width(result.palette.size() - 1));
+  const std::size_t perLong = 64 / bits;
+  const std::size_t expectedLongs =
+      (PackedBiomes::CellCount + perLong - 1) / perLong;
+  if (storage->longs.size() != expectedLongs) {
+    error = "biome palette data length is invalid";
+    return std::nullopt;
+  }
+  result.bitsPerEntry = static_cast<int>(bits);
+  result.data.assign(storage->longs.begin(), storage->longs.end());
+  for (std::size_t i = 0; i < PackedBiomes::CellCount; ++i) {
+    const auto value = packedCell(bits, result.data, i);
+    if (!value || *value >= result.palette.size()) {
+      error = "biome palette index is out of range";
+      return std::nullopt;
+    }
+  }
+  return result;
+}
+
 bool parseLightLayer(const nbt::Tag &sectionTag, std::string_view key,
                      std::optional<std::array<std::uint8_t, kLightNibbleBytes>> &out,
                      std::string &error) {
@@ -735,6 +823,18 @@ std::size_t PackedBlockStates::cell(std::size_t index) const {
                                   ((std::uint64_t{1} << bits) - 1));
 }
 
+std::size_t PackedBiomes::cell(std::size_t index) const {
+  if (bitsPerEntry == 0)
+    return 0;
+  const std::size_t bits = static_cast<std::size_t>(bitsPerEntry);
+  const std::size_t perLong = 64 / bits;
+  if (index >= CellCount || index / perLong >= data.size())
+    return std::numeric_limits<std::size_t>::max();
+  return static_cast<std::size_t>((data[index / perLong] >>
+                                   ((index % perLong) * bits)) &
+                                  ((std::uint64_t{1} << bits) - 1));
+}
+
 DecodedChunk decodeChunkNbt(std::span<const std::uint8_t> bytes,
                             DecodeOptions options) {
   DecodedChunk result;
@@ -770,10 +870,24 @@ DecodedChunk decodeChunkNbt(std::span<const std::uint8_t> bytes,
     return result;
   }
   result.statusName = stringValue(root, "Status");
-  if (result.statusName != "minecraft:full" && result.statusName != "full") {
+  if (options.requireFullStatus) {
+    if (result.statusName != "minecraft:full" && result.statusName != "full") {
+      result.status = DecodeStatus::Unsupported;
+      result.detail = "chunk is not full";
+      return result;
+    }
+  } else if (!isValidChunkStatusName(result.statusName)) {
     result.status = DecodeStatus::Unsupported;
-    result.detail = "chunk is not full";
+    result.detail = "chunk Status is unknown: " + result.statusName;
     return result;
+  }
+  if (const nbt::Tag *inhabited = field(root, "InhabitedTime")) {
+    if (inhabited->type != 4) {
+      result.status = DecodeStatus::Corrupt;
+      result.detail = "InhabitedTime is not a long";
+      return result;
+    }
+    result.inhabitedTime = inhabited->number;
   }
   if (const nbt::Tag *lightOn = field(root, "isLightOn")) {
     if (lightOn->type != 1) {
@@ -785,7 +899,9 @@ DecodedChunk decodeChunkNbt(std::span<const std::uint8_t> bytes,
   }
   std::string error;
   const nbt::Tag *sections = field(root, "sections");
-  if (!sections || sections->type != 9 || sections->listElementType != 10) {
+  if (!sections || sections->type != 9 ||
+      ((options.requireFullStatus || !sections->list.empty()) &&
+       sections->listElementType != 10)) {
     result.status = DecodeStatus::Corrupt;
     result.detail = "sections is not a compound list";
     return result;
@@ -814,6 +930,12 @@ DecodedChunk decodeChunkNbt(std::span<const std::uint8_t> bytes,
       result.detail = error;
       return result;
     }
+    section.biomes = parseBiomes(sectionTag, error);
+    if (!error.empty()) {
+      result.status = DecodeStatus::Corrupt;
+      result.detail = error;
+      return result;
+    }
     if (!parseLightLayer(sectionTag, "BlockLight", section.blockLight, error) ||
         !parseLightLayer(sectionTag, "SkyLight", section.skyLight, error)) {
       result.status = DecodeStatus::Corrupt;
@@ -821,6 +943,70 @@ DecodedChunk decodeChunkNbt(std::span<const std::uint8_t> bytes,
       return result;
     }
     result.sections.push_back(std::move(section));
+  }
+  if (const nbt::Tag *carving = field(root, "carving_mask")) {
+    if (carving->type != 12) {
+      result.status = DecodeStatus::Corrupt;
+      result.detail = "carving_mask is not a long array";
+      return result;
+    }
+    result.carvingMask.reserve(carving->longs.size());
+    for (std::int64_t v : carving->longs)
+      result.carvingMask.push_back(static_cast<std::uint64_t>(v));
+  }
+  if (const nbt::Tag *postProc = field(root, "PostProcessing")) {
+    if (postProc->type != 9) {
+      result.status = DecodeStatus::Corrupt;
+      result.detail = "PostProcessing is not a list";
+      return result;
+    }
+    result.postProcessing.resize(postProc->list.size());
+    for (std::size_t i = 0; i < postProc->list.size(); ++i) {
+      const nbt::Tag &secTag = postProc->list[i];
+      if (secTag.type != 9) {
+        result.status = DecodeStatus::Corrupt;
+        result.detail = "PostProcessing section entry is not a list";
+        return result;
+      }
+      auto &dst = result.postProcessing[i];
+      dst.reserve(secTag.list.size());
+      for (const nbt::Tag &offsetTag : secTag.list) {
+        if (offsetTag.type != 2) {
+          result.status = DecodeStatus::Corrupt;
+          result.detail = "PostProcessing offset entry is not a short";
+          return result;
+        }
+        dst.push_back(static_cast<std::int16_t>(offsetTag.number));
+      }
+    }
+  }
+  if (const nbt::Tag *heightmaps = field(root, "Heightmaps")) {
+    if (heightmaps->type != 10) {
+      result.status = DecodeStatus::Corrupt;
+      result.detail = "Heightmaps is not a compound";
+      return result;
+    }
+    static constexpr std::array<HeightmapType, 6> kAllHeightmapTypes{
+        HeightmapType::WorldSurfaceWG, HeightmapType::WorldSurface,
+        HeightmapType::OceanFloorWG,   HeightmapType::OceanFloor,
+        HeightmapType::MotionBlocking, HeightmapType::MotionBlockingNoLeaves,
+    };
+    for (HeightmapType hmType : kAllHeightmapTypes) {
+      const nbt::Tag *hmTag =
+          field(*heightmaps, heightmapSerializationKey(hmType));
+      if (!hmTag)
+        continue;
+      if (hmTag->type != 12) {
+        result.status = DecodeStatus::Corrupt;
+        result.detail = "Heightmap entry is not a long array";
+        return result;
+      }
+      std::vector<std::uint64_t> words;
+      words.reserve(hmTag->longs.size());
+      for (std::int64_t v : hmTag->longs)
+        words.push_back(static_cast<std::uint64_t>(v));
+      result.heightmaps.emplace(hmType, std::move(words));
+    }
   }
   result.blockTicks = parseTickList(result.root, "block_ticks", error);
   if (!error.empty()) {

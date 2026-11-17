@@ -54,6 +54,7 @@ LightService::Impl::Impl(int minSection, int sectionCount,
   controlQueue = std::make_unique<GrowableSpscRing<PendingChunk>>(
       std::max<std::size_t>(2, options.maxQueuedCommands));
   opticalTable = defaultLightOpticalTable();
+  refreshScratchMetrics();
   worker = std::thread([this] { run(); });
 #if defined(_WIN32) || defined(__linux__)
   const auto affinity =
@@ -681,7 +682,9 @@ bool LightService::Impl::flushAndWait(std::chrono::milliseconds timeout) {
   flushRequested = true;
   signalWorkerLocked(true);
   auto done = [&] {
-    return closing || (!busy && pending.empty() && orderedInputEmptyLocked());
+    return closing || (!busy && !compacting &&
+                       !compactRequested.load(std::memory_order_acquire) &&
+                       pending.empty() && orderedInputEmptyLocked());
   };
   bool reached = true;
   if (timeout.count() > 0)
@@ -690,6 +693,29 @@ bool LightService::Impl::flushAndWait(std::chrono::milliseconds timeout) {
     idle.wait(lock, done);
   flushRequested = wasFlushRequested;
   return reached && error.empty() && !closing;
+}
+
+bool LightService::Impl::needsTaskQueueCompact() const noexcept {
+  return scratchCompactable.load(std::memory_order_acquire);
+}
+
+std::size_t LightService::Impl::scratchTaskQueueBytesForTesting() const noexcept {
+  return scratchQueueBytes.load(std::memory_order_acquire);
+}
+
+bool LightService::Impl::requestTaskQueueCompact(
+    CleanupExecutionGate::Lease lease) {
+  std::lock_guard lock(mutex);
+  if (closing || !accepting)
+    return false;
+  if (compactRequested.load(std::memory_order_acquire))
+    return false;
+  if (!scratchCompactable.load(std::memory_order_acquire))
+    return false;
+  compactLease = std::move(lease);
+  compactRequested.store(true, std::memory_order_release);
+  signalWorkerLocked(true);
+  return true;
 }
 
 LightService::ChunkStatus LightService::Impl::chunkStatus(int chunkX,
@@ -752,7 +778,9 @@ bool LightService::Impl::waitIdleForTesting() {
   flushRequested = true;
   signalWorkerLocked(true);
   idle.wait(lock, [&] {
-    return !busy && pending.empty() && orderedInputEmptyLocked();
+    return !busy && !compacting &&
+           !compactRequested.load(std::memory_order_acquire) &&
+           pending.empty() && orderedInputEmptyLocked();
   });
   flushRequested = false;
   return error.empty();
@@ -811,6 +839,9 @@ void LightService::Impl::close() {
   }
   if (selected.joinable())
     selected.join();
+  std::lock_guard lock(mutex);
+  compactRequested.store(false, std::memory_order_relaxed);
+  compactLease.release();
 }
 
 bool LightService::Impl::validSection(int sectionY) const {
@@ -977,14 +1008,16 @@ void LightService::Impl::noteHighWaterLocked() {
 void LightService::Impl::awaitWork(std::unique_lock<std::mutex> &lock) {
   for (;;) {
     if (closing ||
-        (!paused && (!pending.empty() || !orderedInputEmptyLocked())))
+        (!paused && (!pending.empty() || !orderedInputEmptyLocked() ||
+                     compactRequested.load(std::memory_order_acquire))))
       return;
     workerSleeping.store(true, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_seq_cst);
     sleepState.notify_all();
     const auto observed = wakeSequence.load(std::memory_order_acquire);
     if (closing ||
-        (!paused && (!pending.empty() || !orderedInputEmptyLocked()))) {
+        (!paused && (!pending.empty() || !orderedInputEmptyLocked() ||
+                     compactRequested.load(std::memory_order_acquire)))) {
       workerSleeping.store(false, std::memory_order_release);
       return;
     }
@@ -1005,6 +1038,20 @@ void LightService::Impl::run() {
       break;
     if (paused && !closing)
       continue;
+    if (pending.empty() && orderedInputEmptyLocked() &&
+        compactRequested.exchange(false, std::memory_order_acq_rel)) {
+      compacting = true;
+      auto lease = std::move(compactLease);
+      lock.unlock();
+      compactScratchTaskQueues();
+      lease.release();
+      lock.lock();
+      compacting = false;
+      idle.notify_all();
+      if (closing && pending.empty() && orderedInputEmptyLocked())
+        break;
+      continue;
+    }
     if (options.batchWindowMs > 0 && !closing && !flushRequested &&
         !forcedChunk) {
       const auto window = std::chrono::milliseconds(options.batchWindowMs);
@@ -1066,6 +1113,15 @@ void LightService::Impl::run() {
     ++statsBatches;
     statsWorkerCpuMs.store(currentThreadCpuMs() - workerCpuStart,
                            std::memory_order_relaxed);
+    if (compactRequested.exchange(false, std::memory_order_acq_rel)) {
+      compacting = true;
+      auto lease = std::move(compactLease);
+      lock.unlock();
+      compactScratchTaskQueues();
+      lease.release();
+      lock.lock();
+      compacting = false;
+    }
     if (pauseAfterBatch) {
       pauseAfterBatch = false;
       paused = true;
@@ -1075,6 +1131,8 @@ void LightService::Impl::run() {
     if (closing && pending.empty() && orderedInputEmptyLocked())
       break;
   }
+  compactRequested.store(false, std::memory_order_relaxed);
+  compactLease.release();
 }
 
 PreparedBatch
@@ -1593,6 +1651,7 @@ void LightService::Impl::executeLayers(const PreparedBatch &prepared) {
 void LightService::Impl::processBatch(std::vector<PendingChunk> &batch) {
   PreparedBatch prepared = prepareBatch(batch);
   executeLayers(prepared);
+  refreshScratchMetrics();
   for (std::uint64_t key : prepared.removed) {
     geometry.erase(key);
     directChunks.erase(key);
@@ -1601,6 +1660,22 @@ void LightService::Impl::processBatch(std::vector<PendingChunk> &batch) {
     protocolBaseBlock.erase(key);
     protocolBaseSky.erase(key);
   }
+}
+
+void LightService::Impl::refreshScratchMetrics() {
+  const bool needsCompact = blockScratch.anyQueueNeedsCompact() ||
+                            skyScratch.anyQueueNeedsCompact();
+  scratchCompactable.store(needsCompact, std::memory_order_release);
+  scratchQueueBytes.store(
+      blockScratch.totalQueueBytes() + skyScratch.totalQueueBytes(),
+      std::memory_order_release);
+}
+
+bool LightService::Impl::compactScratchTaskQueues() {
+  bool shrunk = blockScratch.compactQueues();
+  shrunk |= skyScratch.compactQueues();
+  refreshScratchMetrics();
+  return shrunk;
 }
 
 LightService::LightService(int minBlockSectionY, int blockSectionCount,
@@ -1660,6 +1735,15 @@ LightService::ChunkStatus LightService::chunkStatus(int chunkX,
 }
 bool LightService::flushAndWait(std::chrono::milliseconds timeout) {
   return impl_->flushAndWait(timeout);
+}
+bool LightService::needsTaskQueueCompact() const noexcept {
+  return impl_->needsTaskQueueCompact();
+}
+bool LightService::requestTaskQueueCompact(CleanupExecutionGate::Lease lease) {
+  return impl_->requestTaskQueueCompact(std::move(lease));
+}
+std::size_t LightService::scratchTaskQueueBytesForTesting() const noexcept {
+  return impl_->scratchTaskQueueBytesForTesting();
 }
 void LightService::resetMeasurementStats() { impl_->resetMeasurementStats(); }
 std::string LightService::workerError() const { return impl_->workerError(); }

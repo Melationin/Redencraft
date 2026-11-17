@@ -1,21 +1,27 @@
 #pragma once
+// 随机刻世界访问抽象接口：将随机刻方块逻辑（草方块蔓延、火蔓延、树苗生长、蘑菇存活等）
+// 与 `World` 存储解耦，并在光照、流体或标签等系统未就绪时通过 `std::nullopt` 显式上报缺失。
 
 #include "redstone/engine.hpp"
 
 namespace redstone {
-// Queries supplied by the eventual ServerLevel integration. nullopt means that
-// the needed registry, lighting, fluid or tag information is unavailable.
-// Never replace unavailable lighting, fluid or tag information with a guess.
+// 面向未来完整 `ServerLevel` 集成的随机刻查询与写入抽象接口。
+// 之所以将其抽象为虚基类而非直接耦合 `World`，一方面是为了隔离尚未完全就绪的子系统，
+// 另一方面便于单元测试按场景注入轻量实现。
+// 返回 `std::nullopt` 表示所需的注册表、光照、流体或标签信息当前不可用；
+// 按照项目约束，决不允许用猜测值代替不可用的光照、流体或标签信息。
 class RandomTickAccess {
 public:
   virtual ~RandomTickAccess() = default;
   virtual BlockState getBlock(Pos pos) const = 0;
   virtual std::optional<bool> isFullFluid(Pos pos) const = 0;
   virtual std::optional<bool> isWaterFluid(Pos pos) const = 0;
-  // LightEngine.getLightBlockInto(from, to, UP, to.getLightDampening()).
+  // 对应 `LightEngine.getLightBlockInto(from, to, UP, to.getLightDampening())`，
+  // 计算从 `from` 向上传播到 `above` 位置时的光照衰减量。
   virtual std::optional<int> lightBlockIntoUp(BlockState from, Pos above) const = 0;
   virtual std::optional<int> maxLocalRawBrightness(Pos pos) const = 0;
   virtual std::optional<bool> isSnowySetting(Pos above) const = 0;
+  // 草方块/菌丝向目标位置蔓延的判定结果：区分未支持、不可蔓延、普通蔓延与带雪蔓延。
   enum class SpreadTargetResult {
     Unsupported,
     CannotSpread,
@@ -28,15 +34,15 @@ public:
                                                   Pos targetAbove) const;
   virtual void setBlockAndUpdate(Pos pos, BlockState state) = 0;
   virtual void setBlock(Pos pos, BlockState state, int flags) = 0;
-  // nullopt when TreeGrower / world generation is unavailable.
+  // 当 `TreeGrower` 或世界生成尚未可用时返回 `std::nullopt`。
   virtual std::optional<bool> growSaplingTree(Pos pos, BlockState state, Random &random) = 0;
-  // MushroomBlock.canSurvive requires current raw light, solid rendering and
-  // the world's overrides_mushroom_light_requirement tag.
+  // `MushroomBlock.canSurvive` 依赖当前原始亮度、实心不透明渲染判定以及世界级的
+  // `overrides_mushroom_light_requirement` 标签；缺失时返回 `std::nullopt`。
   virtual std::optional<bool> canMushroomSurvive(Pos, BlockState) const {
     return std::nullopt;
   }
   virtual int minY() const { return -64; }
-  // Inclusive maximum block Y coordinate (LevelHeightAccessor.getMaxY).
+  // 含边界的最高方块 Y 坐标（对应 `LevelHeightAccessor.getMaxY`）。
   virtual int maxBlockY() const { return 319; }
   virtual bool isInsideBuildHeight(int y) const {
     return y >= minY() && y <= maxBlockY();
@@ -58,6 +64,7 @@ public:
                                         double, double) const {
     return false;
   }
+  // 判断方块是否具备完整实心遮光渲染（受支持、可遮光且光衰减为 15）。
   virtual bool isSolidRender(BlockState state) const {
     const BlockLightProperties &lp = lightPropertiesOf(state);
     return lp.supported && lp.canOcclude && lp.dampening == 15;
@@ -74,5 +81,6 @@ public:
   virtual std::optional<bool> isRainingAt(Pos) const { return std::nullopt; }
 };
 
+// 根据周围可燃方块朝向计算在 `pos` 放置普通火（`minecraft:fire`）时的初始附着状态。
 BlockState baseFireStateForPlacement(const RandomTickAccess &level, Pos pos);
 } // namespace redstone

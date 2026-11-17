@@ -1,4 +1,5 @@
 #pragma once
+// 轻量调试客户端本地物品栏与方块拾取目录：提供方块反查物品、创造模式物品表与快捷栏操作。
 #include "redstone/entity.hpp"
 #include <algorithm>
 #include <array>
@@ -7,8 +8,7 @@
 #include <vector>
 
 namespace redstone::client {
-// Item represented by a block; an empty result means there is no selectable
-// item.
+// 获取方块对应的物品名称；返回空字符串表示该方块没有可直接选取的物品。
 inline std::string itemForBlock(const BlockState &state) {
   if (state.is(Blocks::PISTON_HEAD))
     return state.get("type") == "sticky" ? "minecraft:sticky_piston"
@@ -16,11 +16,12 @@ inline std::string itemForBlock(const BlockState &state) {
   return blockItem(state);
 }
 
+// 从已注册方块表构建调试客户端的创造模式物品目录，去重并过滤无独立物品的方块变种。
 inline std::vector<std::string> creativeCatalog() {
   std::vector<std::string> result;
   for (const auto &entry : blockRegistry()) {
     const auto item = itemForBlock(BlockState(entry.name));
-    // The wall fan and piston head share an item with another registered block.
+    // 墙面珊瑚扇与活塞头与另一个已注册方块共用同一物品，此处跳过以免目录重复。
     if (item.empty() || item != entry.name ||
         std::find(result.begin(), result.end(), item) != result.end())
       continue;
@@ -29,6 +30,7 @@ inline std::vector<std::string> creativeCatalog() {
   return result;
 }
 
+// 调试客户端本地 9 格快捷栏与背包面板开关状态，支持数字键选槽、滚轮切换与中键拾取方块。
 struct Inventory {
   std::array<std::string, 9> slots = {
       "minecraft:piston",       "minecraft:sticky_piston",
@@ -45,7 +47,7 @@ struct Inventory {
     selectedSlot = index;
     return true;
   }
-  // A positive mouse wheel delta moves left, matching the vanilla hotbar.
+  // 正向鼠标滚轮增量向左移动选中槽位，与原版快捷栏操作方向一致。
   void scroll(int signedNotches) {
     const int shift = signedNotches % static_cast<int>(slots.size());
     selectedSlot = (selectedSlot - shift + static_cast<int>(slots.size())) %

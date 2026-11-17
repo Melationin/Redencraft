@@ -1,30 +1,34 @@
 #pragma once
+// 游戏刻速率、冻结/单步调试与冲刺（sprint）调度状态机。
+// 对齐原版 `TickRateManager` 与 `ServerTickRateManager`，以纯状态方式供主循环、指令与测试共用。
 #include <chrono>
 #include <cstdint>
 #include <optional>
 
 namespace redstone {
-// net.minecraft.world.TickRateManager plus the ServerTickRateManager half.
+// 对应原版 `net.minecraft.world.TickRateManager` 及其服务端半部 `ServerTickRateManager`。
 //
-// The manager owns no network or chat state: the sprint clock lives here but the
-// "commands.tick.sprint.report" line is handed to the caller as a value, so this
-// class stays usable from tests and from any front end.
+// 本管理器不持有任何网络或聊天状态：冲刺（sprint）计时器在此维护，但生成的
+// `"commands.tick.sprint.report"` 数据以纯值 `SprintReport` 返回给调用方，
+// 从而使该类无需依赖协议层即可被测试与任意前端复用。
 class TickRateManager {
 public:
   using Clock = std::chrono::steady_clock;
   static constexpr float kMinTickRate = 1.0f;
   static constexpr std::int64_t kNanosecondsPerSecond = 1000000000;
 
-  // Bumped by every change the client has to be told about
-  // (ClientboundTickingStatePacket / TickingStepPacket). The countdown inside
-  // tick() is not a change: the client counts down on its own, like vanilla.
-  std::uint64_t revision() const { return revision_; }
+  // 每次发生需要通知客户端的变化时递增对应版本号
+  // （分别对应 `ClientboundTickingStatePacket` 与 `TickingStepPacket`）。
+  // `tick()` 内部的步进倒计时不触发版本号递增：与原版一致，客户端会自行倒数剩余步数。
+  std::uint64_t stateRevision() const { return stateRevision_; }
+  std::uint64_t stepRevision() const { return stepRevision_; }
+  std::uint64_t revision() const { return stateRevision_ + stepRevision_; }
 
   void setTickRate(float rate) {
     tickRate_ = rate < kMinTickRate ? kMinTickRate : rate;
     nanosecondsPerTick_ = static_cast<std::int64_t>(
         static_cast<double>(kNanosecondsPerSecond) / tickRate_);
-    ++revision_;
+    ++stateRevision_;
   }
   float tickrate() const { return tickRate_; }
   float millisecondsPerTick() const {
@@ -38,7 +42,7 @@ public:
     if (frozen_ == frozen)
       return;
     frozen_ = frozen;
-    ++revision_;
+    ++stateRevision_;
   }
   bool isFrozen() const { return frozen_; }
 
@@ -48,23 +52,24 @@ public:
       --frozenTicksToRun_;
   }
 
-  // ServerTickRateManager.
+  // 对应 `ServerTickRateManager` 的步进与冲刺控制接口。
   bool isSprinting() const { return scheduledSprintTicks_ > 0; }
   int scheduledSprintTicks() const { return scheduledSprintTicks_; }
   int remainingSprintTicks() const { return remainingSprintTicks_; }
 
+  // 仅在处于冻结状态时允许设定向前步进的 tick 数，供 `/tick step` 使用。
   bool stepGameIfPaused(int ticks) {
     if (!isFrozen())
       return false;
     frozenTicksToRun_ = ticks;
-    ++revision_;
+    ++stepRevision_;
     return true;
   }
   bool stopStepping() {
     if (frozenTicksToRun_ <= 0)
       return false;
     frozenTicksToRun_ = 0;
-    ++revision_;
+    ++stepRevision_;
     return true;
   }
   bool stopSprinting() {
@@ -80,11 +85,13 @@ public:
     remainingSprintTicks_ = ticks;
     previousIsFrozen_ = isFrozen();
     setFrozen(false);
+    // 冲刺开始时立即解除游戏元素冻结标志，防止第一次冲刺迭代读到上一次冻结 tick
+    // 遗留的 `runGameElements_ == false` 而空转或消耗额外未计入预算的 tick。
+    runGameElements_ = true;
     return interrupted;
   }
 
-  // True when this loop iteration must tick immediately instead of waiting for
-  // the next scheduled time. Only call it while isSprinting().
+  // 若返回 true，表示主循环本次迭代应跳过等待、立即执行下一游戏刻。仅在 `isSprinting()` 时调用。
   bool checkShouldSprintThisTick(Clock::time_point now = Clock::now()) {
     if (!runGameElements_)
       return false;
@@ -104,7 +111,7 @@ public:
     int ticksPerSecond = 0;
     double millisecondsPerTick = 0;
   };
-  // Set once when a sprint finishes (exhausted or cancelled).
+  // 冲刺结束（配额耗尽或被取消）后置位一次，取出后清空。
   std::optional<SprintReport> takeSprintReport() {
     const auto report = sprintReport_;
     sprintReport_.reset();
@@ -144,6 +151,7 @@ private:
   Clock::duration sprintTimeSpend_{};
   bool previousIsFrozen_ = false;
   std::optional<SprintReport> sprintReport_;
-  std::uint64_t revision_ = 1;
+  std::uint64_t stateRevision_ = 1;
+  std::uint64_t stepRevision_ = 1;
 };
 } // namespace redstone

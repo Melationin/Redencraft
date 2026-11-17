@@ -1,5 +1,7 @@
 #pragma once
 
+// 光照引擎内部公共基础结构：提供高性能扁平哈希容器、坐标与区块键工具、批处理上下文、可写光照层封装及双引擎共享的只读宿主上下文。
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -27,28 +29,33 @@ const BlockLightProperties &unsupportedLightProperties() noexcept;
 
 namespace redstone::light_internal {
 
+// 直读低内存模式下记录在工作线程中的区块元数据（无需保存几何单元，仅保留坐标与生命周期代次）。
 struct DirectChunkMeta {
   int chunkX = 0;
   int chunkZ = 0;
   std::uint64_t lifecycleEpoch = 0;
 };
 
+// 线程 CPU 亲和性设置结果，记录实际生效的掩码与平台错误码。
 struct ThreadAffinityResult {
   std::uint64_t mask = 0;
   std::uint32_t error = 0;
 };
 
+// 返回当前线程累计消耗的 CPU 时间（毫秒），用于统计工作线程开销。
 double currentThreadCpuMs();
 #if defined(_WIN32) || defined(__linux__)
 ThreadAffinityResult applyThreadAffinity(std::thread::native_handle_type handle,
                                          std::uintptr_t mask);
 #endif
 
+// 将 `(chunkX, chunkZ)` 打包为 64 位无符号区块键，便于哈希查找与排序发布。
 inline std::uint64_t chunkKey(int x, int z) {
   return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
          static_cast<std::uint32_t>(z);
 }
 
+// 计算区块坐标在 64 槽（8x8）直接映射 L1 缓存中的槽位索引。
 inline std::size_t chunkL1Slot(int chunkX, int chunkZ) {
   return static_cast<std::size_t>(((chunkX & 7) << 3) | (chunkZ & 7));
 }
@@ -59,6 +66,7 @@ inline std::size_t chunkL1Slot(std::uint64_t key) {
   return chunkL1Slot(chunkX, chunkZ);
 }
 
+// SplitMix64 混合哈希器，避免连续整数区块键在开放寻址表中发生聚簇退化。
 struct UInt64Hash {
   std::size_t operator()(std::uint64_t x) const noexcept {
     x ^= x >> 30;
@@ -85,13 +93,14 @@ template <class Key, class Value> struct FlatMapSlot {
   static const FlatMapSlot &constValueRef(const FlatMapSlot &s) { return s; }
 };
 
-// Compact open-addressing hash table with Swiss-style 1-byte H2 tags.
-// Keeps probes in contiguous byte cache lines and eliminates heap nodes.
+// 紧凑型开放寻址哈希表，采用类似 SwissTable 的 1 字节 H2 标签。
+// 存在原因：替代 `std::unordered_map`/`std::unordered_set`，将探测局限在连续字节缓存行中并彻底消除每个节点一次堆分配与指针追踪，是热路径（区块/区块段/去重集合）降低延迟的关键容器；同时通过 `rehashEpoch_` 让外部 L1 指针缓存能 O(1) 感知重哈希。
 template <class Slot, class Key, class Hash> class FlatTable {
   static constexpr std::uint8_t kEmpty = 0;
   static constexpr std::uint8_t kTombstone = 1;
   static constexpr std::size_t kNpos = static_cast<std::size_t>(-1);
 
+  // 取哈希高 7 位并置位最高位（`>= 0x80`）作为占用槽位的 H2 指纹标签，从而与 `kEmpty(0)`/`kTombstone(1)` 区分。
   static std::uint8_t tagOf(std::size_t hash) {
     return static_cast<std::uint8_t>(0x80u | ((hash >> 57) & 0x7Fu));
   }
@@ -367,20 +376,24 @@ public:
 
 inline bool validLightValue(std::uint8_t value) { return value <= 15; }
 
+// 判断方块在原版光照传播中是否可视为“无遮挡形状”（空气、非遮挡方块或未启用基于形状的面遮挡）。
 inline bool emptyShape(const BlockLightProperties &properties) {
   return !properties.supported || !properties.canOcclude ||
          !properties.useShapeForLightOcclusion;
 }
 
+// 计算光进入该方块后的衰减量：受支持方块至少衰减 1 级，未受支持方块保守视为完全阻挡（16）。
 inline int lightOpacity(const BlockLightProperties &properties) {
   return properties.supported ? std::max(1, int(properties.dampening)) : 16;
 }
 
+// 返回空气/虚空等无阻挡方块的默认光学属性常量。
 const BlockLightProperties &emptyLightProperties();
 bool hasLightFaceRect(const BlockLightProperties &properties, int direction);
 bool faceShapesOcclude(const BlockLightProperties &from,
                        const BlockLightProperties &to, int direction);
 
+// 世界空间方块坐标。
 struct LightPos {
   int x = 0;
   int y = 0;
@@ -399,6 +412,7 @@ struct LightPosHash {
   }
 };
 
+// 三维区块段坐标 `(sectionX, sectionY, sectionZ)`。
 struct SectionPos3 {
   int x = 0;
   int y = 0;
@@ -417,6 +431,7 @@ struct SectionPos3Hash {
   }
 };
 
+// 与 `LightDirection` 一一对应的 6 个正交邻居偏移表（下、上、北、南、西、东）。
 inline constexpr std::array<LightPos, 6> kDirectionOffsets{{
     {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0}}};
 
@@ -425,6 +440,7 @@ inline LightPos offset(LightPos position, int direction) {
   return {position.x + delta.x, position.y + delta.y, position.z + delta.z};
 }
 
+// 按区块段首元素 `sectionY` 计算连续段数组中的下标，越界时返回 `values.size()`。
 template <class T>
 std::size_t vectorIndex(const std::vector<T> &values, int sectionY) {
   if (values.empty())
@@ -436,17 +452,21 @@ std::size_t vectorIndex(const std::vector<T> &values, int sectionY) {
              : values.size();
 }
 
+// 传入无锁环形队列 `inputQueue` 的单格几何变更事件，附带单调序号用于与控制队列定序合并。
 struct GeometryInput {
   std::uint64_t sequence = 0;
   LightCellUpdate update;
 };
 static_assert(sizeof(GeometryInput) == 32);
 
+// 在合批与合并阶段保留的“单格最新方块状态”记录，仅保留序号更高的写覆盖。
 struct OwnedCell {
   std::uint64_t sequence = 0;
   BlockState::Id state = 0;
 };
 
+// 归属于同一区块的待处理合批控制与方块变更集合。
+// 存在原因：将同一合批窗口内对同一区块的加载、卸载与多次离散方块修改折叠到一条记录中，避免重复构建/传播同一区块。
 struct PendingChunk {
   std::uint64_t key = 0;
   std::uint64_t generation = 0;
@@ -458,6 +478,7 @@ struct PendingChunk {
   std::unordered_map<std::uint32_t, OwnedCell> ownedCells;
 };
 
+// 写时复制（COW）辅助：若快照已被赋予非 0 发布版本号（可能已入队或被主线程持有），则克隆一份新头部供当前批次修改并清零 `revision`。
 inline void mutableLayerSnapshot(std::shared_ptr<LightChunkSnapshot> &slot) {
   if (slot && slot->revision != 0) {
     slot = std::make_shared<LightChunkSnapshot>(*slot);
@@ -465,6 +486,8 @@ inline void mutableLayerSnapshot(std::shared_ptr<LightChunkSnapshot> &slot) {
   }
 }
 
+// 传播过程中单个区块的可变工作副本。
+// 存在原因：在区块发生修改前与已发布快照共享 `shared_ptr`；一旦发生修改，通过 `sectionForEdit` 按段执行写时复制，从而只克隆真正变脏的段头。
 struct WorkingChunk {
   std::uint64_t key = 0;
   std::uint64_t lifecycleEpoch = 0;
@@ -476,9 +499,11 @@ struct WorkingChunk {
   bool propagated = false;
   bool inPlace = false;
 
+  // 按需写时复制指定 `sectionY` 的快照头部，返回可安全写入的段指针。
   LightSectionSnapshot *sectionForEdit(int sectionY);
 };
 
+// 工作线程持有的单区块完整光学几何镜像（仅标准模式使用；直读模式使用 `DirectChunkMeta`）。
 struct GeometryChunk {
   int chunkX = 0;
   int chunkZ = 0;
@@ -486,6 +511,7 @@ struct GeometryChunk {
   std::vector<GeometrySection> sections;
 };
 
+// 一轮合批经 `prepareBatch` 折叠并差分后的输入摘要，供方块光与天空光两个传播阶段共用。
 struct PreparedBatch {
   FlatSet<std::uint64_t, UInt64Hash> touched;
   FlatSet<std::uint64_t, UInt64Hash> dirty;
@@ -498,16 +524,20 @@ struct PreparedBatch {
   std::uint64_t maxGeneration = 0;
 };
 
+// 单光照层单批次执行期间的所有工作区块与已移除区块集合。
 struct LayerWorkspace {
   FlatMap<std::uint64_t, WorkingChunk, UInt64Hash> chunks;
   FlatSet<std::uint64_t, UInt64Hash> removed;
 };
 
+// 单光照层执行结束后的输出（包含工作区及本轮是否完全收敛无缺元数据）。
 struct LayerOutcome {
   LayerWorkspace layers;
   bool complete = false;
 };
 
+// 追踪网络协议可见的“已收敛基线版本”及跨未收敛批次累积的脏段列表。
+// 存在原因：若某次传播因邻居缺失/未支持方块而未收敛（`protocolReady == false`），增量脏段不能推进协议基准版本号，而必须暂存到 `pendingDirty` 中，直到下次完全收敛时一并合并发布。
 struct ProtocolBaseMeta {
   bool hasBase = false;
   std::uint64_t epoch = 0;
@@ -518,12 +548,14 @@ struct ProtocolBaseMeta {
   std::vector<int> pendingDirty;
 };
 
+// 工作线程经 `resultQueue` 投递给主线程的单层发布项。
 struct LayerResult {
   LightLayer layer = LightLayer::Block;
   std::uint64_t key = 0;
   std::shared_ptr<LightChunkSnapshot> snapshot;
 };
 
+// 增亮 BFS 任务，记录目标坐标、源亮度、允许传播方向掩码及是否来自空段/自发光（直射天空光）。
 struct IncreaseTask {
   LightPos position;
   std::uint8_t level = 0;
@@ -532,12 +564,15 @@ struct IncreaseTask {
   bool fromEmission = false;
 };
 
+// 减暗 BFS 任务，记录坐标、原传播亮度及允许扩散的邻居方向掩码。
 struct DecreaseTask {
   LightPos position;
   std::uint8_t level = 0;
   std::uint8_t directions = 0;
 };
 
+// 传播器内部使用的可懒扩容单个区块段光照值容器（包装 `LightLayerRef`）。
+// 存在原因：在只读或整段均一填充（如 `fill(15)`）时保持零页分配的 `Uniform` 形态；仅当局部单元被修改为异质值时才通过 `ensureMixed()` 懒分配/展开为 2048 字节半字节页，并通过代理 `CellRef` 提供数组式下标读写。
 class LightValues {
 public:
   class CellRef {
@@ -566,7 +601,9 @@ public:
   CellRef operator[](std::size_t index) { return {*this, index}; }
   std::uint8_t operator[](std::size_t index) const { return value(index); }
   void fill(std::uint8_t value);
+  // 用从上方继承来的 256 列底面光照一次性平铺填充整个 16x16x16 混合区块段，避免逐格位操作开销。
   void fillInheritedMixed(const std::array<std::uint8_t, 256> &cols);
+  // 检测当前层是否全段相同（若是混合页则扫描确认是否已退化为均一值，以便提交时折叠回 `Uniform` 省内存）。
   std::optional<std::uint8_t> uniformValue() const;
   const LightLayerRef &ref() const { return layer_; }
   const LightLayerSnapshot::PackedPagePtr &shared() const {
@@ -594,8 +631,8 @@ private:
   LightLayerRef layer_;
 };
 
-// Worker-owned context exposed read-only (except queue entry telemetry and
-// its local L1 geometry cache) to independent block and sky propagators.
+// 工作线程自持的只读上下文宿主，暴露给独立的方块光与天空光传播器使用（除队列计数遥测与本地 L1 几何缓存外均为只读）。
+// 存在原因：统一屏蔽“标准 `GeometryChunk` 镜像”与“直读 `DirectWorldGeometrySource` 视图”两种底层数据源差异，并用 64 槽 L1 缓存加速高频坐标的光学属性查询。
 struct LightEngineHost {
   LightEngineHost(
       int minSection, int sectionCount, const LightOpticalTable &table,
@@ -653,6 +690,7 @@ struct LightEngineHost {
                                                     int sectionY) const;
   std::optional<bool> geometrySectionNonEmpty(std::uint64_t key,
                                               int sectionY) const;
+  // 查询世界坐标处的方块光学属性；若遇到未受支持方块，将 `incomplete` 置为 true 以阻止本轮标记为 `protocolReady`。
   const BlockLightProperties &blockPropertiesAt(int x, int y, int z,
                                                 bool &incomplete) const;
   const BlockLightProperties *sectionPropertiesAt(std::uint64_t key, int x,

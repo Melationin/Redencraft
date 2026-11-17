@@ -13,6 +13,7 @@
 #endif
 #include "redstone/command.hpp"
 #include "redstone/dimension.hpp"
+#include "redstone/entity.hpp"
 #include "redstone/litematic.hpp"
 #include "redstone/net/session.hpp"
 #include "redstone/net/outbox.hpp"
@@ -552,6 +553,17 @@ private:
   std::vector<WorldChunkManager *> managers_;
 };
 
+class FixtureCreeper final : public LivingEntity {
+public:
+  FixtureCreeper() : LivingEntity("minecraft:creeper") {}
+  bool hurtServer(World &world, const DamageSource &source,
+                  float amount) override {
+    if (source.kind == DamageKind::Cramming)
+      return false;
+    return LivingEntity::hurtServer(world, source, amount);
+  }
+};
+
 } // namespace
 int runServer(int argc, char **argv) {
   try {
@@ -561,12 +573,15 @@ int runServer(int argc, char **argv) {
     std::vector<std::filesystem::path> blockTagPacks;
     int port = 25565, maxTicks = 0, forceMargin = 2;
     int simulationDistance = 10;
+    int entityCramCount = 100;
     bool explicitSpawn = false, explicitOffset = false;
-    bool consoleEnabled = true, fluidFixture = false, singlePlatform = false;
+    bool consoleEnabled = true, fluidFixture = false, entityFixture = false,
+         singlePlatform = false;
     bool lowMemory = false;
     LitematicOptions schematicOptions;
     AnvilLoadOptions anvilOptions;
     ServerOptions options;
+    options.spawnPlayerEntity = true;
     LightWorkerOptions lightOptions;
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
@@ -612,6 +627,17 @@ int runServer(int argc, char **argv) {
         // a set of sealed 1x1 shafts whose falling water touches several Y
         // sections. It is not a world generator and does not run in normal use.
         fluidFixture = true;
+        continue;
+      }
+      if (arg == "--entity-fixture") {
+        entityFixture = true;
+        continue;
+      }
+      if (arg == "--entity-cram-count") {
+        if (i + 1 >= argc)
+          throw ProtocolError("argument needs a value");
+        entityCramCount = integer(argv[++i], 1, 5000);
+        entityFixture = true;
         continue;
       }
       if (arg == "--single-platform") {
@@ -994,6 +1020,59 @@ int runServer(int argc, char **argv) {
                   << " y=48..64 source_section=4 lower_section=3"
                   << std::endl;
       }
+      if (entityFixture) {
+        auto buildGlassCage = [&](int cx, int cz) {
+          for (int y = 65; y <= 67; ++y) {
+            world.setBlock({cx - 1, y, cz}, defaultState("glass"), 0);
+            world.setBlock({cx + 1, y, cz}, defaultState("glass"), 0);
+            world.setBlock({cx, y, cz - 1}, defaultState("glass"), 0);
+            world.setBlock({cx, y, cz + 1}, defaultState("glass"), 0);
+          }
+          world.setBlock({cx, 68, cz}, defaultState("glass"), 0);
+        };
+        // Cage 1 at (4, 65, 8): N creepers ignoring cramming damage.
+        buildGlassCage(4, 8);
+        for (int i = 0; i < entityCramCount; ++i) {
+          auto creeper = std::make_shared<FixtureCreeper>();
+          const double ox = 4.5 + ((i % 5) - 2) * 0.04;
+          const double oz = 8.5 + (((i / 5) % 5) - 2) * 0.04;
+          creeper->setPos(ox, 65.0, oz);
+          world.addEntity(creeper);
+        }
+        // Cage 2 at (12, 65, 8): 200 non-pushable items + 20 armor stands + 2 creepers.
+        buildGlassCage(12, 8);
+        for (int i = 0; i < 200; ++i) {
+          auto item = std::make_shared<ItemEntity>(
+              world, Vec3{12.5, 65.0, 8.5}, ItemStack{"minecraft:cobblestone", 64});
+          item->setDeltaMovement(0.0, 0.0, 0.0);
+          item->pickupDelay = 32767;
+          item->age = -32768;
+          world.addEntity(item);
+        }
+        for (int i = 0; i < 20; ++i) {
+          auto stand = std::make_shared<ArmorStand>(world, Vec3{12.5, 65.0, 8.5});
+          world.addEntity(stand);
+        }
+        for (int i = 0; i < 2; ++i) {
+          auto c = std::make_shared<FixtureCreeper>();
+          c->setPos(12.4 + i * 0.2, 65.0, 8.5);
+          world.addEntity(c);
+        }
+        // Track + Minecarts + Boat + Step-up slabs around z=12..14.
+        for (int x = 6; x <= 10; ++x)
+          world.setBlock({x, 65, 12}, defaultState("rail"), 0);
+        world.spawnMinecart({7.5, 65.0625, 12.5});
+        world.spawnMinecart({9.5, 65.0625, 12.5});
+        auto boat = std::make_shared<Boat>(world, Vec3{12.5, 65.0, 12.5},
+                                           "minecraft:oak_boat",
+                                           "minecraft:oak_boat");
+        world.addEntity(boat);
+        world.setBlock({7, 65, 14}, defaultState("stone_slab").with("type", "bottom"), 0);
+        world.setBlock({8, 65, 14}, defaultState("smooth_stone"), 0);
+        std::cout << "ENTITY_FIXTURE creepers=" << entityCramCount
+                  << " cage1=(4.5,65,8.5) cage2=(12.5,65,8.5) "
+                  << "total_entities=" << world.entities.size() << std::endl;
+      }
     }
     std::sort(options.chunks.begin(), options.chunks.end());
     options.chunks.erase(
@@ -1134,6 +1213,14 @@ int runServer(int argc, char **argv) {
                 writer.submit(c, c->session.takeOutputItems());
               }
           };
+      targetWorld.entityTakenObserver =
+          [&, wp](int collectorId, int targetId, int amount) {
+            for (auto &c : connections)
+              if (!c->dead && &c->session.world() == wp) {
+                c->session.sendTakeItemEntity(collectorId, targetId, amount);
+                writer.submit(c, c->session.takeOutputItems());
+              }
+          };
     };
     if (worldSet) {
       for (const auto &level : worldSet->levels())
@@ -1168,7 +1255,8 @@ int runServer(int argc, char **argv) {
     std::array<std::int64_t, 100> tickTimes{};
     std::int64_t aggregatedTickNanos = 0;
     std::int64_t tickCount = 0;
-    std::uint64_t tickStateRevision = tickRate.revision();
+    std::uint64_t tickStateRevision = tickRate.stateRevision();
+    std::uint64_t tickStepRevision = tickRate.stepRevision();
     auto nextTick =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
     int ticks = 0;
@@ -1273,7 +1361,18 @@ int runServer(int argc, char **argv) {
       timeval timeout{};
       // A sprinting server polls without waiting, like MinecraftServer.run:
       // the loop must spin as fast as it can instead of pacing to the tick rate.
-      timeout.tv_usec = tickRate.isSprinting() ? 0 : 5000;
+      // When not sprinting, sleep at most until nextTick (capped at 5 ms for
+      // console/accept responsiveness) so /tick rate > 200 TPS is not throttled.
+      if (tickRate.isSprinting()) {
+        timeout.tv_usec = 0;
+      } else {
+        const auto remainingUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                nextTick - std::chrono::steady_clock::now())
+                .count();
+        timeout.tv_usec =
+            static_cast<long>(std::clamp<std::int64_t>(remainingUs, 0, 5000));
+      }
       if (select(static_cast<int>(largest + 1), &reads, nullptr, nullptr,
                  &timeout) < 0) {
         if (stopRequested)
@@ -1365,6 +1464,30 @@ int runServer(int argc, char **argv) {
         return remove;
       });
       auto now = std::chrono::steady_clock::now();
+      const auto syncTickState = [&]() {
+        const bool stateChanged = tickRate.stateRevision() != tickStateRevision;
+        const bool stepChanged = tickRate.stepRevision() != tickStepRevision;
+        if (!stateChanged && !stepChanged)
+          return;
+        tickStateRevision = tickRate.stateRevision();
+        tickStepRevision = tickRate.stepRevision();
+        const auto targetInterval =
+            std::chrono::nanoseconds(tickRate.nanosecondsPerTick());
+        if (stateChanged && !tickRate.isSprinting() &&
+            nextTick - now > targetInterval)
+          nextTick = now + targetInterval;
+        for (auto &c : connections)
+          if (!c->dead) {
+            if (stateChanged)
+              c->session.sendTickingState(tickRate);
+            if (stepChanged)
+              c->session.sendTickingStep(tickRate);
+            writer.submit(c, c->session.takeOutputItems());
+          }
+      };
+      // Sync command-driven /tick rate|freeze|step updates before tickRate.tick()
+      // decrements the step budget, matching vanilla ServerTickRateManager.
+      syncTickState();
       // MinecraftServer.run: a sprinting iteration ticks immediately and
       // restarts the scheduler clock; otherwise the loop waits for the current
       // tick rate.
@@ -1417,6 +1540,11 @@ int runServer(int argc, char **argv) {
             aggregatedTickNanos /
             std::min<std::int64_t>(100, std::max<std::int64_t>(tickCount, 1));
         commandContext.tickTimes = tickTimes;
+        if (worldSet && worldSet->cleanupManager()) {
+          worldSet->cleanupManager()->recordExternalTickTimeMs(milliseconds);
+        } else if (world.cleanupManager()) {
+          world.cleanupManager()->recordExternalTickTimeMs(milliseconds);
+        }
         // Sent after this tick's simulation and connection synchronization.
         // Idle waiting, socket IO outside the tick and this display are
         // excluded.
@@ -1444,17 +1572,9 @@ int runServer(int argc, char **argv) {
           nextTick =
               tickEnd + std::chrono::nanoseconds(tickRate.nanosecondsPerTick());
       }
-      // ServerTickRateManager.updateStateToClients / updateStepTicks: only
-      // command-driven changes are broadcast; the countdown is client side.
-      if (tickRate.revision() != tickStateRevision) {
-        tickStateRevision = tickRate.revision();
-        for (auto &c : connections)
-          if (!c->dead) {
-            c->session.sendTickingState(tickRate);
-            c->session.sendTickingStep(tickRate);
-            writer.submit(c, c->session.takeOutputItems());
-          }
-      }
+      // ServerTickRateManager.updateStateToClients / updateStepTicks: also flush
+      // state changes triggered at sprint completion (e.g. restoring frozen).
+      syncTickState();
       // ServerTickRateManager.finishTickSprint reporting.
       if (const auto report = tickRate.takeSprintReport()) {
         std::ostringstream text;

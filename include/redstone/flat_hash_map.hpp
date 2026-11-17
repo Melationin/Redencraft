@@ -1,28 +1,54 @@
 #pragma once
+// 开放寻址扁平哈希表实现：为区块方块实体表等热点查找提供连续数组探测，避免红黑树与逐节点分配。
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace redstone {
 
-// Open-addressed hash map (linear probing, power-of-two capacity) for the block
-// entity tables. Vanilla keeps those in fastutil's Object2ObjectOpenHashMap, so
-// a lookup is one probe into a contiguous slot array instead of a red-black
-// tree walk plus a node allocation per entry.
+struct TransparentStringHash {
+  using is_transparent = void;
+  std::uint64_t operator()(std::string_view sv) const noexcept {
+    std::uint64_t h = 14695981039346656037ULL;
+    for (unsigned char c : sv) {
+      h ^= c;
+      h *= 1099511628211ULL;
+    }
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    return h;
+  }
+};
+
+// 开放寻址哈希表（线性探测，容量始终为 2 的幂），用于方块实体表等高频访问映射。
+// 原版将其存放在 fastutil 的 Object2ObjectOpenHashMap 中，因此一次查找只需在连续槽位数组上
+// 进行一次探测，而无需红黑树遍历及每个条目的独立堆节点分配。
 //
-// Erase leaves a tombstone; growth reclaims them. There is no per-entry
-// allocation, no rebalancing and no ordering. Iteration order is therefore
-// unspecified: callers that expose an ordered list (chunk snapshots) sort after
-// collecting.
-template <class Key, class T, class Hash> class FlatHashMap {
+// 删除操作会留下墓碑标记（Deleted），并在扩容重哈希时统一回收；无逐项分配、无再平衡、无顺序约束。
+// 因此遍历顺序是未指定的：需要对外输出有序列表的调用方（如区块快照）应在收集后自行排序。
+template <class Key, class T, class Hash, class KeyEqual = std::equal_to<Key>>
+class FlatHashMap {
 public:
+  using key_type = Key;
+  using mapped_type = T;
   using value_type = std::pair<Key, T>;
 
 private:
+  template <class K>
+  static constexpr bool kTransparentLookup =
+      requires { typename Hash::is_transparent; } &&
+      requires { typename KeyEqual::is_transparent; } &&
+      requires(const Hash &h, const KeyEqual &eq, const Key &a, const K &b) {
+        h(b);
+        eq(a, b);
+      };
   enum class State : std::uint8_t { Empty, Used, Deleted };
   struct Slot {
     std::uint64_t hash = 0;
@@ -89,8 +115,25 @@ public:
     const std::size_t index = findIndex(key, hashKey(key));
     return index < slots_.size() ? const_iterator(this, index) : end();
   }
+  template <class K>
+    requires kTransparentLookup<K>
+  iterator find(const K &key) {
+    const std::size_t index = findIndex(key, hashKey(key));
+    return index < slots_.size() ? iterator(this, index) : end();
+  }
+  template <class K>
+    requires kTransparentLookup<K>
+  const_iterator find(const K &key) const {
+    const std::size_t index = findIndex(key, hashKey(key));
+    return index < slots_.size() ? const_iterator(this, index) : end();
+  }
 
   bool contains(const Key &key) const {
+    return findIndex(key, hashKey(key)) < slots_.size();
+  }
+  template <class K>
+    requires kTransparentLookup<K>
+  bool contains(const K &key) const {
     return findIndex(key, hashKey(key)) < slots_.size();
   }
 
@@ -106,9 +149,35 @@ public:
       throw std::out_of_range("FlatHashMap::at: missing key");
     return slots_[index].entry.second;
   }
+  template <class K>
+    requires kTransparentLookup<K>
+  T &at(const K &key) {
+    const std::size_t index = findIndex(key, hashKey(key));
+    if (index >= slots_.size())
+      throw std::out_of_range("FlatHashMap::at: missing key");
+    return slots_[index].entry.second;
+  }
+  template <class K>
+    requires kTransparentLookup<K>
+  const T &at(const K &key) const {
+    const std::size_t index = findIndex(key, hashKey(key));
+    if (index >= slots_.size())
+      throw std::out_of_range("FlatHashMap::at: missing key");
+    return slots_[index].entry.second;
+  }
 
-  // Inserts a default constructed value when the key is absent. Like vanilla's
-  // Object2ObjectOpenHashMap.put this never rehashes an existing entry.
+  void reserve(std::size_t expectedEntries) {
+    if (expectedEntries == 0)
+      return;
+    std::size_t capacity = 8;
+    while (capacity * 3 < expectedEntries * 4)
+      capacity <<= 1;
+    if (capacity > slots_.size())
+      rehash(capacity);
+  }
+
+  // 当键不存在时插入默认构造的值；与原版 Object2ObjectOpenHashMap.put 一样，
+  // 对已存在条目绝不触发重哈希。
   T &operator[](const Key &key) {
     const std::uint64_t hash = hashKey(key);
     const std::size_t index = findIndex(key, hash);
@@ -117,7 +186,7 @@ public:
     return insertSlot(key, hash).entry.second;
   }
 
-  // Returns true when the key was present.
+  // 删除指定键；仅当键原本存在时返回 true。
   bool erase(const Key &key) {
     const std::size_t index = findIndex(key, hashKey(key));
     if (index >= slots_.size())
@@ -137,13 +206,14 @@ public:
   }
 
 private:
-  std::uint64_t hashKey(const Key &key) const {
+  template <class K> std::uint64_t hashKey(const K &key) const {
     return static_cast<std::uint64_t>(hasher_(key));
   }
 
-  // Returns slots_.size() when the key is absent. Deleted slots do not
-  // terminate a probe chain, so an erase can never hide a later entry.
-  std::size_t findIndex(const Key &key, std::uint64_t hash) const {
+  // 若键不存在则返回 slots_.size()。已删除槽位（Deleted）不会截断探测链，
+  // 从而保证删除操作绝不会遮蔽探测链后方的有效条目。
+  template <class K>
+  std::size_t findIndex(const K &key, std::uint64_t hash) const {
     if (slots_.empty())
       return 0;
     const std::size_t mask = slots_.size() - 1;
@@ -153,15 +223,15 @@ private:
       if (slot.state == State::Empty)
         return slots_.size();
       if (slot.state == State::Used && slot.hash == hash &&
-          slot.entry.first == key)
+          equal_(slot.entry.first, key))
         return index;
       index = (index + 1) & mask;
     }
   }
 
   Slot &insertSlot(const Key &key, std::uint64_t hash) {
-    // Keep at most 75% occupancy (used + tombstones) so a probe always finds an
-    // empty slot, and grow to ~50% load to keep the chains short.
+    // 将总占用率（有效项 + 墓碑）限制在 75% 以内以确保探测总能命中空槽，
+    // 并在重哈希时将有效负载控制到约 50% 以保持探测链较短。
     if (slots_.empty()) {
       rehash(8);
     } else if ((size_ + tombstones_ + 1) * 4 > slots_.size() * 3) {
@@ -220,6 +290,7 @@ private:
   std::size_t size_ = 0;
   std::size_t tombstones_ = 0;
   Hash hasher_{};
+  KeyEqual equal_{};
 };
 
 } // namespace redstone

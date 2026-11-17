@@ -1,4 +1,7 @@
 #pragma once
+// 区块加载票据系统、双距离传播图（Loading / Simulation）与需求源管理，
+// 对齐原版 26.1 `TicketStorage`、`ChunkLevel`、`ChunkTracker` 与 `DistanceManager`。
+// 将“区块应该加载到什么等级”的需求计算与实际磁盘 I/O（`chunk_lifecycle.hpp`）及 `World` 内存安装解耦。
 
 #include <compare>
 #include <cstdint>
@@ -13,6 +16,7 @@
 
 namespace redstone {
 
+// 区块二维坐标 `(x, z)`，支持按 `(x, z)` 字典序排序及打包为原版 `ChunkPos.asLong()` 风格的 64 位键。
 struct ChunkTicketPos {
   int x = 0;
   int z = 0;
@@ -26,6 +30,7 @@ struct ChunkTicketPos {
   }
 };
 
+// 票据行为标志位（对应原版 `TicketType.Flags`）：控制持久化、加载图注入、模拟图注入、维度保活与卸载过期策略。
 enum class TicketFlags : std::uint32_t {
   None = 0,
   Persist = 1,
@@ -45,6 +50,7 @@ constexpr std::uint32_t operator|(std::uint32_t left, TicketFlags right) {
   return left | ticketFlag(right);
 }
 
+// 票据类型描述符：定义静态超时 tick 数与标志位集合，决定同类票据对双图和维度的语义影响。
 struct TicketType {
   std::string_view name;
   std::int64_t timeout = 0;
@@ -65,6 +71,7 @@ struct TicketType {
   friend bool operator==(const TicketType &, const TicketType &) = default;
 };
 
+// 原版 26.1 内置票据类型注册表，flags 掩码与超时刻数严格对齐原版定义。
 namespace ticket_types {
 inline constexpr TicketType PlayerSpawn{"minecraft:player_spawn", 20, 2};
 inline constexpr TicketType SpawnSearch{"minecraft:spawn_search", 1, 2};
@@ -77,6 +84,7 @@ inline constexpr TicketType EnderPearl{"minecraft:ender_pearl", 40, 14};
 inline constexpr TicketType Unknown{"minecraft:unknown", 1, 18};
 } // namespace ticket_types
 
+// 挂载在某个区块坐标上的单张加载票据实例，持有类型、源等级 `level_` 与剩余寿命 `ticksLeft_`。
 class Ticket {
 public:
   Ticket(const TicketType &type, int level)
@@ -102,14 +110,16 @@ private:
   std::int64_t ticksLeft_;
 };
 
+// 区分两条独立的需求传播图：
+// 玩家视野（viewDistance）只拉高 `Loading` 需求（加载并发送区块给客户端，但不 ticking），
+// 而模拟距（simulationDistance）与强加载票据同时驱动 `Simulation` 需求（决定方块/实体刻是否执行）。
 enum class TicketDemand {
   Loading,
   Simulation,
 };
 
-// TicketStorage emits the same two listener updates as 26.1. sourceLevel is the
-// raw TicketStorage value before ChunkTracker clamping (45 when absent for both
-// loading and simulation). A repeated identical ticket renews without an update.
+// `TicketStorage` 发出的与原版 26.1 一致的两类监听更新。`sourceLevel` 为经 `ChunkTracker` 截断前的
+// 原始源等级（加载图与模拟图在无源时均为 45）。重复添加相同身份的票据只会续期，不会产生源等级更新。
 struct TicketSourceChange {
   TicketDemand demand = TicketDemand::Loading;
   ChunkTicketPos position;
@@ -151,15 +161,17 @@ struct TicketHolderState {
 using TicketHolderLookup =
     std::function<TicketHolderState(const ChunkTicketPos &position)>;
 
+// 区块票据存储中心：维护各区块上的活跃票据、关闭时停用的票据以及 `/forceload` 强制加载集合。
+// 之所以集中管理并提供 `applyBatch`，是因为玩家移动或区域切换往往同时产生大量增删操作，
+// 汇总后只输出净源等级变化可避免图传播产生无效的中间态震荡。
 class TicketStorage {
 public:
   bool addTicket(const ChunkTicketPos &position, Ticket ticket,
                  TicketStorageChange *out = nullptr);
   bool removeTicket(const ChunkTicketPos &position, const Ticket &ticket,
                     TicketStorageChange *out = nullptr);
-  // Applies in order, then reports only final per-position source differences.
-  // A batch whose source levels return to their original values emits no graph
-  // update even if ticket objects were renewed along the way.
+  // 按顺序执行全部操作，然后仅报告每个位置最终的源等级净差异。
+  // 若一批操作后某位置的源等级回到原值，即使中途续期了票据对象，也不会触发传播图更新。
   TicketStorageChange applyBatch(std::span<const TicketOperation> operations);
 
   const std::vector<Ticket> &getTickets(const ChunkTicketPos &position) const;
@@ -172,8 +184,8 @@ public:
   bool shouldKeepDimensionActive() const;
   bool hasForcedTicket(const ChunkTicketPos &position) const;
 
-  // One call performs one 26.1 purge step. A holder that exists but is not
-  // ready for saving pauses countdown for types without expire-if-unloaded.
+  // 每次调用执行一轮原版 26.1 的超时清理。若对应区块 holder 存在但尚未准备好保存，
+  // 对未设置 `CanExpireIfUnloaded` 标志的票据会暂停倒计时（避免正在刷盘或过渡中的区块过早失活）。
   TicketStorageChange purgeTimedTickets(const TicketHolderLookup &holders);
 
   TicketStorageChange deactivateTicketsOnClosing();
@@ -183,9 +195,8 @@ public:
 
   std::vector<std::pair<ChunkTicketPos, Ticket>>
   persistentTickets() const;
-  // Startup-only raw restore. Every input entry is appended without identity
-  // deduplication or Ticket timeout renewal, and one final source diff is
-  // produced for both trackers.
+  // 仅用于启动阶段恢复持久化票据。每条输入直接追加而不做身份去重或超时续期，
+  // 并在末尾一次性为两张传播图生成汇总源差异。
   TicketStorageChange restorePersistentTickets(
       std::span<const std::pair<ChunkTicketPos, Ticket>> tickets);
 
@@ -206,6 +217,7 @@ private:
   std::set<ChunkTicketPos> forcedChunks_;
 };
 
+// 完整区块的活跃状态阶梯（与原版 `FullChunkStatus` 一致）：等级数字越小，活跃度越高。
 enum class FullChunkStatus {
   Inaccessible,
   Full,
@@ -213,6 +225,7 @@ enum class FullChunkStatus {
   EntityTicking,
 };
 
+// 世界生成/加载阶段枚举：覆盖从空占位到最终 `Full` 的 12 个原版阶段（对应等级 33..44）。
 enum class GenerationStatus {
   Empty,
   StructureStarts,
@@ -228,6 +241,9 @@ enum class GenerationStatus {
   Full,
 };
 
+// 原版区块等级常量与映射工具：
+// 数值越小优先级越高（31 实体刻 -> 32 方块刻 -> 33 完整区块 -> 34..44 外围生成缓冲 -> 45 无源）。
+// 票据向 8 邻域扩散时每格等级 +1，使核心加载区块周围自然形成满足邻居依赖（光照/结构/特征）的缓冲环。
 namespace ticket_levels {
 inline constexpr int FullChunkLevel = 33;
 inline constexpr int BlockTickingLevel = 32;
@@ -267,9 +283,9 @@ struct ChunkLevelChange {
   bool decreased() const { return newLevel < oldLevel; }
 };
 
-// Main-thread-only graph. Sources are asserted levels; every edge is one of the
-// eight surrounding chunks and costs one level. A source change schedules one
-// recomputation; calling tick with no source change does not scan the graph.
+// 仅限主线程运行的区块等级传播图（对应 `ChunkTracker`）：
+// 源节点由票据系统断言给定；每条边连接切比雪夫距离为 1 的八个周围区块且传播代价为 +1 等级。
+// 仅当存在源变化时执行局部增量重算；在无源变化时不会扫描全图。
 class ChunkLevelGraph {
 public:
   explicit ChunkLevelGraph(TicketDemand demand);
@@ -297,8 +313,8 @@ private:
 };
 
 enum class ChunkDataResidency {
-  // T-1 models demand only. Holder scope and FULL/ticking projections do not
-  // imply that chunk data is resident or ready.
+  // 当前仅建模“需求”（demand）本身。`holderFullStatus` 与 ticking 投影
+  // 并不意味着区块磁盘数据已经驻留或就绪（实际驻留由 `ChunkLifecycleController` 跟踪）。
   NotTracked,
 };
 
@@ -324,8 +340,9 @@ struct TicketSystemUpdate {
   }
 };
 
-// Main-thread composition. It deliberately has no World, ChunkHolder, disk, or
-// ticking hook: holderFullStatus is a level projection, not data residency.
+// 主线程票据等级组合系统：把 `TicketStorage` 与 `Loading` / `Simulation` 两张传播图绑定为单一原子状态。
+// 它刻意不持有 `World`、`ChunkHolder`、磁盘或 ticking 钩子：`holderFullStatus` 只是票据等级投影，
+// 并非实际数据驻留状态，使需求传播逻辑能够独立验证与测试。
 class TicketLevelSystem {
 public:
   bool addTicket(const ChunkTicketPos &position, Ticket ticket,
@@ -354,6 +371,7 @@ private:
   ChunkLevelGraph simulation_{TicketDemand::Simulation};
 };
 
+// 判定在线玩家是否应为周围区块贡献加载/模拟需求（仅在 Playing 且未死亡/未断线时有效）。
 constexpr bool ticketPlayerDemandActive(bool sessionPlaying, bool dead,
                                         bool closing, bool closed) {
   return sessionPlaying && !dead && !closing && !closed;
@@ -372,8 +390,10 @@ struct TicketSourceUpdate {
   std::size_t simulationPresenceChanges = 0;
 };
 
-// Main-thread-only demand source bookkeeping. It does not load chunks, search
-// for spawns, create futures, or drive a tick gate.
+// 主线程需求源记账管理器（对应原版 `DistanceManager` 中的玩家区域与强加载源跟踪）。
+// 维护每个区块被多少玩家视距/模拟距覆盖的引用计数（`loadingCoverage_` / `simulationCoverage_`），
+// 仅在覆盖数从 0->1 或 1->0 时向 `TicketLevelSystem` 发射批量票据变更，避免多玩家重叠移动时重复操作图。
+// 本类只负责计算票据需求，不直接加载区块、搜索出生点、创建异步任务或驱动 tick 门控。
 class TicketSourceManager {
 public:
   static constexpr int MinViewDistance = 2;
@@ -395,8 +415,7 @@ public:
 
   TicketSourceUpdate addPlayer(PlayerTicketId id, ChunkTicketPos center);
   TicketSourceUpdate movePlayer(PlayerTicketId id, ChunkTicketPos center);
-  // Exact presence reconciliation: add when present, move when existing,
-  // remove when absent. Safe on every server-loop iteration.
+  // 精确存在性对账：在线则添加或移动，离线则移除。可在服务端每轮主循环中幂等调用。
   TicketSourceUpdate setPlayer(PlayerTicketId id, bool present,
                                ChunkTicketPos center);
   TicketSourceUpdate removePlayer(PlayerTicketId id);

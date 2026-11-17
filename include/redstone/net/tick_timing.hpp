@@ -1,4 +1,5 @@
 #pragma once
+// Tick 耗时滑动统计窗口：聚合最近 1 秒内已完成的 tick 耗时样本，供服务端周期性向客户端上报性能指标。
 #include <chrono>
 #include <cstddef>
 #include <deque>
@@ -6,7 +7,8 @@
 #include <utility>
 
 namespace redstone::net {
-// Reporting only: completed ticks in (now - 1s, now], at most one report/sec.
+// 仅用于性能汇报统计：统计 (now - 1s, now] 时间窗内已完成的刻耗时，且至多每秒生成一次汇报，
+// 避免每刻向客户端高频推送调试统计包而干扰网络带宽。
 class TickTimingWindow {
 public:
   using Clock = std::chrono::steady_clock;

@@ -47,9 +47,99 @@ if(REDSTONE_ALLOCATOR STREQUAL "jemalloc")
 elseif(NOT REDSTONE_ALLOCATOR STREQUAL "system")
   message(FATAL_ERROR "Unknown allocator: ${REDSTONE_ALLOCATOR}")
 endif()
-add_library(redstone_core src/state.cpp src/blocks.cpp src/block_tags.cpp src/random_tick.cpp src/fluid.cpp src/fluid_flow.cpp src/light/optical.cpp src/light/snapshot.cpp src/light/common.cpp src/light/block_light_engine.cpp src/light/sky_light_engine.cpp src/light/service.cpp src/dimension.cpp src/poi.cpp src/portal.cpp src/server_worlds.cpp src/tickets.cpp src/heightmap.cpp src/engine.cpp src/entity.cpp src/rail.cpp src/piston.cpp src/containers.cpp src/redstone/signal.cpp src/redstone/wire.cpp src/redstone/torch.cpp src/redstone/diode.cpp src/redstone/controls.cpp src/redstone/consumers.cpp src/shapes.cpp src/nbt.cpp src/storage.cpp src/region.cpp src/terrain_codec.cpp src/entity_codec.cpp src/chunk_lifecycle.cpp src/world_chunk_manager.cpp src/litematic.cpp src/command.cpp vendor/lz4/lz4.c vendor/lz4/xxhash.c)
+add_library(redstone_core
+  src/state.cpp
+  src/blocks.cpp
+  src/block_tags.cpp
+  src/items.cpp
+  src/item_tags.cpp
+  src/item_use.cpp
+  src/random_tick.cpp
+  src/fluid.cpp
+  src/fluid_flow.cpp
+  src/light/optical.cpp
+  src/light/snapshot.cpp
+  src/light/common.cpp
+  src/light/block_light_engine.cpp
+  src/light/sky_light_engine.cpp
+  src/light/service.cpp
+  src/periodic_cleanup.cpp
+  src/dimension.cpp
+  src/poi.cpp
+  src/portal.cpp
+  src/server_worlds.cpp
+  src/tickets.cpp
+  src/heightmap.cpp
+  src/engine/types.cpp
+  src/engine/level_ticks.cpp
+  src/engine/chunk_storage.cpp
+  src/engine/block_updates.cpp
+  src/engine/random_tick_world.cpp
+  src/engine/block_behaviours.cpp
+  src/entity/entity_type_registry.cpp
+  src/entity/entity_data.cpp
+  src/entity/entity_base.cpp
+  src/entity/inside_block_effects.cpp
+  src/entity/simple_entities.cpp
+  src/entity/projectiles.cpp
+  src/entity/vehicles_boat.cpp
+  src/entity/decorative_entities.cpp
+  src/entity/living_entity.cpp
+  src/entity/armor_stand.cpp
+  src/entity/minecart.cpp
+  src/entity/player.cpp
+  src/entity/entity_codec_general.cpp
+  src/entity/world_entities.cpp
+  src/entity/explosion.cpp
+  src/rail.cpp
+  src/piston.cpp
+  src/containers.cpp
+  src/redstone/signal.cpp
+  src/redstone/wire.cpp
+  src/redstone/torch.cpp
+  src/redstone/diode.cpp
+  src/redstone/controls.cpp
+  src/redstone/consumers.cpp
+  src/shapes.cpp
+  src/nbt.cpp
+  src/storage.cpp
+  src/region.cpp
+  src/terrain_codec.cpp
+  src/entity_codec.cpp
+  src/chunk_lifecycle.cpp
+  src/world_chunk_manager/lifecycle.cpp
+  src/world_chunk_manager/residency_persistence.cpp
+  src/worldgen/chunk_status.cpp
+  src/worldgen/proto_chunk.cpp
+  src/worldgen/chunk_generator.cpp
+  src/worldgen/worldgen_scheduler.cpp
+  src/worldgen/random_source.cpp
+  src/worldgen/noise.cpp
+  src/worldgen/density_function.cpp
+  src/worldgen/noise_router.cpp
+  src/worldgen/climate.cpp
+  src/worldgen/biome_source.cpp
+  src/worldgen/aquifer.cpp
+  src/worldgen/noise_chunk.cpp
+  src/worldgen/surface_rules.cpp
+  src/worldgen/value_providers.cpp
+  src/worldgen/carver.cpp
+  src/worldgen/structure.cpp
+  src/worldgen/jigsaw.cpp
+  src/worldgen/feature.cpp
+  src/worldgen/feature_extra.cpp
+  src/worldgen/tree_feature.cpp
+  src/worldgen/noise_chunk_generator.cpp
+  src/litematic.cpp
+  src/command.cpp
+  vendor/lz4/lz4.c
+  vendor/lz4/xxhash.c)
 set_source_files_properties(src/light/optical.cpp PROPERTIES
   OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/light_metadata.inc;${CMAKE_CURRENT_SOURCE_DIR}/src/light_occlusion.inc")
+set_source_files_properties(src/items.cpp PROPERTIES
+  OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/redstone/items_decl.inc;${CMAKE_CURRENT_SOURCE_DIR}/src/items_registry.inc")
+set_source_files_properties(src/item_tags.cpp PROPERTIES
+  OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/item_tags.inc")
 target_include_directories(redstone_core PUBLIC include PRIVATE src vendor)
 target_include_directories(redstone_core PUBLIC vendor/lz4)
 target_link_libraries(redstone_core PUBLIC ZLIB::ZLIB Threads::Threads)
@@ -107,7 +197,12 @@ endif()
 include(CTest)
 option(REDSTONE_BUILD_VANILLA_SERVER "Build the optional protocol 775 native server" OFF)
 if(REDSTONE_BUILD_VANILLA_SERVER)
-  add_library(redstone_protocol src/net/wire.cpp src/net/session.cpp)
+  add_library(redstone_protocol
+    src/net/wire.cpp
+    src/net/session.cpp
+    src/net/session_interaction.cpp
+    src/net/session_tracking.cpp)
+  target_include_directories(redstone_protocol PRIVATE src)
   target_link_libraries(redstone_protocol PUBLIC redstone_core)
   if(MSVC)
     target_compile_options(redstone_protocol PRIVATE /W4 /utf-8)
@@ -126,7 +221,7 @@ if(REDSTONE_BUILD_VANILLA_SERVER)
     target_link_options(redstone_vanilla_server PRIVATE -municode)
   endif()
   if(BUILD_TESTING)
-    foreach(name wire protocol outbox light_protocol world_clock_protocol)
+    foreach(name wire protocol outbox light_protocol world_clock_protocol player_protocol)
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_protocol redstone_allocator)
       if(MSVC)
@@ -160,6 +255,8 @@ if(BUILD_TESTING)
     target_link_libraries(block_light_probe PRIVATE redstone_core redstone_allocator)
     add_executable(sky_light_probe tests/sky_light_probe.cpp)
     target_link_libraries(sky_light_probe PRIVATE redstone_core redstone_allocator)
+    add_executable(worldgen_differential_probe tests/worldgen_differential_probe.cpp)
+    target_link_libraries(worldgen_differential_probe PRIVATE redstone_core redstone_allocator)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
     add_test(NAME block_inventory COMMAND "${Python3_EXECUTABLE}"
@@ -226,7 +323,7 @@ if(BUILD_TESTING)
       --faces "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_light_faces.tsv"
       --faces-source "${CMAKE_CURRENT_SOURCE_DIR}/src/light_occlusion.inc")
   endif()
-  foreach(name dimension poi portal engine entity piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap tickets region terrain_codec entity_codec chunk_lifecycle world_chunk_manager world_clock redstone_components containers)
+  foreach(name dimension poi portal engine periodic_cleanup entity entity_core entity_stage2 living_entity player_entity item piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap tickets region terrain_codec entity_codec chunk_lifecycle world_chunk_manager world_clock worldgen_g0 worldgen_g1_noise worldgen_g1_router worldgen_g2_biome worldgen_g2_terrain worldgen_carver worldgen_g3_structures worldgen_g3_features worldgen_scheduler redstone_components containers item_registry item_use entity_movement entity_simple entity_vehicle entity_projectile entity_living entity_nbt)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_core redstone_allocator)
@@ -253,6 +350,31 @@ if(BUILD_TESTING)
       elseif(name STREQUAL "poi")
         add_test(NAME ${name} COMMAND ${name}_tests
                  "${CMAKE_CURRENT_BINARY_DIR}/poi-test-scratch")
+      elseif(name STREQUAL "worldgen_g0")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_BINARY_DIR}/worldgen-g0-test-scratch")
+      elseif(name STREQUAL "worldgen_g1_router")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/worldgen26_1")
+      elseif(name STREQUAL "worldgen_g2_biome")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/worldgen26_1"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/protocol775")
+      elseif(name STREQUAL "worldgen_g2_terrain")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/worldgen26_1")
+      elseif(name STREQUAL "worldgen_carver")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/worldgen26_1")
+      elseif(name STREQUAL "worldgen_g3_structures")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/worldgen26_1")
+      elseif(name STREQUAL "worldgen_g3_features")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/worldgen26_1")
+      elseif(name STREQUAL "worldgen_scheduler")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/worldgen26_1")
       else()
         add_test(NAME ${name} COMMAND ${name}_tests)
       endif()
@@ -289,5 +411,9 @@ if(BUILD_TESTING)
   if(TARGET redstone_protocol AND TARGET command_tests)
     target_link_libraries(command_tests PRIVATE redstone_protocol)
     target_compile_definitions(command_tests PRIVATE REDSTONE_HAVE_PROTOCOL=1)
+  endif()
+  if(TARGET redstone_protocol AND TARGET worldgen_g2_biome_tests)
+    target_link_libraries(worldgen_g2_biome_tests PRIVATE redstone_protocol)
+    target_compile_definitions(worldgen_g2_biome_tests PRIVATE REDSTONE_HAVE_PROTOCOL=1)
   endif()
 endif()

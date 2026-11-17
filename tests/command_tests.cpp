@@ -181,6 +181,32 @@ void tickRateCommands() {
   require(fixture.run(source, "tick sprint 1s") == 1, "sprint restarts");
   require(fixture.run(source, "tick freeze") == 1, "freeze cancels a sprint");
   require(!fixture.ticks.isSprinting(), "freeze stopped the sprint");
+
+  // Starting a sprint from an already-frozen tick loop must start on tick 1
+  // and execute the exact requested tick count (20 ticks for 1s) before
+  // restoring the prior frozen state.
+  (void)fixture.ticks.takeSprintReport();
+  fixture.ticks.tick();
+  require(!fixture.ticks.runsNormally(), "frozen tick sets runGameElements=false");
+  require(fixture.run(source, "tick sprint 1s") == 1,
+          "sprint from frozen succeeds");
+  int sprintTicksExecuted = 0;
+  for (int i = 0; i < 25; ++i) {
+    if (!fixture.ticks.isSprinting() ||
+        !fixture.ticks.checkShouldSprintThisTick())
+      break;
+    fixture.ticks.tick();
+    require(fixture.ticks.runsNormally(),
+            "sprint tick runs game elements normally");
+    fixture.ticks.endTickWork();
+    ++sprintTicksExecuted;
+  }
+  require(sprintTicksExecuted == 20,
+          "sprint from frozen runs exact scheduled tick count");
+  require(!fixture.ticks.isSprinting(), "sprint finishes after 20 ticks");
+  require(fixture.ticks.isFrozen(), "sprint restores prior frozen state");
+  require(fixture.ticks.takeSprintReport().has_value(),
+          "completed sprint from frozen emits report");
 }
 
 void suggestions() {
@@ -564,6 +590,7 @@ void commandTreeEncoding() {
     std::string name;
     int parser = -1;
     std::string parserData;
+    std::string suggestionId;
   };
   std::vector<Entry> entries;
   for (int i = 0; i < count; ++i) {
@@ -586,6 +613,8 @@ void commandTreeEncoding() {
         (void)reader.i32();
       }
       entry.parserData.assign(body.begin() + before, body.begin() + reader.pos);
+      if ((entry.flags & 16) != 0)
+        entry.suggestionId = reader.string();
     }
     entries.push_back(std::move(entry));
   }
@@ -606,9 +635,13 @@ void commandTreeEncoding() {
     if (entry.parser == 1) {
       sawFloat = true;
       require(entry.name == "rate", "the float argument is rate");
+      require(entry.suggestionId == "minecraft:ask_server",
+              "rate argument advertises minecraft:ask_server");
     } else if (entry.parser == 43) {
       sawTime = true;
       require(entry.name == "time", "the time argument is time");
+      require(entry.suggestionId == "minecraft:ask_server",
+              "time argument advertises minecraft:ask_server");
     }
   }
   require(sawFloat, "brigadier:float is exported for rate");
@@ -630,6 +663,7 @@ void timeCommandTreeEncoding() {
     std::string name;
     int parser = -1;
     std::string registry;
+    std::string suggestionId;
   };
   std::vector<Entry> entries;
   for (int i = 0; i < count; ++i) {
@@ -656,6 +690,8 @@ void timeCommandTreeEncoding() {
       } else {
         throw std::runtime_error("unexpected command parser id");
       }
+      if ((entry.flags & 16) != 0)
+        entry.suggestionId = reader.string();
     }
     entries.push_back(std::move(entry));
   }

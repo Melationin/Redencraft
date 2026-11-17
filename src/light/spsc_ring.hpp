@@ -1,5 +1,7 @@
 #pragma once
 
+// 单生产者单消费者（SPSC）无锁环形队列与引擎内部 FIFO 任务队列：用于主线程与光照工作线程间低开销无锁通信及单线程 BFS 传播排队。
+
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -10,6 +12,8 @@
 
 namespace redstone::light_internal {
 
+// 固定容量的单生产者单消费者（SPSC）无锁环形缓冲区。
+// 存在原因：用于无需动态扩容的轻量 SPSC 场景，以 `acquire`/`release` 内存序避免互斥锁开销。
 template <class T> class SpscRing {
 public:
   explicit SpscRing(std::size_t capacity)
@@ -65,10 +69,8 @@ private:
   std::atomic<std::uint64_t> tail_{0};
 };
 
-// SPSC circular ring buffer that automatically doubles its power-of-2
-// capacity (like std::vector) when full. Steady-state traffic wraps within the
-// active ring without further heap allocation, while the consumer drains any
-// older ring before releasing it.
+// 可自动倍增扩容的 SPSC 环形缓冲区。
+// 存在原因：热路径的方块更新、控制命令与快照发布都需要无锁投递且不能因突发流量丢包；当当前环满时像 `std::vector` 一样分配两倍大小的 2 的幂新环并串接在 `next` 指针后，稳态下在活动环内零堆分配复用，消费者彻底排空旧环后再释放之。
 template <class T> class GrowableSpscRing {
   struct Ring {
     explicit Ring(std::size_t capacity)
@@ -76,6 +78,7 @@ template <class T> class GrowableSpscRing {
           mask(slots.size() - 1) {}
     std::vector<T> slots;
     std::size_t mask;
+    // 将生产者指针、消费者指针及其缓存的对方游标隔离到不同缓存行，避免伪共享。
     alignas(64) std::atomic<std::size_t> head{0};
     std::size_t cachedTail = 0;
     std::atomic<Ring *> next{nullptr};
@@ -103,8 +106,7 @@ public:
     if (head - ring->cachedTail >= ring->slots.size()) {
       ring->cachedTail = ring->tail.load(std::memory_order_acquire);
       if (head - ring->cachedTail >= ring->slots.size()) {
-        // Exponential 2x capacity growth when the current circular ring is
-        // full.
+        // 当前环形缓冲区已满时，按 2 倍指数扩容并链接新环。
         Ring *next = new Ring(ring->slots.size() * 2);
         next->slots[0] = std::move(value);
         next->head.store(1, std::memory_order_relaxed);
@@ -116,9 +118,7 @@ public:
       }
     }
     ring->slots[head & ring->mask] = std::move(value);
-    // Publish the logical count before making the slot visible. A consumer
-    // that acquires head may already advance its tail, so incrementing the
-    // count afterwards could let consumed temporarily exceed published.
+    // 必须先发布逻辑计数再让槽位对消费者可见：一旦 `head` 可见，消费者即可消费并推进 `consumed_`，若后递增计数会导致短暂出现 `consumed > published`。
     published_.store(published_.load(std::memory_order_relaxed) + 1,
                      std::memory_order_release);
     ring->head.store(head + 1, std::memory_order_release);
@@ -137,10 +137,7 @@ public:
       Ring *next = ring->next.load(std::memory_order_acquire);
       if (!next)
         return nullptr;
-      // The prior head load may have raced with the producer filling the last
-      // slots before linking next. Once next is visible the producer has
-      // stopped writing this ring, so this acquire load is final. Never free a
-      // ring until that confirmed head equals our consumer tail.
+      // 前一次 `head` 读取可能与生产者填满最后几个槽位并挂接 `next` 的操作并发竞争；一旦观测到 `next` 非空，生产者已停止写入当前环，因此这次 `acquire` 读取得到的 `confirmedHead` 是最终值，在 `tail == confirmedHead` 之前绝不能提前释放当前环。
       const auto confirmedHead = ring->head.load(std::memory_order_acquire);
       if (tail != confirmedHead) {
         ring->cachedHead = confirmedHead;
@@ -167,9 +164,7 @@ public:
 
   bool empty() const { return size() == 0; }
   std::size_t size() const {
-    // Read the consumer first. published is incremented before head, so every
-    // consumed item has already been counted. The producer can still be
-    // between those stores, making this an upper bound until head is visible.
+    // 先读取消费者计数 `consumed_`：由于 `published_` 总是先于 `head` 递增，所有已消费元素必已被计入 `published_`；若生产者正处于两个 store 之间，返回值在 `head` 可见前至多略高估（上界）。
     const auto consumed = consumed_.load(std::memory_order_acquire);
     const auto published = published_.load(std::memory_order_acquire);
     return published >= consumed
@@ -184,14 +179,51 @@ private:
   std::atomic<std::uint64_t> published_{0};
 };
 
+// 单线程工作器内部使用的可扩容连续循环队列。
+// 存在原因：替代 `std::deque`（分段块分配且指针跳转多），为光照传播的增亮/减暗/检查 BFS 队列提供连续内存访问和跨批次复用的零重置 `clear()`。
 template <class T> class TaskQueue {
 public:
-  TaskQueue() : values_(1024), mask_(values_.size() - 1) {}
+  static constexpr std::size_t kMinCapacity = 1024;
+
+  TaskQueue() : values_(kMinCapacity), mask_(values_.size() - 1) {}
   bool empty() const { return head_ == tail_; }
+  std::size_t size() const noexcept { return tail_ - head_; }
+  std::size_t capacity() const noexcept { return values_.size(); }
+  std::size_t freeSlots() const noexcept { return values_.size() - size(); }
+  std::size_t capacityBytes() const noexcept {
+    return values_.capacity() * sizeof(T);
+  }
   const T &front() const { return values_[head_ & mask_]; }
   void clear() {
     head_ = 0;
     tail_ = 0;
+  }
+  // 当空闲槽位占比过高（已用 <= 1/4 容量且超过最小保留容量）时按 2 的幂收缩底层缓冲，释放历史峰值内存。
+  bool needsCompact(std::size_t minCapacity = kMinCapacity) const noexcept {
+    const std::size_t floorCap =
+        std::bit_ceil(std::max(kMinCapacity, minCapacity));
+    const std::size_t cap = values_.size();
+    return cap > floorCap && size() * 4 <= cap;
+  }
+  bool compact(std::size_t minCapacity = kMinCapacity) {
+    const std::size_t floorCap =
+        std::bit_ceil(std::max(kMinCapacity, minCapacity));
+    const std::size_t cap = values_.size();
+    const std::size_t count = size();
+    if (cap <= floorCap || count * 4 > cap)
+      return false;
+    const std::size_t targetCap = std::max(
+        floorCap, std::bit_ceil(std::max<std::size_t>(1, count * 2)));
+    if (targetCap >= cap)
+      return false;
+    std::vector<T> shrunk(targetCap);
+    for (std::size_t i = 0; i < count; ++i)
+      shrunk[i] = std::move(values_[(head_ + i) & mask_]);
+    values_.swap(shrunk);
+    mask_ = values_.size() - 1;
+    head_ = 0;
+    tail_ = count;
+    return true;
   }
   void push(T value) {
     if (tail_ - head_ == values_.size()) {
