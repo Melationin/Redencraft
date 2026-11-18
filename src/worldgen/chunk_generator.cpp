@@ -32,23 +32,6 @@ PersistedChunkLight extractPersistedLight(const ProtoChunk &proto) {
   return persisted;
 }
 
-// deferCompute 为真时只注册几何与空壳，区块停在“未计算”，由 Light 阶段
-// 的 requestChunkCompute() 触发首次计算。
-std::uint64_t submitProtoChunkToLight(const ProtoChunk &proto, LightService &ls,
-                                      bool deferCompute = false) {
-  const auto optical = ls.opticalTable();
-  if (!optical)
-    return 0;
-  // 统一光照入口：World::Chunk 与 ProtoChunk 共用同一个 BaseChunk 构建器。
-  std::optional<PersistedChunkLight> persisted;
-  if (proto.isLightCorrect())
-    persisted = extractPersistedLight(proto);
-  LightChunkInput input = buildLightChunkInput(
-      proto, *optical, std::move(persisted), /*directGeometry=*/false,
-      deferCompute && !proto.isLightCorrect());
-  return ls.submitChunk(std::move(input));
-}
-
 void copySnapshotLayerToOptional(const LightSectionSnapshot *secSnap,
                                  LightLayer layer, LightLayerStorage &out) {
   if (!secSnap) {
@@ -173,19 +156,13 @@ int WorldGenRegion::getHeight(HeightmapType type, int x, int z) const {
   return getChunk(x >> 4, z >> 4, ChunkStatusId::Empty).getHeight(type, x, z);
 }
 
-ChunkGenerationPipeline::ChunkGenerationPipeline(ChunkGenerator &generator,
-                                                 std::int64_t worldSeed,
-                                                 RawChunkStore *diskStore,
-                                                 World *residentWorld,
-                                                 LightService *lightService)
+ChunkGenerationPipeline::ChunkGenerationPipeline(
+    ChunkGenerator &generator, std::int64_t worldSeed, RawChunkStore *diskStore,
+    World *residentWorld, std::shared_ptr<LightOpticalContext> lightContext,
+    GeneratedLightQueue *lightQueue)
     : generator_(generator), worldSeed_(worldSeed), diskStore_(diskStore),
-      residentWorld_(residentWorld), lightService_(lightService) {}
-
-LightService *ChunkGenerationPipeline::activeLightService() const noexcept {
-  if (lightService_ != nullptr)
-    return lightService_;
-  return residentWorld_ != nullptr ? residentWorld_->lightService() : nullptr;
-}
+      residentWorld_(residentWorld), lightContext_(std::move(lightContext)),
+      lightQueue_(lightQueue) {}
 
 ChunkAccess *ChunkGenerationPipeline::findChunk(ChunkTicketPos pos) const {
   auto it = chunks_.find(pos);
@@ -309,7 +286,7 @@ void ChunkGenerationPipeline::advanceOneStep(ChunkTicketPos pos,
     WorldGenRegion region(step, chunk, std::move(squareCache), radius,
                           worldSeed_);
     executeChunkGenerationStep(generator_, region, *proto, step.targetStatus(),
-                               worldSeed_, activeLightService());
+                               worldSeed_, lightContext_.get(), lightQueue_);
   }
   ++stats_.stepsExecuted;
 }
@@ -317,7 +294,8 @@ void ChunkGenerationPipeline::advanceOneStep(ChunkTicketPos pos,
 void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &region,
                                 ProtoChunk &proto, ChunkStatusId targetStatus,
                                 std::int64_t worldSeed,
-                                LightService *lightService) {
+                                LightOpticalContext *lightContext,
+                                GeneratedLightQueue *lightQueue) {
   const ChunkTicketPos pos = proto.pos();
   switch (targetStatus) {
   case ChunkStatusId::Empty:
@@ -355,20 +333,30 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
   case ChunkStatusId::InitializeLight:
     proto.primeHeightmaps(ChunkStatus::initializeLight().heightmapsAfter());
     proto.flushDirtyHeightmaps();
-    if (lightService != nullptr) {
-      proto.setLightSubmissionGeneration(submitProtoChunkToLight(
-          proto, *lightService, /*deferCompute=*/true));
+    if (lightQueue != nullptr && lightContext != nullptr) {
+      if (const auto optical = lightContext->get()) {
+        // 生成 worker 只构造纯值输入；真正的 submitChunk 由主线程 pump 完成。
+        GeneratedLightWork work;
+        work.position = pos;
+        work.input = buildLightChunkInput(
+            proto, *optical,
+            proto.isLightCorrect()
+                ? std::optional<PersistedChunkLight>(extractPersistedLight(proto))
+                : std::nullopt,
+            /*directGeometry=*/false, /*deferCompute=*/!proto.isLightCorrect());
+        lightQueue->push(std::move(work));
+      }
     }
     break;
   case ChunkStatusId::Light:
     // 不等待：只登记首次计算请求，区块带着“未计算”直接进入 Spawn/Full。
     // 光照由引擎异步发布，需要数据的消费方（存档、协议、查询）自己按
     // isChunkSettled()/latestLayerChunk() 取，绝不在生成流水线里做全局屏障。
-    if (lightService != nullptr) {
-      const std::uint64_t request =
-          lightService->requestChunkCompute(pos.x, pos.z);
-      if (request != 0)
-        proto.setLightSubmissionGeneration(request);
+    if (lightQueue != nullptr) {
+      GeneratedLightWork work;
+      work.position = pos;
+      work.compute = true;
+      lightQueue->push(std::move(work));
     }
     proto.setLightCorrect(false);
     break;

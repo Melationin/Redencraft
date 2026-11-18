@@ -182,15 +182,14 @@ private:
   std::array<std::deque<ReadyEntry>, kTotalBuckets> buckets_;
 };
 
-WorldGenScheduler::WorldGenScheduler(ChunkGenerator &generator,
-                                     std::int64_t worldSeed,
-                                     RawChunkStore *diskStore,
-                                     World *residentWorld,
-                                     LightService *lightService,
-                                     WorldGenSchedulerConfig config)
+WorldGenScheduler::WorldGenScheduler(
+    ChunkGenerator &generator, std::int64_t worldSeed, RawChunkStore *diskStore,
+    World *residentWorld, std::shared_ptr<LightOpticalContext> lightContext,
+    GeneratedLightQueue *lightQueue, WorldGenSchedulerConfig config)
     : generator_(generator), worldSeed_(worldSeed), diskStore_(diskStore),
-      residentWorld_(residentWorld), lightService_(lightService),
-      config_(config), shards_(std::make_unique<HolderShard[]>(kShardCount)),
+      residentWorld_(residentWorld), lightContext_(std::move(lightContext)),
+      lightQueue_(lightQueue), config_(config),
+      shards_(std::make_unique<HolderShard[]>(kShardCount)),
       parallelQueue_(std::make_unique<PriorityBucketQueue>()),
       coloredQueues_(std::make_unique<PriorityBucketQueue[]>(9)) {
   if (config_.threadCount == 0) {
@@ -213,12 +212,6 @@ WorldGenScheduler::~WorldGenScheduler() {
     if (t.joinable())
       t.join();
   }
-}
-
-LightService *WorldGenScheduler::activeLightService() const noexcept {
-  if (lightService_ != nullptr)
-    return lightService_;
-  return residentWorld_ ? residentWorld_->lightService() : nullptr;
 }
 
 std::shared_ptr<WorldGenScheduler::ChunkHolder>
@@ -785,16 +778,9 @@ void WorldGenScheduler::runSingleStage(ChunkHolder &holder,
   WorldGenRegion region(step, *holder.chunk, std::move(squareCache), radius,
                         worldSeed_);
 
-  LightService *ls = activeLightService();
-  if (ls != nullptr && (nextStage == ChunkStatusId::InitializeLight ||
-                        nextStage == ChunkStatusId::Light)) {
-    std::lock_guard<std::mutex> llock(lightMutex_);
-    executeChunkGenerationStep(generator_, region, *proto, nextStage,
-                               worldSeed_, ls);
-  } else {
-    executeChunkGenerationStep(generator_, region, *proto, nextStage,
-                               worldSeed_, nullptr);
-  }
+  // 光照阶段只把纯值工作投递给主线程；生成 worker 绝不直接调用 LightService。
+  executeChunkGenerationStep(generator_, region, *proto, nextStage, worldSeed_,
+                             lightContext_.get(), lightQueue_);
 
   if (nextStage == ChunkStatusId::Features && !holder.cachedR8View.empty()) {
     std::vector<ChunkAccess *>{}.swap(holder.cachedR8View);
@@ -895,7 +881,8 @@ bool WorldGenScheduler::generateAndInstallIntoWorld(ChunkTicketPos pos,
 }
 
 std::size_t WorldGenScheduler::evictIdleOutsideRadius(
-    std::span<const ChunkTicketPos> keepCenters, int keepRadius) {
+    std::span<const ChunkTicketPos> keepCenters, int keepRadius,
+    std::vector<ChunkTicketPos> *evictedOut) {
   std::size_t evicted = 0;
   for (std::size_t s = 0; s < kShardCount; ++s) {
     HolderShard &shard = shards_[s];
@@ -918,6 +905,8 @@ std::size_t WorldGenScheduler::evictIdleOutsideRadius(
         }
       }
       if (canEvict) {
+        if (evictedOut != nullptr)
+          evictedOut->push_back(h.pos);
         it = shard.map.erase(it);
         ++evicted;
       } else {

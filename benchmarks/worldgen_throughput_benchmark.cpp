@@ -7,6 +7,7 @@
 #include "redstone/worldgen.hpp"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <sys/resource.h>
 #include <vector>
 
@@ -217,9 +219,14 @@ int main(int argc, char **argv) {
         world->enableLighting(lightOptions);
       }
     }
-    LightService *lightService = withLight ? world->lightService() : nullptr;
-    WorldGenScheduler scheduler(*generator, seed, nullptr, nullptr, lightService,
-                                config);
+    std::shared_ptr<LightOpticalContext> lightContext;
+    if (withLight) {
+      lightContext = std::make_shared<LightOpticalContext>();
+      lightContext->set(world->lightService()->opticalTable());
+    }
+    GeneratedLightQueue lightQueue;
+    WorldGenScheduler scheduler(*generator, seed, nullptr, nullptr, lightContext,
+                                withLight ? &lightQueue : nullptr, config);
 
     std::vector<ChunkBatchRequest> requests;
     requests.reserve(static_cast<std::size_t>(size) * size);
@@ -230,11 +237,37 @@ int main(int argc, char **argv) {
             ChunkBatchRequest{ChunkTicketPos{x, z}, ChunkStatusId::Full});
     }
 
+    // 生成期光照由单线程 pump 提交：批处理调用会阻塞主线程，这里单独起投递线程，
+    // 保持“生成 worker 只构造输入、LightService 只被一个线程提交”的契约。
+    std::atomic<bool> lightPumpRunning{true};
+    std::thread lightPump;
+    auto drainLightQueue = [&]() {
+      for (GeneratedLightWork &work : lightQueue.drain()) {
+        if (work.compute)
+          world->requestGeneratedChunkLightCompute(work.position.x,
+                                                   work.position.z);
+        else
+          world->submitGeneratedChunkLight(std::move(work.input));
+      }
+    };
+    if (withLight) {
+      lightPump = std::thread([&]() {
+        while (lightPumpRunning.load(std::memory_order_relaxed)) {
+          drainLightQueue();
+          std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+      });
+    }
     const auto wallStart = std::chrono::steady_clock::now();
     const double cpuStart = processCpuSeconds();
     scheduler.ensureStatusBatch(requests, ChunkTicketPos{0, 0});
     const double cpuEnd = processCpuSeconds();
     const auto wallEnd = std::chrono::steady_clock::now();
+    lightPumpRunning.store(false, std::memory_order_relaxed);
+    if (lightPump.joinable())
+      lightPump.join();
+    if (withLight)
+      drainLightQueue();
 
     std::size_t resident = 0;
     for (const ChunkBatchRequest &request : requests) {

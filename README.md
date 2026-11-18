@@ -12,7 +12,7 @@
 | 模块 | 当前已实现边界 | 尚未完成（目标阶段） |
 |---|---|---|
 | **世界与维度** | 支持 26.1 维度类型注册与 `world_gen_settings.dat` / `dimensions/<ns>/<path>` 解析（`D-1`）、`ServerWorldSet` 同服多维度与共享时钟推进、维度 `waterEvaporates` / `fastLava`（`D-2`），以及 `--dimension` 选择目标维度 | 维度传送门切换触发与跨维位置换算（`D-3`）；世界生成（`G-1 ~ G-4`） |
-| **区块加载与存档** | `redstone_cli` 与 `--world` / `--schematic` 为只读导入；`redstone_vanilla_server --ticketed-world <dir>` 支持基于加载票的异步加载/卸载与 Anvil 写回（26.1 FULL 区块、计划刻、移动活塞、简单实体、`level.dat` `Time`、内置 `world_clocks` 与持久票）；启用 `--worldgen <assets/worldgen26_1>` 时缺失区块按加载票等级在线生成（WorldGenScheduler 并行，FULL 安装进 `World`，34..44 仅推进生成缓存），生成区块由专用 I/O 线程写回 Anvil | 生成器邻居视图只读磁盘（未落盘的运行时修改不可见）；已注册但尚未实现模拟的方块作为惰性状态保存，未注册/损坏数据仍拒绝；生成期方块实体、初始生物与生成期光照尚未接入 |
+| **区块加载与存档** | `redstone_cli` 与 `--world` / `--schematic` 为只读导入；`redstone_vanilla_server --ticketed-world <dir>` 支持基于加载票的异步加载/卸载与 Anvil 写回（26.1 FULL 区块、计划刻、移动活塞、简单实体、`level.dat` `Time`、内置 `world_clocks` 与持久票）；启用 `--worldgen <assets/worldgen26_1>` 时缺失区块按加载票等级在线生成（WorldGenScheduler 并行，FULL 安装进 `World`，34..44 仅推进生成缓存），生成区块由专用 I/O 线程写回 Anvil | 生成器邻居视图只读磁盘（未落盘的运行时修改不可见）；已注册但尚未实现模拟的方块作为惰性状态保存，未注册/损坏数据仍拒绝；生成期方块实体与初始生物尚未接入；生成期光照已在 `InitializeLight`/`Light` 阶段提交（生成 worker 投递、主线程泵提交，安装时接管登记） |
 | **方块、红石与刻顺序** | 按 `ServerLevel.tick` 阶段分离推进；`NeighborUpdater` / `CollectingNeighborUpdater`、`updateShape`、`neighborChanged`、方块/流体计划刻、方块事件、方块实体（移动活塞等）、容器、随机刻、26.1 方块标签与 16 色羊毛地毯 | 原版全部方块/实验性红石规则持续补齐中，进度见 [BLOCK_TODO.md](BLOCK_TODO.md) |
 | **流体** | 水与岩浆状态、传播/坡度/反应、含水宿主与 `fluid_ticks` 调度（[流体文档](docs/fluid-testing.md)） | 桶交互、实体推流及与真服逐刻全量差分（`F-9a / F-9b`） |
 | **光照** | 双光层（BlockLight + SkyLight）独立 4-bit 压缩快照、后台 worker + SPSC 无锁交接、Anvil 光照读写及协议 775 初始/增量发送（[光照文档](docs/light-engine.md)） | 独立多维度下的逐维度光学实例与全量真服差分 |

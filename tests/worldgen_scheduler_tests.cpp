@@ -58,7 +58,8 @@ void testParityWithSingleThreadCarvers(const WorldgenRegistries &reg) {
   NoiseBasedChunkGenerator mtGen(reg, *owSettings, owBiomes);
   WorldGenSchedulerConfig cfg;
   cfg.threadCount = 8;
-  WorldGenScheduler sched(mtGen, kSeed, nullptr, nullptr, nullptr, cfg);
+  WorldGenScheduler sched(mtGen, kSeed, nullptr, nullptr, nullptr, nullptr,
+                          cfg);
 
   const std::vector<ChunkTicketPos> coords = {
       {0, 0}, {1, 0}, {0, 1}, {1, 1}, {3, -2}, {-6, 1},
@@ -91,7 +92,7 @@ void testClusteredBatchFullAndEviction(const WorldgenRegistries &reg) {
 
   WorldGenSchedulerConfig cfg;
   cfg.threadCount = 8;
-  WorldGenScheduler sched(gen, kSeed, nullptr, nullptr, nullptr, cfg);
+  WorldGenScheduler sched(gen, kSeed, nullptr, nullptr, nullptr, nullptr, cfg);
 
   // Simulate fast player movement submitting a clustered 3x3 grid of FULL targets,
   // first upgrading center to Biomes, then pushing full 3x3 to FULL incrementally.
@@ -148,7 +149,11 @@ void testClusteredLightService(const WorldgenRegistries &reg) {
 
   WorldGenSchedulerConfig cfg;
   cfg.threadCount = 4;
-  WorldGenScheduler sched(gen, kSeed, nullptr, &world, nullptr, cfg);
+  auto lightContext = std::make_shared<LightOpticalContext>();
+  lightContext->set(world.lightService()->opticalTable());
+  GeneratedLightQueue lightQueue;
+  WorldGenScheduler sched(gen, kSeed, nullptr, &world, lightContext, &lightQueue,
+                          cfg);
 
   std::vector<ChunkBatchRequest> batch = {
       {{0, 0}, ChunkStatusId::Full},
@@ -157,6 +162,16 @@ void testClusteredLightService(const WorldgenRegistries &reg) {
       {{1, 1}, ChunkStatusId::Full},
   };
   sched.ensureStatusBatch(batch, {0, 0});
+  // 生成 worker 只投递纯值光照输入；LightService 的提交契约要求在主线程执行。
+  assert(lightQueue.size() > 0);
+  for (GeneratedLightWork &work : lightQueue.drain()) {
+    if (work.compute) {
+      assert(world.requestGeneratedChunkLightCompute(work.position.x,
+                                                     work.position.z) != 0);
+    } else {
+      assert(world.submitGeneratedChunkLight(std::move(work.input)) != 0);
+    }
+  }
   for (const auto &req : batch) {
     ChunkAccess *c = sched.findChunk(req.pos);
     assert(c != nullptr);

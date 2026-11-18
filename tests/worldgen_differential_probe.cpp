@@ -309,7 +309,7 @@ int main(int argc, char **argv) {
         WorldGenSchedulerConfig cfg;
         cfg.threadCount = threadCount;
         st.sched = std::make_unique<WorldGenScheduler>(
-            *st.gen, seed, nullptr, nullptr, nullptr, cfg);
+            *st.gen, seed, nullptr, nullptr, nullptr, nullptr, cfg);
         it = schedulers.emplace(key, std::move(st)).first;
       }
       return it->second;

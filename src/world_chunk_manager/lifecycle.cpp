@@ -335,12 +335,60 @@ void WorldChunkManager::applyTicketUpdate(const TicketSystemUpdate &update) {
   pump();
 }
 
+void WorldChunkManager::pumpGeneratedLightWork() {
+  if (!generatedLightQueue_)
+    return;
+  LightService *light = world_.lightingEnabled() ? world_.lightService() : nullptr;
+  if (generatedLightContext_)
+    generatedLightContext_->set(light ? light->opticalTable() : nullptr);
+  std::vector<worldgen::GeneratedLightWork> works =
+      generatedLightQueue_->drain();
+  if (light == nullptr) {
+    // 未启用光照：这类世界本就不该产生光照工作，丢弃即可（不留下半套登记）。
+    generatedLightRequests_.clear();
+    return;
+  }
+  for (worldgen::GeneratedLightWork &work : works) {
+    if (work.compute) {
+      const std::uint64_t generation = world_.requestGeneratedChunkLightCompute(
+          work.position.x, work.position.z);
+      if (generation != 0)
+        generatedLightRequests_[work.position].compute = generation;
+    } else {
+      const std::uint64_t generation =
+          world_.submitGeneratedChunkLight(std::move(work.input));
+      if (generation != 0)
+        generatedLightRequests_[work.position].submit = generation;
+    }
+  }
+}
+
+void WorldChunkManager::unloadEvictedGeneratedLight() {
+  std::vector<ChunkTicketPos> evicted;
+  {
+    std::lock_guard lock(generationMutex_);
+    if (evictedGeneratedChunks_.empty())
+      return;
+    evicted.swap(evictedGeneratedChunks_);
+  }
+  LightService *light = world_.lightService();
+  for (const ChunkTicketPos &position : evicted) {
+    generatedLightRequests_.erase(position);
+    if (light != nullptr)
+      light->unloadChunk(position.x, position.z);
+  }
+}
+
 void WorldChunkManager::pump() {
   world_.drainLightPublications();
   if (!accepting())
     return;
   observeTickTime();
   publishGenerationKeepCenters();
+  // 先注销被裁剪区块的光照登记，再提交新的生成期输入：同一坐标若“先裁后重用”，
+  // 晚到的 unload 不能把新一代的登记抹掉。
+  unloadEvictedGeneratedLight();
+  pumpGeneratedLightWork();
   processCompletedGeneration();
   controller_->drain();
   processSaveCompletions();
@@ -1142,6 +1190,10 @@ ChunkShutdownResult WorldChunkManager::close() {
 void WorldChunkManager::startGenerationThread() {
   if (!generator_ || generationThread_.joinable())
     return;
+  if (!generatedLightQueue_)
+    generatedLightQueue_ = std::make_shared<worldgen::GeneratedLightQueue>();
+  if (!generatedLightContext_)
+    generatedLightContext_ = std::make_shared<worldgen::LightOpticalContext>();
   // 并行调度器惰性创建在生成线程上（首个批次），避免无生成需求时也起线程池。
   {
     std::lock_guard lock(generationMutex_);
@@ -1161,11 +1213,17 @@ void WorldChunkManager::stopGenerationThread() {
   if (generationThread_.joinable())
     generationThread_.join();
   generationScheduler_.reset();
+  if (generatedLightQueue_)
+    generatedLightQueue_->clear();
+  if (generatedLightContext_)
+    generatedLightContext_->set(nullptr);
+  generatedLightRequests_.clear();
   std::lock_guard lock(generationMutex_);
   residencyGenerationJobs_.clear();
   bufferGenerationJobs_.clear();
   residencyGenerationQueued_.clear();
   completedGeneration_.clear();
+  evictedGeneratedChunks_.clear();
 }
 
 bool WorldChunkManager::requestChunkGeneration(
@@ -1283,9 +1341,11 @@ void WorldChunkManager::generationLoop() {
         threads = static_cast<int>(std::clamp<unsigned>(hc / 2u, 1u, 8u));
       }
       config.threadCount = static_cast<std::size_t>(threads);
+      // 生成期光照：worker 只构造输入投递，主线程 pump 负责真正提交。
       generationScheduler_ = std::make_unique<worldgen::WorldGenScheduler>(
           *generator_, static_cast<std::int64_t>(world_.seed),
-          generationStore_.get(), nullptr, nullptr, config);
+          generationStore_.get(), /*residentWorld=*/nullptr,
+          generatedLightContext_, generatedLightQueue_.get(), config);
     }
 
     std::map<ChunkTicketPos, worldgen::ChunkStatusId> targets;
@@ -1365,8 +1425,15 @@ void WorldChunkManager::generationLoop() {
     if (batchesSinceTrim >= 4 ||
         generationTrimRequested_.exchange(false, std::memory_order_acq_rel)) {
       batchesSinceTrim = 0;
-      const std::size_t evicted =
-          generationScheduler_->evictIdleOutsideRadius(centers, keepRadius);
+      std::vector<ChunkTicketPos> evictedChunks;
+      const std::size_t evicted = generationScheduler_->evictIdleOutsideRadius(
+          centers, keepRadius, &evictedChunks);
+      {
+        std::lock_guard lock(generationMutex_);
+        evictedGeneratedChunks_.insert(evictedGeneratedChunks_.end(),
+                                       evictedChunks.begin(),
+                                       evictedChunks.end());
+      }
       std::lock_guard lock(generationMutex_);
       generationStats_.cachedChunks = generationScheduler_->heldChunkCount();
       generationStats_.evicted += evicted;
@@ -1392,12 +1459,25 @@ void WorldChunkManager::processCompletedGeneration() {
                                       result.detail);
       continue;
     }
+    // 生成期光照：把主线程 pump 得到的请求序号带进安装载荷，安装时据此跳过重传。
+    if (auto found = generatedLightRequests_.find(result.position);
+        found != generatedLightRequests_.end()) {
+      result.loaded.lightSubmissionGeneration = found->second.submit;
+      result.loaded.lightComputeGeneration = found->second.compute;
+    }
     if (!controller_->completeGeneratedChunk(
             result.position, result.epoch, std::move(result.loaded),
             std::move(result.root))) {
       errors_[result.position] =
           "generated chunk arrived after its demand was retired";
+      // 迟到的结果不会再安装：撤销光照引擎里的生成期登记，避免无主区块常驻。
+      if (generatedLightRequests_.erase(result.position) != 0) {
+        if (LightService *light = world_.lightService())
+          light->unloadChunk(result.position.x, result.position.z);
+      }
+      continue;
     }
+    generatedLightRequests_.erase(result.position);
   }
 }
 

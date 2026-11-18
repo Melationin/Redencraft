@@ -318,11 +318,28 @@ void testPipelineWithLightService() {
   world.enableLighting(opts);
 
   TestTerrainGenerator gen;
-  ChunkGenerationPipeline pipe(gen, 123456789LL, nullptr, &world);
+  auto lightContext = std::make_shared<LightOpticalContext>();
+  lightContext->set(world.lightService()->opticalTable());
+  GeneratedLightQueue lightQueue;
+  ChunkGenerationPipeline pipe(gen, 123456789LL, nullptr, &world, lightContext,
+                               &lightQueue);
   ChunkAccess &litChunk = pipe.ensureStatus({0, 0}, ChunkStatusId::Light);
   // Light 阶段不再等待：区块带着“未计算”返回，光照由引擎异步完成。
   require(!litChunk.isLightCorrect(),
           "ChunkStatusId::Light must not claim the light is complete");
+
+  // 生成期只投递纯值输入；LightService 的提交在主线程 pump 里完成。
+  require(lightQueue.size() > 0, "pipeline queued generation-time light work");
+  for (GeneratedLightWork &work : lightQueue.drain()) {
+    if (work.compute) {
+      require(world.requestGeneratedChunkLightCompute(work.position.x,
+                                                      work.position.z) != 0,
+              "compute request accepted");
+    } else {
+      require(world.submitGeneratedChunkLight(std::move(work.input)) != 0,
+              "geometry submission accepted");
+    }
+  }
 
   auto *proto = dynamic_cast<ProtoChunk *>(&litChunk);
   require(proto != nullptr, "chunk before Full must be ProtoChunk");

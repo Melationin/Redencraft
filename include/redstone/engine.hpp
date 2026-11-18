@@ -4,6 +4,7 @@
 // 方块事件、活塞与容器方块实体、随机刻）、实体空间查询与按轴滑移碰撞/单遍推挤，以及光照和托管生命周期观测钩子。
 #include "redstone/chunk_section.hpp"
 #include "redstone/engine_types.hpp"
+#include "redstone/light/chunk_input.hpp"
 #include "redstone/periodic_cleanup.hpp"
 #include <bit>
 #include <type_traits>
@@ -135,6 +136,12 @@ public:
   // 受管安装必须让两者等于生成/读取请求的代次（Proto -> World 不换代）。
   std::uint64_t chunkLoadEpochForTest(int x, int z) const;
   std::uint64_t chunkLightEpochForTest(int x, int z) const;
+  // 测试可见：生成期光照请求序号（0 = 安装时由 World 自行登记）。
+  std::uint64_t chunkRequiredLightGenerationForTest(int x, int z) const;
+  // 测试可见：安装时接管生成期光照登记（而不是重新提交几何）的次数。
+  std::uint64_t generatedLightAdoptionCountForTest() const {
+    return generatedLightAdoptions_;
+  }
   bool isLoaded(Pos pos) const;
   // 显式有序的数据包列表，按优先级从低到高排列。仅在全部新定义构建完成后才原子替换当前世界的标签快照。
   BlockTagRegistry::ReloadResult reloadBlockTags(const std::vector<std::filesystem::path> &packs);
@@ -174,6 +181,10 @@ public:
   // 不能用 refreshLightSnapshots()（后者会重投所有已加载区块，令 N 个区块的
   // 导入退化为 O(N^2) 次提交）。
   void reloadChunkLight(int x, int z);
+  // 生成期光照交接（主线程）：生成 worker 只构造输入并投递，由这里真正提交给光照引擎。
+  // 返回请求序号（0 = 未开启光照 / 服务已关闭），安装时据此跳过重复提交。
+  std::uint64_t submitGeneratedChunkLight(LightChunkInput input);
+  std::uint64_t requestGeneratedChunkLightCompute(int x, int z);
   void setChunkPersistedLight(int x, int z, PersistedChunkLight persisted);
   // 按维度独立的兴趣点索引（对应原版 `PoiManager` / `PoiSection`）。
   PoiStorage &pois() { return *poiStorage_; }
@@ -759,6 +770,8 @@ private:
   // 在方块计划刻之后、区块随机刻之前收集并执行。
   std::unique_ptr<FluidTickQueue> fluidTickQueue_;
   std::unique_ptr<LightService> lightService_;
+  // 生成期光照接管次数（安装路径诊断/测试可见）。
+  std::uint64_t generatedLightAdoptions_ = 0;
   struct CleanupRegistryHandle {
     std::shared_ptr<PeriodicCleanupManager> manager;
     bool autoAdvance = true;

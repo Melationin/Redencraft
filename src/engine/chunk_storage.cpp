@@ -178,6 +178,11 @@ std::uint64_t World::chunkLightEpochForTest(int x, int z) const {
   return chunk ? chunk->lightLifecycleEpoch : 0;
 }
 
+std::uint64_t World::chunkRequiredLightGenerationForTest(int x, int z) const {
+  const Chunk *chunk = chunkAt(x, z);
+  return chunk ? chunk->requiredLightGeneration : 0;
+}
+
 World::Chunk *World::chunkAt(int x, int z) {
   return const_cast<Chunk *>(chunkAtCached(x, z));
 }
@@ -266,7 +271,15 @@ bool World::installManagedChunk(
       entities.push_back(entity);
       entitySectionAdd(*entity);
     }
-    loadChunk(x, z, /*registerLight=*/true, loadEpoch);
+    // 生成期已由主线程提交过光照几何与首次计算请求：直接接管，不再整份重传，
+    // 只把光照生命周期代次对齐到引擎那一代（与 installProtoChunkIntoWorld 同语义）。
+    const bool lightAlreadySubmitted =
+        insertedIt->second.requiredLightGeneration != 0 && lightService_;
+    loadChunk(x, z, /*registerLight=*/!lightAlreadySubmitted, loadEpoch);
+    if (lightAlreadySubmitted) {
+      ++generatedLightAdoptions_;
+      alignChunkLightLifecycle(x, z);
+    }
     reconcilePoiFromChunk(x, z, insertedIt->second);
   } catch (...) {
     std::vector<std::shared_ptr<Entity>> insertedEntities;
@@ -728,6 +741,18 @@ void World::reloadChunkLight(int x, int z) {
           std::max(chunk->requiredLightGeneration, seq);
     chunk->persistedLight.reset();
   }
+}
+
+std::uint64_t World::submitGeneratedChunkLight(LightChunkInput input) {
+  if (!lightService_)
+    return 0;
+  return lightService_->submitChunk(std::move(input));
+}
+
+std::uint64_t World::requestGeneratedChunkLightCompute(int x, int z) {
+  if (!lightService_)
+    return 0;
+  return lightService_->requestChunkCompute(x, z);
 }
 
 void World::refreshLightSnapshots() {

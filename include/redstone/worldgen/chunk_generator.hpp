@@ -6,13 +6,16 @@
 // 防止越界写入引发数据竞争或依赖死锁，同时保持与 26.1 `ChunkStatusTasks` 完全一致的阶段推进契约。
 
 #include "redstone/chunk_lifecycle.hpp"
+#include "redstone/light/chunk_input.hpp"
 #include "redstone/worldgen/chunk_status.hpp"
 #include "redstone/worldgen/proto_chunk.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -23,6 +26,65 @@ class World;
 } // namespace redstone
 
 namespace redstone::worldgen {
+
+// 生成期光照工作项（对齐 26.1 `InitializeLight` 注册几何 → `Light` 请求首次计算的两段式交接）。
+// 存在原因：`LightService::submitChunk` / `requestChunkCompute` 只在主线程调用，而生成本身跑在
+// 并行 worker 上。worker 因此只构造纯值的 `LightChunkInput` 投递到队列，由主线程 pump 真正提交，
+// 既不破坏生成并行度，也不把光照引擎的线程契约扩散到生成代码里。
+struct GeneratedLightWork {
+  ChunkTicketPos position;
+  // false = InitializeLight 阶段注册几何（停在“未计算”）；true = Light 阶段请求首次计算。
+  bool compute = false;
+  LightChunkInput input;
+};
+
+// 生成 worker → 主线程的单向投递队列：互斥保护、不阻塞、不参与生成依赖图。
+class GeneratedLightQueue {
+public:
+  void push(GeneratedLightWork work) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    items_.push_back(std::move(work));
+  }
+  std::vector<GeneratedLightWork> drain() {
+    std::vector<GeneratedLightWork> out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    out.reserve(items_.size());
+    for (GeneratedLightWork &item : items_)
+      out.push_back(std::move(item));
+    items_.clear();
+    return out;
+  }
+  std::size_t size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return items_.size();
+  }
+  void clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    items_.clear();
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::deque<GeneratedLightWork> items_;
+};
+
+// 生成 worker 与主线程共享的光学查找表句柄。光照服务可能在生成线程启动后才启用
+// （`World::enableLighting`），因此用互斥保护而不是在调度器构造时固化一份指针。
+class LightOpticalContext {
+public:
+  std::shared_ptr<const LightOpticalTable> get() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return optical_;
+  }
+  void set(std::shared_ptr<const LightOpticalTable> optical) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    optical_ = std::move(optical);
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::shared_ptr<const LightOpticalTable> optical_;
+};
 
 // 对齐原版 26.1 `WorldGenRegion.java`：向单个生成步骤暴露中心区块及有限邻域切片。
 // 所有跨区块读写均受 `ChunkStep::directDependencies()` 与 `ChunkStep::blockStateWriteRadius()` 门控。
@@ -135,7 +197,8 @@ public:
   ChunkGenerationPipeline(ChunkGenerator &generator, std::int64_t worldSeed,
                           RawChunkStore *diskStore = nullptr,
                           World *residentWorld = nullptr,
-                          LightService *lightService = nullptr);
+                          std::shared_ptr<LightOpticalContext> lightContext = {},
+                          GeneratedLightQueue *lightQueue = nullptr);
 
   // 确保目标区块达到 `targetStatus`（若已在更高阶段则直接返回）。
   // 使用 `LOADING_PYRAMID` 当区块已在磁盘处于较后阶段时可跳过前面已固化的邻域递归。
@@ -154,7 +217,6 @@ public:
   const Stats &stats() const noexcept { return stats_; }
 
 private:
-  LightService *activeLightService() const noexcept;
   ChunkAccess &getOrLoadChunk(ChunkTicketPos pos);
   void advanceOneStep(ChunkTicketPos pos, ChunkAccess &chunk,
                       const ChunkStep &step, bool fromLoadedProto);
@@ -163,17 +225,21 @@ private:
   std::int64_t worldSeed_ = 0;
   RawChunkStore *diskStore_ = nullptr;
   World *residentWorld_ = nullptr;
-  LightService *lightService_ = nullptr;
+  std::shared_ptr<LightOpticalContext> lightContext_;
+  GeneratedLightQueue *lightQueue_ = nullptr;
   std::map<ChunkTicketPos, std::unique_ptr<ChunkAccess>> chunks_;
   std::map<ChunkTicketPos, bool> startedLoadedFromStore_;
   Stats stats_;
 };
 
 // 执行单个 `ChunkStatusId` 的生成步骤并在完成时原子推进 `proto.persistedStatus()`。
+// `lightContext` / `lightQueue` 非空时，`InitializeLight` 与 `Light` 阶段只构造并投递
+// 光照工作（真正的 `LightService` 提交由主线程 pump 完成）；两者为空时生成不触碰光照。
 void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &region,
                                 ProtoChunk &proto, ChunkStatusId targetStatus,
                                 std::int64_t worldSeed,
-                                LightService *lightService);
+                                LightOpticalContext *lightContext,
+                                GeneratedLightQueue *lightQueue);
 
 // 将到达 `Full` 的 `ProtoChunk` 零拷贝/紧凑写入运行态 `World` 并调度后处理流体刻。
 // 从光照引擎的最新快照刷新 ProtoChunk 的光照层（晋升/存档前调用）。

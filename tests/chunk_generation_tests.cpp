@@ -1,4 +1,5 @@
 #include "redstone/engine.hpp"
+#include "redstone/light/service.hpp"
 #include "redstone/world_chunk_manager.hpp"
 #include "redstone/worldgen.hpp"
 #include "redstone/worldgen/chunk_generator.hpp"
@@ -399,7 +400,7 @@ void testSchedulerCacheEviction() {
   worldgen::WorldGenSchedulerConfig config;
   config.threadCount = 2;
   worldgen::WorldGenScheduler scheduler(*generator, 1234, nullptr, nullptr,
-                                        nullptr, config);
+                                        nullptr, nullptr, config);
   std::vector<worldgen::ChunkBatchRequest> batch;
   for (int dx = -1; dx <= 1; ++dx) {
     for (int dz = -1; dz <= 1; ++dz)
@@ -417,6 +418,53 @@ void testSchedulerCacheEviction() {
 }
 
 // 6) 真实 26.1 生成器接入 WorldChunkManager：生成、安装、模拟与专用 I/O 落盘。
+// 6) 生成期光照：worker 在 InitializeLight/Light 阶段只投递纯值输入，主线程 pump 提交，
+//    安装时接管同一份登记（不再整份重传几何）并对齐光照生命周期代次。
+void testGenerationTimeLightSubmission() {
+  World world;
+  LightWorkerOptions lightOpts;
+  lightOpts.batchWindowMs = 0;
+  world.enableLighting(lightOpts);
+  auto store = std::make_shared<MemoryStore>();
+  auto generator = std::make_shared<TestGenerator>(false);
+  WorldChunkManager manager(world, store, 2, 4, emptyEntityProbe, {}, generator);
+  manager.addPlayer(1, {0, 0});
+  require(pumpUntil(manager, [&] { return world.isChunkLoaded(0, 0); }, 20000),
+          "generated chunk installed with lighting enabled");
+
+  require(world.isChunkLoaded(0, 0), "generated chunk resident in World");
+  const LightService::ChunkStatus status =
+      world.lightService()->chunkStatus(0, 0);
+  require(status.loaded,
+          "light engine already knew the chunk while it was being generated");
+  const std::uint64_t requiredGeneration =
+      world.chunkRequiredLightGenerationForTest(0, 0);
+  require(requiredGeneration != 0,
+          "generation-time light request carried into the World chunk");
+  require(status.submittedGeneration == requiredGeneration,
+          "install adopted the generation-time submission instead of "
+          "resubmitting the full geometry");
+  require(status.lifecycleEpoch == world.chunkLightEpochForTest(0, 0),
+          "install aligned the light lifecycle to the engine lifetime");
+  require(world.generatedLightAdoptionCountForTest() >= 1,
+          "install adopted the generation-time light registration");
+
+  require(pumpUntil(
+              manager,
+              [&] {
+                const LightService::ChunkStatus st =
+                    world.lightService()->chunkStatus(0, 0);
+                return st.complete && !st.pending;
+              },
+              20000),
+          "generated chunk light converges without a second submission");
+  world.drainLightPublications();
+  require(world.lightService()->latestLayerChunk(LightLayer::Block, 0, 0) !=
+              nullptr,
+          "generated chunk publishes a block light layer");
+  require(manager.close().complete, "lighting generation world closes cleanly");
+}
+
 void testRealGeneratorInstall(const std::filesystem::path &assets) {
   const worldgen::WorldgenRegistries registries =
       worldgen::WorldgenRegistries::loadFromDirectory(assets);
@@ -475,6 +523,7 @@ int main(int argc, char **argv) {
     testBufferLevelsDoNotInstall();
     testStaleGenerationIsDiscarded();
     testSchedulerCacheEviction();
+    testGenerationTimeLightSubmission();
     if (argc >= 2)
       testRealGeneratorInstall(argv[1]);
     std::cout << "chunk generation tests passed"

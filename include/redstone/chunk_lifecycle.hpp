@@ -156,6 +156,10 @@ struct LifecycleLoadedChunk {
   // 由世界生成产出的区块（promoteProtoChunkToLoaded）标记为 true：管理器据此在安装后
   // 把区块纳入待落盘状态，使专用 I/O 线程把这次生成真正写回 Anvil。
   bool generated = false;
+  // 生成期光照交接：主线程把 worker 构造的几何/首次计算请求提交给 LightService 后
+  // 记录的请求序号。安装时据此跳过整份几何重传，并对齐光照生命周期代次。
+  std::uint64_t lightSubmissionGeneration = 0;
+  std::uint64_t lightComputeGeneration = 0;
   // ProtoChunk::postProcessing 展开后的世界坐标。安装后管理器按原版
   // postLoadProtoChunk 语义为这些位置重新调度流体刻（例如特征生成的水源/岩浆源）。
   std::vector<Pos> postProcessingPositions;

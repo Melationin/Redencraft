@@ -50,7 +50,8 @@ public:
   WorldGenScheduler(ChunkGenerator &generator, std::int64_t worldSeed,
                     RawChunkStore *diskStore = nullptr,
                     World *residentWorld = nullptr,
-                    LightService *lightService = nullptr,
+                    std::shared_ptr<LightOpticalContext> lightContext = {},
+                    GeneratedLightQueue *lightQueue = nullptr,
                     WorldGenSchedulerConfig config = {});
   ~WorldGenScheduler();
 
@@ -77,8 +78,10 @@ public:
   bool generateAndInstallIntoWorld(ChunkTicketPos pos, World &world);
 
   // 清理已完成且不再处于保留坐标 `keepRadius` 邻域内的空闲槽位与外围半成品，控制内存水位。
+  // `evictedOut` 非空时追加被裁掉的坐标，供主线程同步注销光照引擎里的生成期登记。
   std::size_t evictIdleOutsideRadius(std::span<const ChunkTicketPos> keepCenters,
-                                     int keepRadius = 12);
+                                     int keepRadius = 12,
+                                     std::vector<ChunkTicketPos> *evictedOut = nullptr);
 
   WorldGenSchedulerStats stats() const;
 
@@ -92,7 +95,6 @@ private:
   class PriorityBucketQueue;
   struct ReadyEntry;
 
-  LightService *activeLightService() const noexcept;
   std::shared_ptr<ChunkHolder> getOrCreateHolder(ChunkTicketPos pos,
                                                  std::uint8_t distBucket);
   std::shared_ptr<ChunkHolder> findHolder(ChunkTicketPos pos) const;
@@ -117,14 +119,14 @@ private:
   std::int64_t worldSeed_ = 0;
   RawChunkStore *diskStore_ = nullptr;
   World *residentWorld_ = nullptr;
-  LightService *lightService_ = nullptr;
+  std::shared_ptr<LightOpticalContext> lightContext_;
+  GeneratedLightQueue *lightQueue_ = nullptr;
   WorldGenSchedulerConfig config_;
 
   static constexpr std::size_t kShardCount = 64;
   std::unique_ptr<HolderShard[]> shards_;
 
   mutable std::mutex storeMutex_;
-  mutable std::mutex lightMutex_;
 
   std::mutex queueMutex_;
   std::condition_variable queueCv_;

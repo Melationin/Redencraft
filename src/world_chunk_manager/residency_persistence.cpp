@@ -389,6 +389,14 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
   chunk.loadEpoch = loadEpoch;
   chunk.lightEpoch = loadEpoch;
   chunk.lightLifecycleEpoch = loadEpoch;
+  // 生成期已在光照引擎里登记过几何/首次计算：把请求序号带进安装路径，让
+  // World::installManagedChunk 走“接管”而不是重新提交整份几何。
+  if (loaded.lightSubmissionGeneration != 0)
+    chunk.requiredLightGeneration = std::max(
+        chunk.requiredLightGeneration, loaded.lightSubmissionGeneration);
+  if (loaded.lightComputeGeneration != 0)
+    chunk.requiredLightGeneration = std::max(
+        chunk.requiredLightGeneration, loaded.lightComputeGeneration);
   if (loaded.isLightOn) {
     PersistedChunkLight persisted;
     persisted.isLightOn = true;

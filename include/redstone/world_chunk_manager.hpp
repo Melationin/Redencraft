@@ -31,6 +31,9 @@ namespace redstone {
 
 namespace worldgen {
 class ChunkGenerator;
+struct GeneratedLightWork;
+class GeneratedLightQueue;
+class LightOpticalContext;
 class WorldGenScheduler;
 } // namespace worldgen
 
@@ -414,6 +417,11 @@ private:
   void cancelGeneration(const ChunkTicketPos &position);
   void processCompletedGeneration();
   void publishGenerationKeepCenters();
+  // 生成期光照：worker 只投递纯值工作，这里在主线程真正提交给 LightService
+  // （submitChunk/requestChunkCompute 的主线程契约）。
+  void pumpGeneratedLightWork();
+  // 调度器裁剪掉生成缓存后，主线程同步注销光照引擎里的生成期登记。
+  void unloadEvictedGeneratedLight();
 
   // 在未单独提供 RawEntityStore 时，于地形读盘阶段同步探查实体区块可读性的包装存储。
   class EntityReadStore;
@@ -470,6 +478,15 @@ private:
   std::shared_ptr<worldgen::ChunkGenerator> generator_;
   std::shared_ptr<RawChunkStore> generationStore_;
   std::unique_ptr<worldgen::WorldGenScheduler> generationScheduler_;
+  // ---- 生成期光照交接（worker 构造输入，主线程提交）----
+  struct GeneratedLightRequest {
+    std::uint64_t submit = 0;
+    std::uint64_t compute = 0;
+  };
+  std::shared_ptr<worldgen::GeneratedLightQueue> generatedLightQueue_;
+  std::shared_ptr<worldgen::LightOpticalContext> generatedLightContext_;
+  std::map<ChunkTicketPos, GeneratedLightRequest> generatedLightRequests_;
+  std::vector<ChunkTicketPos> evictedGeneratedChunks_;
   std::thread generationThread_;
   mutable std::mutex generationMutex_;
   std::condition_variable generationReady_;
