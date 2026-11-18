@@ -991,23 +991,36 @@ LifecycleLoadedChunk promoteProtoChunkToLoaded(ProtoChunk &&chunk,
           ProtoChunk::unpackOffsetCoordinates(packed, chunk.pos(), sectionY));
     }
   }
-  out.sections.reserve(chunk.sections().size());
-  for (ProtoChunkSection &sec : chunk.sections()) {
-    // 所有区段都保留：生成区块的 NBT 模板包含全部区段，管理器的可写区段集合
-    // 必须与之一致，否则在空区段放置方块会被错误地标记为“模板缺失”。
-    terrain::Section dst;
-    dst.y = sec.sectionY();
-    if (!sec.hasOnlyAir())
-      dst.blockStates = packSectionBlocks(sec);
-    terrain::PackedBiomes packedBiomes;
-    chunk.biomes(static_cast<int>(&sec - chunk.sections().data()),
-                 chunk.defaultBiome())
-        .pack(packedBiomes.palette, packedBiomes.data,
-              packedBiomes.bitsPerEntry);
-    dst.biomes = std::move(packedBiomes);
-    dst.blockLight = sec.blockLight.take();
-    dst.skyLight = sec.skyLight.take();
-    out.sections.push_back(std::move(dst));
+  if (chunk.isLightCorrect()) {
+    // 带持久化光照的原型（例如磁盘恢复后继续生成）：保留 terrain 视图，
+    // 让安装路径按 isLightOn 还原光照层。
+    out.sections.reserve(chunk.sections().size());
+    for (ProtoChunkSection &sec : chunk.sections()) {
+      // 所有区段都保留：生成区块的 NBT 模板包含全部区段，管理器的可写区段集合
+      // 必须与之一致，否则在空区段放置方块会被错误地标记为“模板缺失”。
+      terrain::Section dst;
+      dst.y = sec.sectionY();
+      if (!sec.hasOnlyAir())
+        dst.blockStates = packSectionBlocks(sec);
+      terrain::PackedBiomes packedBiomes;
+      chunk.biomes(static_cast<int>(&sec - chunk.sections().data()),
+                   chunk.defaultBiome())
+          .pack(packedBiomes.palette, packedBiomes.data,
+                packedBiomes.bitsPerEntry);
+      dst.biomes = std::move(packedBiomes);
+      dst.blockLight = sec.blockLight.take();
+      dst.skyLight = sec.skyLight.take();
+      out.sections.push_back(std::move(dst));
+    }
+  } else {
+    // 零拷贝晋升：位宽、调色板、计数器与随机刻分桶全部原样移交，安装时直接
+    // move 进 World 区段；不再 pack 成 terrain::Section 再重建一遍。
+    out.prebuiltSectionCount = chunk.sectionCount();
+    out.prebuiltMinSectionY = chunk.minSectionY();
+    // `ProtoChunk::sections()` 掩盖了基类的同名成员数组，这里显式走 BaseChunk。
+    auto &base = static_cast<redstone::BaseChunk &>(chunk);
+    out.prebuiltSections = std::move(base.sections);
+    out.prebuiltBiomes = std::move(base.biomeSections);
   }
   out.blockTicks = std::move(chunk.blockTicks());
   out.fluidTicks = std::move(chunk.fluidTicks());

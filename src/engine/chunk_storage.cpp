@@ -766,6 +766,49 @@ std::uint64_t World::requestGeneratedChunkLightCompute(int x, int z) {
   return lightService_->requestChunkCompute(x, z);
 }
 
+bool World::adoptSectionStorage(int x, int z, int sectionY,
+                                 BlockSection &&section) {
+  Chunk *chunk = chunkAt(x, z);
+  if (!chunk)
+    return false;
+  const int targetSection = World::sectionIndex(sectionY * 16);
+  if (targetSection < 0 || targetSection >= sectionCount())
+    return false;
+  const std::size_t index = static_cast<std::size_t>(targetSection);
+  blockReadCache_.sectionIndex = -1;
+  Section &destination = chunk->sections[index];
+  {
+    std::unique_lock<std::shared_mutex> resizeLock;
+    if (std::shared_mutex *mu = directResizeMutex())
+      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
+    destination = std::move(section);
+    destination.setSectionY(static_cast<std::int8_t>(sectionY));
+    // 光照的权威数据在 LightService 里；World 区段不保留原型携带的层。
+    destination.blockLight.reset();
+    destination.skyLight.reset();
+  }
+  const std::uint64_t key = chunkKey(x, z);
+  if (poiStorage_) {
+    std::vector<std::pair<std::uint16_t, PoiTypeId>> found;
+    bool hasPoi = false;
+    for (int cell = 0; cell < kLightVolume; ++cell) {
+      const PoiTypeId poi = fastPoiTypeForState(destination.get(cell));
+      if (poi == PoiTypeId::None)
+        continue;
+      hasPoi = true;
+      found.emplace_back(static_cast<std::uint16_t>(cell), poi);
+    }
+    if (hasPoi)
+      poiStorage_->reconcileSectionFromScan(x, z, targetSection, found, false);
+    else
+      poiStorage_->markSectionValidEmpty(x, z, targetSection);
+  }
+  updateChunkRandomTickMask(*chunk, key, targetSection,
+                            destination.isRandomlyTicking());
+  chunk->persistedLight.reset();
+  return true;
+}
+
 void World::refreshLightSnapshots() {
   if (!lightService_)
     return;

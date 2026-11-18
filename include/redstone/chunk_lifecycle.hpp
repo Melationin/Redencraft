@@ -4,11 +4,13 @@
 // 增量补丁落盘与模板保留，并通过无阻塞 `drain()` 在主线程完成安装与驱逐，避免磁盘 I/O 卡顿主循环。
 
 #include "redstone/nbt.hpp"
+#include "redstone/chunk_section.hpp"
 #include "redstone/engine_types.hpp"
 #include "redstone/entity_codec.hpp"
 #include "redstone/terrain_codec.hpp"
 #include "redstone/tickets.hpp"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -160,6 +162,14 @@ struct LifecycleLoadedChunk {
   // 记录的请求序号。安装时据此跳过整份几何重传，并对齐光照生命周期代次。
   std::uint64_t lightSubmissionGeneration = 0;
   std::uint64_t lightComputeGeneration = 0;
+  // 生成路径零拷贝晋升：区段（位宽/调色板/计数器/随机刻分桶）与生物群系存储整体
+  // move 过来，安装时直接替换 World 区块区段，不再 pack -> unpack 两次重编码。
+  // 为空表示仍走通用的 terrain::Section 解码路径（磁盘载入 / getter 需要光照层）。
+  std::optional<std::array<BlockSection, kSectionCapacity>> prebuiltSections;
+  std::optional<std::array<std::shared_ptr<SectionBiomes>, kSectionCapacity>>
+      prebuiltBiomes;
+  int prebuiltSectionCount = 0;
+  int prebuiltMinSectionY = 0;
   // ProtoChunk::postProcessing 展开后的世界坐标。安装后管理器按原版
   // postLoadProtoChunk 语义为这些位置重新调度流体刻（例如特征生成的水源/岩浆源）。
   std::vector<Pos> postProcessingPositions;

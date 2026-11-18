@@ -418,6 +418,31 @@ void testSchedulerCacheEviction() {
 }
 
 // 6) 真实 26.1 生成器接入 WorldChunkManager：生成、安装、模拟与专用 I/O 落盘。
+// 5b) 零拷贝晋升：ProtoChunk 的区段存储原样 move 进安装载荷，不再重编码地形。
+void testPromotionMovesSectionStorage() {
+  worldgen::ProtoChunk proto({3, -2}, -64, 384);
+  require(proto.setBlockState(0, -64, 0, BlockState("minecraft:stone"))
+              .has_value(),
+          "proto accepts a block before promotion");
+  const std::shared_ptr<redstone::SectionStorage> storage =
+      proto.section(0).storage;
+  require(storage != nullptr, "proto section materialized storage");
+  const std::uint16_t nonEmpty = proto.section(0).nonEmpty;
+
+  LifecycleLoadedChunk loaded =
+      worldgen::promoteProtoChunkToLoaded(std::move(proto), 7);
+  require(loaded.prebuiltSections.has_value(),
+          "promotion hands over the section array itself");
+  require(loaded.sections.empty(),
+          "promotion no longer re-encodes sections into terrain::Section");
+  const redstone::BlockSection &moved = (*loaded.prebuiltSections)[0];
+  require(moved.storage == storage,
+          "section storage is moved, not copied");
+  require(moved.nonEmpty == nonEmpty && moved.get(0) ==
+              BlockState("minecraft:stone").id(),
+          "section counters and palette survive the move");
+}
+
 // 6) 生成期光照：worker 在 InitializeLight/Light 阶段只投递纯值输入，主线程 pump 提交，
 //    安装时接管同一份登记（不再整份重传几何）并对齐光照生命周期代次。
 void testGenerationTimeLightSubmission() {
@@ -531,6 +556,7 @@ int main(int argc, char **argv) {
     testBufferLevelsDoNotInstall();
     testStaleGenerationIsDiscarded();
     testSchedulerCacheEviction();
+    testPromotionMovesSectionStorage();
     testGenerationTimeLightSubmission();
     if (argc >= 2)
       testRealGeneratorInstall(argv[1]);

@@ -418,10 +418,21 @@ bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
   auto postProcessCopy = proto.postProcessing();
   const int minSec = proto.minSectionY();
 
+  // 光照快照要在搬运区段之前取：`BlockSection` 会被整体 move 进 World。
+  std::optional<PersistedChunkLight> persistedLight;
+  if (proto.isLightCorrect()) {
+    if (LightService *light = world.lightService())
+      refreshProtoChunkLight(proto, *light);
+    persistedLight = extractPersistedLight(proto);
+  }
+
   // 不在此时登记光照：方块还没导入，提交进去的会是“全空气”几何。
   world.loadChunk(pos.x, pos.z, /*registerLight=*/false);
+  // `ProtoChunk::sections()` 掩盖了基类同名成员，显式走 BaseChunk 访问存储数组。
+  auto &protoBase = static_cast<BaseChunk &>(proto);
   for (int secIndex = 0; secIndex < proto.sectionCount(); ++secIndex) {
-    const ProtoChunkSection &sec = proto.section(secIndex);
+    BlockSection &sec = protoBase.sections[static_cast<std::size_t>(secIndex)];
+    const int sectionY = sec.sectionY();
     auto secBiomes = proto.biomes(secIndex, proto.defaultBiome());
     const bool uniformPlains =
         secBiomes.palette().size() <= 1 &&
@@ -431,39 +442,16 @@ bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
       auto sb = std::make_shared<SectionBiomes>();
       sb->palette = secBiomes.palette();
       sb->indices = secBiomes.indices();
-      world.setSectionBiomes(pos.x, sec.sectionY(), pos.z, std::move(sb));
+      world.setSectionBiomes(pos.x, sectionY, pos.z, std::move(sb));
     }
-    if (sec.hasOnlyAir())
-      continue;
-    std::vector<BlockState::Id> palette;
-    std::array<std::uint16_t, 4096> indices{};
-    std::map<BlockState::Id, std::uint16_t> mapIdx;
-    for (int ly = 0; ly < 16; ++ly) {
-      for (int lz = 0; lz < 16; ++lz) {
-        for (int lx = 0; lx < 16; ++lx) {
-          const BlockState st = sec.getBlockState(lx, ly, lz);
-          auto it = mapIdx.find(st.id());
-          if (it == mapIdx.end()) {
-            const std::uint16_t nextIdx =
-                static_cast<std::uint16_t>(palette.size());
-            palette.push_back(st.id());
-            it = mapIdx.emplace(st.id(), nextIdx).first;
-          }
-          const std::size_t cell =
-              static_cast<std::size_t>((ly << 8) | (lz << 4) | lx);
-          indices[cell] = it->second;
-        }
-      }
-    }
-    world.importSectionBlocks(pos.x, pos.z, sec.sectionY(), palette, indices);
+    // 零拷贝：位宽/调色板/计数器/随机刻分桶原样移交，不再按调色板重建。
+    if (!world.adoptSectionStorage(pos.x, pos.z, sectionY, std::move(sec)))
+      throw std::runtime_error("generated section cannot be adopted by World");
   }
   // 只重建刚导入的这一个区块：整世界重扫会让 N 个区块的导入变成 O(N^2)。
   world.primeHeightmaps(pos.x, pos.z);
-  if (proto.isLightCorrect()) {
-    if (LightService *light = world.lightService())
-      refreshProtoChunkLight(proto, *light);
-    world.setChunkPersistedLight(pos.x, pos.z, extractPersistedLight(proto));
-  }
+  if (persistedLight)
+    world.setChunkPersistedLight(pos.x, pos.z, std::move(*persistedLight));
   if (proto.lightSubmissionGeneration() != 0) {
     // 流水线已经登记过这个区块（几何与导入后的方块一致）：直接接管，
     // 只把本地生命周期代次对齐到引擎那一代，避免同一块光被重算一遍。

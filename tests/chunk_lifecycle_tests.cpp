@@ -81,6 +81,14 @@ std::vector<std::uint8_t> makeChunkNbt(const ChunkTicketPos &position) {
 
 std::string blockNameAt(const LifecycleLoadedChunk &loaded,
                         std::size_t index) {
+  if (loaded.prebuiltSections && loaded.prebuiltSectionCount > 0) {
+    // 生成路径零拷贝晋升：区段不再编码成 terrain::Section，直接读原型区段。
+    const BlockSection &section = (*loaded.prebuiltSections)[0];
+    return section.getBlockState(static_cast<int>(index & 15),
+                                 static_cast<int>((index >> 8) & 15),
+                                 static_cast<int>((index >> 4) & 15))
+        .name();
+  }
   if (loaded.sections.empty() || !loaded.sections[0].blockStates)
     return {};
   const auto &states = *loaded.sections[0].blockStates;

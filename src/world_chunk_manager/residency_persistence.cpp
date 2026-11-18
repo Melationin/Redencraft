@@ -153,6 +153,32 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
   chunk.loaded = false;
   std::set<int> writableSections;
 
+  if (loaded.prebuiltSections && loaded.prebuiltBiomes) {
+    // 生成路径：区段存储已经在 ProtoChunk 里按最终位宽构建好，直接 move 进来。
+    for (int i = 0; i < loaded.prebuiltSectionCount; ++i) {
+      const int sectionY = loaded.prebuiltMinSectionY + i;
+      const int baseY = sectionY * 16;
+      if (baseY < world_.minY() || baseY + 15 >= world_.maxY()) {
+        errors_[position] = "generated section Y is outside World height";
+        return false;
+      }
+      const int sectionIndex = world_.sectionIndex(baseY);
+      if (sectionIndex < 0 || sectionIndex >= world_.sectionCount()) {
+        errors_[position] = "generated section cannot map into World storage";
+        return false;
+      }
+      const std::size_t index = static_cast<std::size_t>(sectionIndex);
+      World::Section &section = chunk.sections[index];
+      section = std::move((*loaded.prebuiltSections)[static_cast<std::size_t>(i)]);
+      // 光照的权威数据在 LightService 里，World 区段不保留原型携带的层。
+      section.blockLight.reset();
+      section.skyLight.reset();
+      chunk.biomeSections[index] =
+          std::move((*loaded.prebuiltBiomes)[static_cast<std::size_t>(i)]);
+      writableSections.insert(sectionY);
+    }
+  }
+
   for (terrain::Section &loadedSection : loaded.sections) {
     const int sectionY = loadedSection.y;
     if (!loadedSection.blockStates && !loadedSection.biomes)

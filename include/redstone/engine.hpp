@@ -188,6 +188,10 @@ public:
   std::uint64_t submitGeneratedChunkLight(LightChunkInput input);
   std::uint64_t requestGeneratedChunkLightCompute(int x, int z);
   void setChunkPersistedLight(int x, int z, PersistedChunkLight persisted);
+  // 生成路径零拷贝安装：把 ProtoChunk 的区段存储整体 move 进已加载区块
+  // （位宽/调色板/计数器/随机刻分桶原样保留），并按新内容重建该区段的 POI。
+  // 返回 false 表示区块未加载或区段超出高度。
+  bool adoptSectionStorage(int x, int z, int sectionY, BlockSection &&section);
   // 按维度独立的兴趣点索引（对应原版 `PoiManager` / `PoiSection`）。
   PoiStorage &pois() { return *poiStorage_; }
   const PoiStorage &pois() const { return *poiStorage_; }
