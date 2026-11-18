@@ -279,6 +279,9 @@ int main(int argc, char **argv) {
         auto proto = scheduler.takeProtoChunk(request.pos);
         if (!proto)
           continue;
+        // 光照数据只存在于光照引擎里，统计/序列化前先按"存档时"的方式取一次。
+        if (world && world->lightService() != nullptr)
+          refreshProtoChunkLight(*proto, *world->lightService());
         for (int s = 0; s < proto->sectionCount(); ++s) {
           const ProtoChunkSection &sec = proto->section(s);
           if (sec.blockLight().has_value())
@@ -302,8 +305,6 @@ int main(int argc, char **argv) {
         }
         if (withSerialize) {
           const auto t0 = std::chrono::steady_clock::now();
-          if (world && world->lightService() != nullptr)
-            refreshProtoChunkLight(*proto, *world->lightService());
           const nbt::RootTag root = encodeProtoChunkToNbt(*proto);
           const std::vector<std::uint8_t> encoded = nbt::writeRoot(root);
           nbtBytes += encoded.size();
