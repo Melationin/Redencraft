@@ -69,6 +69,8 @@ public:
   void seedChunk(std::uint64_t key);
   // 从相邻已加载区块边界向当前区块播种跨界入向光。
   void seedIncoming(std::uint64_t key, std::uint8_t directionMask = 0b111100);
+  // 应用“未计算”阶段攒下的入向传播：写入该格并按原方向掩码继续扩散。
+  void applyDeferred(LightPos position, std::uint8_t level);
   // 将当前区块边界高亮度光向相邻区块播种出向光（常用于持久化区块加载后的边界衔接）。
   void seedOutgoing(std::uint64_t key, std::uint8_t directionMask = 0b111100);
   // 区块被卸载或替换时，将邻接区块朝向该区块的边界单元加入检查队列以消退来自已移除区块的光照。

@@ -403,8 +403,17 @@ void BlockLightPropagator::propagateIncrease(const IncreaseTask &task) {
     const LightSectionSnapshot *toSection = sectionAt(to);
     if (!toSection) {
       if ((to.x >> 4) != (task.position.x >> 4) ||
-          (to.z >> 4) != (task.position.z >> 4))
+          (to.z >> 4) != (task.position.z >> 4)) {
+        // 目标区块还没算过（“未计算”）：把它记进收件箱，等它计算时再应用，
+        // 而不是丢掉这次传播后靠 seedIncoming 重新推导。
+        const auto &toState = stateAt(to);
+        const int incoming = fromLevel - lightOpacity(toState);
+        if (incoming > 0 &&
+            owner.deferIncoming(false, to, direction,
+                                static_cast<std::uint8_t>(incoming)))
+          continue;
         ++owner.unloadedNeighborSkips;
+      }
       continue;
     }
     const int toLevel = storedLevel(to);
@@ -452,6 +461,15 @@ void BlockLightPropagator::propagateDecrease(const DecreaseTask &task) {
                       false);
     }
   }
+}
+
+void BlockLightPropagator::applyDeferred(LightPos position, std::uint8_t level) {
+  if (!sectionAt(position))
+    return;
+  if (storedLevel(position) >= static_cast<int>(level))
+    return;
+  setStoredLevel(position, level);
+  enqueueIncrease(position, level, 63, emptyShape(stateAt(position)), false);
 }
 
 void BlockLightPropagator::enqueueIncrease(LightPos position, std::uint8_t level,

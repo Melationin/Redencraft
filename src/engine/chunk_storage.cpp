@@ -611,10 +611,16 @@ void World::updateChunkRandomTickMask(Chunk &chunk, std::uint64_t key,
     removeRandomTickingChunk(chunk);
 }
 
-void World::loadChunk(int x, int z) {
-  blockReadCache_.sectionIndex = -1;
+void World::loadChunk(int x, int z, bool registerLight) {
   const auto key = chunkKey(x, z);
-  auto it = chunks_.find(key);
+  // 已经常驻：节点、高度图、刻容器、光照登记、生命周期代次全部就位，重复调用
+  // 不该有任何副作用（尤其不该再向光照引擎提交一次）。
+  // chunks_ 是 unordered_map，节点地址稳定，读缓存里的 Chunk* 仍然有效。
+  const auto existing = chunks_.find(key);
+  if (existing != chunks_.end() && existing->second.loaded)
+    return;
+  blockReadCache_.sectionIndex = -1;
+  auto it = existing;
   if (it == chunks_.end()) {
     std::unique_lock<std::shared_mutex> resizeLock;
     if (std::shared_mutex *mu = directResizeMutex())
@@ -624,7 +630,8 @@ void World::loadChunk(int x, int z) {
   auto &c = it->second;
   const bool wasLoaded = c.loaded;
   c.loaded = true;
-  if (!wasLoaded)
+  // 接管流水线登记时（registerLight=false）不动代次，由对齐函数决定。
+  if (!wasLoaded && registerLight)
     ++c.lightLifecycleEpoch;
   if (c.randomTickingSectionMask != 0)
     addRandomTickingChunk(c, key);
@@ -641,15 +648,28 @@ void World::loadChunk(int x, int z) {
   fluidTickQueue_->addContainer(chunkKey(x, z));
   if (lightService_) {
     flushPendingLightCells();
-    if (auto input = makeLightChunkInput(x, z)) {
-      const std::uint64_t seq = lightService_->submitChunk(std::move(*input));
-      if (seq > 0)
-        c.requiredLightGeneration = std::max(c.requiredLightGeneration, seq);
-      c.persistedLight.reset();
+    if (registerLight) {
+      if (auto input = makeLightChunkInput(x, z)) {
+        const std::uint64_t seq = lightService_->submitChunk(std::move(*input));
+        if (seq > 0)
+          c.requiredLightGeneration = std::max(c.requiredLightGeneration, seq);
+        c.persistedLight.reset();
+      }
     }
     if (!wasLoaded && lightChunkLifecycleObserver)
       lightChunkLifecycleObserver(x, z, true);
   }
+}
+
+void World::alignChunkLightLifecycle(int x, int z) {
+  if (!lightService_)
+    return;
+  Chunk *chunk = chunkAt(x, z);
+  if (!chunk)
+    return;
+  const LightService::ChunkStatus status = lightService_->chunkStatus(x, z);
+  if (status.loaded && status.lifecycleEpoch != 0)
+    chunk->lightLifecycleEpoch = status.lifecycleEpoch;
 }
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
@@ -1040,7 +1060,9 @@ std::string_view World::getNoiseBiome(int quartX, int quartY, int quartZ) const 
 
 void World::setSectionBiomes(int chunkX, int sectionY, int chunkZ,
                              std::shared_ptr<const SectionBiomes> biomes) {
-  loadChunk(chunkX, chunkZ);
+  // 只保证节点存在：设置群系不是光照输入变更，不应该顺手向光照引擎登记一次
+  // （生成晋升路径正处在“方块尚未导入完”的中间态，那会触发一次错误的计算）。
+  loadChunk(chunkX, chunkZ, /*registerLight=*/false);
   Chunk *chunk = chunkAt(chunkX, chunkZ);
   if (!chunk)
     return;

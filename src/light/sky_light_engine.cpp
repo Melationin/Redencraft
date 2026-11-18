@@ -1,5 +1,8 @@
 #include "light/sky_light_engine.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
 #include <utility>
 
@@ -198,6 +201,9 @@ void SkyLightPropagator::syncStorageEligibility() {
          y < chunk.snapshot->minBlockSectionY +
                  chunk.snapshot->blockSectionCount + 1;
          ++y) {
+      // 原版规则：本段与周围 26 个邻居全空时，横向不可能有光进来，该层可以省略。
+      // 判定范围由调用方收窄为“本批真正要计算的区块”，它们的窗口恰好是“自身 +
+      // 8 个邻居”，而 Light 的依赖保证这 8 个邻居都已注册几何 → 结果唯一确定。
       bool eligible = false;
       for (int dx = -1; dx <= 1 && !eligible; ++dx)
         for (int dz = -1; dz <= 1 && !eligible; ++dz)
@@ -594,6 +600,10 @@ SkyLightPropagator::initialWorkingLayer(std::uint64_t chunkKeyValue,
 
 bool SkyLightPropagator::blockSectionNonEmpty(int x, int y, int z) const {
   const auto key = chunkKey(x, z);
+  // 先查已经注册的光学几何：它在 InitializeLight 阶段就已登记，与“这个区块是否
+  // 已经发布过光照快照”无关。
+  if (const GeometrySection *geometry = owner.geometrySection(key, y))
+    return !geometry->empty;
   if (const std::optional<bool> nonEmpty =
           owner.geometrySectionNonEmpty(key, y))
     return *nonEmpty;
@@ -1059,8 +1069,16 @@ void SkyLightPropagator::propagateIncrease(const IncreaseTask &task) {
     const LightPos to = offset(task.position, direction);
     if (!sectionAt(to)) {
       if ((to.x >> 4) != (task.position.x >> 4) ||
-          (to.z >> 4) != (task.position.z >> 4))
+          (to.z >> 4) != (task.position.z >> 4)) {
+        // 目标区块“未计算”：记进收件箱，等它计算时再应用。
+        const auto &toState = stateAt(to);
+        const int incoming = fromLevel - lightOpacity(toState);
+        if (incoming > 0 &&
+            owner.deferIncoming(true, to, direction,
+                                static_cast<std::uint8_t>(incoming)))
+          continue;
         ++owner.unloadedNeighborSkips;
+      }
       continue;
     }
     const int toLevel = storedLevel(to);
@@ -1183,6 +1201,16 @@ void SkyLightPropagator::propagateFromEmptySections(LightPos to, int direction,
     }
     --sectionY;
   }
+}
+
+void SkyLightPropagator::applyDeferred(LightPos position, std::uint8_t level) {
+  if (!sectionAt(position))
+    return;
+  if (storedLevel(position) >= static_cast<int>(level))
+    return;
+  if (!setStoredLevel(position, level))
+    return;
+  enqueueIncrease(position, level, 63, emptyShape(stateAt(position)), false);
 }
 
 void SkyLightPropagator::enqueueIncrease(LightPos position, std::uint8_t level,

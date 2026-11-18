@@ -218,6 +218,14 @@ struct LightChunkInput {
   bool directGeometry = false;
   std::vector<GeometrySection> geometrySections;
   std::optional<PersistedChunkLight> persistedLight;
+  // 本次提交如何推进到“完整区块”：
+  //   Immediate —— 立即在工作线程计算（默认）。
+  //   Deferred  —— 只注册几何与空壳，区块停在“未计算”，由
+  //                `LightService::requestChunkCompute()` 触发首次计算。
+  // 若 `persistedLight.isLightOn` 为真，则总是走“直接完整”（装填存档半字节、
+  // 不跑 BFS），与本字段无关。
+  enum class Completion { Immediate, Deferred };
+  Completion completion = Completion::Immediate;
 
   // 光照区块段比方块区块段在上下各多 1 个缓冲区段（对应原版 `minSection - 1 .. maxSection + 1`）。
   int minLightSectionY() const { return minBlockSectionY - 1; }

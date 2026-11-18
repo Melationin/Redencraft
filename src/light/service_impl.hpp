@@ -39,6 +39,7 @@ public:
   }
 
   std::uint64_t submitChunk(LightChunkInput input);
+  std::uint64_t requestChunkCompute(int chunkX, int chunkZ);
   std::uint64_t reportBlockCell(LightCellUpdate update);
   std::uint64_t reportBlockCells(std::span<const LightCellUpdate> updates);
   bool unloadChunk(int chunkX, int chunkZ);
@@ -192,7 +193,9 @@ private:
                                     std::shared_ptr<LightChunkSnapshot>,
                                     light_internal::UInt64Hash> &ready) const;
   void executeLayers(const light_internal::PreparedBatch &prepared);
-  void processBatch(std::vector<light_internal::PendingChunk> &batch);
+  // 返回本批摘要，供 `run()` 在持锁状态下维护“未计算”状态集合。
+  light_internal::PreparedBatch
+  processBatch(std::vector<light_internal::PendingChunk> &batch);
   bool compactScratchTaskQueues();
   void refreshScratchMetrics();
 
@@ -207,6 +210,11 @@ private:
   std::condition_variable batchDone;
   std::condition_variable sleepState;
   std::unordered_map<std::uint64_t, light_internal::PendingChunk> pending;
+  // “未计算”的两个来源（工作线程在 `mutex` 下维护，主线程的状态查询走同一把锁）：
+  //   needsCompute —— 几何已注册、从未算过（`Completion::Deferred`）；
+  //   needsUpdate  —— 已完整，但邻居边界变了，等待一次边界重算。
+  light_internal::FlatSet<std::uint64_t, light_internal::UInt64Hash> needsCompute;
+  light_internal::FlatSet<std::uint64_t, light_internal::UInt64Hash> needsUpdate;
   std::shared_ptr<const LightOpticalTable> opticalTable;
   light_internal::FlatMap<std::uint64_t, light_internal::GeometryChunk,
                           light_internal::UInt64Hash>
@@ -236,6 +244,13 @@ private:
   light_internal::FlatMap<std::uint64_t, light_internal::SkyColumnSources,
                           light_internal::UInt64Hash>
       skyColumnSources;
+  // “未计算”区块收到、尚未应用的入向光照传播（每层一个收件箱）。
+  light_internal::FlatMap<std::uint64_t, light_internal::DeferredChunkInbox,
+                          light_internal::UInt64Hash>
+      deferredBlockCells;
+  light_internal::FlatMap<std::uint64_t, light_internal::DeferredChunkInbox,
+                          light_internal::UInt64Hash>
+      deferredSkyCells;
   light_internal::FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>,
                           light_internal::UInt64Hash>
       latestBlock;
@@ -279,9 +294,6 @@ private:
   bool neighborsReadyFor(std::uint64_t key) const;
   // 本批次新变为"几何就绪"的区块，用于在批次结束后唤醒邻居重传播。
   std::vector<std::uint64_t> justBecameReady;
-  // 本批次里真正发生变化（dirty）的区块；批次结束后把它们的 8 邻居重新入队，
-  // 让边界光持续双向传播直到不再变化（单调最大值的混沌迭代，与批次划分无关）。
-  std::vector<std::uint64_t> repropagateFrom;
   bool compacting = false;
   std::size_t busyChunks = 0;
   std::uint64_t nextPublicationRevision = 0;

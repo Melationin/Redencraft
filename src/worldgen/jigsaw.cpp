@@ -522,17 +522,31 @@ BlockState parseBlockStateString(std::string_view text) {
     return defaultState(normId(std::string(text)));
   BlockState state =
       defaultState(normId(std::string(text.substr(0, bracket))));
-  if (!text.empty() && text.back() == ']')
-    text.remove_suffix(1);
+  // 属性区只到第一个 ']' 为止。NBT 的 final_state 可能带尾随空白/回车：只在
+  // “整串最后一个字符是 ]”时才去右括号会把 "false]" 当成属性值（100x100 生成时
+  // 在 minecraft:acacia_fence 上触发过）。
+  const std::size_t close = text.find(']', bracket);
+  if (close != std::string_view::npos)
+    text = text.substr(0, close);
+  const auto trimEntry = [](std::string_view value) {
+    while (!value.empty() &&
+           (value.front() == ' ' || value.front() == '\t'))
+      value.remove_prefix(1);
+    while (!value.empty() &&
+           (value.back() == ' ' || value.back() == '\t' ||
+            value.back() == '\r' || value.back() == '\n'))
+      value.remove_suffix(1);
+    return value;
+  };
   std::size_t pos = bracket + 1;
   while (pos < text.size()) {
     const std::size_t comma = text.find(',', pos);
     const std::size_t end = comma == std::string_view::npos ? text.size() : comma;
-    const std::string_view entry = text.substr(pos, end - pos);
+    const std::string_view entry = trimEntry(text.substr(pos, end - pos));
     const std::size_t eq = entry.find('=');
     if (eq != std::string_view::npos) {
-      const std::string key(entry.substr(0, eq));
-      const std::string value(entry.substr(eq + 1));
+      const std::string key(trimEntry(entry.substr(0, eq)));
+      const std::string value(trimEntry(entry.substr(eq + 1)));
       if (state.hasProperty(key))
         state = state.with(key, value);
     }

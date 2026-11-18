@@ -96,6 +96,8 @@ public:
   void initPersistedSources(std::uint64_t key);
   void seedIncoming(std::uint64_t key, std::uint8_t directionMask = 0b111100);
   void seedOutgoing(std::uint64_t key, std::uint8_t directionMask = 0b111100);
+  // 应用“未计算”阶段攒下的入向传播：写入该格并向各方向继续扩散。
+  void applyDeferred(LightPos position, std::uint8_t level);
   void clearIncomingFrom(std::uint64_t removedKey);
   // 依据 3x3x3 方块区块段非空状态重新计算受影响区块各段的存储资格：新获得资格的段按继承值实例化，失去资格的段释放并回退为 `Missing`。
   void syncStorageEligibility();
@@ -166,6 +168,7 @@ private:
   LightValues initialWorkingLayer(std::uint64_t chunkKeyValue,
                                   const LightChunkSnapshot *chunk,
                                   int sectionY) const;
+  // 该段是否有方块（只看这一段本身；调用方决定要不要看竖直邻居）。
   bool blockSectionNonEmpty(int x, int y, int z) const;
   WorkingChunk *workingChunk(std::uint64_t key);
   const LightChunkSnapshot *stateFor(std::uint64_t key) const;

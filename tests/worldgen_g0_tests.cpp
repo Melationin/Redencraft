@@ -318,18 +318,22 @@ void testPipelineWithLightService() {
   TestTerrainGenerator gen;
   ChunkGenerationPipeline pipe(gen, 123456789LL, nullptr, &world);
   ChunkAccess &litChunk = pipe.ensureStatus({0, 0}, ChunkStatusId::Light);
-  require(litChunk.isLightCorrect(),
-          "ChunkStatusId::Light must mark lightCorrect=true with LightService");
+  // Light 阶段不再等待：区块带着“未计算”返回，光照由引擎异步完成。
+  require(!litChunk.isLightCorrect(),
+          "ChunkStatusId::Light must not claim the light is complete");
 
   auto *proto = dynamic_cast<ProtoChunk *>(&litChunk);
   require(proto != nullptr, "chunk before Full must be ProtoChunk");
   const int topSecIdx = proto->sectionIndex(64);
-  // 光照数据现在只存在光照引擎里（ProtoChunk 不再拷贝副本），
-  // 这里验证区块被标记为光照完成，并且引擎侧确实发布了天空光层。
-  require(proto->isLightCorrect(), "Light step marks chunk lightCorrect");
-  require(world.lightService() != nullptr &&
-              world.lightService()->latestLayerChunk(LightLayer::Sky, 0, 0) !=
-                  nullptr,
+  require(world.lightService() != nullptr, "light service is attached");
+
+  // 流水线已经继续往下走了，这里才回头等引擎把这一块算完。
+  world.lightService()->flushAndWait();
+  world.drainLightPublications();
+  require(world.lightService()->isChunkSettled(0, 0),
+          "async light reaches complete after the pipeline moved on");
+  require(world.lightService()->latestLayerChunk(LightLayer::Sky, 0, 0) !=
+              nullptr,
           "Light engine publishes sky layer for the generated chunk");
   (void)topSecIdx;
 

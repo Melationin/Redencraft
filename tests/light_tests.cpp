@@ -2781,6 +2781,66 @@ void lowMemoryDirectLightParityAndConcurrency() {
 }
 } // namespace
 
+// 三态模型：Deferred 提交只注册几何（未计算），requestChunkCompute 把它推进到完整。
+void deferredComputeStates() {
+  LightService service(-1, 1, LightWorkerOptions{1000, 16, false, true});
+  LightChunkInput deferred = chunkFixture(0, 0, -1, 1);
+  deferred.completion = LightChunkInput::Completion::Deferred;
+  require(service.submitChunk(std::move(deferred)) != 0,
+          "deferred submission is accepted");
+  require(service.waitIdleForTesting(), "deferred registration settles");
+
+  // 未计算：几何已注册，但没有光照壳，也不发布任何快照。
+  auto status = service.chunkStatus(0, 0);
+  require(status.loaded && status.needsCompute && !status.needsUpdate &&
+              status.pending && !status.complete,
+          "deferred chunk is registered but still needs compute");
+  require(!service.isChunkSettled(0, 0),
+          "deferred chunk is not settled before its first compute");
+  service.drainPublished();
+  require(service.latestLayerChunk(LightLayer::Block, 0, 0) == nullptr,
+          "deferred registration publishes no light");
+
+  // 未计算 → 完整：首次计算后发布完整光照。
+  require(service.requestChunkCompute(0, 0) != 0,
+          "compute request is accepted for a registered chunk");
+  require(service.waitIdleForTesting(), "first compute completes");
+  service.drainPublished();
+  const auto lit = service.latestLayerChunk(LightLayer::Block, 0, 0);
+  require(lit && lit->propagationComplete && lit->protocolReady,
+          "first compute publishes a complete block-light snapshot");
+  require(lit->section(-1)->light(LightLayer::Block, 1, 2, 3) == 15,
+          "first compute seeds the emitting block");
+  status = service.chunkStatus(0, 0);
+  require(!status.needsCompute && !status.needsUpdate && status.complete,
+          "first compute moves the chunk to complete");
+  require(service.isChunkSettled(0, 0), "computed chunk is settled");
+
+  // 未注册的区块不能请求计算。
+  require(service.requestChunkCompute(7, 7) == 0,
+          "compute request on an unknown chunk is rejected");
+}
+
+// 计算请求必须与同区块已排队的 load 合并，而不是把它覆盖掉。
+void computeRequestMergesWithPendingLoad() {
+  LightService service(-1, 1, LightWorkerOptions{1000, 16, true, false});
+  LightChunkInput input = chunkFixture(0, 0, -1, 1);
+  input.completion = LightChunkInput::Completion::Deferred;
+  require(service.submitChunk(std::move(input)) != 0,
+          "deferred load is queued while paused");
+  require(service.requestChunkCompute(0, 0) != 0,
+          "compute request is queued behind the load");
+  service.resumeForTesting();
+  require(service.waitIdleForTesting(), "merged load and compute settle");
+  service.drainPublished();
+  const auto lit = service.latestLayerChunk(LightLayer::Block, 0, 0);
+  require(lit != nullptr,
+          "compute request must not overwrite the pending load");
+  require(lit->section(-1)->light(LightLayer::Block, 1, 2, 3) == 15,
+          "merged request computes the registered geometry");
+  require(service.isChunkSettled(0, 0), "merged chunk reaches complete");
+}
+
 int main(int argc, char **argv) {
   try {
     require(argc == 2, "light_tests needs assets/light26_1");
@@ -2821,6 +2881,8 @@ int main(int argc, char **argv) {
     pausedWorldRecoveryAndImport();
     persistedLightReuseNeighborPropagationAndStatus();
     persistedNeighborsSkipRedundantSeedingAndEditPropagates();
+    deferredComputeStates();
+    computeRequestMergesWithPendingLoad();
     lowMemoryDirectLightParityAndConcurrency();
     std::cout << "light tests passed\n";
     return 0;

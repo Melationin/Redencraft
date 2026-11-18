@@ -60,6 +60,11 @@ struct LightWorkerOptions {
   // 光传播半径 15 <= 1 个区块，因此同色分片（间隔 >= 3 个区块）之间不存在
   // 跨分片传播，可以安全并行而无需原子操作。
   int tiledParallelism = 0;
+  // 几何新就绪时是否把已处理过的邻居置为“未计算”，让它重跑一次边界播种
+  // （原版 LightEngine.checkEdge 的完整等价物）。默认关闭：跨区块光本来就会由
+  // 新块自身的传播经 ensureWorking 推进已发布邻居，再反向拉一次是重复劳动，
+  // 20x20 基准实测 wall +72%。需要更保守的边界收敛时再打开。
+  bool borderTriggers = false;
 };
 
 // 主线程投递入口与后台光照工作线程的所有者（Pimpl 隔离实现细节）。
@@ -109,6 +114,10 @@ public:
   std::shared_ptr<const LightOpticalTable> opticalTable() const;
   // 提交区块加载或重载输入；有效更新会按区块合并，不会因队列容量受限而拒收，仅在服务正在关闭或输入非法时返回 0。
   std::uint64_t submitChunk(LightChunkInput input);
+  // 把已注册几何、停在“未计算”的区块推进到“完整”：登记一次首次计算请求，
+  // 返回请求序号（0 表示区块未注册或服务正在关闭）。与 `submitChunk` 一样只在
+  // 主线程调用；真正的播种与传播由工作线程在下一批执行。
+  std::uint64_t requestChunkCompute(int chunkX, int chunkZ);
   // 热路径上的无锁方块单元变更投递入口，记录内仅含坐标与原始状态 ID，工作线程负责一切光学解析；环形缓冲区满时会自动扩容并合并到待处理工作中而不会静默丢弃。返回分配的单调请求序号（被拒绝时返回 0）。
   std::uint64_t reportBlockCell(LightCellUpdate update);
   std::uint64_t reportBlockCells(std::span<const LightCellUpdate> updates);
@@ -134,6 +143,11 @@ public:
   struct ChunkStatus {
     bool loaded = false;
     bool pending = false;
+    // 三态模型：`loaded == false` 为“不可访问”；`needsCompute`（几何已注册、
+    // 从未算过）或 `needsUpdate`（已完整、边界变脏待重算）为“未计算”；
+    // 两者皆假且 `pending == false` 为“完整”。
+    bool needsCompute = false;
+    bool needsUpdate = false;
     bool blockComplete = false;
     bool skyComplete = false;
     bool complete = false;

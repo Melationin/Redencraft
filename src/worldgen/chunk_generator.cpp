@@ -69,8 +69,10 @@ PersistedChunkLight extractPersistedLight(const ProtoChunk &proto) {
   return persisted;
 }
 
-std::uint64_t submitProtoChunkToLight(const ProtoChunk &proto,
-                                      LightService &ls) {
+// deferCompute 为真时只注册几何与空壳，区块停在“未计算”，由 Light 阶段
+// 的 requestChunkCompute() 触发首次计算。
+std::uint64_t submitProtoChunkToLight(const ProtoChunk &proto, LightService &ls,
+                                      bool deferCompute = false) {
   const auto optical = ls.opticalTable();
   if (!optical)
     return 0;
@@ -81,6 +83,8 @@ std::uint64_t submitProtoChunkToLight(const ProtoChunk &proto,
   input.blockSectionCount = proto.sectionCount();
   if (proto.isLightCorrect())
     input.persistedLight = extractPersistedLight(proto);
+  else if (deferCompute)
+    input.completion = LightChunkInput::Completion::Deferred;
   input.geometrySections.reserve(proto.sections().size());
   for (const ProtoChunkSection &sec : proto.sections()) {
     input.geometrySections.push_back(
@@ -396,40 +400,21 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
     proto.primeHeightmaps(ChunkStatus::initializeLight().heightmapsAfter());
     proto.flushDirtyHeightmaps();
     if (lightService != nullptr) {
-      proto.setLightSubmissionGeneration(
-          submitProtoChunkToLight(proto, *lightService));
+      proto.setLightSubmissionGeneration(submitProtoChunkToLight(
+          proto, *lightService, /*deferCompute=*/true));
     }
     break;
   case ChunkStatusId::Light:
+    // 不等待：只登记首次计算请求，区块带着“未计算”直接进入 Spawn/Full。
+    // 光照由引擎异步发布，需要数据的消费方（存档、协议、查询）自己按
+    // isChunkSettled()/latestLayerChunk() 取，绝不在生成流水线里做全局屏障。
     if (lightService != nullptr) {
-      auto waitAndDrain = [&]() {
-        const std::uint64_t generation = proto.lightSubmissionGeneration();
-        const bool perChunkWait =
-            std::getenv("REDSTONE_LIGHT_PER_CHUNK") != nullptr;
-        if (generation != 0 && perChunkWait)
-          (void)lightService->waitForChunk(
-              pos.x, pos.z, generation, std::chrono::milliseconds{30000});
-        else
-          lightService->flushAndWait();
-        lightService->drainPublished();
-      };
-      waitAndDrain();
-      bool settled = lightService->isChunkSettled(pos.x, pos.z);
-      // 兜底重投：快照不完整时再投一次本区块，让跨区块边界重新传播。
-      for (int attempt = 0; !settled && attempt < 2; ++attempt) {
-        proto.setLightSubmissionGeneration(
-            submitProtoChunkToLight(proto, *lightService));
-        waitAndDrain();
-        settled = lightService->isChunkSettled(pos.x, pos.z);
-      }
-      // 光照数据只保留在光照引擎里（可变、可被邻居继续更新），ProtoChunk 不再
-      // 拷贝副本；写存档/晋升前用 refreshProtoChunkLight() 现取一次。
-      proto.setLightCorrect(settled);
-    } else {
-      // TODO(G-6): 未挂载 LightService 时无法执行真实光照传播，
-      // 保持 lightCorrect=false 而不伪造已完成光照快照。
-      proto.setLightCorrect(false);
+      const std::uint64_t request =
+          lightService->requestChunkCompute(pos.x, pos.z);
+      if (request != 0)
+        proto.setLightSubmissionGeneration(request);
     }
+    proto.setLightCorrect(false);
     break;
   case ChunkStatusId::Spawn:
     generator.spawnOriginalMobs(region, proto, worldSeed);
@@ -460,20 +445,24 @@ bool ChunkGenerationPipeline::generateAndInstallIntoWorld(ChunkTicketPos pos,
 }
 
 void refreshProtoChunkLight(ProtoChunk &proto, LightService &lightService) {
-  if (!proto.isLightCorrect())
-    return;
   lightService.drainPublished();
   const auto blockSnap = lightService.latestLayerChunk(
       LightLayer::Block, proto.pos().x, proto.pos().z);
   const auto skySnap = lightService.latestLayerChunk(
       LightLayer::Sky, proto.pos().x, proto.pos().z);
+  // 引擎还没算完这个区块：保留 ProtoChunk 里已有的（可能是存档读入的）光照，
+  // 绝不能用一个空快照把它抹掉。
+  if (!blockSnap && !skySnap)
+    return;
   for (int s = 0; s < proto.sectionCount(); ++s) {
     ProtoChunkSection &sec = proto.section(s);
     const int secY = sec.sectionY();
-    copySnapshotLayerToOptional(blockSnap ? blockSnap->section(secY) : nullptr,
-                                LightLayer::Block, sec.blockLight());
-    copySnapshotLayerToOptional(skySnap ? skySnap->section(secY) : nullptr,
-                                LightLayer::Sky, sec.skyLight());
+    if (blockSnap)
+      copySnapshotLayerToOptional(blockSnap->section(secY), LightLayer::Block,
+                                  sec.blockLight());
+    if (skySnap)
+      copySnapshotLayerToOptional(skySnap->section(secY), LightLayer::Sky,
+                                  sec.skyLight());
   }
 }
 
@@ -484,7 +473,8 @@ bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
   auto postProcessCopy = proto.postProcessing();
   const int minSec = proto.minSectionY();
 
-  world.loadChunk(pos.x, pos.z);
+  // 不在此时登记光照：方块还没导入，提交进去的会是“全空气”几何。
+  world.loadChunk(pos.x, pos.z, /*registerLight=*/false);
   for (const ProtoChunkSection &sec : proto.sections()) {
     const auto &secBiomes = sec.biomes();
     const bool uniformPlains =
@@ -527,8 +517,15 @@ bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
     if (LightService *light = world.lightService())
       refreshProtoChunkLight(proto, *light);
     world.setChunkPersistedLight(pos.x, pos.z, extractPersistedLight(proto));
-    // 只重投当前区块：refreshLightSnapshots() 会重投所有已加载区块，
-    // 逐区块晋升时是 O(N^2) 次提交（实测 50x50 会因此 OOM）。
+  }
+  if (proto.lightSubmissionGeneration() != 0) {
+    // 流水线已经登记过这个区块（几何与导入后的方块一致）：直接接管，
+    // 只把本地生命周期代次对齐到引擎那一代，避免同一块光被重算一遍。
+    world.alignChunkLightLifecycle(pos.x, pos.z);
+  } else {
+    // 流水线没登记过（例如未挂载 LightService 的调用方）：由 World 现在登记。
+    // 只重投当前区块：refreshLightSnapshots() 会重投所有已加载区块，逐区块晋升时
+    // 是 O(N^2) 次提交（实测 50x50 会因此 OOM）。
     world.reloadChunkLight(pos.x, pos.z);
   }
 

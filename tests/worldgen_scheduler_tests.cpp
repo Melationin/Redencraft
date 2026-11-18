@@ -161,7 +161,14 @@ void testClusteredLightService(const WorldgenRegistries &reg) {
     ChunkAccess *c = sched.findChunk(req.pos);
     assert(c != nullptr);
     assert(c->persistedStatus() == ChunkStatusId::Full);
-    assert(c->isLightCorrect());
+    // Light 阶段不再等待：状态到 Full 时光照可能还在引擎里异步计算。
+    assert(!c->isLightCorrect());
+  }
+  // 需要光照数据的消费方自己等：引擎算完后这些区块才算“完整”。
+  assert(world.lightService() != nullptr);
+  world.lightService()->flushAndWait();
+  for (const auto &req : batch) {
+    assert(world.lightService()->isChunkSettled(req.pos.x, req.pos.z));
   }
 }
 

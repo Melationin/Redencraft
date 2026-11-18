@@ -1,5 +1,8 @@
 #include "light/service_impl.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
 #include <bit>
 #include <exception>
@@ -118,6 +121,31 @@ std::uint64_t LightService::Impl::submitChunk(LightChunkInput input) {
   state.revision = active.requestRevision;
   state.load = std::make_unique<LightChunkInput>(std::move(input));
   return enqueueControl(std::move(state)) ? generation : 0;
+}
+
+std::uint64_t LightService::Impl::requestChunkCompute(int chunkX, int chunkZ) {
+  if (!accepting) {
+    ++statsRejected;
+    return 0;
+  }
+  const std::uint64_t key = chunkKey(chunkX, chunkZ);
+  const auto active = versions.find(key);
+  if (active == versions.end() || active->second.inactive) {
+    ++statsRejected;
+    return 0;
+  }
+  const auto generation = nextRequestGeneration();
+  ++active->second.requestRevision;
+  active->second.submittedGeneration = generation;
+  mainVersions[key] = active->second;
+  PendingChunk command;
+  command.key = key;
+  command.generation = generation;
+  command.inputSequence = generation;
+  command.lifecycleEpoch = active->second.epoch;
+  command.revision = active->second.requestRevision;
+  command.compute = true;
+  return enqueueControl(std::move(command)) ? generation : 0;
 }
 
 std::uint64_t LightService::Impl::nextRequestGeneration() {
@@ -754,7 +782,9 @@ bool LightService::Impl::isChunkSettled(int chunkX, int chunkZ) const {
   if (processed == processedGeneration.end() ||
       processed->second < version->second.submittedGeneration)
     return false;
-  return !pending.contains(key);
+  // “完整”= 已处理完自己的输入 + 不在待处理命令里 + 不在两种“未计算”状态里。
+  return !pending.contains(key) && !needsCompute.contains(key) &&
+         !needsUpdate.contains(key);
 }
 
 bool LightService::Impl::needsTaskQueueCompact() const noexcept {
@@ -824,12 +854,16 @@ LightService::ChunkStatus LightService::Impl::chunkStatus(int chunkX,
       (options.hasSkyLight &&
        status.publishedSkyGeneration < status.submittedGeneration);
   bool workerPending = false;
-  if (!missingGeneration) {
+  {
     std::lock_guard lock(mutex);
-    workerPending = pending.contains(key) || !resultQueue->empty() || busy ||
-                    !orderedInputEmptyLocked();
+    status.needsCompute = needsCompute.contains(key);
+    status.needsUpdate = needsUpdate.contains(key);
+    if (!missingGeneration)
+      workerPending = pending.contains(key) || !resultQueue->empty() || busy ||
+                      !orderedInputEmptyLocked();
   }
-  status.pending = missingGeneration || workerPending;
+  status.pending = missingGeneration || workerPending || status.needsCompute ||
+                   status.needsUpdate;
   status.complete =
       !status.pending && status.blockComplete && status.skyComplete;
   return status;
@@ -996,7 +1030,27 @@ bool LightService::Impl::orderedInputEmptyLocked() const {
 void LightService::Impl::applyOrderedControlLocked(PendingChunk control) {
   workerVersions[control.key] = {control.lifecycleEpoch, control.revision,
                                  control.unload};
+  if (control.compute && !control.load && !control.unload) {
+    // 计算请求是“状态提升”而不是一条独立命令：它绝不能覆盖同区块已排队的
+    // load/cell 命令，只能与它们合并。
+    auto inserted = pending.try_emplace(control.key, PendingChunk{});
+    PendingChunk &state = inserted.first->second;
+    if (control.generation > state.inputSequence) {
+      state.key = control.key;
+      state.generation = control.generation;
+      state.inputSequence = control.generation;
+      state.lifecycleEpoch = control.lifecycleEpoch;
+      state.revision = control.revision;
+    }
+    state.compute = true;
+    return;
+  }
   if (control.load || control.unload) {
+    if (control.load) {
+      const auto previous = pending.find(control.key);
+      if (previous != pending.end())
+        control.compute = control.compute || previous->second.compute;
+    }
     pending[control.key] = std::move(control);
     return;
   }
@@ -1070,7 +1124,8 @@ void LightService::Impl::noteHighWaterLocked() {
 void LightService::Impl::awaitWork(std::unique_lock<std::mutex> &lock) {
   for (;;) {
     if (closing ||
-        (!paused && (!pending.empty() || !orderedInputEmptyLocked() ||
+        (!paused && (!pending.empty() || !needsUpdate.empty() ||
+                     !orderedInputEmptyLocked() ||
                      compactRequested.load(std::memory_order_acquire))))
       return;
     workerSleeping.store(true, std::memory_order_relaxed);
@@ -1078,7 +1133,8 @@ void LightService::Impl::awaitWork(std::unique_lock<std::mutex> &lock) {
     sleepState.notify_all();
     const auto observed = wakeSequence.load(std::memory_order_acquire);
     if (closing ||
-        (!paused && (!pending.empty() || !orderedInputEmptyLocked() ||
+        (!paused && (!pending.empty() || !needsUpdate.empty() ||
+                     !orderedInputEmptyLocked() ||
                      compactRequested.load(std::memory_order_acquire)))) {
       workerSleeping.store(false, std::memory_order_release);
       return;
@@ -1177,6 +1233,26 @@ void LightService::Impl::run() {
         pending.erase(it);
       }
     }
+    // “未计算”的第二种来源：邻居边界变脏。它们不是命令而是状态位，在这里
+    // 物化成只带 key 的触发；因此绝不会覆盖同区块已排队的 load/cell 命令。
+    for (auto it = needsUpdate.begin();
+         it != needsUpdate.end() && batch.size() < options.maxQueuedCommands;) {
+      const std::uint64_t key = *it;
+      const auto version = versions.find(key);
+      if (version == versions.end() || version->second.inactive) {
+        it = needsUpdate.erase(it);
+        continue;
+      }
+      PendingChunk trigger;
+      trigger.key = key;
+      trigger.generation = nextRequestGeneration();
+      trigger.inputSequence = trigger.generation;
+      trigger.lifecycleEpoch = version->second.epoch;
+      trigger.revision = version->second.requestRevision;
+      batch.push_back(std::move(trigger));
+      it = needsUpdate.erase(it);
+    }
+
     busy = true;
     busyChunks = batch.size();
     busyMinGeneration = std::numeric_limits<std::uint64_t>::max();
@@ -1186,8 +1262,9 @@ void LightService::Impl::run() {
       busyMinGeneration = 0;
     lock.unlock();
 
+    PreparedBatch summary;
     try {
-      processBatch(batch);
+      summary = processBatch(batch);
     } catch (const std::exception &failure) {
       lock.lock();
       error = failure.what();
@@ -1206,65 +1283,47 @@ void LightService::Impl::run() {
       auto &processed = processedGeneration[command.key];
       processed = std::max(processed, command.generation);
     }
-    // checkEdge 的重入部分：新近就绪的区块会让已处理过的邻居多出一条边界光，
-    // 把它们重新入队，让边界光双向补一次（单调更新，收敛到同一不动点）。
-    for (std::uint64_t readyKey : justBecameReady) {
-      if (!options.deferUntilNeighborsReady) continue;
-      const int cx = static_cast<int>(static_cast<std::int32_t>(readyKey >> 32));
-      const int cz =
-          static_cast<int>(static_cast<std::int32_t>(readyKey & 0xFFFFFFFFu));
-      for (int dz = -1; dz <= 1; ++dz) {
-        for (int dx = -1; dx <= 1; ++dx) {
-          if (dx == 0 && dz == 0)
-            continue;
-          const std::uint64_t neighborKey = chunkKey(cx + dx, cz + dz);
-          if (!readyChunks.contains(neighborKey) ||
-              !processedGeneration.contains(neighborKey))
-            continue;
-          const auto version = versions.find(neighborKey);
-          if (version == versions.end() || version->second.inactive)
-            continue;
-          PendingChunk reprocess;
-          reprocess.key = neighborKey;
-          reprocess.generation = nextRequestGeneration();
-          reprocess.inputSequence = reprocess.generation;
-          reprocess.lifecycleEpoch = version->second.epoch;
-          reprocess.revision = version->second.requestRevision;
-          pending[neighborKey] = std::move(reprocess);
-        }
-      }
+    // 维护“未计算”状态集合：注册 → needsCompute；首次计算完成 → 清除；
+    // 本批处理过的区块边界已经新鲜，清掉旧的 needsUpdate。
+    for (std::uint64_t key : summary.registered)
+      needsCompute.insert(key);
+    for (std::uint64_t key : summary.computed)
+      needsCompute.erase(key);
+    // 整块重新加载会覆盖掉此前登记的“待首次计算”。
+    for (std::uint64_t key : summary.loaded)
+      needsCompute.erase(key);
+    for (std::uint64_t key : summary.touched)
+      needsUpdate.erase(key);
+    for (std::uint64_t key : summary.removed) {
+      needsCompute.erase(key);
+      needsUpdate.erase(key);
     }
-    justBecameReady.clear();
-    // 把"本批发生变化的区块"的 8 邻居重新入队：下一批会让边界光从邻居的已存储
-    // 层再播种一次，反复直到没有任何 dirty，收敛结果与批次划分无关。
-    if (options.deferUntilNeighborsReady) {
-      for (std::uint64_t dirtyKey : repropagateFrom) {
+    // checkEdge 的等价物：几何新就绪的区块会让已处理过的邻居多出一条边界光。
+    // 这里只置“未计算”位，不再往 pending 塞命令——状态不会被后来的命令覆盖，
+    // 下一次切批时由本函数统一物化成触发。
+    if (options.deferUntilNeighborsReady && options.borderTriggers) {
+      for (std::uint64_t readyKey : justBecameReady) {
         const int cx =
-            static_cast<int>(static_cast<std::int32_t>(dirtyKey >> 32));
-        const int cz = static_cast<int>(
-            static_cast<std::int32_t>(dirtyKey & 0xFFFFFFFFu));
+            static_cast<int>(static_cast<std::int32_t>(readyKey >> 32));
+        const int cz =
+            static_cast<int>(static_cast<std::int32_t>(readyKey & 0xFFFFFFFFu));
         for (int dz = -1; dz <= 1; ++dz) {
           for (int dx = -1; dx <= 1; ++dx) {
             if (dx == 0 && dz == 0)
               continue;
             const std::uint64_t neighborKey = chunkKey(cx + dx, cz + dz);
-            if (!readyChunks.contains(neighborKey))
+            if (!readyChunks.contains(neighborKey) ||
+                !processedGeneration.contains(neighborKey))
               continue;
             const auto version = versions.find(neighborKey);
             if (version == versions.end() || version->second.inactive)
               continue;
-            PendingChunk reprocess;
-            reprocess.key = neighborKey;
-            reprocess.generation = nextRequestGeneration();
-            reprocess.inputSequence = reprocess.generation;
-            reprocess.lifecycleEpoch = version->second.epoch;
-            reprocess.revision = version->second.requestRevision;
-            pending[neighborKey] = std::move(reprocess);
+            needsUpdate.insert(neighborKey);
           }
         }
       }
     }
-    repropagateFrom.clear();
+    justBecameReady.clear();
     ++statsBatches;
     statsWorkerCpuMs.store(currentThreadCpuMs() - workerCpuStart,
                            std::memory_order_relaxed);
@@ -1415,6 +1474,14 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
           skyColumnSources.erase(key);
         }
       }
+      if (command.load->completion == LightChunkInput::Completion::Deferred &&
+          !command.compute && !command.load->persistedLight) {
+        // 生成区块：只注册几何，停在“未计算”。这里刻意不建光照壳——壳存在
+        // 意味着邻居的边界传播可以写进来，那就是“算过一半”了。首次计算由
+        // requestChunkCompute() 触发（对应原版 InitializeLight → Light 的分界）。
+        prepared.registered.insert(key);
+        continue;
+      }
       auto &blockShell = lastReadyBlock[key];
       const bool usePersisted =
           command.load->persistedLight &&
@@ -1471,10 +1538,36 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
     } else {
       continue;
     }
-    if (applyCells(key, chunkX, chunkZ, command)) {
+    const bool changed = applyCells(key, chunkX, chunkZ, command);
+    if (command.compute) {
+      // 首次计算：“未计算” → “完整”。壳此前不存在（Deferred 注册时刻意没建），
+      // 这里补齐；随后按“新块”完整播种一次并发布。
+      auto &blockShell = lastReadyBlock[key];
+      if (!blockShell || blockShell->lifecycleEpoch != command.lifecycleEpoch)
+        blockShell = makeRawLayerShell(key, chunkX, chunkZ, command.generation,
+                                       command.lifecycleEpoch);
+      else
+        syncRawLayerGeometry(blockShell, key);
+      if (options.hasSkyLight) {
+        auto &skyShell = lastReadySky[key];
+        if (!skyShell || skyShell->lifecycleEpoch != command.lifecycleEpoch)
+          skyShell = makeRawLayerShell(key, chunkX, chunkZ, command.generation,
+                                       command.lifecycleEpoch);
+        else
+          syncRawLayerGeometry(skyShell, key);
+      } else {
+        lastReadySky.erase(key);
+      }
+      prepared.computed.insert(key);
       touchKey(key, true);
-      persistedLightChunks.erase(key);
+    } else if (changed) {
+      touchKey(key, true);
+    } else if (command.ownedCells.empty()) {
+      // 纯触发：邻居边界发生了变化，只把边界光重新拉一次；没有实际改动就不算脏。
+      touchKey(key, false);
     }
+    if (changed)
+      persistedLightChunks.erase(key);
   }
 
   const auto markAffected = [&](std::uint64_t key) {
@@ -1559,6 +1652,8 @@ LayerOutcome LightService::Impl::executeBlockLayer(
                        directChunks,      options.directWorld,
                        lastReadyBlock,    lastReadySky,
                        queueEntries,      unloadedSkips};
+  host.deferredBlock = &deferredBlockCells;
+  host.deferredSky = &deferredSkyCells;
   light_internal::BlockLightPropagator propagation(host, result.layers.chunks,
                                                    result.layers.removed,
                                                    blockScratch);
@@ -1577,6 +1672,52 @@ LayerOutcome LightService::Impl::executeBlockLayer(
       propagation.seedIncoming(key);
     }
   }
+  // 首次计算：几何在“未计算”阶段就已注册，这里补上完整播种。
+  for (std::uint64_t key : prepared.computed) {
+    if (prepared.loaded.contains(key))
+      continue;
+    propagation.seedChunk(key);
+    propagation.seedIncoming(key);
+  }
+  // 边界重算：只把邻居贴面光拉进来一次，不做整块扫描。
+  for (std::uint64_t key : prepared.touched) {
+    if (prepared.loaded.contains(key) || prepared.computed.contains(key))
+      continue;
+    propagation.seedIncoming(key);
+  }
+  // 应用“未计算”期间攒下的入向传播（等价于原版直接写进邻居光照段的那一步）。
+  const auto drainDeferredBlock = [&](std::uint64_t key) {
+    const auto it = deferredBlockCells.find(key);
+    if (it == deferredBlockCells.end())
+      return;
+    const int chunkX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+    for (const auto &[sectionY, inbox] : it->second) {
+      for (int face = 0; face < light_internal::DeferredSectionInbox::kFaceCount;
+           ++face) {
+        for (int v = 0; v < 16; ++v) {
+          for (int u = 0; u < 16; ++u) {
+            const std::uint8_t level = inbox.get(face, u, v);
+            if (level == 0)
+              continue;
+            int x = chunkX * 16 + u;
+            int z = chunkZ * 16 + ((face == 1) ? 15 : 0);
+            if (face >= 2) {
+              x = chunkX * 16 + ((face == 3) ? 15 : 0);
+              z = chunkZ * 16 + u;
+            }
+            propagation.applyDeferred({x, sectionY * 16 + v, z}, level);
+          }
+        }
+      }
+    }
+    deferredBlockCells.erase(key);
+  };
+  for (std::uint64_t key : prepared.loaded)
+    drainDeferredBlock(key);
+  for (std::uint64_t key : prepared.computed)
+    if (!prepared.loaded.contains(key))
+      drainDeferredBlock(key);
   for (std::uint64_t key : prepared.removed)
     propagation.clearIncomingFrom(key);
   for (std::uint64_t key : prepared.replaced)
@@ -1607,9 +1748,16 @@ LayerOutcome LightService::Impl::executeSkyLayer(const PreparedBatch &prepared) 
                        directChunks,      options.directWorld,
                        lastReadyBlock,    lastReadySky,
                        queueEntries,      unloadedSkips};
+  host.deferredBlock = &deferredBlockCells;
+  host.deferredSky = &deferredSkyCells;
+  // 存储资格判定范围：首批计算只看本批真正要算的区块（窗口 = 自身 + 8 邻居，
+  // 依赖保证邻居几何已注册 → 判定确定）；有方块变更时仍看 3x3 邻域，因为这次
+  // 改动可能改变邻居的存储资格。
+  const auto &eligibilityScope =
+      prepared.changedPositions.empty() ? prepared.touched : prepared.affected;
   light_internal::SkyLightPropagator sky(host, result.layers.chunks,
                                          result.layers.removed,
-                                         skyColumnSources, prepared.affected,
+                                         skyColumnSources, eligibilityScope,
                                          skyScratch);
   for (std::uint64_t key : prepared.loaded) {
     if (prepared.persistedLoaded.contains(key)) {
@@ -1625,6 +1773,49 @@ LayerOutcome LightService::Impl::executeSkyLayer(const PreparedBatch &prepared) 
       sky.seedIncoming(key);
     }
   }
+  for (std::uint64_t key : prepared.computed) {
+    if (prepared.loaded.contains(key))
+      continue;
+    sky.seedChunk(key);
+    sky.seedIncoming(key);
+  }
+  for (std::uint64_t key : prepared.touched) {
+    if (prepared.loaded.contains(key) || prepared.computed.contains(key))
+      continue;
+    sky.seedIncoming(key);
+  }
+  const auto drainDeferredSky = [&](std::uint64_t key) {
+    const auto it = deferredSkyCells.find(key);
+    if (it == deferredSkyCells.end())
+      return;
+    const int chunkX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+    for (const auto &[sectionY, inbox] : it->second) {
+      for (int face = 0; face < light_internal::DeferredSectionInbox::kFaceCount;
+           ++face) {
+        for (int v = 0; v < 16; ++v) {
+          for (int u = 0; u < 16; ++u) {
+            const std::uint8_t level = inbox.get(face, u, v);
+            if (level == 0)
+              continue;
+            int x = chunkX * 16 + u;
+            int z = chunkZ * 16 + ((face == 1) ? 15 : 0);
+            if (face >= 2) {
+              x = chunkX * 16 + ((face == 3) ? 15 : 0);
+              z = chunkZ * 16 + u;
+            }
+            sky.applyDeferred({x, sectionY * 16 + v, z}, level);
+          }
+        }
+      }
+    }
+    deferredSkyCells.erase(key);
+  };
+  for (std::uint64_t key : prepared.loaded)
+    drainDeferredSky(key);
+  for (std::uint64_t key : prepared.computed)
+    if (!prepared.loaded.contains(key))
+      drainDeferredSky(key);
   for (std::uint64_t key : prepared.removed)
     sky.clearIncomingFrom(key);
   for (std::uint64_t key : prepared.replaced)
@@ -1674,9 +1865,16 @@ LayerOutcome LightService::Impl::executeSkyLayer(const PreparedBatch &prepared) 
   const bool needsSkyWork =
       sky.hasPendingWork() || !prepared.changedPositions.empty() ||
       !prepared.removed.empty() || !prepared.replaced.empty() ||
+      !prepared.computed.empty() || !prepared.touched.empty() ||
       prepared.persistedLoaded.size() != prepared.loaded.size();
   if (needsSkyWork) {
-    sky.syncStorageEligibility();
+    // 只有几何/方块分布变化时才需要重扫 3x3x3 的存储资格。纯边界重算不重扫，
+    // 但仍保持 storageReady=false：此时资格判定回退到快照本身（非 Missing
+    // 即可存储），绝不能用一个空的 storedEligible 把写入全部拒掉。
+    if (!prepared.loaded.empty() || !prepared.removed.empty() ||
+        !prepared.replaced.empty() || !prepared.computed.empty() ||
+        !prepared.changedPositions.empty())
+      sky.syncStorageEligibility();
     sky.run();
     sky.commitLayers();
   }
@@ -1805,12 +2003,10 @@ void LightService::Impl::executeLayers(const PreparedBatch &prepared) {
   }
 }
 
-void LightService::Impl::processBatch(std::vector<PendingChunk> &batch) {
+PreparedBatch
+LightService::Impl::processBatch(std::vector<PendingChunk> &batch) {
   PreparedBatch prepared = prepareBatch(batch);
   executeLayers(prepared);
-  // 记录本批真正变化的区块，供批次结束后唤醒 8 邻居（不动点迭代）。
-  for (std::uint64_t key : prepared.dirty)
-    repropagateFrom.push_back(key);
   refreshScratchMetrics();
   for (std::uint64_t key : prepared.removed) {
     geometry.erase(key);
@@ -1819,7 +2015,10 @@ void LightService::Impl::processBatch(std::vector<PendingChunk> &batch) {
     lastReadySky.erase(key);
     protocolBaseBlock.erase(key);
     protocolBaseSky.erase(key);
+    deferredBlockCells.erase(key);
+    deferredSkyCells.erase(key);
   }
+  return prepared;
 }
 
 void LightService::Impl::refreshScratchMetrics() {
@@ -1851,6 +2050,10 @@ std::shared_ptr<const LightOpticalTable> LightService::opticalTable() const {
 
 std::uint64_t LightService::submitChunk(LightChunkInput input) {
   return impl_->submitChunk(std::move(input));
+}
+
+std::uint64_t LightService::requestChunkCompute(int chunkX, int chunkZ) {
+  return impl_->requestChunkCompute(chunkX, chunkZ);
 }
 
 std::uint64_t LightService::reportBlockCell(LightCellUpdate update) {

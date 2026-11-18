@@ -291,7 +291,34 @@ int main(int argc, char **argv) {
             for (std::uint8_t value : *sec.skyLight())
               lightChecksum += value;
         }
-        if (proto->isLightCorrect()) {
+        // 诊断用：把每块的光照校验和逐行写出，便于两次运行逐块 diff。
+        if (const char *dumpPath = std::getenv("REDSTONE_LIGHT_DUMP")) {
+          for (int s = 0; s < proto->sectionCount(); ++s) {
+            const ProtoChunkSection &sec = proto->section(s);
+            std::uint64_t blockSum = 0;
+            std::uint64_t skySum = 0;
+            if (sec.blockLight().has_value())
+              for (std::uint8_t value : *sec.blockLight())
+                blockSum += value;
+            if (sec.skyLight().has_value())
+              for (std::uint8_t value : *sec.skyLight())
+                skySum += value;
+            if (FILE *dump = std::fopen(dumpPath, "a")) {
+              std::fprintf(dump, "%d %d %d %llu %llu %d %d\n", request.pos.x,
+                           request.pos.z, sec.sectionY(),
+                           static_cast<unsigned long long>(blockSum),
+                           static_cast<unsigned long long>(skySum),
+                           sec.blockLight().has_value() ? 1 : 0,
+                           sec.skyLight().has_value() ? 1 : 0);
+              std::fclose(dump);
+            }
+          }
+        }
+        const bool settled =
+            world && world->lightService() != nullptr &&
+            world->lightService()->isChunkSettled(request.pos.x,
+                                                  request.pos.z);
+        if (settled || proto->isLightCorrect()) {
           ++lightCorrect;
         } else {
           const int halfSize = size / 2;
@@ -375,11 +402,12 @@ int main(int argc, char **argv) {
         const LightService::Stats ls = world->lightService()->stats();
         std::printf("light_stats batches=%llu published=%llu "
                     "worker_cpu_ms=%.1f block_cpu_ms=%.1f sky_cpu_ms=%.1f "
-                    "light_queue=%llu\n",
+                    "light_queue=%llu unloaded_skips=%llu\n",
                     static_cast<unsigned long long>(ls.processedBatches),
                     static_cast<unsigned long long>(ls.published),
                     ls.workerCpuMs, ls.blockWorkerCpuMs, ls.skyWorkerCpuMs,
-                    static_cast<unsigned long long>(ls.lightQueueEntries));
+                    static_cast<unsigned long long>(ls.lightQueueEntries),
+                    static_cast<unsigned long long>(ls.unloadedNeighborSkips));
         std::fflush(stdout);
       }
     }

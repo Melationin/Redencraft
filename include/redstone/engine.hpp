@@ -119,7 +119,12 @@ public:
   World &operator=(World &&) noexcept;
   World(const World &) = delete;
   World &operator=(const World &) = delete;
-  void loadChunk(int x, int z);
+  // ~registerLight=false~ 只建立区块节点、不向光照引擎提交登记，用于“生成后再
+  // 统一登记”的晋升路径（此时方块还没导入，提交进去的会是空几何）。
+  void loadChunk(int x, int z, bool registerLight = true);
+  // 让本地区块的生命周期代次对齐引擎里已有的登记。生成路径接管流水线先前的
+  // 登记时需要它，否则存档/网络侧会认为光照属于上一个生命周期而永远不就绪。
+  void alignChunkLightLifecycle(int x, int z);
   void unloadChunk(int x, int z);
   bool isChunkLoaded(int x, int z) const;
   bool isLoaded(Pos pos) const;

@@ -440,6 +440,43 @@ inline LightPos offset(LightPos position, int direction) {
   return {position.x + delta.x, position.y + delta.y, position.z + delta.z};
 }
 
+// 单个区块段在“未计算”阶段收到的入向光照。
+// 存在原因：原版会把邻居推来的光直接写进已分配的光照段；我们的“未计算”区块还没有
+// 光照壳，写不进去。跨区块的光只可能从 4 个水平侧面进入（同区块内部的段间传播在
+// 同一个批次里完成），所以每段只需保存 4 x 16 x 16 格、4 bit/格 = 512 字节。
+// 用 max 合并，天然去重，也不需要容量上限。
+struct DeferredSectionInbox {
+  static constexpr int kFaceCount = 4;
+  static constexpr int kFaceNibbles = 256;
+  static constexpr int kFaceBytes = kFaceNibbles / 2;   // 128
+  // 面顺序对应“进入方向的反向”：(north,south,west,east) 边缘 = 方向 3,2,5,4。
+  std::array<std::array<std::uint8_t, kFaceBytes>, kFaceCount> faces{};
+
+  std::uint8_t get(int face, int u, int v) const {
+    const int index = (v << 4) | u;
+    const std::uint8_t packed = faces[face][index >> 1];
+    return static_cast<std::uint8_t>((packed >> ((index & 1) * 4)) & 15u);
+  }
+  void raise(int face, int u, int v, std::uint8_t level) {
+    const int index = (v << 4) | u;
+    std::uint8_t &packed = faces[face][index >> 1];
+    const int shift = (index & 1) * 4;
+    if (level <= static_cast<std::uint8_t>((packed >> shift) & 15u))
+      return;
+    packed = static_cast<std::uint8_t>((packed & ~(0x0Fu << shift)) |
+                                       ((level & 15u) << shift));
+  }
+  bool empty() const {
+    for (const auto &face : faces)
+      for (std::uint8_t packed : face)
+        if (packed != 0)
+          return false;
+    return true;
+  }
+};
+// 单区块的收件箱：只保存有入向光的段（通常 1~3 个）。
+using DeferredChunkInbox = std::vector<std::pair<int, DeferredSectionInbox>>;
+
 // 按区块段首元素 `sectionY` 计算连续段数组中的下标，越界时返回 `values.size()`。
 template <class T>
 std::size_t vectorIndex(const std::vector<T> &values, int sectionY) {
@@ -475,6 +512,9 @@ struct PendingChunk {
   std::uint64_t revision = 0;
   std::unique_ptr<LightChunkInput> load;
   bool unload = false;
+  // 首次计算请求（`LightService::requestChunkCompute`）：几何已注册、空壳已存在，
+  // 本批对其实施一次完整播种（seedChunk + seedIncoming）并置为需要发布。
+  bool compute = false;
   std::unordered_map<std::uint32_t, OwnedCell> ownedCells;
 };
 
@@ -519,6 +559,10 @@ struct PreparedBatch {
   FlatSet<std::uint64_t, UInt64Hash> replaced;
   FlatSet<std::uint64_t, UInt64Hash> loaded;
   FlatSet<std::uint64_t, UInt64Hash> persistedLoaded;
+  // 只注册了几何、停在“未计算”的区块（`Completion::Deferred`）。
+  FlatSet<std::uint64_t, UInt64Hash> registered;
+  // 本批首次计算的区块（“未计算” → “完整”）。
+  FlatSet<std::uint64_t, UInt64Hash> computed;
   FlatSet<std::uint64_t, UInt64Hash> affected;
   std::vector<LightPos> changedPositions;
   std::uint64_t maxGeneration = 0;
@@ -662,6 +706,41 @@ struct LightEngineHost {
       &lastReadySky;
   std::uint64_t &lightQueueEntries;
   std::uint64_t &unloadedNeighborSkips;
+  // 每个光照层各一个“未计算区块收件箱”。
+  FlatMap<std::uint64_t, DeferredChunkInbox, UInt64Hash> *deferredBlock = nullptr;
+  FlatMap<std::uint64_t, DeferredChunkInbox, UInt64Hash> *deferredSky = nullptr;
+
+  // 目标区块已注册几何但还没算过（“未计算”）时，把 \`level\` 以 max 方式记进它对应
+  // 段的那一侧 16x16 收件箱并返回 true；返回 false 表示目标真的不存在（世界边界外
+  // 的区块）或已经有光照壳，调用方按“跳过”处理。
+  bool deferIncoming(bool sky, LightPos to, int direction, std::uint8_t level) const {
+    auto *inbox = sky ? deferredSky : deferredBlock;
+    if (inbox == nullptr)
+      return false;
+    const std::uint64_t key = chunkKey(to.x >> 4, to.z >> 4);
+    if (!geometry.contains(key))
+      return false;
+    const auto &ready = sky ? lastReadySky : lastReadyBlock;
+    if (ready.find(key) != ready.end())
+      return false;
+    DeferredChunkInbox &chunkInbox = (*inbox)[key];
+    const int sectionY = to.y >> 4;
+    DeferredSectionInbox *section = nullptr;
+    for (auto &entry : chunkInbox) {
+      if (entry.first == sectionY) {
+        section = &entry.second;
+        break;
+      }
+    }
+    if (section == nullptr) {
+      chunkInbox.emplace_back(sectionY, DeferredSectionInbox{});
+      section = &chunkInbox.back().second;
+    }
+    const int face = (direction ^ 1) - 2;
+    const int u = (direction == 2 || direction == 3) ? (to.x & 15) : (to.z & 15);
+    section->raise(face, u, to.y & 15, level);
+    return true;
+  }
 
   const LightOpticalClass &opticalClass(std::uint16_t id) const {
     return opticalTable[static_cast<std::uint8_t>(id)];
