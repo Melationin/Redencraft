@@ -123,7 +123,7 @@ private:
 
 // 单八度经典 Perlin 梯度噪声（对齐 `ImprovedNoise.java`）。
 // 支持 `yScale` / `yFudge` 垂直阶梯截断采样（为老式 3D 地形混合与云团偏移所必需）与解析梯度导数。
-class ImprovedNoise {
+class alignas(64) ImprovedNoise {
 public:
   explicit ImprovedNoise(RandomSource &random);
 
@@ -186,6 +186,10 @@ public:
   const std::vector<double> &amplitudes() const noexcept { return amplitudes_; }
 
   static double wrap(double x) noexcept {
+    // |x| < 3.3554432E7 / 2 时 x / 3.3554432E7 + 0.5 落在 [0, 1) 内，
+    // 原式中的 lfloor 恒为 0（负端点同理），直接返回 x 与逐位结果一致。
+    if (x > -16777216.0 && x < 16777216.0)
+      return x;
     return x -
            static_cast<double>(worldgen_math::lfloor(x / 3.3554432E7 + 0.5)) *
                3.3554432E7;
@@ -196,6 +200,16 @@ private:
               std::vector<double> amplitudes, bool useNewInitialization);
 
   double edgeValue(double noiseValue) const noexcept;
+
+  // 扁平八度表：只保留非零振幅八度，预先算好输入/值系数，热路径不再查 optional、
+  // 不再做逐八度的 factor *= 2 / valueFactor /= 2。系数仍按原顺序生成，结果逐位一致。
+  struct OctaveSlot {
+    const ImprovedNoise *noise = nullptr;
+    double inputFactor = 1.0;
+    double amplitude = 0.0;
+    double valueFactor = 1.0;
+  };
+  std::vector<OctaveSlot> octaveSlots_;
 
   std::vector<std::optional<ImprovedNoise>> noiseLevels_;
   int firstOctave_ = 0;

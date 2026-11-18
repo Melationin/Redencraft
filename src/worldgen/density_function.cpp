@@ -56,6 +56,13 @@ double applyMappedTransform(MappedOp op, double input) noexcept {
   return input;
 }
 
+// 无缓存上下文（NoiseChunk 路径）直接走 computeUncached，避免每条边都经过
+// compute 的缓存检查与一次额外函数调用；有缓存时保持原有语义。
+inline double computeChild(const DensityNodePtr &node,
+                           const DensityFunctionContext &ctx) noexcept {
+  return ctx.evalCache ? node->compute(ctx) : node->computeUncached(ctx);
+}
+
 double mapRarity(RarityMapperKind kind, double input) noexcept {
   if (kind == RarityMapperKind::Type1) {
     // QuantizedSpaghettiRarity.getSpaghettiRarity3D
@@ -211,7 +218,7 @@ float CubicSpline::apply(int blockX, int blockY, int blockZ) const {
 float CubicSpline::apply(const DensityFunctionContext &ctx) const {
   if (isConstant_)
     return constantValue_;
-  const float input = static_cast<float>(coordinate_->compute(ctx));
+  const float input = static_cast<float>(computeChild(coordinate_, ctx));
   const int start = findSplineInterval(locations_, input);
   const int lastIdx = static_cast<int>(locations_.size()) - 1;
   if (start < 0) {
@@ -262,7 +269,38 @@ double DensityNode::compute(int blockX, int blockY, int blockZ) const {
   return compute(DensityFunctionContext{blockX, blockY, blockZ, nullptr});
 }
 
+namespace {
+
+bool isCacheableKind(DensityNodeKind kind) noexcept {
+  switch (kind) {
+  case DensityNodeKind::Noise:
+  case DensityNodeKind::ShiftedNoise:
+  case DensityNodeKind::ShiftA:
+  case DensityNodeKind::ShiftB:
+  case DensityNodeKind::Shift:
+  case DensityNodeKind::WeirdScaledSampler:
+  case DensityNodeKind::OldBlendedNoise:
+  case DensityNodeKind::Spline:
+  case DensityNodeKind::EndIslands:
+    return true;
+  default:
+    return false;
+  }
+}
+
+} // namespace
+
 double DensityNode::compute(const DensityFunctionContext &ctx) const {
+  if (!ctx.evalCache || !isCacheableKind(kind))
+    return computeUncached(ctx);
+  if (const double *cached = ctx.evalCache->find(this))
+    return *cached;
+  const double value = computeUncached(ctx);
+  ctx.evalCache->insert(this, value);
+  return value;
+}
+
+double DensityNode::computeUncached(const DensityFunctionContext &ctx) const {
   const int blockX = ctx.blockX;
   const int blockY = ctx.blockY;
   const int blockZ = ctx.blockZ;
@@ -270,20 +308,20 @@ double DensityNode::compute(const DensityFunctionContext &ctx) const {
   case DensityNodeKind::Constant:
     return constantValue;
   case DensityNodeKind::Mapped:
-    return applyMappedTransform(mappedOp, arg1->compute(ctx));
+    return applyMappedTransform(mappedOp, computeChild(arg1, ctx));
   case DensityNodeKind::Clamp:
-    return std::clamp(arg1->compute(ctx), param1, param2);
+    return std::clamp(computeChild(arg1, ctx), param1, param2);
   case DensityNodeKind::TwoArg: {
-    const double v1 = arg1->compute(ctx);
+    const double v1 = computeChild(arg1, ctx);
     switch (twoArgOp) {
     case TwoArgOp::Add:
-      return v1 + arg2->compute(ctx);
+      return v1 + computeChild(arg2, ctx);
     case TwoArgOp::Mul:
-      return v1 == 0.0 ? 0.0 : v1 * arg2->compute(ctx);
+      return v1 == 0.0 ? 0.0 : v1 * computeChild(arg2, ctx);
     case TwoArgOp::Min:
-      return v1 < arg2->minValue ? v1 : std::min(v1, arg2->compute(ctx));
+      return v1 < arg2->minValue ? v1 : std::min(v1, computeChild(arg2, ctx));
     case TwoArgOp::Max:
-      return v1 > arg2->maxValue ? v1 : std::max(v1, arg2->compute(ctx));
+      return v1 > arg2->maxValue ? v1 : std::max(v1, computeChild(arg2, ctx));
     }
     return 0.0;
   }
@@ -294,18 +332,18 @@ double DensityNode::compute(const DensityFunctionContext &ctx) const {
     return worldgen_math::clampedLerp(factor, param1, param2);
   }
   case DensityNodeKind::RangeChoice: {
-    const double v = arg1->compute(ctx);
-    return (v >= param1 && v < param2) ? arg2->compute(ctx)
-                                       : arg3->compute(ctx);
+    const double v = computeChild(arg1, ctx);
+    return (v >= param1 && v < param2) ? computeChild(arg2, ctx)
+                                       : computeChild(arg3, ctx);
   }
   case DensityNodeKind::Noise:
     return noiseHolder.getValue(static_cast<double>(blockX) * xzScale,
                                 static_cast<double>(blockY) * yScale,
                                 static_cast<double>(blockZ) * xzScale);
   case DensityNodeKind::ShiftedNoise: {
-    const double sx = static_cast<double>(blockX) * xzScale + arg1->compute(ctx);
-    const double sy = static_cast<double>(blockY) * yScale + arg2->compute(ctx);
-    const double sz = static_cast<double>(blockZ) * xzScale + arg3->compute(ctx);
+    const double sx = static_cast<double>(blockX) * xzScale + computeChild(arg1, ctx);
+    const double sy = static_cast<double>(blockY) * yScale + computeChild(arg2, ctx);
+    const double sz = static_cast<double>(blockZ) * xzScale + computeChild(arg3, ctx);
     return noiseHolder.getValue(sx, sy, sz);
   }
   case DensityNodeKind::ShiftA:
@@ -322,7 +360,7 @@ double DensityNode::compute(const DensityFunctionContext &ctx) const {
                                 static_cast<double>(blockZ) * 0.25) *
            4.0;
   case DensityNodeKind::WeirdScaledSampler: {
-    const double input = arg1->compute(ctx);
+    const double input = computeChild(arg1, ctx);
     const double rarity = mapRarity(rarityMapper, input);
     return rarity * std::abs(noiseHolder.getValue(
                         static_cast<double>(blockX) / rarity,
@@ -345,13 +383,13 @@ double DensityNode::compute(const DensityFunctionContext &ctx) const {
     const int step = intParam2;
     const int lower = intParam1;
     const int topY =
-        worldgen_math::floorDivInt(arg2->compute(ctx) /
+        worldgen_math::floorDivInt(computeChild(arg2, ctx) /
                                    static_cast<double>(step)) *
         step;
     if (topY <= lower)
       return static_cast<double>(lower);
     for (int y = topY; y >= lower; y -= step) {
-      if (arg1->compute(DensityFunctionContext{blockX, y, blockZ, nullptr}) > 0.0)
+      if (arg1->computeUncached(DensityFunctionContext{blockX, y, blockZ, nullptr}) > 0.0)
         return static_cast<double>(y);
     }
     return static_cast<double>(lower);
@@ -363,7 +401,7 @@ double DensityNode::compute(const DensityFunctionContext &ctx) const {
     return 0.0;
   case DensityNodeKind::BlendDensity:
   case DensityNodeKind::Marker:
-    return arg1->compute(ctx);
+    return computeChild(arg1, ctx);
   case DensityNodeKind::Custom:
     return custom ? custom->compute(ctx) : 0.0;
   }
@@ -540,6 +578,413 @@ void DensityNode::fillArray(double *output, std::size_t count,
   case DensityNodeKind::FindTopSurface:
     provider.fillAllDirectly(output, count, *this);
     return;
+  }
+}
+
+namespace {
+
+constexpr std::uint32_t kFlatInvalid = 0xFFFFFFFFu;
+
+} // namespace
+
+// 编译器需要访问 FlatDensityFunction 的私有指令表。
+struct FlatDensityCompiler {
+  FlatDensityFunction &fn;
+  std::unordered_map<const DensityNode *, std::uint32_t> memo;
+  std::unordered_map<const CubicSpline *, std::uint32_t> splineMemo;
+  bool ok = true;
+
+  template <class F>
+  std::uint32_t push(const DensityNode *node, F &&fill) {
+    const std::uint32_t index = static_cast<std::uint32_t>(fn.ops_.size());
+    fn.ops_.emplace_back();
+    fill(fn.ops_.back());
+    memo.emplace(node, index);
+    return index;
+  }
+
+  std::uint32_t visit(const DensityNodePtr &node) {
+    if (!node)
+      return kFlatInvalid;
+    if (auto it = memo.find(node.get()); it != memo.end())
+      return it->second;
+    if (!ok)
+      return kFlatInvalid;
+
+    switch (node->kind) {
+    case DensityNodeKind::Constant:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::Constant;
+        op.p1 = node->constantValue;
+      });
+    case DensityNodeKind::Mapped: {
+      const std::uint32_t a = visit(node->arg1);
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::Mapped;
+        op.aux = static_cast<std::uint8_t>(node->mappedOp);
+        op.a = a;
+      });
+    }
+    case DensityNodeKind::Clamp: {
+      const std::uint32_t a = visit(node->arg1);
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::Clamp;
+        op.a = a;
+        op.p1 = node->param1;
+        op.p2 = node->param2;
+      });
+    }
+    case DensityNodeKind::TwoArg: {
+      const std::uint32_t a = visit(node->arg1);
+      const std::uint32_t b = visit(node->arg2);
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::TwoArg;
+        op.aux = static_cast<std::uint8_t>(node->twoArgOp);
+        op.a = a;
+        op.b = b;
+        op.p1 = node->twoArgOp == TwoArgOp::Min
+                    ? node->arg2->minValue
+                    : (node->twoArgOp == TwoArgOp::Max ? node->arg2->maxValue
+                                                       : 0.0);
+      });
+    }
+    case DensityNodeKind::YClampedGradient:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::YClampedGradient;
+        op.i1 = node->intParam1;
+        op.i2 = node->intParam2;
+        op.p1 = node->param1;
+        op.p2 = node->param2;
+      });
+    case DensityNodeKind::RangeChoice: {
+      const std::uint32_t a = visit(node->arg1);
+      const std::uint32_t b = visit(node->arg2);
+      const std::uint32_t c = visit(node->arg3);
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::RangeChoice;
+        op.a = a;
+        op.b = b;
+        op.c = c;
+        op.p1 = node->param1;
+        op.p2 = node->param2;
+      });
+    }
+    case DensityNodeKind::Noise:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::Noise;
+        op.ptr = node->noiseHolder.noise.get();
+        op.s1 = node->xzScale;
+        op.s2 = node->yScale;
+      });
+    case DensityNodeKind::ShiftedNoise: {
+      const std::uint32_t a = visit(node->arg1);
+      const std::uint32_t b = visit(node->arg2);
+      const std::uint32_t c = visit(node->arg3);
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::ShiftedNoise;
+        op.a = a;
+        op.b = b;
+        op.c = c;
+        op.ptr = node->noiseHolder.noise.get();
+        op.s1 = node->xzScale;
+        op.s2 = node->yScale;
+      });
+    }
+    case DensityNodeKind::ShiftA:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::ShiftA;
+        op.ptr = node->noiseHolder.noise.get();
+      });
+    case DensityNodeKind::ShiftB:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::ShiftB;
+        op.ptr = node->noiseHolder.noise.get();
+      });
+    case DensityNodeKind::Shift:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::Shift;
+        op.ptr = node->noiseHolder.noise.get();
+      });
+    case DensityNodeKind::WeirdScaledSampler: {
+      const std::uint32_t a = visit(node->arg1);
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::WeirdScaled;
+        op.a = a;
+        op.aux = static_cast<std::uint8_t>(node->rarityMapper);
+        op.ptr = node->noiseHolder.noise.get();
+      });
+    }
+    case DensityNodeKind::OldBlendedNoise:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::OldBlended;
+        op.ptr = node->blendedNoise.get();
+      });
+    case DensityNodeKind::Spline: {
+      const std::uint32_t spline = compileSpline(node->spline.get());
+      if (!ok)
+        return kFlatInvalid;
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::Spline;
+        op.a = spline;
+      });
+    }
+    case DensityNodeKind::EndIslands:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::EndIslands;
+        op.ptr = node->endIslandNoise.get();
+      });
+    case DensityNodeKind::BlendAlpha:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::BlendAlpha;
+      });
+    case DensityNodeKind::BlendOffset:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::BlendOffset;
+      });
+    case DensityNodeKind::Beardifier:
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::Beardifier;
+      });
+    case DensityNodeKind::BlendDensity:
+    case DensityNodeKind::Marker: {
+      const std::uint32_t a = visit(node->arg1);
+      return push(node.get(), [&](FlatDensityFunction::Op &op) {
+        op.kind = FlatDensityFunction::OpKind::PassThrough;
+        op.a = a;
+      });
+    }
+    case DensityNodeKind::FindTopSurface:
+    case DensityNodeKind::Custom:
+      ok = false;
+      return kFlatInvalid;
+    }
+    ok = false;
+    return kFlatInvalid;
+  }
+
+  std::uint32_t compileSpline(const CubicSpline *spline) {
+    if (!spline) {
+      ok = false;
+      return kFlatInvalid;
+    }
+    if (auto it = splineMemo.find(spline); it != splineMemo.end())
+      return it->second;
+    const std::uint32_t index =
+        static_cast<std::uint32_t>(fn.splines_.size());
+    fn.splines_.emplace_back();
+    splineMemo.emplace(spline, index);
+    if (spline->isConstant()) {
+      fn.splines_[index].isConstant = true;
+      fn.splines_[index].constant = spline->constantValue();
+      return index;
+    }
+    fn.splines_[index].isConstant = false;
+    const std::uint32_t coordOp = visit(spline->coordinate());
+    if (!ok)
+      return index;
+    fn.splines_[index].coordOp = coordOp;
+    fn.splines_[index].locations = spline->locations();
+    fn.splines_[index].derivatives = spline->derivatives();
+    std::vector<std::uint32_t> values;
+    values.reserve(spline->values().size());
+    for (const auto &child : spline->values())
+      values.push_back(compileSpline(child.get()));
+    fn.splines_[index].values = std::move(values);
+    return index;
+  }
+};
+
+std::shared_ptr<const FlatDensityFunction>
+FlatDensityFunction::compile(std::span<const DensityNodePtr> roots) {
+  auto fn = std::make_shared<FlatDensityFunction>();
+  FlatDensityCompiler compiler{*fn, {}, {}, true};
+  fn->roots_.reserve(roots.size());
+  for (const DensityNodePtr &root : roots) {
+    if (!root) {
+      fn->roots_.push_back(kFlatInvalid);
+      continue;
+    }
+    const std::uint32_t index = compiler.visit(root);
+    if (!compiler.ok)
+      return nullptr;
+    fn->roots_.push_back(index);
+  }
+  return fn;
+}
+
+float FlatDensityFunction::evaluateSpline(std::uint32_t index,
+                                          const double *slots) const {
+  const FlatSpline &spline = splines_[index];
+  if (spline.isConstant)
+    return spline.constant;
+  const float input = static_cast<float>(slots[spline.coordOp]);
+  const int start = findSplineInterval(spline.locations, input);
+  const int lastIdx = static_cast<int>(spline.locations.size()) - 1;
+  if (start < 0) {
+    return linearExtendFloat(input, spline.locations,
+                             evaluateSpline(spline.values[0], slots),
+                             spline.derivatives, 0);
+  }
+  if (start == lastIdx) {
+    const auto idx = static_cast<std::size_t>(lastIdx);
+    return linearExtendFloat(input, spline.locations,
+                             evaluateSpline(spline.values[idx], slots),
+                             spline.derivatives, idx);
+  }
+  const auto s = static_cast<std::size_t>(start);
+  const float x1 = spline.locations[s];
+  const float x2 = spline.locations[s + 1];
+  const float t = (input - x1) / (x2 - x1);
+  const float d1 = spline.derivatives[s];
+  const float d2 = spline.derivatives[s + 1];
+  const float y1 = evaluateSpline(spline.values[s], slots);
+  const float y2 = evaluateSpline(spline.values[s + 1], slots);
+  const float a = d1 * (x2 - x1) - (y2 - y1);
+  const float b = -d2 * (x2 - x1) + (y2 - y1);
+  const float lerpY = y1 + t * (y2 - y1);
+  const float lerpAB = a + t * (b - a);
+  return lerpY + t * (1.0f - t) * lerpAB;
+}
+
+void FlatDensityFunction::evaluate(const DensityFunctionContext &ctx,
+                                   double *out) const {
+  thread_local std::vector<double> slots;
+  if (slots.size() < ops_.size())
+    slots.resize(ops_.size());
+  const int blockX = ctx.blockX;
+  const int blockY = ctx.blockY;
+  const int blockZ = ctx.blockZ;
+  for (std::size_t i = 0; i < ops_.size(); ++i) {
+    const Op &op = ops_[i];
+    switch (op.kind) {
+    case OpKind::Constant:
+      slots[i] = op.p1;
+      break;
+    case OpKind::Mapped:
+      slots[i] = applyMappedTransform(static_cast<MappedOp>(op.aux),
+                                      slots[op.a]);
+      break;
+    case OpKind::Clamp:
+      slots[i] = std::clamp(slots[op.a], op.p1, op.p2);
+      break;
+    case OpKind::TwoArg: {
+      const double v1 = slots[op.a];
+      switch (static_cast<TwoArgOp>(op.aux)) {
+      case TwoArgOp::Add:
+        slots[i] = v1 + slots[op.b];
+        break;
+      case TwoArgOp::Mul:
+        slots[i] = v1 == 0.0 ? 0.0 : v1 * slots[op.b];
+        break;
+      case TwoArgOp::Min:
+        slots[i] = v1 < op.p1 ? v1 : std::min(v1, slots[op.b]);
+        break;
+      case TwoArgOp::Max:
+        slots[i] = v1 > op.p1 ? v1 : std::max(v1, slots[op.b]);
+        break;
+      }
+      break;
+    }
+    case OpKind::YClampedGradient: {
+      const double factor =
+          (static_cast<double>(blockY) - static_cast<double>(op.i1)) /
+          (static_cast<double>(op.i2) - static_cast<double>(op.i1));
+      slots[i] = worldgen_math::clampedLerp(factor, op.p1, op.p2);
+      break;
+    }
+    case OpKind::RangeChoice: {
+      const double v = slots[op.a];
+      slots[i] = (v >= op.p1 && v < op.p2) ? slots[op.b] : slots[op.c];
+      break;
+    }
+    case OpKind::Noise: {
+      const auto *noise = static_cast<const NormalNoise *>(op.ptr);
+      slots[i] = noise ? noise->getValue(static_cast<double>(blockX) * op.s1,
+                                         static_cast<double>(blockY) * op.s2,
+                                         static_cast<double>(blockZ) * op.s1)
+                       : 0.0;
+      break;
+    }
+    case OpKind::ShiftedNoise: {
+      const auto *noise = static_cast<const NormalNoise *>(op.ptr);
+      const double sx = static_cast<double>(blockX) * op.s1 + slots[op.a];
+      const double sy = static_cast<double>(blockY) * op.s2 + slots[op.b];
+      const double sz = static_cast<double>(blockZ) * op.s1 + slots[op.c];
+      slots[i] = noise ? noise->getValue(sx, sy, sz) : 0.0;
+      break;
+    }
+    case OpKind::ShiftA: {
+      const auto *noise = static_cast<const NormalNoise *>(op.ptr);
+      slots[i] =
+          noise ? noise->getValue(static_cast<double>(blockX) * 0.25, 0.0,
+                                  static_cast<double>(blockZ) * 0.25) *
+                      4.0
+                : 0.0;
+      break;
+    }
+    case OpKind::ShiftB: {
+      const auto *noise = static_cast<const NormalNoise *>(op.ptr);
+      slots[i] =
+          noise ? noise->getValue(static_cast<double>(blockZ) * 0.25,
+                                  static_cast<double>(blockX) * 0.25, 0.0) *
+                      4.0
+                : 0.0;
+      break;
+    }
+    case OpKind::Shift: {
+      const auto *noise = static_cast<const NormalNoise *>(op.ptr);
+      slots[i] =
+          noise ? noise->getValue(static_cast<double>(blockX) * 0.25,
+                                  static_cast<double>(blockY) * 0.25,
+                                  static_cast<double>(blockZ) * 0.25) *
+                      4.0
+                : 0.0;
+      break;
+    }
+    case OpKind::WeirdScaled: {
+      const double input = slots[op.a];
+      const double rarity =
+          mapRarity(static_cast<RarityMapperKind>(op.aux), input);
+      const auto *noise = static_cast<const NormalNoise *>(op.ptr);
+      slots[i] =
+          noise ? rarity * std::abs(noise->getValue(
+                                      static_cast<double>(blockX) / rarity,
+                                      static_cast<double>(blockY) / rarity,
+                                      static_cast<double>(blockZ) / rarity))
+                : 0.0;
+      break;
+    }
+    case OpKind::OldBlended: {
+      const auto *noise = static_cast<const BlendedNoise *>(op.ptr);
+      slots[i] = noise ? noise->compute(blockX, blockY, blockZ) : 0.0;
+      break;
+    }
+    case OpKind::Spline:
+      slots[i] = static_cast<double>(evaluateSpline(op.a, slots.data()));
+      break;
+    case OpKind::EndIslands: {
+      const auto *noise = static_cast<const SimplexNoise *>(op.ptr);
+      slots[i] = noise ? (static_cast<double>(endIslandHeightValue(
+                              *noise, blockX / 8, blockZ / 8)) -
+                         8.0) /
+                             128.0
+                       : 0.0;
+      break;
+    }
+    case OpKind::BlendAlpha:
+      slots[i] = 1.0;
+      break;
+    case OpKind::BlendOffset:
+    case OpKind::Beardifier:
+      slots[i] = 0.0;
+      break;
+    case OpKind::PassThrough:
+      slots[i] = slots[op.a];
+      break;
+    }
+  }
+  for (std::size_t r = 0; r < roots_.size(); ++r) {
+    out[r] = roots_[r] == kFlatInvalid ? 0.0 : slots[roots_[r]];
   }
 }
 

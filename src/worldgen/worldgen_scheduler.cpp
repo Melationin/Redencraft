@@ -257,8 +257,8 @@ WorldGenScheduler::getOrCreateHolder(ChunkTicketPos pos,
       const StoreReadResult raw = diskStore_->readChunk(pos);
       if (raw.status == StoreReadStatus::Found) {
         std::string err;
-        auto decoded = decodeProtoChunkNbt(raw.nbt, generator_.minY(),
-                                           generator_.height(), err);
+        auto decoded = decodeProtoChunkNbt(raw.nbt, generator_.chunkMinY(),
+                                           generator_.chunkHeight(), err);
         if (!decoded) {
           throw std::runtime_error("failed to decode persisted chunk (" +
                                    std::to_string(pos.x) + "," +
@@ -274,8 +274,8 @@ WorldGenScheduler::getOrCreateHolder(ChunkTicketPos pos,
   }
 
   if (!loadedChunk) {
-    loadedChunk = std::make_unique<ProtoChunk>(pos, generator_.minY(),
-                                               generator_.height());
+    loadedChunk = std::make_unique<ProtoChunk>(pos, generator_.chunkMinY(),
+                                               generator_.chunkHeight());
   }
 
   auto candidate =
@@ -861,6 +861,29 @@ std::size_t WorldGenScheduler::evictIdleOutsideRadius(
   }
   holdersEvicted_.fetch_add(evicted, std::memory_order_relaxed);
   return evicted;
+}
+
+std::size_t WorldGenScheduler::heldChunkCount() const {
+  std::size_t count = 0;
+  for (std::size_t s = 0; s < kShardCount; ++s) {
+    std::shared_lock<std::shared_mutex> lock(shards_[s].mtx);
+    for (const auto &entry : shards_[s].map) {
+      if (entry.second->chunk)
+        ++count;
+    }
+  }
+  return count;
+}
+
+void WorldGenScheduler::forEachHeldChunk(
+    const std::function<void(const ChunkAccess &)> &visitor) const {
+  for (std::size_t s = 0; s < kShardCount; ++s) {
+    std::shared_lock<std::shared_mutex> lock(shards_[s].mtx);
+    for (const auto &entry : shards_[s].map) {
+      if (entry.second->chunk)
+        visitor(*entry.second->chunk);
+    }
+  }
 }
 
 WorldGenSchedulerStats WorldGenScheduler::stats() const {

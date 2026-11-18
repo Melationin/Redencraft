@@ -303,7 +303,8 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
             }
             auto item = std::make_shared<ItemEntity>(
                 world_, position, stack,
-                Vec3{decoded.motion[0], decoded.motion[1], decoded.motion[2]});
+                Vec3{decoded.motion[0], decoded.motion[1], decoded.motion[2]},
+                RestoreFromStorageTag{});
             item->yaw = decoded.rotation[0];
             item->pitch = decoded.rotation[1];
             item->onGround = decoded.onGround;

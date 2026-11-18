@@ -219,6 +219,26 @@ void payload(std::vector<uint8_t> &out, const Tag &tag, int depth,
     break;
   }
   case 10: {
+    // 快路径：compoundOrder 覆盖全部键且无重复时直接顺序写出，省掉去重集合。
+    bool orderedUnique = tag.compoundOrder.size() == tag.compound.size();
+    for (const std::string &name : tag.compoundOrder) {
+      if (!tag.compound.contains(name)) {
+        orderedUnique = false;
+        break;
+      }
+    }
+    if (orderedUnique) {
+      for (const std::string &name : tag.compoundOrder) {
+        const Tag &value = tag.compound.at(name);
+        if (value.type == 0 || value.type > 12)
+          throw Error("invalid NBT compound tag");
+        out.push_back(value.type);
+        str(out, name);
+        payload(out, value, depth + 1, nodes);
+      }
+      out.push_back(0);
+      break;
+    }
     std::set<std::string> written;
     auto emit = [&](const std::string &name, const Tag &value) {
       if (value.type == 0 || value.type > 12)
@@ -261,6 +281,7 @@ std::vector<uint8_t> writeRoot(const RootTag &root) {
   if (root.value.type != 10)
     throw Error("NBT root must be a compound");
   std::vector<uint8_t> out;
+  out.reserve(std::size_t{1} << 16);
   out.push_back(10);
   str(out, root.name);
   std::size_t nodes = 0;

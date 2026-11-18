@@ -139,9 +139,9 @@ void testClusteredLightService(const WorldgenRegistries &reg) {
   const auto *endSettings = reg.findNoiseSettings("minecraft:end");
   assert(endSettings != nullptr);
   auto endBiomes = std::make_shared<TheEndBiomeSource>();
-  NoiseBasedChunkGenerator gen(reg, *endSettings, endBiomes);
+  NoiseBasedChunkGenerator gen(reg, *endSettings, endBiomes, redstone::endDimensionType().minY, redstone::endDimensionType().height);
 
-  World world(0, 128);
+  World world(0, 256);
   LightWorkerOptions lopts;
   lopts.batchWindowMs = 0;
   world.enableLighting(lopts);

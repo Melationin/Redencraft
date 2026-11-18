@@ -2,6 +2,8 @@
 #include "redstone/light/snapshot.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <array>
 #include <bit>
 #include <span>
@@ -160,6 +162,23 @@ bool faceShapesOcclude(const BlockLightProperties &from,
 LightOpticalTable::LightOpticalTable() {
   classes_.push_back({{}, false}); // conservative unsupported sentinel
   stateClasses_.resize(detail::gStateCount, 0);
+  if (std::getenv("REDSTONE_LIGHT_DEBUG") != nullptr) {
+    std::size_t unsupportedStates = 0;
+    std::vector<const Block *> unsupportedBlocks;
+    for (BlockState::Id stateId = 0; stateId < detail::gStateCount; ++stateId) {
+      const BlockState state = BlockState::fromId(stateId);
+      if (lightPropertiesOf(state).supported)
+        continue;
+      ++unsupportedStates;
+      if (std::find(unsupportedBlocks.begin(), unsupportedBlocks.end(),
+                    &state.block()) == unsupportedBlocks.end())
+        unsupportedBlocks.push_back(&state.block());
+    }
+    std::fprintf(stderr, "light: %zu unsupported states in %zu blocks\n",
+                 unsupportedStates, unsupportedBlocks.size());
+    for (std::size_t i = 0; i < unsupportedBlocks.size() && i < 40; ++i)
+      std::fprintf(stderr, "  %s\n", unsupportedBlocks[i]->name().c_str());
+  }
   std::unordered_map<std::uint64_t, std::uint8_t> byOptics;
   for (BlockState::Id stateId = 0; stateId < detail::gStateCount; ++stateId) {
     const BlockState state = BlockState::fromId(stateId);

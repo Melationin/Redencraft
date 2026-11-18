@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <exception>
+#include <limits>
 #include <map>
 #include <shared_mutex>
 #include <stdexcept>
@@ -124,6 +125,8 @@ std::uint64_t LightService::Impl::nextRequestGeneration() {
 }
 
 void LightService::Impl::loadGeometry(std::uint64_t key, LightChunkInput &input) {
+  if (readyChunks.insert(key).second)
+    justBecameReady.push_back(key);
   if (input.directGeometry) {
     geometry.erase(key);
     directChunks[key] = light_internal::DirectChunkMeta{
@@ -495,6 +498,8 @@ void LightService::Impl::mergeChangedSections(
 }
 
 void LightService::Impl::drainPublished() {
+  // 生成阶段有多个线程会并发排空；结果队列是单消费者，这里串行化。
+  std::lock_guard<std::mutex> drainLock(drainMutex);
   if (resultQueue->empty())
     return;
   std::vector<LayerResult> coalesced;
@@ -693,6 +698,63 @@ bool LightService::Impl::flushAndWait(std::chrono::milliseconds timeout) {
     idle.wait(lock, done);
   flushRequested = wasFlushRequested;
   return reached && error.empty() && !closing;
+}
+
+bool LightService::Impl::waitForChunk(int chunkX, int chunkZ,
+                                      std::uint64_t generation,
+                                      std::chrono::milliseconds timeout) {
+  if (generation == 0)
+    return true;
+  const std::uint64_t key = chunkKey(chunkX, chunkZ);
+  std::unique_lock lock(mutex);
+  const bool wasFlushRequested = flushRequested;
+  // 跳过 30ms 合批窗口，让本区块的工作尽快进入传播。
+  flushRequested = true;
+  signalWorkerLocked(true);
+  auto done = [&] {
+    if (closing)
+      return true;
+    if (!orderedInputEmptyLocked())
+      return false;
+    const auto found = processedGeneration.find(key);
+    return found != processedGeneration.end() && found->second >= generation;
+  };
+  bool reached = true;
+  if (timeout.count() > 0)
+    reached = idle.wait_for(lock, timeout, done);
+  else
+    idle.wait(lock, done);
+  flushRequested = wasFlushRequested;
+  return reached && error.empty() && !closing;
+}
+
+// 8 邻域几何是否都已注册；未就绪时推迟本区块，避免在缺少邻区块几何的拓扑上
+// 传播并把结果发布出去（原版 LightEngine.checkEdge 的延迟语义）。
+bool LightService::Impl::neighborsReadyFor(std::uint64_t key) const {
+  const int chunkX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+  const int chunkZ = static_cast<int>(static_cast<std::int32_t>(key & 0xFFFFFFFFu));
+  for (int dz = -1; dz <= 1; ++dz) {
+    for (int dx = -1; dx <= 1; ++dx) {
+      if (!readyChunks.contains(chunkKey(chunkX + dx, chunkZ + dz)))
+        return false;
+    }
+  }
+  return true;
+}
+
+// 收敛判据：本区块提交的输入都处理过，且它自己不在待处理集合里。
+// 注意这允许之后邻居到达时再更新本区块的光照数据（原版语义：光照是可变数据）。
+bool LightService::Impl::isChunkSettled(int chunkX, int chunkZ) const {
+  std::lock_guard lock(mutex);
+  const std::uint64_t key = chunkKey(chunkX, chunkZ);
+  const auto version = versions.find(key);
+  if (version == versions.end() || version->second.inactive)
+    return false;
+  const auto processed = processedGeneration.find(key);
+  if (processed == processedGeneration.end() ||
+      processed->second < version->second.submittedGeneration)
+    return false;
+  return !pending.contains(key);
 }
 
 bool LightService::Impl::needsTaskQueueCompact() const noexcept {
@@ -1038,7 +1100,8 @@ void LightService::Impl::run() {
       break;
     if (paused && !closing)
       continue;
-    if (pending.empty() && orderedInputEmptyLocked() &&
+    if (!options.deferUntilNeighborsReady && pending.empty() &&
+        orderedInputEmptyLocked() &&
         compactRequested.exchange(false, std::memory_order_acq_rel)) {
       compacting = true;
       auto lease = std::move(compactLease);
@@ -1085,7 +1148,30 @@ void LightService::Impl::run() {
       const std::size_t count = std::min(
           {options.batchSize, options.maxQueuedCommands, pending.size()});
       batch.reserve(count);
-      for (std::size_t i = 0; i < count; ++i) {
+      if (!options.deferUntilNeighborsReady) {
+        for (std::size_t i = 0; i < count; ++i) {
+          auto it = pending.begin();
+          batch.push_back(std::move(it->second));
+          pending.erase(it);
+        }
+      } else
+      // checkEdge 的等价物：邻区块几何未就绪时先推迟本区块（最多推迟若干轮，
+      // 避免世界边界上永远凑不齐 8 邻域而饿死），等邻居就绪后再传播。
+      for (auto it = pending.begin();
+           it != pending.end() && batch.size() < count;) {
+        PendingChunk &candidate = it->second;
+        const bool bringsGeometry = static_cast<bool>(candidate.load);
+        if (!bringsGeometry && !neighborsReadyFor(candidate.key) &&
+            ++neighborDeferrals[candidate.key] < 4) {
+          ++it;
+          continue;
+        }
+        neighborDeferrals.erase(candidate.key);
+        batch.push_back(std::move(candidate));
+        it = pending.erase(it);
+      }
+      if (batch.empty() && !pending.empty()) {
+        // 所有待处理区块都被邻居阻塞：退化为处理队首，保证有进展。
         auto it = pending.begin();
         batch.push_back(std::move(it->second));
         pending.erase(it);
@@ -1093,6 +1179,11 @@ void LightService::Impl::run() {
     }
     busy = true;
     busyChunks = batch.size();
+    busyMinGeneration = std::numeric_limits<std::uint64_t>::max();
+    for (const PendingChunk &command : batch)
+      busyMinGeneration = std::min(busyMinGeneration, command.generation);
+    if (batch.empty())
+      busyMinGeneration = 0;
     lock.unlock();
 
     try {
@@ -1110,6 +1201,70 @@ void LightService::Impl::run() {
     lock.lock();
     busy = false;
     busyChunks = 0;
+    busyMinGeneration = 0;
+    for (const PendingChunk &command : batch) {
+      auto &processed = processedGeneration[command.key];
+      processed = std::max(processed, command.generation);
+    }
+    // checkEdge 的重入部分：新近就绪的区块会让已处理过的邻居多出一条边界光，
+    // 把它们重新入队，让边界光双向补一次（单调更新，收敛到同一不动点）。
+    for (std::uint64_t readyKey : justBecameReady) {
+      if (!options.deferUntilNeighborsReady) continue;
+      const int cx = static_cast<int>(static_cast<std::int32_t>(readyKey >> 32));
+      const int cz =
+          static_cast<int>(static_cast<std::int32_t>(readyKey & 0xFFFFFFFFu));
+      for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          if (dx == 0 && dz == 0)
+            continue;
+          const std::uint64_t neighborKey = chunkKey(cx + dx, cz + dz);
+          if (!readyChunks.contains(neighborKey) ||
+              !processedGeneration.contains(neighborKey))
+            continue;
+          const auto version = versions.find(neighborKey);
+          if (version == versions.end() || version->second.inactive)
+            continue;
+          PendingChunk reprocess;
+          reprocess.key = neighborKey;
+          reprocess.generation = nextRequestGeneration();
+          reprocess.inputSequence = reprocess.generation;
+          reprocess.lifecycleEpoch = version->second.epoch;
+          reprocess.revision = version->second.requestRevision;
+          pending[neighborKey] = std::move(reprocess);
+        }
+      }
+    }
+    justBecameReady.clear();
+    // 把"本批发生变化的区块"的 8 邻居重新入队：下一批会让边界光从邻居的已存储
+    // 层再播种一次，反复直到没有任何 dirty，收敛结果与批次划分无关。
+    if (options.deferUntilNeighborsReady) {
+      for (std::uint64_t dirtyKey : repropagateFrom) {
+        const int cx =
+            static_cast<int>(static_cast<std::int32_t>(dirtyKey >> 32));
+        const int cz = static_cast<int>(
+            static_cast<std::int32_t>(dirtyKey & 0xFFFFFFFFu));
+        for (int dz = -1; dz <= 1; ++dz) {
+          for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dz == 0)
+              continue;
+            const std::uint64_t neighborKey = chunkKey(cx + dx, cz + dz);
+            if (!readyChunks.contains(neighborKey))
+              continue;
+            const auto version = versions.find(neighborKey);
+            if (version == versions.end() || version->second.inactive)
+              continue;
+            PendingChunk reprocess;
+            reprocess.key = neighborKey;
+            reprocess.generation = nextRequestGeneration();
+            reprocess.inputSequence = reprocess.generation;
+            reprocess.lifecycleEpoch = version->second.epoch;
+            reprocess.revision = version->second.requestRevision;
+            pending[neighborKey] = std::move(reprocess);
+          }
+        }
+      }
+    }
+    repropagateFrom.clear();
     ++statsBatches;
     statsWorkerCpuMs.store(currentThreadCpuMs() - workerCpuStart,
                            std::memory_order_relaxed);
@@ -1179,6 +1334,8 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
         std::max(prepared.maxGeneration, command.generation);
     if (command.unload) {
       prepared.removed.insert(key);
+      readyChunks.erase(key);
+      neighborDeferrals.erase(key);
       prepared.loaded.erase(key);
       prepared.touched.erase(key);
       prepared.dirty.erase(key);
@@ -1651,6 +1808,9 @@ void LightService::Impl::executeLayers(const PreparedBatch &prepared) {
 void LightService::Impl::processBatch(std::vector<PendingChunk> &batch) {
   PreparedBatch prepared = prepareBatch(batch);
   executeLayers(prepared);
+  // 记录本批真正变化的区块，供批次结束后唤醒 8 邻居（不动点迭代）。
+  for (std::uint64_t key : prepared.dirty)
+    repropagateFrom.push_back(key);
   refreshScratchMetrics();
   for (std::uint64_t key : prepared.removed) {
     geometry.erase(key);
@@ -1735,6 +1895,14 @@ LightService::ChunkStatus LightService::chunkStatus(int chunkX,
 }
 bool LightService::flushAndWait(std::chrono::milliseconds timeout) {
   return impl_->flushAndWait(timeout);
+}
+bool LightService::isChunkSettled(int chunkX, int chunkZ) const {
+  return impl_->isChunkSettled(chunkX, chunkZ);
+}
+bool LightService::waitForChunk(int chunkX, int chunkZ,
+                                std::uint64_t generation,
+                                std::chrono::milliseconds timeout) {
+  return impl_->waitForChunk(chunkX, chunkZ, generation, timeout);
 }
 bool LightService::needsTaskQueueCompact() const noexcept {
   return impl_->needsTaskQueueCompact();

@@ -152,9 +152,8 @@ void assertColumn(ChunkAccess &chunk, const NoiseBasedChunkGenerator &gen,
 }
 
 void testDisabledAquiferInvariants() {
-  auto picker = [](int, int, int) {
-    return FluidStatus{63, Blocks::WATER.defaultState()};
-  };
+  FluidPicker picker;
+  picker.seaStatus = FluidStatus{63, Blocks::WATER.defaultState()};
   auto aq = Aquifer::createDisabled(picker);
   assert(!aq->shouldScheduleFluidUpdate());
   assert(!aq->computeSubstance(DensityFunctionContext{0, 60, 0}, 0.5).has_value());
@@ -315,7 +314,7 @@ int main(int argc, char **argv) {
     assert(neSettings != nullptr);
     auto neBiomes = std::make_shared<MultiNoiseBiomeSource>(
         MultiNoiseBiomeSource::createNether());
-    NoiseBasedChunkGenerator gen(reg, *neSettings, neBiomes);
+    NoiseBasedChunkGenerator gen(reg, *neSettings, neBiomes, redstone::netherDimensionType().minY, redstone::netherDimensionType().height);
     ChunkGenerationPipeline pipe(gen, kSeed1);
     ChunkAccess &c00 = pipe.ensureStatus(ChunkTicketPos{0, 0}, ChunkStatusId::Surface);
     assertColumn(c00, gen, kSeed1, 4, 11, 127, 127, 128, "minecraft:nether_wastes",
@@ -323,11 +322,11 @@ int main(int argc, char **argv) {
                  "63..65=minecraft:netherrack;109..123=minecraft:netherrack;"
                  "124..124=minecraft:bedrock;125..125=minecraft:netherrack;126..127=minecraft:bedrock",
                  "nether(0,0)[4,11]");
-    assertChunkHash(c00, 0xe0141efdf508e598ULL, "nether(0,0)");
+    assertChunkHash(c00, 0xbc8347302940e598ULL, "nether(0,0)");
 
     ChunkAccess &cBasalt =
         pipe.ensureStatus(ChunkTicketPos{0, 8}, ChunkStatusId::Surface);
-    assertChunkHash(cBasalt, 0x8ef271e761ce57fdULL, "nether(0,8) basalt_deltas");
+    assertChunkHash(cBasalt, 0x05ed59abddd857fdULL, "nether(0,8) basalt_deltas");
   }
 
   // 3. End: golden parity against server-26.1.jar (central + outer island)
@@ -335,16 +334,16 @@ int main(int argc, char **argv) {
     const auto *enSettings = reg.findNoiseSettings("minecraft:end");
     assert(enSettings != nullptr);
     auto enBiomes = std::make_shared<TheEndBiomeSource>();
-    NoiseBasedChunkGenerator gen(reg, *enSettings, enBiomes);
+    NoiseBasedChunkGenerator gen(reg, *enSettings, enBiomes, redstone::endDimensionType().minY, redstone::endDimensionType().height);
     ChunkGenerationPipeline pipe(gen, kSeed1);
     ChunkAccess &c00 = pipe.ensureStatus(ChunkTicketPos{0, 0}, ChunkStatusId::Surface);
     assertColumn(c00, gen, kSeed1, 2, 3, 63, 63, 64, "minecraft:the_end",
                  "14..63=minecraft:end_stone", "end(0,0)[2,3]");
-    assertChunkHash(c00, 0x2493d3596aa95c19ULL, "end(0,0)");
+    assertChunkHash(c00, 0x2e1ba913b19f5c19ULL, "end(0,0)");
 
     ChunkAccess &cOuter =
         pipe.ensureStatus(ChunkTicketPos{70, 0}, ChunkStatusId::Surface);
-    assertChunkHash(cOuter, 0xb9292e07be0c2325ULL, "end(70,0)");
+    assertChunkHash(cOuter, 0x326b9ac2f7f62325ULL, "end(70,0)");
   }
 
   std::cout << "worldgen_g2_terrain_tests passed\n";

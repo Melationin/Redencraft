@@ -6,6 +6,14 @@ ItemEntity::ItemEntity(World &world, Vec3 pos, ItemStack stack)
     : ItemEntity(world, pos, std::move(stack),
                  Vec3{world.random.nextDouble() * 0.2 - 0.1, 0.2,
                       world.random.nextDouble() * 0.2 - 0.1}) {}
+ItemEntity::ItemEntity(World &world, Vec3 pos, ItemStack stack, Vec3 motion,
+                       RestoreFromStorageTag)
+    : Entity("minecraft:item"), item(std::move(stack)) {
+  entityData_.define(kDataItemId, EntityDataSerializer::ItemStack, item);
+  setPos(pos);
+  setDeltaMovement(motion);
+  oldPosition = position;
+}
 ItemEntity::ItemEntity(World &world, Vec3 pos, ItemStack stack, Vec3 motion)
     : Entity("minecraft:item"), item(std::move(stack)) {
   entityData_.define(kDataItemId, EntityDataSerializer::ItemStack, item);

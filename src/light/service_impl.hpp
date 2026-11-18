@@ -59,6 +59,10 @@ public:
   Stats stats() const;
   ChunkStatus chunkStatus(int chunkX, int chunkZ) const;
   bool flushAndWait(std::chrono::milliseconds timeout);
+  // 等待"提交序号 <= generation 的工作全部处理完"，不等待之后提交的工作。
+  bool waitForChunk(int chunkX, int chunkZ, std::uint64_t generation,
+                    std::chrono::milliseconds timeout);
+  bool isChunkSettled(int chunkX, int chunkZ) const;
   bool needsTaskQueueCompact() const noexcept;
   bool requestTaskQueueCompact(CleanupExecutionGate::Lease lease = {});
   std::size_t scratchTaskQueueBytesForTesting() const noexcept;
@@ -196,6 +200,8 @@ private:
   int blockSectionCount;
   LightWorkerOptions options;
   mutable std::mutex mutex;
+  // 生成管线有多个线程会调用 drainPublished()，结果队列是单消费者，必须串行化。
+  std::mutex drainMutex;
   std::condition_variable wake;
   std::condition_variable idle;
   std::condition_variable batchDone;
@@ -261,6 +267,21 @@ private:
   bool accepting = true;
   std::atomic<bool> closing{false};
   bool busy = false;
+  // 当前批次里最小的提交序号；等待接口用它判断本批次是否还有早于目标序号的
+  // 工作在跑（对应原版按区块等待，而不是全局排空）。
+  std::uint64_t busyMinGeneration = 0;
+  // 每个区块最近一次被处理到的提交序号（工作线程写入，等待方在 mutex 下读取）。
+  std::unordered_map<std::uint64_t, std::uint64_t> processedGeneration;
+  // 几何已经注册的区块（checkEdge 的等价状态）：跨区块边界传播只有在邻区块
+  // 几何就绪后才有意义，否则先推迟本区块，等邻居就绪再处理。
+  std::unordered_set<std::uint64_t> readyChunks;
+  std::unordered_map<std::uint64_t, std::uint32_t> neighborDeferrals;
+  bool neighborsReadyFor(std::uint64_t key) const;
+  // 本批次新变为"几何就绪"的区块，用于在批次结束后唤醒邻居重传播。
+  std::vector<std::uint64_t> justBecameReady;
+  // 本批次里真正发生变化（dirty）的区块；批次结束后把它们的 8 邻居重新入队，
+  // 让边界光持续双向传播直到不再变化（单调最大值的混沌迭代，与批次划分无关）。
+  std::vector<std::uint64_t> repropagateFrom;
   bool compacting = false;
   std::size_t busyChunks = 0;
   std::uint64_t nextPublicationRevision = 0;

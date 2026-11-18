@@ -6,12 +6,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace redstone::worldgen {
 namespace {
@@ -471,14 +476,19 @@ bool StructurePlacementConfig::applyAdditionalChunkRestrictions(
 ChunkGeneratorStructureState::ChunkGeneratorStructureState(
     std::int64_t levelSeed, std::int64_t concentricRingsSeed,
     const WorldgenRegistries &registries, const BiomeSource &biomeSource,
-    const ClimateSampler &sampler)
+    const ClimateSampler &sampler, bool includeConcentricRings)
     : levelSeed_(levelSeed), concentricRingsSeed_(concentricRingsSeed),
+      includeConcentricRings_(includeConcentricRings),
       registries_(registries), biomeSource_(biomeSource), sampler_(sampler) {
   const auto possibleList = biomeSource_.possibleBiomes();
   const std::set<std::string> possibleSet(possibleList.begin(),
                                           possibleList.end());
   for (const auto &[setId, setDef] : registries_.structureSets()) {
     (void)setId;
+    if (!includeConcentricRings_ &&
+        setDef.placement.kind == StructurePlacementKind::ConcentricRings) {
+      continue;
+    }
     bool matchesAny = false;
     for (const auto &entry : setDef.structures) {
       const StructureDefinition *sDef =
@@ -523,8 +533,6 @@ ChunkGeneratorStructureState::generateRingPositions(
   const int distance = placement.distance;
   const int count = placement.count;
   int spread = placement.spread;
-  std::vector<ChunkTicketPos> positions;
-  positions.reserve(static_cast<std::size_t>(count));
 
   LegacyRandomSource random(0);
   random.setSeed(concentricRingsSeed_);
@@ -532,26 +540,36 @@ ChunkGeneratorStructureState::generateRingPositions(
   int positionInCircle = 0;
   int circle = 0;
 
-  auto preferredPred = [&](std::string_view b) {
-    return registries_.biomeMatches(b, placement.preferredBiomesSelector);
+  // 预先把生物群系选择器编译成整数位掩码，避免 41 万个采样点每次都做字符串查找。
+  std::vector<std::uint64_t> preferredMask;
+  const bool hasMask = registries_.buildBiomeSelectorMask(
+      std::span<const std::string>(&placement.preferredBiomesSelector, 1),
+      preferredMask);
+  auto preferredPred = [&](std::string_view biome) {
+    if (!hasMask)
+      return registries_.biomeMatches(biome, placement.preferredBiomesSelector);
+    return WorldgenRegistries::biomeMatchesMask(registries_.findBiomeId(biome),
+                                                preferredMask);
   };
 
+  // 对齐 26.1 ChunkGeneratorStructureState.generateRingPositions：
+  // 先在主循环中按固定顺序派生子随机源，再把 128 个独立的大半径群系搜索并行执行；
+  // 每个搜索只读写自己的 RandomSource，结果按原索引收集，保持与原版一致的确定性。
+  struct RingSearchTask {
+    int initialX = 0;
+    int initialZ = 0;
+    LegacyRandomSource rng{0};
+  };
+  std::vector<RingSearchTask> tasks;
+  tasks.reserve(static_cast<std::size_t>(count));
   for (int i = 0; i < count; ++i) {
     const double dist = 4.0 * distance + distance * circle * 6.0 +
                         (random.nextDouble() - 0.5) * (distance * 2.5);
-    const int initialX =
-        static_cast<int>(std::llround(std::cos(angle) * dist));
-    const int initialZ =
-        static_cast<int>(std::llround(std::sin(angle) * dist));
-    auto searchRng = random.fork();
-    const auto found = biomeSource_.findBiomeHorizontal(
-        (initialX << 4) + 8, 0, (initialZ << 4) + 8, 112, preferredPred,
-        searchRng, sampler_);
-    if (found.has_value()) {
-      positions.push_back(ChunkTicketPos{found->pos.x >> 4, found->pos.z >> 4});
-    } else {
-      positions.push_back(ChunkTicketPos{initialX, initialZ});
-    }
+    RingSearchTask task;
+    task.initialX = static_cast<int>(std::llround(std::cos(angle) * dist));
+    task.initialZ = static_cast<int>(std::llround(std::sin(angle) * dist));
+    task.rng = random.fork();
+    tasks.push_back(std::move(task));
 
     angle += (kPiDouble * 2.0) / static_cast<double>(spread);
     if (++positionInCircle == spread) {
@@ -561,6 +579,52 @@ ChunkGeneratorStructureState::generateRingPositions(
       spread = std::min(spread, count - i);
       angle += random.nextDouble() * kPiDouble * 2.0;
     }
+  }
+
+  std::vector<ChunkTicketPos> positions(tasks.size());
+  std::vector<std::exception_ptr> failures(tasks.size());
+  auto runTask = [&](std::size_t index) noexcept {
+    try {
+      RingSearchTask &task = tasks[index];
+      const auto found = biomeSource_.findBiomeHorizontal(
+          (task.initialX << 4) + 8, 0, (task.initialZ << 4) + 8, 112,
+          preferredPred, task.rng, sampler_);
+      positions[index] =
+          found.has_value()
+              ? ChunkTicketPos{found->pos.x >> 4, found->pos.z >> 4}
+              : ChunkTicketPos{task.initialX, task.initialZ};
+    } catch (...) {
+      failures[index] = std::current_exception();
+    }
+  };
+
+  const std::size_t hardware =
+      std::max(1u, std::thread::hardware_concurrency());
+  const std::size_t workerCount = std::min<std::size_t>(hardware, tasks.size());
+  if (workerCount <= 1) {
+    for (std::size_t i = 0; i < tasks.size(); ++i)
+      runTask(i);
+  } else {
+    std::atomic<std::size_t> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount - 1);
+    auto workerLoop = [&]() {
+      for (;;) {
+        const std::size_t index = next.fetch_add(1, std::memory_order_relaxed);
+        if (index >= tasks.size())
+          return;
+        runTask(index);
+      }
+    };
+    for (std::size_t w = 1; w < workerCount; ++w)
+      workers.emplace_back(workerLoop);
+    workerLoop();
+    for (std::thread &worker : workers)
+      worker.join();
+  }
+  for (const std::exception_ptr &failure : failures) {
+    if (failure)
+      std::rethrow_exception(failure);
   }
   return positions;
 }

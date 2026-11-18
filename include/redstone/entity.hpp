@@ -529,12 +529,19 @@ private:
 };
 
 /// 掉落物实体（`minecraft:item`），实现物品物理、合并堆叠、拾取冷却与熔岩/虚空销毁语义。
+// 标记"从存档/托管存储恢复"的构造路径：不消耗 World 随机源。
+struct RestoreFromStorageTag {};
+
 class ItemEntity : public Entity {
 public:
   static constexpr std::uint8_t kDataItemId = 8;
 
   ItemEntity(World &world, Vec3 pos, ItemStack stack);
   ItemEntity(World &world, Vec3 pos, ItemStack stack, Vec3 motion);
+  // 恢复路径：yaw/pitch 随后由记录覆盖、bobOffs 仅客户端视觉，因此不掷随机数，
+  // 与 PrimedTnt 的恢复构造保持同一契约——区块加载不得扰动 World 随机序列。
+  ItemEntity(World &world, Vec3 pos, ItemStack stack, Vec3 motion,
+             RestoreFromStorageTag restore);
   void tick(World &world) override;
   bool fireImmune() const override;
   bool hurt(World &world, DamageKind kind, float damage) override;

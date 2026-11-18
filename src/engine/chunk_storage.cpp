@@ -838,6 +838,22 @@ void World::setChunkPersistedLight(int x, int z, PersistedChunkLight persisted) 
   }
 }
 
+void World::reloadChunkLight(int x, int z) {
+  if (!lightService_)
+    return;
+  flushPendingLightCells();
+  Chunk *chunk = chunkAt(x, z);
+  if (!chunk)
+    return;
+  if (auto input = makeLightChunkInput(x, z)) {
+    const std::uint64_t seq = lightService_->submitChunk(std::move(*input));
+    if (seq > 0)
+      chunk->requiredLightGeneration =
+          std::max(chunk->requiredLightGeneration, seq);
+    chunk->persistedLight.reset();
+  }
+}
+
 void World::refreshLightSnapshots() {
   if (!lightService_)
     return;
@@ -893,23 +909,30 @@ void World::primeHeightmaps() {
   for (auto &[key, chunk] : chunks_) {
     if (!chunk.loaded)
       continue;
-    const int chunkX = static_cast<int>(key >> 32);
-    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
-    if (!chunk.heightmaps)
-      chunk.heightmaps = std::make_unique<ChunkHeightmaps>(
-          minY_, sectionCount() * 16);
-    int highestSectionPosition = minY_;
-    for (int section = sectionCount(); section-- > 0;) {
-      if (!chunk.sections[section].hasOnlyAir()) {
-        highestSectionPosition = (minY_ >> 4) * 16 + section * 16 + 16;
-        break;
-      }
-    }
-    chunk.heightmaps->prime(
-        highestSectionPosition, [this, chunkX, chunkZ](int x, int y, int z) {
-          return getBlock({chunkX * 16 + x, y, chunkZ * 16 + z});
-        });
+    primeHeightmaps(static_cast<int>(key >> 32),
+                    static_cast<int>(static_cast<std::uint32_t>(key)));
   }
+}
+
+void World::primeHeightmaps(int chunkX, int chunkZ) {
+  auto found = chunks_.find(chunkKey(chunkX, chunkZ));
+  if (found == chunks_.end() || !found->second.loaded)
+    return;
+  Chunk &chunk = found->second;
+  if (!chunk.heightmaps)
+    chunk.heightmaps =
+        std::make_unique<ChunkHeightmaps>(minY_, sectionCount() * 16);
+  int highestSectionPosition = minY_;
+  for (int section = sectionCount(); section-- > 0;) {
+    if (!chunk.sections[section].hasOnlyAir()) {
+      highestSectionPosition = (minY_ >> 4) * 16 + section * 16 + 16;
+      break;
+    }
+  }
+  chunk.heightmaps->prime(
+      highestSectionPosition, [this, chunkX, chunkZ](int x, int y, int z) {
+        return getBlock({chunkX * 16 + x, y, chunkZ * 16 + z});
+      });
 }
 const World::Section *World::loadedSectionAt(Pos p) const {
   if (p.y < minY_ || p.y >= maxY_)

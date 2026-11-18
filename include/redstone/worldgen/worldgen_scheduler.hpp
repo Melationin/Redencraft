@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -64,6 +65,12 @@ public:
                          ChunkTicketPos priorityAnchor = {0, 0});
 
   ChunkAccess *findChunk(ChunkTicketPos pos) const;
+
+  // 诊断用：统计/遍历当前仍持有区块的槽位（包含目标区块与它们依赖的邻域区块）。
+  // 整批生成结束后这些槽位不会被自动回收，因此它们构成常驻内存的主体。
+  std::size_t heldChunkCount() const;
+  void forEachHeldChunk(
+      const std::function<void(const ChunkAccess &)> &visitor) const;
   std::optional<ProtoChunk> takeProtoChunk(ChunkTicketPos pos);
 
   // 生成至 `Full` 并通过共享安装路径写入运行态 `World`。

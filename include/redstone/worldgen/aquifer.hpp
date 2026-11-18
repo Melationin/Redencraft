@@ -31,8 +31,17 @@ struct FluidStatus {
   friend bool operator==(const FluidStatus &, const FluidStatus &) = default;
 };
 
-using FluidPicker =
-    std::function<FluidStatus(int blockX, int blockY, int blockZ)>;
+// 26.1 的 FluidPicker 只依赖 y（海平面/熔岩位）；用可内联的值类型替代
+// std::function，避免每个非固体方块一次类型擦除调用。
+struct FluidPicker {
+  FluidStatus lavaStatus;
+  FluidStatus seaStatus;
+  int cutoff = -54;
+
+  FluidStatus at(int /*blockX*/, int blockY, int /*blockZ*/) const noexcept {
+    return blockY < cutoff ? lavaStatus : seaStatus;
+  }
+};
 
 using BlockStateFiller =
     std::function<std::optional<BlockState>(const DensityFunctionContext &ctx)>;

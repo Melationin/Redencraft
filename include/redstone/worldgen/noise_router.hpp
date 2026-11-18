@@ -74,6 +74,8 @@ struct ClimateSampler {
   DensityNodePtr weirdness;
   std::vector<ClimateParameterPoint> spawnTarget;
   std::uint8_t yDependentMask = 0x3F;
+  // 6 条气候通道共享的扁平求值器（纯函数子图）；为空时回退到逐通道递归求值。
+  std::shared_ptr<const FlatDensityFunction> flat;
 
   void computeYDependentMask() noexcept;
   ClimateTargetPoint sample(int quartX, int quartY, int quartZ) const;

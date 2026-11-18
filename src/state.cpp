@@ -1,5 +1,7 @@
 #include "redstone/engine.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <string_view>
 #include <utility>
@@ -644,6 +646,9 @@ const Block &blockByName(std::string_view name) {
   table.owned.emplace_back(std::string(name),
                            BlockMetadata{0, false, "unsupported", false},
                            StateDefinition{});
+  if (std::getenv("REDSTONE_LIGHT_DEBUG") != nullptr)
+    std::fprintf(stderr, "unknown block at runtime: %s\n",
+                 table.owned.back().name().c_str());
   return table.owned.back();
 }
 

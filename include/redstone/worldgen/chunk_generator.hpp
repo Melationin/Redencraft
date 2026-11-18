@@ -70,6 +70,10 @@ public:
 
   virtual int minY() const noexcept { return -64; }
   virtual int height() const noexcept { return 384; }
+  // 维度区块高度（LevelHeightAccessor）与生成深度（getGenDepth）分离：
+  // 下界/末地生成深度 128，但区块仍是 16 段（0..255），128 以上为空气。
+  virtual int chunkMinY() const noexcept { return minY(); }
+  virtual int chunkHeight() const noexcept { return height(); }
 
   virtual void createStructures(ProtoChunk &chunk, std::int64_t worldSeed) {
     (void)chunk;
@@ -171,6 +175,10 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
                                 LightService *lightService);
 
 // 将到达 `Full` 的 `ProtoChunk` 零拷贝/紧凑写入运行态 `World` 并调度后处理流体刻。
+// 从光照引擎的最新快照刷新 ProtoChunk 的光照层（晋升/存档前调用）。
+// 光照的权威数据在光照引擎里可变地更新，ProtoChunk 里的层只是存档缓存。
+void refreshProtoChunkLight(ProtoChunk &proto, LightService &lightService);
+
 bool installProtoChunkIntoWorld(ProtoChunk &&proto, World &world);
 
 } // namespace redstone::worldgen

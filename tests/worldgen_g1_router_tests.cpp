@@ -5,6 +5,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
@@ -309,6 +310,33 @@ void testRegistriesAndRouters(const std::filesystem::path &assetsDir) {
   }
 }
 
+
+void testFlatDensitySampler(const std::filesystem::path &assetsDir) {
+  const WorldgenRegistries reg = WorldgenRegistries::loadFromDirectory(assetsDir);
+  int flatSamplers = 0;
+  for (const GoldenRow &row : kGoldenRows) {
+    const auto *settings = reg.findNoiseSettings(row.settingsId);
+    require(settings != nullptr, row.settingsId);
+    RandomState state = RandomState::create(*settings, reg, row.seed);
+    const ClimateSampler &flat = state.sampler();
+    ClimateSampler fallback = flat;
+    fallback.flat.reset();
+    if (flat.flat)
+      ++flatSamplers;
+    for (int qx = -48; qx <= 48; qx += 7) {
+      for (int qz = -48; qz <= 48; qz += 11) {
+        for (int qy = -8; qy <= 8; qy += 4) {
+          const ClimateTargetPoint a = flat.sample(qx, qy, qz);
+          const ClimateTargetPoint b = fallback.sample(qx, qy, qz);
+          if (std::memcmp(&a, &b, sizeof(a)) != 0)
+            throw std::runtime_error("flat sampler differs from recursive");
+        }
+      }
+    }
+  }
+  require(flatSamplers > 0, "no climate sampler compiled a flat evaluator");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -318,6 +346,7 @@ int main(int argc, char **argv) {
                  : std::filesystem::path("assets/worldgen26_1");
     testCubicSplineDirect();
     testRegistriesAndRouters(assetsDir);
+    testFlatDensitySampler(assetsDir);
     std::cout << "worldgen_g1_router tests passed\n";
     return 0;
   } catch (const std::exception &ex) {

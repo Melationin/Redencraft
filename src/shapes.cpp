@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <deque>
 #include <string>
 namespace redstone {
 #include "block_shapes.inc"
@@ -230,17 +229,8 @@ Rect wallTest(Direction d) {
     return {7, 7, 16, 9};
   }
 }
-// BlockStateBase exposes immutable per-state voxel shapes; cache them by the
-// interned state id so a shape is built at most once.
-std::deque<VoxelShape> &shapeCache() {
-  static std::deque<VoxelShape> cache;
-  return cache;
-}
-std::vector<bool> &shapeReady() {
-  static std::vector<bool> ready;
-  return ready;
-}
 } // namespace
+
 VoxelShape spanToShape(std::uint16_t spanIndex) {
   const ShapeSpan span = kBlockShapeSpans[spanIndex];
   VoxelShape out;
@@ -249,6 +239,26 @@ VoxelShape spanToShape(std::uint16_t spanIndex) {
     out.push_back(kBlockShapeBoxes[span.offset + i]);
   return out;
 }
+
+// 碰撞形状按 ShapeSpan 去重：所有 schema 状态共享同一组不可变 VoxelShape，
+// 首次访问时一次性建表，之后只读，避免多线程 lazy 构造争用全局容器。
+namespace {
+std::vector<VoxelShape> buildCollisionSpanShapes() {
+  std::vector<VoxelShape> shapes(std::size(kBlockShapeSpans));
+  for (std::size_t i = 0; i < shapes.size(); ++i)
+    shapes[i] = spanToShape(static_cast<std::uint16_t>(i));
+  return shapes;
+}
+const std::vector<VoxelShape> &collisionSpanShapes() {
+  static const std::vector<VoxelShape> shapes = buildCollisionSpanShapes();
+  return shapes;
+}
+const VoxelShape &fullCubeShape() {
+  static const VoxelShape shape{ShapeBox{0.0, 0.0, 0.0, 16.0, 16.0, 16.0}};
+  return shape;
+}
+} // namespace
+
 VoxelShape computeStateShape(const BlockState &s) {
   if (s.isSchemaState() && s.id() < std::size(kStateBasicInfo))
     return spanToShape(kStateBasicInfo[s.id()].collisionShape);
@@ -261,17 +271,13 @@ VoxelShape outlineShape(const BlockState &s) {
 }
 const VoxelShape &collisionShape(const BlockState &s) {
   const auto id = static_cast<std::size_t>(s.id());
-  auto &cache = shapeCache();
-  auto &ready = shapeReady();
-  if (id >= cache.size()) {
-    cache.resize(id + 1);
-    ready.resize(id + 1, false);
+  if (s.isSchemaState() && id < std::size(kStateBasicInfo)) {
+    const std::uint16_t span = kStateBasicInfo[id].collisionShape;
+    const auto &shapes = collisionSpanShapes();
+    if (span < shapes.size())
+      return shapes[span];
   }
-  if (!ready[id]) {
-    cache[id] = computeStateShape(s);
-    ready[id] = true;
-  }
-  return cache[id];
+  return fullCubeShape();
 }
 VoxelShape collisionShape(World &w, Pos p, const BlockState &s) {
   if (!s.is(Blocks::MOVING_PISTON))

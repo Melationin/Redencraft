@@ -53,7 +53,7 @@ public:
                                              double density) override {
     if (density > 0.0)
       return std::nullopt;
-    return fluidPicker_(ctx.blockX, ctx.blockY, ctx.blockZ).at(ctx.blockY);
+    return fluidPicker_.at(ctx.blockX, ctx.blockY, ctx.blockZ).at(ctx.blockY);
   }
 
   bool shouldScheduleFluidUpdate() const noexcept override { return false; }
@@ -126,6 +126,8 @@ public:
     minGridZ_ = gridZ(minBlockZ + kSampleOffsetZ);
     const int maxGridZ = gridZ(maxBlockZ + kSampleOffsetZ) + 1;
     gridSizeZ_ = maxGridZ - minGridZ_ + 1;
+    strideZ_ = gridSizeX_;
+    strideY_ = gridSizeZ_ * gridSizeX_;
 
     const int totalGridSize = gridSizeX_ * gridSizeY * gridSizeZ_;
     aquiferCache_.resize(static_cast<std::size_t>(totalGridSize));
@@ -149,12 +151,13 @@ public:
     const int posX = ctx.blockX;
     const int posY = ctx.blockY;
     const int posZ = ctx.blockZ;
-    const FluidStatus globalFluid = globalFluidPicker_(posX, posY, posZ);
+    const FluidStatus globalFluid = globalFluidPicker_.at(posX, posY, posZ);
+    const BlockState globalAtY = globalFluid.at(posY);
     if (posY > skipSamplingAboveY_) {
       shouldScheduleFluidUpdate_ = false;
       return globalFluid.at(posY);
     }
-    if (globalFluid.at(posY).is(Blocks::LAVA)) {
+    if (globalAtY.is(Blocks::LAVA)) {
       shouldScheduleFluidUpdate_ = false;
       return lavaState_;
     }
@@ -171,13 +174,15 @@ public:
     int closestIndex3 = 0;
     int closestIndex4 = 0;
 
+    const int baseIndex = getIndex(xAnchor, yAnchor - 1, zAnchor);
     for (int x1 = 0; x1 <= 1; ++x1) {
       for (int y1 = -1; y1 <= 1; ++y1) {
         for (int z1 = 0; z1 <= 1; ++z1) {
           const int spacedGridX = xAnchor + x1;
           const int spacedGridY = yAnchor + y1;
           const int spacedGridZ = zAnchor + z1;
-          const int index = getIndex(spacedGridX, spacedGridY, spacedGridZ);
+          const int index =
+              baseIndex + x1 + (y1 + 1) * strideY_ + z1 * strideZ_;
           auto &locSlot = aquiferLocationCache_[static_cast<std::size_t>(index)];
           Pos location;
           if (locSlot.has_value()) {
@@ -224,12 +229,12 @@ public:
       }
     }
 
-    const FluidStatus closestStatus1 = getAquiferStatus(closestIndex1);
+    const FluidStatus &closestStatus1 = getAquiferStatus(closestIndex1);
     const double similarity12 = similarity(distanceSqr1, distanceSqr2);
     const BlockState fluidState = closestStatus1.at(posY);
     if (similarity12 <= 0.0) {
       if (similarity12 >= kFlowingUpdateSimilarity) {
-        const FluidStatus closestStatus2 = getAquiferStatus(closestIndex2);
+        const FluidStatus &closestStatus2 = getAquiferStatus(closestIndex2);
         shouldScheduleFluidUpdate_ = !(closestStatus1 == closestStatus2);
       } else {
         shouldScheduleFluidUpdate_ = false;
@@ -237,13 +242,13 @@ public:
       return fluidState;
     }
     if (fluidState.is(Blocks::WATER) &&
-        globalFluidPicker_(posX, posY - 1, posZ).at(posY - 1).is(Blocks::LAVA)) {
+        globalFluidPicker_.at(posX, posY - 1, posZ).at(posY - 1).is(Blocks::LAVA)) {
       shouldScheduleFluidUpdate_ = true;
       return fluidState;
     }
 
     double barrierNoiseValue = std::numeric_limits<double>::quiet_NaN();
-    const FluidStatus closestStatus2 = getAquiferStatus(closestIndex2);
+    const FluidStatus &closestStatus2 = getAquiferStatus(closestIndex2);
     const double barrier12 =
         similarity12 *
         calculatePressure(ctx, barrierNoiseValue, closestStatus1, closestStatus2);
@@ -252,7 +257,7 @@ public:
       return std::nullopt;
     }
 
-    const FluidStatus closestStatus3 = getAquiferStatus(closestIndex3);
+    const FluidStatus &closestStatus3 = getAquiferStatus(closestIndex3);
     const double similarity13 = similarity(distanceSqr1, distanceSqr3);
     if (similarity13 > 0.0) {
       const double barrier13 =
@@ -361,18 +366,17 @@ private:
     return 2.0 * (noiseValue + gradient);
   }
 
-  FluidStatus getAquiferStatus(int index) {
+  const FluidStatus &getAquiferStatus(int index) {
     auto &cached = aquiferCache_[static_cast<std::size_t>(index)];
-    if (cached.has_value())
-      return *cached;
-    const Pos loc = *aquiferLocationCache_[static_cast<std::size_t>(index)];
-    FluidStatus status = computeFluid(loc.x, loc.y, loc.z);
-    cached = status;
-    return status;
+    if (!cached.has_value()) {
+      const Pos loc = *aquiferLocationCache_[static_cast<std::size_t>(index)];
+      cached = computeFluid(loc.x, loc.y, loc.z);
+    }
+    return *cached;
   }
 
   FluidStatus computeFluid(int x, int y, int z) {
-    const FluidStatus globalFluid = globalFluidPicker_(x, y, z);
+    const FluidStatus globalFluid = globalFluidPicker_.at(x, y, z);
     int lowestPreliminarySurface = std::numeric_limits<int>::max();
     const int topOfAquiferCell = y + 12;
     const int bottomOfAquiferCell = y - 12;
@@ -391,7 +395,7 @@ private:
       const bool topPokesAbove = topOfAquiferCell > adjustedSurface;
       if (topPokesAbove || start) {
         const FluidStatus globalAtSurface =
-            globalFluidPicker_(sampleX, adjustedSurface, sampleZ);
+            globalFluidPicker_.at(sampleX, adjustedSurface, sampleZ);
         if (!globalAtSurface.at(adjustedSurface).isAir()) {
           if (start)
             surfaceAtCenterIsUnderGlobalFluidLevel = true;
@@ -501,6 +505,8 @@ private:
   int minGridZ_ = 0;
   int gridSizeX_ = 0;
   int gridSizeZ_ = 0;
+  int strideY_ = 0;
+  int strideZ_ = 0;
   std::vector<std::optional<FluidStatus>> aquiferCache_;
   std::vector<std::optional<Pos>> aquiferLocationCache_;
 };

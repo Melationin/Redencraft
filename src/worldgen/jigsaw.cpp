@@ -511,6 +511,38 @@ StructurePoolElement parsePoolElement(const picojson::value &v,
   return el;
 }
 
+// 解析带属性的方块状态字符串（等价于 26.1 BlockStateParser.parseForBlock）：
+// 例如 jigsaw 的 final_state 可能是
+// "minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"。
+// 只按方块名查表会把整串当成方块名，从而造出一个 unsupported 假方块（光学属性缺失，
+// 既不挡光也不参与方块逻辑），所以这里必须拆出方括号里的属性再逐条应用。
+BlockState parseBlockStateString(std::string_view text) {
+  const std::size_t bracket = text.find('[');
+  if (bracket == std::string_view::npos)
+    return defaultState(normId(std::string(text)));
+  BlockState state =
+      defaultState(normId(std::string(text.substr(0, bracket))));
+  if (!text.empty() && text.back() == ']')
+    text.remove_suffix(1);
+  std::size_t pos = bracket + 1;
+  while (pos < text.size()) {
+    const std::size_t comma = text.find(',', pos);
+    const std::size_t end = comma == std::string_view::npos ? text.size() : comma;
+    const std::string_view entry = text.substr(pos, end - pos);
+    const std::size_t eq = entry.find('=');
+    if (eq != std::string_view::npos) {
+      const std::string key(entry.substr(0, eq));
+      const std::string value(entry.substr(eq + 1));
+      if (state.hasProperty(key))
+        state = state.with(key, value);
+    }
+    if (comma == std::string_view::npos)
+      break;
+    pos = comma + 1;
+  }
+  return state;
+}
+
 BlockState readBlockStateFromNbt(const nbt::Tag &tag) {
   const nbt::Tag *nameTag = tag.get("Name");
   const std::string name =
@@ -1651,7 +1683,7 @@ bool placeTemplateCore(std::string_view templateId,
         if (const auto *fs = proc.nbt->get("final_state"))
           finalName = fs->text;
       }
-      proc.state = defaultState(normId(finalName));
+      proc.state = parseBlockStateString(normId(finalName));
     }
     processed.push_back(std::move(proc));
   }

@@ -52,6 +52,10 @@ struct LightWorkerOptions {
   DirectWorldGeometrySource directWorld{};
   // 确定性测试注入钩子：在每个已启用光照层开始传播前调用一次。
   std::function<void(LightLayer)> beforeLayerForTesting;
+  // 世界生成期：邻区块几何未就绪时推迟本区块，并在邻居就绪后让受影响的邻居
+  // 重新传播一次（LightEngine.checkEdge 的等价物）。默认关闭以保持既有语义；
+  // 必须放在结构体末尾，避免破坏既有聚合初始化的字段顺序。
+  bool deferUntilNeighborsReady = false;
 };
 
 // 主线程投递入口与后台光照工作线程的所有者（Pimpl 隔离实现细节）。
@@ -139,6 +143,14 @@ public:
   ChunkStatus chunkStatus(int chunkX, int chunkZ) const;
   // 立即打破合批等待窗口并阻塞等待工作线程处理完所有已提交任务（`timeout == 0` 表示无限等待）。
   bool flushAndWait(std::chrono::milliseconds timeout = std::chrono::milliseconds{0});
+  // 只等待"提交序号 <= generation 的区块光照处理完成"，不把调用线程拖到整个
+  // 队列排空；世界生成阶段用它替代 flushAndWait() 的全局屏障。
+  // 该区块的光照是否已收敛（自身输入处理完、无待处理条目）。允许之后被邻居
+  // 的增量传播继续更新——光照是可变数据，不是一次性快照。
+  bool isChunkSettled(int chunkX, int chunkZ) const;
+  bool waitForChunk(
+      int chunkX, int chunkZ, std::uint64_t generation,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds{0});
   // 检查后台传播器的 TaskQueue 是否存在过多空位可收缩，并在空闲/批间触发一次异步回缩。
   bool needsTaskQueueCompact() const noexcept;
   bool requestTaskQueueCompact(CleanupExecutionGate::Lease lease = {});

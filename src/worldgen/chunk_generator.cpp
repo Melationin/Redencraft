@@ -19,20 +19,19 @@ GeometrySection makeGeometryFromProtoSection(const ProtoChunkSection &sec,
                                             const LightOpticalTable &optical) {
   GeometrySection g;
   const std::uint8_t airClass = optical.classForState(0);
-  if (sec.hasOnlyAir() || sec.rawBlocks().empty()) {
+  if (sec.hasOnlyAir()) {
     g.empty = true;
     g.uniform = true;
     g.uniformClass = airClass;
     return g;
   }
-  const auto raw = sec.rawBlocks();
   auto cells = std::make_unique<GeometrySection::Cells>();
   std::uint16_t nonAir = 0;
   std::uint16_t unknown = 0;
-  const std::uint8_t firstClass = optical.classForState(raw[0]);
+  const std::uint8_t firstClass = optical.classForState(sec.blockIdAt(0));
   bool allSame = true;
   for (std::size_t i = 0; i < kLightVolume; ++i) {
-    const std::uint8_t cls = optical.classForState(raw[i]);
+    const std::uint8_t cls = optical.classForState(sec.blockIdAt(i));
     (*cells)[i] = cls;
     if (cls != firstClass)
       allSame = false;
@@ -63,17 +62,18 @@ PersistedChunkLight extractPersistedLight(const ProtoChunk &proto) {
       continue;
     PersistedLightSection ps;
     ps.sectionY = sec.sectionY();
-    ps.blockLight = sec.blockLight();
-    ps.skyLight = sec.skyLight();
+    ps.blockLight = sec.blockLight().copy();
+    ps.skyLight = sec.skyLight().copy();
     persisted.sections.push_back(std::move(ps));
   }
   return persisted;
 }
 
-void submitProtoChunkToLight(const ProtoChunk &proto, LightService &ls) {
+std::uint64_t submitProtoChunkToLight(const ProtoChunk &proto,
+                                      LightService &ls) {
   const auto optical = ls.opticalTable();
   if (!optical)
-    return;
+    return 0;
   LightChunkInput input;
   input.chunkX = proto.pos().x;
   input.chunkZ = proto.pos().z;
@@ -86,12 +86,11 @@ void submitProtoChunkToLight(const ProtoChunk &proto, LightService &ls) {
     input.geometrySections.push_back(
         makeGeometryFromProtoSection(sec, *optical));
   }
-  (void)ls.submitChunk(std::move(input));
+  return ls.submitChunk(std::move(input));
 }
 
-void copySnapshotLayerToOptional(
-    const LightSectionSnapshot *secSnap, LightLayer layer,
-    std::optional<std::array<std::uint8_t, 2048>> &out) {
+void copySnapshotLayerToOptional(const LightSectionSnapshot *secSnap,
+                                 LightLayer layer, LightLayerStorage &out) {
   if (!secSnap) {
     out.reset();
     return;
@@ -284,8 +283,8 @@ ChunkAccess &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
     }
   }
 
-  auto proto = std::make_unique<ProtoChunk>(pos, generator_.minY(),
-                                            generator_.height());
+  auto proto = std::make_unique<ProtoChunk>(pos, generator_.chunkMinY(),
+                                            generator_.chunkHeight());
   ChunkAccess &ref = *proto;
   chunks_.emplace(pos, std::move(proto));
   startedLoadedFromStore_[pos] = false;
@@ -397,30 +396,58 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
     proto.primeHeightmaps(ChunkStatus::initializeLight().heightmapsAfter());
     proto.flushDirtyHeightmaps();
     if (lightService != nullptr) {
-      submitProtoChunkToLight(proto, *lightService);
+      proto.setLightSubmissionGeneration(
+          submitProtoChunkToLight(proto, *lightService));
     }
     break;
   case ChunkStatusId::Light:
     if (lightService != nullptr) {
-      lightService->flushAndWait();
-      lightService->drainPublished();
-      const auto blockSnap =
-          lightService->latestLayerChunk(LightLayer::Block, pos.x, pos.z);
-      const auto skySnap =
-          lightService->latestLayerChunk(LightLayer::Sky, pos.x, pos.z);
-      for (int s = 0; s < proto.sectionCount(); ++s) {
-        ProtoChunkSection &sec = proto.section(s);
-        const int secY = sec.sectionY();
-        copySnapshotLayerToOptional(
-            blockSnap ? blockSnap->section(secY) : nullptr, LightLayer::Block,
-            sec.blockLight());
-        copySnapshotLayerToOptional(
-            skySnap ? skySnap->section(secY) : nullptr, LightLayer::Sky,
-            sec.skyLight());
+      auto applyPublishedLight = [&]() {
+        // 只等"提交序号不超过本区块"的工作，不再做全局排空：后者会让 8 个生成
+        // 线程互相拖住对方提交的光照工作。
+        const std::uint64_t generation = proto.lightSubmissionGeneration();
+        // 默认仍用全局排空：实测按区块等待能把 50x50 从 ~10.9s 降到 ~10.0s，
+        // 但光照结果本身在两种模式下都不稳定（同一模式两次运行的光照校验和不同），
+        // 说明"区块何时算收敛"还没定义清楚；在收敛判据补齐前不切换默认行为。
+        const bool perChunkWait =
+            std::getenv("REDSTONE_LIGHT_PER_CHUNK") != nullptr;
+        if (generation != 0 && perChunkWait)
+          (void)lightService->waitForChunk(
+              pos.x, pos.z, generation, std::chrono::milliseconds{30000});
+        else
+          lightService->flushAndWait();
+        lightService->drainPublished();
+        const auto blockSnap =
+            lightService->latestLayerChunk(LightLayer::Block, pos.x, pos.z);
+        const auto skySnap =
+            lightService->latestLayerChunk(LightLayer::Sky, pos.x, pos.z);
+        for (int s = 0; s < proto.sectionCount(); ++s) {
+          ProtoChunkSection &sec = proto.section(s);
+          const int secY = sec.sectionY();
+          copySnapshotLayerToOptional(
+              blockSnap ? blockSnap->section(secY) : nullptr, LightLayer::Block,
+              sec.blockLight());
+          copySnapshotLayerToOptional(
+              skySnap ? skySnap->section(secY) : nullptr, LightLayer::Sky,
+              sec.skyLight());
+        }
+        const bool blockReady = blockSnap && blockSnap->blockLightComplete;
+        const bool skyReady = !skySnap || skySnap->skyLightComplete;
+        return blockReady && skyReady;
+      };
+      bool ready = applyPublishedLight();
+      // 兜底重投：快照不完整时，队列排空后再投一次本区块，让跨区块边界重新传播。
+      // 注意：50x50 上 lightCorrect=false 的实测根因并不是邻居时序，而是 jigsaw 的
+      // final_state 带属性未解析（见 jigsaw.cpp parseBlockStateString）；这里保留
+      // 重投作为邻域确实不完整时的安全网。
+      for (int attempt = 0; !ready && attempt < 2; ++attempt) {
+        proto.setLightSubmissionGeneration(
+            submitProtoChunkToLight(proto, *lightService));
+        ready = applyPublishedLight();
       }
-      const bool blockReady = blockSnap && blockSnap->blockLightComplete;
-      const bool skyReady = !skySnap || skySnap->skyLightComplete;
-      proto.setLightCorrect(blockReady && skyReady);
+      // 收敛判据来自光照引擎本身（自身输入处理完、且没有待处理条目），
+      // 而不是"这一刻读到的快照是否完整"：之后邻居到达仍可增量更新本区块。
+      proto.setLightCorrect(lightService->isChunkSettled(pos.x, pos.z));
     } else {
       // TODO(G-6): 未挂载 LightService 时无法执行真实光照传播，
       // 保持 lightCorrect=false 而不伪造已完成光照快照。
@@ -453,6 +480,24 @@ bool ChunkGenerationPipeline::generateAndInstallIntoWorld(ChunkTicketPos pos,
   if (!protoOpt)
     return world.isChunkLoaded(pos.x, pos.z);
   return installProtoChunkIntoWorld(std::move(*protoOpt), world);
+}
+
+void refreshProtoChunkLight(ProtoChunk &proto, LightService &lightService) {
+  if (!proto.isLightCorrect())
+    return;
+  lightService.drainPublished();
+  const auto blockSnap = lightService.latestLayerChunk(
+      LightLayer::Block, proto.pos().x, proto.pos().z);
+  const auto skySnap = lightService.latestLayerChunk(
+      LightLayer::Sky, proto.pos().x, proto.pos().z);
+  for (int s = 0; s < proto.sectionCount(); ++s) {
+    ProtoChunkSection &sec = proto.section(s);
+    const int secY = sec.sectionY();
+    copySnapshotLayerToOptional(blockSnap ? blockSnap->section(secY) : nullptr,
+                                LightLayer::Block, sec.blockLight());
+    copySnapshotLayerToOptional(skySnap ? skySnap->section(secY) : nullptr,
+                                LightLayer::Sky, sec.skyLight());
+  }
 }
 
 bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
@@ -499,10 +544,15 @@ bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
     }
     world.importSectionBlocks(pos.x, pos.z, sec.sectionY(), palette, indices);
   }
-  world.primeHeightmaps();
+  // 只重建刚导入的这一个区块：整世界重扫会让 N 个区块的导入变成 O(N^2)。
+  world.primeHeightmaps(pos.x, pos.z);
   if (proto.isLightCorrect()) {
+    if (LightService *light = world.lightService())
+      refreshProtoChunkLight(proto, *light);
     world.setChunkPersistedLight(pos.x, pos.z, extractPersistedLight(proto));
-    world.refreshLightSnapshots();
+    // 只重投当前区块：refreshLightSnapshots() 会重投所有已加载区块，
+    // 逐区块晋升时是 O(N^2) 次提交（实测 50x50 会因此 OOM）。
+    world.reloadChunkLight(pos.x, pos.z);
   }
 
   // 执行原版 postLoadProtoChunk 对应的 postProcessing（例如唤醒特征放置的水源/岩浆源）。

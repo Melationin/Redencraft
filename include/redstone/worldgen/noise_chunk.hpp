@@ -81,6 +81,9 @@ public:
   }
   std::span<const double> directFinalCellValues() const noexcept;
   void advanceVoxelCounter() noexcept { ++interpolationCounter_; }
+  // 仅在 fastCell（直接读 CacheAllInCell 数组）路径下调用：按需把矿脉插值器
+  // 推进到当前体素。非 fastCell 路径仍由 updateForY/X/Z 逐体素更新。
+  void prepareVeinInterpolatorsFor(int x, int y, int z);
   std::optional<BlockState> computeSubstanceFast(int x, int y, int z,
                                                  double density);
 
@@ -162,7 +165,10 @@ private:
   bool terrainInitialized_ = false;
   bool isColumn_ = false;
   bool hasPostDensityInterpolators_ = false;
-  std::size_t postDensityInterpStart_ = 0;
+  std::size_t postDensityInterpStart_ = 0; // eager 区间下界
+  std::size_t eagerPostInterpEnd_ = 0;     // eager 区间上界 = 矿脉插值器起点
+  std::size_t veinInterpStart_ = 0;        // 矿脉插值器 [veinInterpStart_, veinInterpEnd_)
+  std::size_t veinInterpEnd_ = 0;
 
   bool interpolating_ = false;
   bool fillingCell_ = false;

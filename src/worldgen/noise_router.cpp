@@ -596,20 +596,27 @@ ClimateTargetPoint ClimateSampler::sample(int quartX, int quartY,
   const int blockX = quartX * 4;
   const int blockY = quartY * 4;
   const int blockZ = quartZ * 4;
+  if (flat) {
+    double values[6];
+    flat->evaluate(
+        DensityFunctionContext{blockX, blockY, blockZ, nullptr, nullptr},
+        values);
+    return ClimateTargetPoint::make(
+        static_cast<float>(values[0]), static_cast<float>(values[1]),
+        static_cast<float>(values[2]), static_cast<float>(values[3]),
+        static_cast<float>(values[4]), static_cast<float>(values[5]));
+  }
+  DensityEvalCache cache;
+  const DensityFunctionContext ctx{blockX, blockY, blockZ, nullptr, &cache};
   return ClimateTargetPoint::make(
-      temperature
-          ? static_cast<float>(temperature->compute(blockX, blockY, blockZ))
+      temperature ? static_cast<float>(temperature->compute(ctx)) : 0.0f,
+      humidity ? static_cast<float>(humidity->compute(ctx)) : 0.0f,
+      continentalness
+          ? static_cast<float>(continentalness->compute(ctx))
           : 0.0f,
-      humidity ? static_cast<float>(humidity->compute(blockX, blockY, blockZ))
-               : 0.0f,
-      continentalness ? static_cast<float>(
-                            continentalness->compute(blockX, blockY, blockZ))
-                      : 0.0f,
-      erosion ? static_cast<float>(erosion->compute(blockX, blockY, blockZ))
-              : 0.0f,
-      depth ? static_cast<float>(depth->compute(blockX, blockY, blockZ)) : 0.0f,
-      weirdness ? static_cast<float>(weirdness->compute(blockX, blockY, blockZ))
-                : 0.0f);
+      erosion ? static_cast<float>(erosion->compute(ctx)) : 0.0f,
+      depth ? static_cast<float>(depth->compute(ctx)) : 0.0f,
+      weirdness ? static_cast<float>(weirdness->compute(ctx)) : 0.0f);
 }
 
 Pos ClimateSampler::findSpawnPosition() const {
@@ -1241,6 +1248,10 @@ RandomState::RandomState(const NoiseGeneratorSettings &settings,
       .spawnTarget = settings.spawnTarget,
   };
   sampler_.computeYDependentMask();
+  const std::array<DensityNodePtr, 6> climateRoots{
+      sampler_.temperature,     sampler_.humidity, sampler_.continentalness,
+      sampler_.erosion,         sampler_.depth,    sampler_.weirdness};
+  sampler_.flat = FlatDensityFunction::compile(climateRoots);
 }
 
 std::shared_ptr<const NormalNoise>

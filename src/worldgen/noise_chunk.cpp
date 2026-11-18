@@ -400,6 +400,10 @@ void NoiseChunk::ensureTerrainInitialized(RandomState &randomState,
 
   // 记录 finalDensity 自身使用的 interpolator 数量；之后若有含水层/矿脉新增插值器才需在体素循环中更新
   postDensityInterpStart_ = interpolators_.size();
+  // 矿脉通道的 Interpolated 插值器只在 OreVeinifier 真正读取时推进；含水层/其它
+  // postDensity 插值器仍逐体素 eager 更新。
+  eagerPostInterpEnd_ = interpolators_.size();
+  veinInterpStart_ = eagerPostInterpEnd_;
 
   NoiseRouter wrappedAquiferRouter{
       .barrierNoise = wrap(router.barrierNoise),
@@ -437,7 +441,8 @@ void NoiseChunk::ensureTerrainInitialized(RandomState &randomState,
         randomState.oreRandom());
   }
 
-  hasPostDensityInterpolators_ = (interpolators_.size() > postDensityInterpStart_);
+  veinInterpEnd_ = interpolators_.size();
+  hasPostDensityInterpolators_ = (eagerPostInterpEnd_ > postDensityInterpStart_);
 }
 
 DensityNodePtr NoiseChunk::wrap(const DensityNodePtr &function) {
@@ -772,8 +777,31 @@ std::span<const double> NoiseChunk::directFinalCellValues() const noexcept {
   return finalCellCache_->values;
 }
 
+void NoiseChunk::prepareVeinInterpolatorsFor(int x, int y, int z) {
+  if (veinInterpStart_ >= veinInterpEnd_)
+    return;
+  // 与 OreVeinifier 的首个早退条件一致：区间外不会读取矿脉插值器。
+  if (y < -60 || y > 50 || (y > -8 && y < 0))
+    return;
+  inCellX_ = x - cellStartBlockX_;
+  inCellY_ = y - cellStartBlockY_;
+  inCellZ_ = z - cellStartBlockZ_;
+  const double factorY =
+      static_cast<double>(inCellY_) / static_cast<double>(cellHeight_);
+  const double factorX =
+      static_cast<double>(inCellX_) / static_cast<double>(cellWidth_);
+  const double factorZ =
+      static_cast<double>(inCellZ_) / static_cast<double>(cellWidth_);
+  for (std::size_t i = veinInterpStart_; i < veinInterpEnd_; ++i) {
+    interpolators_[i]->updateForY(factorY);
+    interpolators_[i]->updateForX(factorX);
+    interpolators_[i]->updateForZ(factorZ);
+  }
+}
+
 std::optional<BlockState> NoiseChunk::computeSubstanceFast(int x, int y, int z,
                                                            double density) {
+  prepareVeinInterpolatorsFor(x, y, z);
   const DensityFunctionContext ctx{x, y, z, this};
   if (auto state = aquifer_->computeSubstance(ctx, density); state.has_value()) {
     return state;

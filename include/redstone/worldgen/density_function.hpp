@@ -10,11 +10,14 @@
 #include "redstone/worldgen/cubic_spline.hpp"
 #include "redstone/worldgen/noise.hpp"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace redstone::worldgen {
 
@@ -43,11 +46,58 @@ enum class DensityNodeKind : std::uint8_t {
   Custom,
 };
 
+struct DensityNode;
+
+// 单次采样内的共享子图求值 memo。Java 的 Climate.Sampler 会剥离所有 Marker，
+// 因此同一次 sample 中 continents/erosion/ridges 等共享子树会被重复求值；
+// 这里按节点指针记忆（值完全相同，只消除重复计算）。
+struct DensityEvalCache {
+  static constexpr std::size_t kCapacity = 32;
+  struct Slot {
+    const DensityNode *node = nullptr;
+    double value = 0.0;
+  };
+  std::array<Slot, kCapacity> slots{};
+
+  const double *find(const DensityNode *node) const noexcept {
+    std::size_t index =
+        (reinterpret_cast<std::uintptr_t>(node) >> 4) & (kCapacity - 1);
+    for (std::size_t probe = 0; probe < kCapacity; ++probe) {
+      const Slot &slot = slots[index];
+      if (slot.node == node)
+        return &slot.value;
+      if (slot.node == nullptr)
+        return nullptr;
+      index = (index + 1) & (kCapacity - 1);
+    }
+    return nullptr;
+  }
+
+  void insert(const DensityNode *node, double value) noexcept {
+    std::size_t index =
+        (reinterpret_cast<std::uintptr_t>(node) >> 4) & (kCapacity - 1);
+    for (std::size_t probe = 0; probe < kCapacity; ++probe) {
+      Slot &slot = slots[index];
+      if (slot.node == node) {
+        slot.value = value;
+        return;
+      }
+      if (slot.node == nullptr) {
+        slot.node = node;
+        slot.value = value;
+        return;
+      }
+      index = (index + 1) & (kCapacity - 1);
+    }
+  }
+};
+
 struct DensityFunctionContext {
   int blockX = 0;
   int blockY = 0;
   int blockZ = 0;
   const void *activeToken = nullptr;
+  DensityEvalCache *evalCache = nullptr;
 };
 
 struct DensityContextProvider {
@@ -158,8 +208,79 @@ struct DensityNode {
 
   double compute(int blockX, int blockY, int blockZ) const;
   double compute(const DensityFunctionContext &ctx) const;
+  double computeUncached(const DensityFunctionContext &ctx) const;
   void fillArray(double *output, std::size_t count,
                  DensityContextProvider &provider) const;
+};
+
+// 扁平密度函数求值器：把共享 DAG 按后序编译为连续指令表（操作数用索引而非 shared_ptr），
+// 求值时顺序写 slots 数组，消除递归、指针跳转与每节点缓存查找。参考 cubiomes 的
+// SplineStack 做法（预分配连续节点），但这里直接面向 26.1 DensityFunction 图。
+// 仅编译纯函数子图；遇到 Custom/FindTopSurface 这类需要节点身份或额外上下文的节点时返回 nullptr。
+class FlatDensityFunction {
+public:
+  static std::shared_ptr<const FlatDensityFunction>
+  compile(std::span<const DensityNodePtr> roots);
+
+  std::size_t opCount() const noexcept { return ops_.size(); }
+
+  // 按 compile 传入的 roots 顺序写出结果；null root 写 0。
+  void evaluate(const DensityFunctionContext &ctx, double *out) const;
+
+private:
+  friend struct FlatDensityCompiler;
+
+  enum class OpKind : std::uint8_t {
+    Constant,
+    Mapped,
+    Clamp,
+    TwoArg,
+    YClampedGradient,
+    RangeChoice,
+    Noise,
+    ShiftedNoise,
+    ShiftA,
+    ShiftB,
+    Shift,
+    WeirdScaled,
+    OldBlended,
+    Spline,
+    EndIslands,
+    BlendAlpha,
+    BlendOffset,
+    Beardifier,
+    PassThrough,
+  };
+
+  struct Op {
+    OpKind kind = OpKind::Constant;
+    std::uint8_t aux = 0;
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+    std::uint32_t c = 0;
+    double p1 = 0.0;
+    double p2 = 0.0;
+    int i1 = 0;
+    int i2 = 0;
+    const void *ptr = nullptr;
+    double s1 = 1.0;
+    double s2 = 1.0;
+  };
+
+  struct FlatSpline {
+    bool isConstant = true;
+    float constant = 0.0f;
+    std::uint32_t coordOp = 0;
+    std::vector<float> locations;
+    std::vector<float> derivatives;
+    std::vector<std::uint32_t> values;
+  };
+
+  float evaluateSpline(std::uint32_t index, const double *slots) const;
+
+  std::vector<Op> ops_;
+  std::vector<FlatSpline> splines_;
+  std::vector<std::uint32_t> roots_;
 };
 
 namespace density_functions {

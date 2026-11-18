@@ -43,10 +43,14 @@ int floorDivInt(int a, int b) noexcept {
 
 NoiseBasedChunkGenerator::NoiseBasedChunkGenerator(
     const WorldgenRegistries &registries, NoiseGeneratorSettings settings,
-    std::shared_ptr<const BiomeSource> biomeSource)
+    std::shared_ptr<const BiomeSource> biomeSource, int levelMinY,
+    int levelHeight)
     : registries_(registries), settings_(std::move(settings)),
       biomeSource_(std::move(biomeSource)),
-      globalFluidPicker_(createFluidPicker(settings_)) {
+      globalFluidPicker_(createFluidPicker(settings_)),
+      levelMinY_(levelMinY == std::numeric_limits<int>::min() ? settings_.minY
+                                                              : levelMinY),
+      levelHeight_(levelHeight <= 0 ? settings_.height : levelHeight) {
   if (!biomeSource_) {
     throw std::invalid_argument(
         "NoiseBasedChunkGenerator requires non-null BiomeSource");
@@ -64,9 +68,11 @@ FluidPicker NoiseBasedChunkGenerator::createFluidPicker(
   const int seaLevel = settings.seaLevel;
   FluidStatus seaStatus{seaLevel, settings.defaultFluidState};
   const int cutoff = std::min(-54, seaLevel);
-  return [lavaStatus, seaStatus, cutoff](int, int blockY, int) -> FluidStatus {
-    return blockY < cutoff ? lavaStatus : seaStatus;
-  };
+  FluidPicker picker;
+  picker.lavaStatus = lavaStatus;
+  picker.seaStatus = seaStatus;
+  picker.cutoff = cutoff;
+  return picker;
 }
 
 RandomState &
@@ -90,10 +96,17 @@ NoiseBasedChunkGenerator::structureStateForSeed(std::int64_t worldSeed) const {
   if (it != structureStates_.end())
     return *it->second;
   auto st = std::make_unique<ChunkGeneratorStructureState>(
-      worldSeed, worldSeed, registries_, *biomeSource_, rs.sampler());
+      worldSeed, worldSeed, registries_, *biomeSource_, rs.sampler(),
+      concentricRingsEnabled_);
   ChunkGeneratorStructureState &ref = *st;
   structureStates_.emplace(worldSeed, std::move(st));
   return ref;
+}
+
+void NoiseBasedChunkGenerator::setConcentricRingsEnabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  concentricRingsEnabled_ = enabled;
+  structureStates_.clear();
 }
 
 void NoiseBasedChunkGenerator::createStructures(ProtoChunk &chunk,
@@ -252,7 +265,7 @@ void NoiseBasedChunkGenerator::createBiomes(WorldGenRegion &region,
                                             ProtoChunk &chunk,
                                             std::int64_t worldSeed) {
   (void)region;
-  const int sectionCount = static_cast<int>(chunk.sections().size());
+  const int sectionCount = chunk.sectionCount();
   if (const auto *fbs =
           dynamic_cast<const FixedBiomeSource *>(biomeSource_.get())) {
     const ClimateSampler emptySampler{};
@@ -420,7 +433,7 @@ void fillFromNoiseCells(NoiseChunk &nc, ProtoChunk &chunk,
       bool hasOcean[kMaxStackCellW][kMaxStackCellW]{};
       const bool useStackHm = (cellW <= kMaxStackCellW);
 
-      int lastSectionIndex = static_cast<int>(chunk.sections().size()) - 1;
+      int lastSectionIndex = chunk.sectionCount() - 1;
       ProtoChunkSection *section = &chunk.section(lastSectionIndex);
       auto blockGetter = [&chunk](int lx, int py, int lz) {
         return chunk.getBlockState(lx, py, lz);
@@ -594,6 +607,41 @@ void NoiseBasedChunkGenerator::buildSurface(WorldGenRegion &region,
       settings_.minY, settings_.height, chunk, *nc, settings_.surfaceRule);
 }
 
+std::size_t NoiseBasedChunkGenerator::CarverBiomeKeyHash::operator()(
+    const CarverBiomeKey &key) const noexcept {
+  std::uint64_t h = static_cast<std::uint64_t>(key.seed);
+  h ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.x)) *
+       0x9E3779B97F4A7C15ull;
+  h ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(key.z)) *
+       0xC2B2AE3D27D4EB4Full;
+  h ^= h >> 33;
+  h *= 0xFF51AFD7ED558CCDull;
+  h ^= h >> 33;
+  return static_cast<std::size_t>(h);
+}
+
+std::string_view NoiseBasedChunkGenerator::carverBiomeAt(
+    ChunkTicketPos pos, std::int64_t worldSeed, RandomState &rs) const {
+  const CarverBiomeKey key{worldSeed, pos.x, pos.z};
+  CarverBiomeShard &shard = carverBiomeCache_[CarverBiomeKeyHash{}(key) & 31u];
+  {
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    const auto it = shard.map.find(key);
+    if (it != shard.map.end())
+      return registries_.biomeName(it->second);
+  }
+  const std::string_view biome =
+      biomeSource_->getNoiseBiome(pos.x << 2, 0, pos.z << 2, rs.sampler());
+  const std::uint16_t id = registries_.findBiomeId(biome);
+  if (id != WorldgenRegistries::kInvalidBiomeId) {
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    if (shard.map.size() > 4096)
+      shard.map.clear();
+    shard.map.emplace(key, id);
+  }
+  return biome;
+}
+
 void NoiseBasedChunkGenerator::applyCarvers(WorldGenRegion &region,
                                             ProtoChunk &chunk,
                                             std::int64_t worldSeed) {
@@ -612,8 +660,8 @@ void NoiseBasedChunkGenerator::applyCarvers(WorldGenRegion &region,
   for (int dx = -8; dx <= 8; ++dx) {
     for (int dz = -8; dz <= 8; ++dz) {
       const ChunkTicketPos sourcePos{chunk.pos().x + dx, chunk.pos().z + dz};
-      const std::string_view sourceBiome = biomeSource_->getNoiseBiome(
-          sourcePos.x << 2, 0, sourcePos.z << 2, rs.sampler());
+      const std::string_view sourceBiome =
+          carverBiomeAt(sourcePos, worldSeed, rs);
       const BiomeGenerationSettings *bgi =
           registries_.findBiomeGeneration(sourceBiome);
       if (!bgi)
@@ -652,8 +700,16 @@ void NoiseBasedChunkGenerator::applyBiomeDecoration(WorldGenRegion &region,
 
   // 对齐 `ChunkGenerator.applyBiomeDecoration`：收集中心及 8 邻域区块内的全群系集合（仅保留本维度 BiomeSource 可能生成的群系）。
   const auto allowedList = biomeSource_->possibleBiomes();
-  std::set<std::string_view> allowedSet(allowedList.begin(), allowedList.end());
-  std::set<std::string_view> presentBiomes;
+  // 以群系 id 位图替代 std::set<std::string_view>：3x3 邻域每区块要查 13824 个
+  // quart 单元，字符串红黑树查找（含 memcmp）是主要成本。最终 feature 索引会
+  // 排序去重，集合迭代顺序不影响结果。
+  std::vector<std::uint8_t> allowedMask(registries_.biomeCount(), 0);
+  for (const std::string_view allowedBiome : allowedList) {
+    const std::uint16_t id = registries_.findBiomeId(allowedBiome);
+    if (id != WorldgenRegistries::kInvalidBiomeId && id < allowedMask.size())
+      allowedMask[id] = 1;
+  }
+  std::vector<std::uint8_t> presentMask(registries_.biomeCount(), 0);
   for (int dx = -1; dx <= 1; ++dx) {
     for (int dz = -1; dz <= 1; ++dz) {
       const ChunkAccess *nb = region.getChunkIfAllowed(
@@ -671,8 +727,10 @@ void NoiseBasedChunkGenerator::applyBiomeDecoration(WorldGenRegion &region,
             for (int qz = 0; qz < 4; ++qz) {
               const std::string_view b =
                   nb->getNoiseBiome(qx0 + qx, qy0 + qy, qz0 + qz);
-              if (allowedSet.count(b))
-                presentBiomes.insert(b);
+              const std::uint16_t biomeId = registries_.findBiomeId(b);
+              if (biomeId != WorldgenRegistries::kInvalidBiomeId &&
+                  biomeId < allowedMask.size() && allowedMask[biomeId])
+                presentMask[biomeId] = 1;
             }
           }
         }
@@ -731,7 +789,12 @@ void NoiseBasedChunkGenerator::applyBiomeDecoration(WorldGenRegion &region,
     if (step < featuresPerStep_.size()) {
       const StepFeatureData &stepData = featuresPerStep_[step];
       std::vector<int> stepIndices;
-      for (const std::string_view biomeId : presentBiomes) {
+      for (std::size_t presentId = 0; presentId < presentMask.size();
+           ++presentId) {
+        if (presentMask[presentId] == 0)
+          continue;
+        const std::string_view biomeId =
+            registries_.biomeName(static_cast<std::uint16_t>(presentId));
         const auto *bgi = registries_.findBiomeGeneration(biomeId);
         if (!bgi || step >= bgi->features.size())
           continue;

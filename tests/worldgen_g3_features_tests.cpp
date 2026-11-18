@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
     assert(endSteps[i].featureIds.size() == expectedEndCounts[i]);
   }
 
-  NoiseBasedChunkGenerator endGen(reg, *endSettings, endBiomes);
+  NoiseBasedChunkGenerator endGen(reg, *endSettings, endBiomes, redstone::endDimensionType().minY, redstone::endDimensionType().height);
   ChunkGenerationPipeline endPipe(endGen, kSeed);
   ChunkAccess &endChunk =
       endPipe.ensureStatus(ChunkTicketPos{2, 0}, ChunkStatusId::Features);
@@ -141,7 +141,7 @@ int main(int argc, char **argv) {
   assert(neSettings != nullptr);
   auto neBiomes = std::make_shared<MultiNoiseBiomeSource>(
       MultiNoiseBiomeSource::createNether());
-  NoiseBasedChunkGenerator neGen(reg, *neSettings, neBiomes);
+  NoiseBasedChunkGenerator neGen(reg, *neSettings, neBiomes, redstone::netherDimensionType().minY, redstone::netherDimensionType().height);
   ChunkGenerationPipeline nePipe(neGen, kSeed);
   ChunkAccess &neChunk =
       nePipe.ensureStatus(ChunkTicketPos{-1, 0}, ChunkStatusId::Features);

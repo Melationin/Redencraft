@@ -115,12 +115,12 @@ int main(int argc, char **argv) {
     assert(neSettings != nullptr);
     auto neBiomes = std::make_shared<MultiNoiseBiomeSource>(
         MultiNoiseBiomeSource::createNether());
-    NoiseBasedChunkGenerator gen(reg, *neSettings, neBiomes);
+    NoiseBasedChunkGenerator gen(reg, *neSettings, neBiomes, redstone::netherDimensionType().minY, redstone::netherDimensionType().height);
     ChunkGenerationPipeline pipe(gen, kSeed);
     ChunkAccess &c =
         pipe.ensureStatus(ChunkTicketPos{-1, 0}, ChunkStatusId::Carvers);
     assert(c.persistedStatus() == ChunkStatusId::Carvers);
-    assertCarvedHash(c, 0x72b66a26d7b2b70bULL, "nether(-1,0)");
+    assertCarvedHash(c, 0x1eb32a77db78b70bULL, "nether(-1,0)");
   }
 
   std::cout << "worldgen_carver_tests passed\n";

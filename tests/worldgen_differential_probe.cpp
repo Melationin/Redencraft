@@ -101,14 +101,18 @@ makeGenerator(const WorldgenRegistries &reg, const std::string &dim) {
     return std::make_unique<NoiseBasedChunkGenerator>(
         reg, *settings,
         std::make_shared<MultiNoiseBiomeSource>(
-            MultiNoiseBiomeSource::createNether()));
+            MultiNoiseBiomeSource::createNether()),
+        redstone::netherDimensionType().minY,
+        redstone::netherDimensionType().height);
   }
   if (dim == "minecraft:the_end") {
     const auto *settings = reg.findNoiseSettings("minecraft:end");
     if (!settings)
       throw std::runtime_error("missing minecraft:end noise settings");
     return std::make_unique<NoiseBasedChunkGenerator>(
-        reg, *settings, std::make_shared<TheEndBiomeSource>());
+        reg, *settings, std::make_shared<TheEndBiomeSource>(),
+        redstone::endDimensionType().minY,
+        redstone::endDimensionType().height);
   }
   throw std::invalid_argument("unsupported dimension: " + dim);
 }

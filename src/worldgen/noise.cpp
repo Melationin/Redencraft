@@ -393,6 +393,18 @@ PerlinNoise::PerlinNoise(RandomSource &random, int firstOctave,
   lowestFreqValueFactor_ =
       std::pow(2.0, octaves - 1) / (std::pow(2.0, octaves) - 1.0);
   maxValue_ = edgeValue(2.0);
+
+  octaveSlots_.reserve(noiseLevels_.size());
+  double factor = lowestFreqInputFactor_;
+  double valueFactor = lowestFreqValueFactor_;
+  for (std::size_t i = 0; i < noiseLevels_.size(); ++i) {
+    if (noiseLevels_[i]) {
+      octaveSlots_.push_back(OctaveSlot{&*noiseLevels_[i], factor,
+                                        amplitudes_[i], valueFactor});
+    }
+    factor *= 2.0;
+    valueFactor /= 2.0;
+  }
 }
 
 PerlinNoise PerlinNoise::create(RandomSource &random, int firstOctave,
@@ -420,18 +432,12 @@ PerlinNoise PerlinNoise::createLegacyForNetherBiome(
 double PerlinNoise::getValue(double x, double y, double z, double yScale,
                              double yFudge) const noexcept {
   double value = 0.0;
-  double factor = lowestFreqInputFactor_;
-  double valueFactor = lowestFreqValueFactor_;
-  for (std::size_t i = 0; i < noiseLevels_.size(); ++i) {
-    if (noiseLevels_[i]) {
-      const double nv =
-          noiseLevels_[i]->noise(wrap(x * factor), wrap(y * factor),
-                                 wrap(z * factor), yScale * factor,
-                                 yFudge * factor);
-      value += amplitudes_[i] * nv * valueFactor;
-    }
-    factor *= 2.0;
-    valueFactor /= 2.0;
+  for (const OctaveSlot &slot : octaveSlots_) {
+    const double factor = slot.inputFactor;
+    const double nv = slot.noise->noise(wrap(x * factor), wrap(y * factor),
+                                        wrap(z * factor), yScale * factor,
+                                        yFudge * factor);
+    value += (slot.amplitude * nv) * slot.valueFactor;
   }
   return value;
 }

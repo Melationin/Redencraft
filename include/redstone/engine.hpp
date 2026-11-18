@@ -152,8 +152,15 @@ public:
   const Heightmap *heightmap(int chunkX, int chunkZ, HeightmapType type) const;
   int height(HeightmapType type, int blockX, int blockZ) const;
   void primeHeightmaps();
+  // 只重建单个区块的四张终态高度图。逐区块导入/晋升时使用，避免对整个已加载
+  // 世界做一次全量重扫（installProtoChunkIntoWorld 原先每个区块都会触发该全量扫描）。
+  void primeHeightmaps(int chunkX, int chunkZ);
   // 在批量原始写入后，用当前权威区块状态替换已入队的导入前光照快照。未启用光照时为空操作。
   void refreshLightSnapshots();
+  // 只把单个区块的几何/持久化光照重新投递给光照引擎。逐区块晋升时必须用它，
+  // 不能用 refreshLightSnapshots()（后者会重投所有已加载区块，令 N 个区块的
+  // 导入退化为 O(N^2) 次提交）。
+  void reloadChunkLight(int x, int z);
   void setChunkPersistedLight(int x, int z, PersistedChunkLight persisted);
   // 按维度独立的兴趣点索引（对应原版 `PoiManager` / `PoiSection`）。
   PoiStorage &pois() { return *poiStorage_; }

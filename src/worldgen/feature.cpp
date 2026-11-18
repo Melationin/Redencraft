@@ -1716,7 +1716,9 @@ bool PlacedFeature::place(WorldGenRegion &region,
       break;
     }
     case PlacementModifier::Kind::HeightRange: {
-      const WorldGenerationContext wgCtx{region.minY(), region.height()};
+      // HeightRangePlacement 使用 ChunkGenerator.getGenDepth()（生成深度），
+      // 不是维度区块高度：下界生成深度 128，128 以上是空气。
+      const WorldGenerationContext wgCtx{generator.minY(), generator.height()};
       const int y = mod.heightProvider.sample(rng, wgCtx);
       self(self, nextIdx, Pos{p.x, y, p.z});
       break;

@@ -214,57 +214,170 @@ CarvingMask CarvingMask::fromLongArray(std::span<const std::uint64_t> data,
   return mask;
 }
 
+std::uint16_t ProtoChunkPalette::indexAt(std::size_t cell) const noexcept {
+  const std::size_t perWord = std::size_t{64} / bits_;
+  const std::size_t word = cell / perWord;
+  const std::size_t shift = (cell % perWord) * bits_;
+  return static_cast<std::uint16_t>((words_[word] >> shift) &
+                                    ((std::uint64_t{1} << bits_) - 1u));
+}
+
+void ProtoChunkPalette::setIndexAt(std::size_t cell,
+                                   std::uint16_t index) noexcept {
+  const std::size_t perWord = std::size_t{64} / bits_;
+  const std::size_t word = cell / perWord;
+  const std::size_t shift = (cell % perWord) * bits_;
+  const std::uint64_t mask = (std::uint64_t{1} << bits_) - 1u;
+  words_[word] = (words_[word] & ~(mask << shift)) |
+                 ((static_cast<std::uint64_t>(index) & mask) << shift);
+}
+
+BlockState::Id ProtoChunkPalette::idAt(std::size_t cell) const noexcept {
+  if (bits_ == 0)
+    return 0;
+  return palette_[indexAt(cell)];
+}
+
+void ProtoChunkPalette::expandTo(std::uint8_t bits) {
+  std::vector<std::uint64_t> words(wordsForBits(bits), 0);
+  const std::size_t newPerWord = std::size_t{64} / bits;
+  const std::uint64_t newMask = (std::uint64_t{1} << bits) - 1u;
+  for (std::size_t cell = 0; cell < kCells; ++cell) {
+    const std::uint64_t value = indexAt(cell);
+    const std::size_t word = cell / newPerWord;
+    const std::size_t shift = (cell % newPerWord) * bits;
+    words[word] |= (value & newMask) << shift;
+  }
+  words_ = std::move(words);
+  bits_ = bits;
+}
+
+BlockState::Id ProtoChunkPalette::set(std::size_t cell,
+                                      BlockState::Id value) {
+  const BlockState::Id old = idAt(cell);
+  if (old == value)
+    return old;
+  if (bits_ == 0) {
+    if (value == 0)
+      return old;
+    bits_ = 4;
+    palette_.assign({BlockState::Id{0}, value});
+    words_.assign(wordsForBits(4), 0);
+    refCount_.assign({static_cast<std::uint16_t>(kCells - 1), 1});
+    firstCell_.assign({0u, static_cast<std::uint32_t>(cell)});
+    setIndexAt(cell, 1);
+    return old;
+  }
+  if (value == 0) {
+    const std::uint16_t oldIndex = indexAt(cell);
+    if (oldIndex < refCount_.size() && refCount_[oldIndex] > 0)
+      --refCount_[oldIndex];
+    if (!refCount_.empty())
+      ++refCount_[0];
+    setIndexAt(cell, 0);
+    return old;
+  }
+  std::size_t index = 0;
+  for (; index < palette_.size(); ++index) {
+    if (palette_[index] == value)
+      break;
+  }
+  if (index == palette_.size()) {
+    const std::size_t capacity = bits_ == 16 ? 4096u : (std::size_t{1} << bits_);
+    if (palette_.size() >= capacity) {
+      const std::uint8_t nextBits = bits_ == 8 ? 16 : static_cast<std::uint8_t>(bits_ + 1);
+      expandTo(nextBits);
+    }
+    palette_.push_back(value);
+    refCount_.push_back(0);
+    firstCell_.push_back(static_cast<std::uint32_t>(cell));
+  }
+  const std::uint16_t oldIndex = indexAt(cell);
+  if (oldIndex < refCount_.size() && refCount_[oldIndex] > 0)
+    --refCount_[oldIndex];
+  if (index < refCount_.size())
+    ++refCount_[index];
+  setIndexAt(cell, static_cast<std::uint16_t>(index));
+  return old;
+}
+
+bool ProtoChunkPalette::canSerializeDirectly() const noexcept {
+  if (bits_ == 0 || palette_.size() <= 1 ||
+      refCount_.size() != palette_.size() ||
+      firstCell_.size() != palette_.size())
+    return false;
+  // 只要求"没有空洞"：输出调色板按原调色板顺序写（与旧实现的首次出现顺序
+  // 可能不同，但 NBT 语义完全等价、解码结果一致），换取直接复用 words_。
+  for (std::size_t i = 0; i < palette_.size(); ++i) {
+    if (refCount_[i] == 0)
+      return false;
+  }
+  return true;
+}
+
+void ProtoChunkPalette::clear() noexcept {
+  bits_ = 0;
+  std::vector<BlockState::Id>().swap(palette_);
+  std::vector<std::uint64_t>().swap(words_);
+  std::vector<std::uint16_t>().swap(refCount_);
+  std::vector<std::uint32_t>().swap(firstCell_);
+}
+
 ProtoChunkSection::ProtoChunkSection(std::int8_t sectionY,
                                      std::string defaultBiome)
     : sectionY_(sectionY), biomes_(std::move(defaultBiome)) {}
 
 BlockState ProtoChunkSection::getBlockState(int localX, int localY,
                                             int localZ) const {
-  if (blocks_.empty())
+  if (palette_.empty())
     return BlockState{};
-  return BlockState::fromId(blocks_[cellIndex(localX, localY, localZ)]);
+  return BlockState::fromId(palette_.idAt(cellIndex(localX, localY, localZ)));
 }
 
 BlockState ProtoChunkSection::setBlockState(int localX, int localY, int localZ,
                                             const BlockState &state) {
   const std::size_t idx = cellIndex(localX, localY, localZ);
-  if (blocks_.empty()) {
-    if (state.isAir())
-      return BlockState{};
-    blocks_.assign(4096, BlockState{}.id());
-  }
-  const BlockState old = BlockState::fromId(blocks_[idx]);
+  if (palette_.empty() && state.isAir())
+    return BlockState{};
+  const BlockState old =
+      palette_.empty() ? BlockState{} : BlockState::fromId(palette_.idAt(idx));
   if (old.id() == state.id())
     return old;
+  palette_.set(idx, state.id());
   if (old.isAir() && !state.isAir())
     ++nonEmptyBlockCount_;
   else if (!old.isAir() && state.isAir())
     --nonEmptyBlockCount_;
-  blocks_[idx] = state.id();
+  if (nonEmptyBlockCount_ == 0)
+    palette_.clear();
   return old;
 }
 
 FluidState ProtoChunkSection::getFluidState(int localX, int localY,
                                             int localZ) const {
-  if (blocks_.empty())
-    return FluidState{};
   return fluidStateOf(getBlockState(localX, localY, localZ));
 }
 
 ProtoChunk::ProtoChunk(ChunkTicketPos pos, int minY, int height,
                        std::string defaultBiome)
-    : pos_(pos), minY_(minY), height_(height) {
+    : pos_(pos), minY_(minY), height_(height),
+      defaultBiome_(std::move(defaultBiome)) {
   if ((minY & 15) != 0 || height <= 0 || (height & 15) != 0) {
     throw std::invalid_argument(
         "ProtoChunk minY and height must be multiples of 16");
   }
-  const int count = height >> 4;
+  postProcessing_.resize(static_cast<std::size_t>(height >> 4));
+}
+
+void ProtoChunk::ensureSections() const {
+  if (!sections_.empty())
+    return;
+  const int count = height_ >> 4;
+  const int minSec = minY_ >> 4;
   sections_.reserve(static_cast<std::size_t>(count));
-  const int minSec = minY >> 4;
   for (int i = 0; i < count; ++i) {
-    sections_.emplace_back(static_cast<std::int8_t>(minSec + i), defaultBiome);
+    sections_.emplace_back(static_cast<std::int8_t>(minSec + i), defaultBiome_);
   }
-  postProcessing_.resize(static_cast<std::size_t>(count));
 }
 
 void ProtoChunk::setPersistedStatus(ChunkStatusId status) {
@@ -272,7 +385,7 @@ void ProtoChunk::setPersistedStatus(ChunkStatusId status) {
 }
 
 BlockState ProtoChunk::getBlockState(int x, int y, int z) const {
-  if (isOutsideBuildHeight(y))
+  if (isOutsideBuildHeight(y) || sections_.empty())
     return defaultState("void_air");
   const ProtoChunkSection &sec = sections_[static_cast<std::size_t>(sectionIndex(y))];
   if (sec.hasOnlyAir())
@@ -281,7 +394,7 @@ BlockState ProtoChunk::getBlockState(int x, int y, int z) const {
 }
 
 FluidState ProtoChunk::getFluidState(int x, int y, int z) const {
-  if (isOutsideBuildHeight(y))
+  if (isOutsideBuildHeight(y) || sections_.empty())
     return FluidState{};
   const ProtoChunkSection &sec = sections_[static_cast<std::size_t>(sectionIndex(y))];
   if (sec.hasOnlyAir())
@@ -295,6 +408,9 @@ std::optional<BlockState> ProtoChunk::setBlockState(int x, int y, int z,
   (void)flags;
   if (isOutsideBuildHeight(y))
     return defaultState("void_air");
+  if (sections_.empty() && state.isAir())
+    return state;
+  ensureSections();
   ProtoChunkSection &sec = sections_[static_cast<std::size_t>(sectionIndex(y))];
   if (sec.hasOnlyAir() && state.isAir())
     return state;
@@ -315,6 +431,8 @@ std::string_view ProtoChunk::getNoiseBiome(int quartX, int quartY,
   const int minQuartY = minY_ >> 2;
   const int maxQuartY = (maxY() >> 2) - 1;
   const int clampedY = std::clamp(quartY, minQuartY, maxQuartY);
+  if (sections_.empty())
+    return defaultBiome_;
   const int secIdx = (clampedY >> 2) - minSectionY();
   return sections_[static_cast<std::size_t>(secIdx)].biomes().get(
       quartX & 3, clampedY & 3, quartZ & 3);
@@ -326,6 +444,7 @@ void ProtoChunk::setNoiseBiome(int quartX, int quartY, int quartZ,
   const int maxQuartY = (maxY() >> 2) - 1;
   if (quartY < minQuartY || quartY > maxQuartY)
     return;
+  ensureSections();
   const int secIdx = (quartY >> 2) - minSectionY();
   sections_[static_cast<std::size_t>(secIdx)].biomes().set(
       quartX & 3, quartY & 3, quartZ & 3, biomeId);
@@ -368,7 +487,8 @@ void ProtoChunk::flushDirtyHeightmapSingleColumn(int lx, int lz,
       ++remaining;
     }
   }
-  for (int s = sectionCount() - 1; s >= 0 && remaining > 0; --s) {
+  for (int s = static_cast<int>(sections_.size()) - 1;
+       s >= 0 && remaining > 0; --s) {
     const ProtoChunkSection &sec = sections_[static_cast<std::size_t>(s)];
     if (sec.hasOnlyAir())
       continue;
@@ -396,7 +516,8 @@ void ProtoChunk::flushDirtyHeightmapColumns(std::uint8_t mask) const {
   if (targetMask == 0)
     return;
   int highestNonEmptySection = -1;
-  for (int s = sectionCount() - 1; s >= 0; --s) {
+  for (int s = static_cast<int>(sections_.size()) - 1; s >= 0; --s) {
+
     if (!sections_[static_cast<std::size_t>(s)].hasOnlyAir()) {
       highestNonEmptySection = s;
       break;
@@ -493,7 +614,8 @@ void ProtoChunk::primeHeightmaps(std::span<const HeightmapType> types) {
   if (newlyCreatedMask == 0)
     return;
   int highestNonEmptySection = -1;
-  for (int s = sectionCount() - 1; s >= 0; --s) {
+  for (int s = static_cast<int>(sections_.size()) - 1; s >= 0; --s) {
+
     if (!sections_[static_cast<std::size_t>(s)].hasOnlyAir()) {
       highestNonEmptySection = s;
       break;
@@ -629,6 +751,78 @@ int ImposterProtoChunk::getHeight(HeightmapType type, int x, int z) {
                        (pos_.z << 4) + (z & 15));
 }
 
+
+void ProtoChunkMemoryUsage::add(const ProtoChunkMemoryUsage &o) noexcept {
+  chunkObject += o.chunkObject;
+  sectionsArray += o.sectionsArray;
+  lightLayerBuffers += o.lightLayerBuffers;
+  paletteIndexWords += o.paletteIndexWords;
+  paletteEntries += o.paletteEntries;
+  biomePaletteVectors += o.biomePaletteVectors;
+  biomeStrings += o.biomeStrings;
+  heightmapObjects += o.heightmapObjects;
+  heightmapData += o.heightmapData;
+  carvingMask += o.carvingMask;
+  postProcessing += o.postProcessing;
+  ticks += o.ticks;
+  entities += o.entities;
+  blockEntities += o.blockEntities;
+  movingPistons += o.movingPistons;
+  structureReferences += o.structureReferences;
+}
+
+std::size_t ProtoChunkMemoryUsage::heapTotal() const noexcept {
+  return sectionsArray + lightLayerBuffers + paletteIndexWords +
+         paletteEntries + biomePaletteVectors + biomeStrings + heightmapData +
+         carvingMask + postProcessing + ticks + entities + blockEntities +
+         movingPistons + structureReferences;
+}
+
+ProtoChunkMemoryUsage ProtoChunk::memoryUsage() const {
+  ProtoChunkMemoryUsage usage;
+  usage.chunkObject = sizeof(ProtoChunk);
+  usage.sectionsArray = sections_.capacity() * sizeof(ProtoChunkSection);
+  for (const ProtoChunkSection &section : sections_) {
+    const ProtoChunkPalette &palette = section.palette();
+    usage.paletteIndexWords += palette.indexBytes();
+    usage.paletteEntries += palette.entryBytes();
+    const BiomePaletteContainer &biomes = section.biomes();
+    usage.biomePaletteVectors += biomes.palette().capacity() * sizeof(std::string);
+    for (const std::string &id : biomes.palette()) {
+      // 短于 SSO 阈值的群系 id 不单独占堆，只统计真正外置的字符串。
+      if (id.capacity() > 15)
+        usage.biomeStrings += id.capacity() + 1;
+    }
+    usage.lightLayerBuffers +=
+        section.blockLight().heapBytes() + section.skyLight().heapBytes();
+  }
+  for (const auto &heightmap : heightmaps_) {
+    if (!heightmap)
+      continue;
+    usage.heightmapObjects += sizeof(Heightmap);
+    usage.heightmapData +=
+        heightmap->rawData().capacity() * sizeof(std::uint64_t);
+  }
+  if (carvingMask_)
+    usage.carvingMask = carvingMask_->memoryBytes();
+  usage.postProcessing =
+      postProcessing_.capacity() * sizeof(std::vector<std::int16_t>);
+  for (const std::vector<std::int16_t> &offsets : postProcessing_)
+    usage.postProcessing += offsets.capacity() * sizeof(std::int16_t);
+  usage.ticks = blockTicks_.capacity() * sizeof(terrain::SavedTick) +
+                fluidTicks_.capacity() * sizeof(terrain::SavedTick);
+  usage.entities = entities_.capacity() * sizeof(nbt::Tag);
+  usage.blockEntities = pendingBlockEntities_.capacity() * sizeof(nbt::Tag);
+  usage.movingPistons =
+      movingPistons_.capacity() * sizeof(terrain::MovingPistonEntity);
+  for (const auto &entry : structureReferences_) {
+    usage.structureReferences += entry.first.capacity() + 1 +
+                                 sizeof(std::vector<std::int64_t>) + 32;
+    usage.structureReferences += entry.second.capacity() * sizeof(std::int64_t);
+  }
+  return usage;
+}
+
 namespace {
 
 nbt::Tag makeIntTag(std::int32_t v) {
@@ -699,25 +893,48 @@ terrain::PackedBlockStates packSectionBlocks(const ProtoChunkSection &sec) {
     return packed;
   }
 
-  std::span<const BlockState::Id> raw = sec.rawBlocks();
-  std::unordered_map<BlockState::Id, std::uint16_t> idToIndex;
+  // 区段本身已经是"调色板 + 位打包"，这里按调色板下标做 remap 即可：
+  // 调色板项最多 4096 个，用 8 KB 的栈上表替代按 BlockState::Id 的哈希查找，
+  // 同时保持"格子首次出现顺序"（保证输出字节与旧实现一致）。
+  const ProtoChunkPalette &sectionPalette = sec.palette();
+  const std::size_t paletteSize = sectionPalette.paletteSize();
+  if (sectionPalette.canSerializeDirectly()) {
+    // 无空洞且首次使用顺序与格子顺序一致：输出调色板就是原调色板，位打包直接复用。
+    packed.bitsPerEntry = sectionPalette.bits();
+    packed.palette.reserve(paletteSize);
+    for (std::size_t i = 0; i < paletteSize; ++i) {
+      const BlockState st = BlockState::fromId(sectionPalette.paletteEntry(i));
+      terrain::PaletteEntry entry;
+      entry.name = std::string(st.name());
+      entry.properties = st.properties();
+      entry.state = st;
+      entry.supported = true;
+      packed.palette.push_back(std::move(entry));
+    }
+    packed.data.assign(sectionPalette.words().begin(),
+                       sectionPalette.words().end());
+    return packed;
+  }
+  std::array<std::uint16_t, 4096> remap;
+  remap.fill(0xFFFFu);
   std::array<std::uint16_t, 4096> cellIndices{};
   for (std::size_t i = 0; i < 4096; ++i) {
-    const BlockState::Id sid = raw[i];
-    auto it = idToIndex.find(sid);
-    if (it == idToIndex.end()) {
-      const std::uint16_t idx =
-          static_cast<std::uint16_t>(packed.palette.size());
-      const BlockState st = BlockState::fromId(sid);
-      terrain::PaletteEntry pe;
-      pe.name = std::string(st.name());
-      pe.properties = st.properties();
-      pe.state = st;
-      pe.supported = true;
-      packed.palette.push_back(std::move(pe));
-      it = idToIndex.emplace(sid, idx).first;
+    const std::uint16_t paletteIndex = sectionPalette.rawIndexAt(i);
+    if (paletteIndex >= paletteSize)
+      continue;
+    std::uint16_t &slot = remap[paletteIndex];
+    if (slot == 0xFFFFu) {
+      slot = static_cast<std::uint16_t>(packed.palette.size());
+      const BlockState st = BlockState::fromId(
+          sectionPalette.paletteEntry(paletteIndex));
+      terrain::PaletteEntry entry;
+      entry.name = std::string(st.name());
+      entry.properties = st.properties();
+      entry.state = st;
+      entry.supported = true;
+      packed.palette.push_back(std::move(entry));
     }
-    cellIndices[i] = it->second;
+    cellIndices[i] = slot;
   }
   if (packed.palette.size() <= 1) {
     packed.bitsPerEntry = 0;
@@ -832,17 +1049,19 @@ nbt::RootTag encodeProtoChunkToNbt(const ProtoChunk &chunk,
     if (sec.blockLight()) {
       nbt::Tag bl;
       bl.type = 7;
-      bl.bytes.reserve(2048);
-      for (std::uint8_t b : *sec.blockLight())
-        bl.bytes.push_back(static_cast<std::int8_t>(b));
+      const auto &layer = *sec.blockLight();
+      bl.bytes.assign(reinterpret_cast<const std::int8_t *>(layer.data()),
+                      reinterpret_cast<const std::int8_t *>(layer.data()) +
+                          layer.size());
       addCompoundField(secTag, "BlockLight", std::move(bl));
     }
     if (sec.skyLight()) {
       nbt::Tag sl;
       sl.type = 7;
-      sl.bytes.reserve(2048);
-      for (std::uint8_t b : *sec.skyLight())
-        sl.bytes.push_back(static_cast<std::int8_t>(b));
+      const auto &skyLayer = *sec.skyLight();
+      sl.bytes.assign(reinterpret_cast<const std::int8_t *>(skyLayer.data()),
+                      reinterpret_cast<const std::int8_t *>(skyLayer.data()) +
+                          skyLayer.size());
       addCompoundField(secTag, "SkyLight", std::move(sl));
     }
     sectionsTag.list.push_back(std::move(secTag));
@@ -995,8 +1214,14 @@ decodeProtoChunkFromDecoded(const terrain::DecodedChunk &decoded, int minY,
         return std::nullopt;
       }
     }
-    dstSec.blockLight() = srcSec.blockLight;
-    dstSec.skyLight() = srcSec.skyLight;
+    if (srcSec.blockLight)
+      dstSec.blockLight().emplace() = *srcSec.blockLight;
+    else
+      dstSec.blockLight().reset();
+    if (srcSec.skyLight)
+      dstSec.skyLight().emplace() = *srcSec.skyLight;
+    else
+      dstSec.skyLight().reset();
   }
 
   if (!decoded.carvingMask.empty()) {
@@ -1062,8 +1287,8 @@ LifecycleLoadedChunk promoteProtoChunkToLoaded(ProtoChunk &&chunk,
     sec.biomes().pack(packedBiomes.palette, packedBiomes.data,
                       packedBiomes.bitsPerEntry);
     dst.biomes = std::move(packedBiomes);
-    dst.blockLight = std::move(sec.blockLight());
-    dst.skyLight = std::move(sec.skyLight());
+    dst.blockLight = sec.blockLight().take();
+    dst.skyLight = sec.skyLight().take();
     out.sections.push_back(std::move(dst));
   }
   out.blockTicks = std::move(chunk.blockTicks());

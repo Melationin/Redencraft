@@ -355,7 +355,8 @@ public:
                                std::int64_t concentricRingsSeed,
                                const WorldgenRegistries &registries,
                                const BiomeSource &biomeSource,
-                               const ClimateSampler &sampler);
+                               const ClimateSampler &sampler,
+                               bool includeConcentricRings = true);
 
   std::int64_t levelSeed() const noexcept { return levelSeed_; }
   const std::vector<const StructureSetDefinition *> &
@@ -377,6 +378,7 @@ private:
 
   std::int64_t levelSeed_ = 0;
   std::int64_t concentricRingsSeed_ = 0;
+  bool includeConcentricRings_ = true;
   const WorldgenRegistries &registries_;
   const BiomeSource &biomeSource_;
   const ClimateSampler &sampler_;
