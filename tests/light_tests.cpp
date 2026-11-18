@@ -2727,6 +2727,8 @@ void lowMemoryDirectLightParityAndConcurrency() {
   };
 
   World normal(0, 64);
+  // 低内存已是默认，基准组显式关掉，保证两种模式仍被真实对比。
+  normal.setLowMemoryMode(false);
   World lowMem(0, 64);
   lowMem.setLowMemoryMode(true);
   buildFixture(normal);

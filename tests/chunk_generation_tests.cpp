@@ -462,6 +462,14 @@ void testGenerationTimeLightSubmission() {
   require(world.lightService()->latestLayerChunk(LightLayer::Block, 0, 0) !=
               nullptr,
           "generated chunk publishes a block light layer");
+
+  // 默认低内存：安装后已切换为直读 World 几何，运行时埋光源必须立刻被光照线程看到。
+  require(manager.setBlock({0, 0, 0}, BlockState("minecraft:glowstone")),
+          "generated chunk accepts a light source after adoption");
+  require(pumpUntil(
+              manager,
+              [&] { return world.getBrightness({0, 0, 0}, 0) == 15; }, 20000),
+          "direct light reads observe runtime edits after adoptDirectGeometry");
   require(manager.close().complete, "lighting generation world closes cleanly");
 }
 

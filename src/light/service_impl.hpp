@@ -43,6 +43,7 @@ public:
   std::uint64_t reportBlockCell(LightCellUpdate update);
   std::uint64_t reportBlockCells(std::span<const LightCellUpdate> updates);
   bool unloadChunk(int chunkX, int chunkZ);
+  bool adoptDirectGeometry(int chunkX, int chunkZ);
 
   void drainPublished();
   std::shared_ptr<const LightChunkSnapshot> latestLayerChunk(LightLayer layer,

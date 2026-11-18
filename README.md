@@ -19,7 +19,7 @@
 | **实体** | 简单实体（物品、TNT、下落方块、空矿车）、4 种铁轨（`OldMinecartBehavior`）、活塞扫掠推动与粘液/蜂蜜块相互作用（[实体文档](docs/entities.md)） | 生物/玩家 AI 之外的大多数复杂实体仍仅作注册或日志占位 |
 | **网络协议（775）** | 可选原生 TCP 服务端 `redstone_vanilla_server`，支持离线登录、区块/光照分发、放置/破坏方块、容器基础交互、`/tick`、`/time` 与服务端 `ClientboundRespawnPacket` 会话切维接口 | 传送门触发的真实客户端跨维全链路验证（`D-3`） |
 | **调试客户端** | 可选 Windows 极轻量 3D OpenGL 调试客户端 `redstone_client`（[客户端说明](docs/client.md)） | 非完整游戏客户端 |
-| **内存与分配** | 默认通过 `allocator.hpp` 使用 `jemalloc`；`--low-memory` 开启光影/几何直读共享，计划刻使用 32 B `QueuedTick` / 16 B `TickKey` 紧凑布局并支持排空回收与周期压缩 | 光照快照页进一步压缩与跨页去重 |
+| **内存与分配** | 默认通过 `allocator.hpp` 使用 `jemalloc`；默认开启低内存模式（区段按最小位宽压位存储、光照工作线程直读 `World` 几何不另存镜像、生成区块安装后切换为直读），`--no-low-memory` 可关闭；计划刻使用 32 B `QueuedTick` / 16 B `TickKey` 紧凑布局并支持排空回收与周期压缩 | 光照快照页进一步压缩与跨页去重 |
 
 ---
 
@@ -82,7 +82,7 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 ```bash
 # 仅内存只读模式加载 Anvil 存档（低内存模式，关闭控制台输入）
-./build/redstone_vanilla_server --world /path/to/save --skip-non-full-chunks --low-memory --port 25565 --no-console
+./build/redstone_vanilla_server --world /path/to/save --skip-non-full-chunks --port 25565 --no-console
 
 # 显式启用加载票、异步加载/卸载与 Anvil 写回
 ./build/redstone_vanilla_server --ticketed-world /path/to/save_copy --port 25565

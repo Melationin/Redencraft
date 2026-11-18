@@ -123,6 +123,10 @@ public:
   std::uint64_t reportBlockCells(std::span<const LightCellUpdate> updates);
   // 通知工作线程卸载指定区块并推进其生命周期代次，丢弃该区块遗留的过期光照状态。
   bool unloadChunk(int chunkX, int chunkZ);
+  // 低内存模式：把已注册几何的区块切换为“直读 World 几何”。调用方负责保证此刻
+  // World 区块的方块内容与提交时的几何完全一致（安装完成后的第一次调用即满足）；
+  // 不推进代次、不改光照值、不触发重算，只释放工作线程持有的整份几何镜像。
+  bool adoptDirectGeometry(int chunkX, int chunkZ);
 
   // 主线程结果排空与发布交接。排空时仅复制区块快照头部并触发回调，层描述符与 2048 字节原子页仍与工作线程共享；因此混合区块段中的半字节可能在发布后继续原地更新，并发读取方可能观察到新旧半字节的混合状态（但单字节内无撕裂风险）。
   void drainPublished();

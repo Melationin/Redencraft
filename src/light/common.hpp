@@ -515,6 +515,11 @@ struct PendingChunk {
   // 首次计算请求（`LightService::requestChunkCompute`）：几何已注册、空壳已存在，
   // 本批对其实施一次完整播种（seedChunk + seedIncoming）并置为需要发布。
   bool compute = false;
+  // 低内存模式：把“自有几何镜像”切换成“直读 World 几何”。切换时 World 区块的
+  // 方块内容与镜像完全一致，因此不改光照值、不推进代次、不触发重算，只释放镜像。
+  bool adoptDirectGeometry = false;
+  int chunkX = 0;
+  int chunkZ = 0;
   std::unordered_map<std::uint32_t, OwnedCell> ownedCells;
 };
 

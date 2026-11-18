@@ -468,6 +468,7 @@ bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
     // 流水线已经登记过这个区块（几何与导入后的方块一致）：直接接管，
     // 只把本地生命周期代次对齐到引擎那一代，避免同一块光被重算一遍。
     world.alignChunkLightLifecycle(pos.x, pos.z);
+    world.adoptChunkLightDirectGeometry(pos.x, pos.z);
   } else {
     // 流水线没登记过（例如未挂载 LightService 的调用方）：由 World 现在登记。
     // 只重投当前区块：refreshLightSnapshots() 会重投所有已加载区块，逐区块晋升时

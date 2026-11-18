@@ -90,8 +90,7 @@ ServerWorldSet ServerWorldSet::open(const std::filesystem::path &worldDir,
     level->world = std::make_unique<World>(
         stem.type, options.maxNeighborUpdates, stem.id);
     level->world->setCleanupManager(set.cleanupManager_, false);
-    if (options.lowMemoryMode)
-      level->world->setLowMemoryMode(true);
+    level->world->setLowMemoryMode(options.lowMemoryMode);
     level->seed = deriveDimensionSeed(
         static_cast<std::uint64_t>(set.metadata_.seed), stem.id);
     level->world->setSeed(level->seed);

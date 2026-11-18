@@ -148,6 +148,27 @@ std::uint64_t LightService::Impl::requestChunkCompute(int chunkX, int chunkZ) {
   return enqueueControl(std::move(command)) ? generation : 0;
 }
 
+bool LightService::Impl::adoptDirectGeometry(int chunkX, int chunkZ) {
+  if (!accepting || options.directWorld.context == nullptr)
+    return false;
+  const std::uint64_t key = chunkKey(chunkX, chunkZ);
+  const auto active = versions.find(key);
+  if (active == versions.end() || active->second.inactive)
+    return false;
+  PendingChunk command;
+  command.key = key;
+  command.chunkX = chunkX;
+  command.chunkZ = chunkZ;
+  // 刻意复用当前提交代次：切换不产生新的光照结果，若推进代次会让区块永远
+  // 停在“已提交未发布”（pending）状态。
+  command.generation = active->second.submittedGeneration;
+  command.inputSequence = command.generation;
+  command.lifecycleEpoch = active->second.epoch;
+  command.revision = active->second.requestRevision;
+  command.adoptDirectGeometry = true;
+  return enqueueControl(std::move(command));
+}
+
 std::uint64_t LightService::Impl::nextRequestGeneration() {
   return nextGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
 }
@@ -1391,6 +1412,13 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
     const auto key = command.key;
     prepared.maxGeneration =
         std::max(prepared.maxGeneration, command.generation);
+    if (command.adoptDirectGeometry) {
+      // 只把几何来源换成直读：丢弃镜像、登记直读元数据，光照值与“完整”状态原样保留。
+      geometry.erase(key);
+      directChunks[key] = light_internal::DirectChunkMeta{
+          command.chunkX, command.chunkZ, command.lifecycleEpoch};
+      continue;
+    }
     if (command.unload) {
       prepared.removed.insert(key);
       readyChunks.erase(key);
@@ -2067,6 +2095,10 @@ std::uint64_t LightService::reportBlockCells(
 
 bool LightService::unloadChunk(int chunkX, int chunkZ) {
   return impl_->unloadChunk(chunkX, chunkZ);
+}
+
+bool LightService::adoptDirectGeometry(int chunkX, int chunkZ) {
+  return impl_->adoptDirectGeometry(chunkX, chunkZ);
 }
 
 void LightService::drainPublished() { impl_->drainPublished(); }

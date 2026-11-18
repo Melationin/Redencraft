@@ -130,6 +130,8 @@ public:
   // 让本地区块的生命周期代次对齐引擎里已有的登记。生成路径接管流水线先前的
   // 登记时需要它，否则存档/网络侧会认为光照属于上一个生命周期而永远不就绪。
   void alignChunkLightLifecycle(int x, int z);
+  // 低内存模式：安装完成后把该区块的光照登记切换成直读 World 几何（释放生成期镜像）。
+  void adoptChunkLightDirectGeometry(int x, int z);
   void unloadChunk(int x, int z);
   bool isChunkLoaded(int x, int z) const;
   // 测试可见：区块当前的加载生命周期与光照生命周期代次。
@@ -792,7 +794,8 @@ private:
   std::vector<std::pair<int, Pos>> pendingPortalTransferIds_;
   std::unique_ptr<PoiStorage> poiStorage_;
   const LightOpticalTable *lightOptical_ = nullptr;
-  bool lowMemoryMode_ = false;
+  // 默认开启：区段按最小位宽压位、光照工作线程直读 World 几何不另存镜像。
+  bool lowMemoryMode_ = true;
   mutable std::unique_ptr<std::shared_mutex> lightDirectMutex_ =
       std::make_unique<std::shared_mutex>();
   std::shared_mutex *directResizeMutex() const noexcept {

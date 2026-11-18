@@ -279,6 +279,9 @@ bool World::installManagedChunk(
     if (lightAlreadySubmitted) {
       ++generatedLightAdoptions_;
       alignChunkLightLifecycle(x, z);
+      // 低内存模式：生成期提交的是 ProtoChunk 的几何副本，安装后 World 数据与它
+      // 完全一致，直接切成直读，避免每个生成区块长期常驻一份镜像。
+      adoptChunkLightDirectGeometry(x, z);
     }
     reconcilePoiFromChunk(x, z, insertedIt->second);
   } catch (...) {
@@ -669,10 +672,18 @@ int World::getBrightness(Pos pos, int skyDarken) const {
 }
 
 void World::setLowMemoryMode(bool enabled) {
+  if (lowMemoryMode_ == enabled)
+    return;
   if (lightService_)
     throw std::logic_error(
         "cannot change low-memory mode while lighting is active");
   lowMemoryMode_ = enabled;
+}
+
+void World::adoptChunkLightDirectGeometry(int x, int z) {
+  if (!lowMemoryMode_ || !lightService_)
+    return;
+  (void)lightService_->adoptDirectGeometry(x, z);
 }
 
 void World::enableLighting(LightWorkerOptions options) {
