@@ -56,6 +56,10 @@ struct LightWorkerOptions {
   // 重新传播一次（LightEngine.checkEdge 的等价物）。默认关闭以保持既有语义；
   // 必须放在结构体末尾，避免破坏既有聚合初始化的字段顺序。
   bool deferUntilNeighborsReady = false;
+  // 3x3 九色分片并行的 worker 数：0/1 表示保持现有单 worker 行为（默认关闭）。
+  // 光传播半径 15 <= 1 个区块，因此同色分片（间隔 >= 3 个区块）之间不存在
+  // 跨分片传播，可以安全并行而无需原子操作。
+  int tiledParallelism = 0;
 };
 
 // 主线程投递入口与后台光照工作线程的所有者（Pimpl 隔离实现细节）。
