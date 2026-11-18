@@ -324,8 +324,14 @@ void testPipelineWithLightService() {
   auto *proto = dynamic_cast<ProtoChunk *>(&litChunk);
   require(proto != nullptr, "chunk before Full must be ProtoChunk");
   const int topSecIdx = proto->sectionIndex(64);
-  const auto &topSky = proto->section(topSecIdx).skyLight();
-  require(topSky.has_value(), "Light step populates ProtoChunk skyLight");
+  // 光照数据现在只存在光照引擎里（ProtoChunk 不再拷贝副本），
+  // 这里验证区块被标记为光照完成，并且引擎侧确实发布了天空光层。
+  require(proto->isLightCorrect(), "Light step marks chunk lightCorrect");
+  require(world.lightService() != nullptr &&
+              world.lightService()->latestLayerChunk(LightLayer::Sky, 0, 0) !=
+                  nullptr,
+          "Light engine publishes sky layer for the generated chunk");
+  (void)topSecIdx;
 
   require(pipe.generateAndInstallIntoWorld({0, 0}, world),
           "install lit Full chunk into World");
