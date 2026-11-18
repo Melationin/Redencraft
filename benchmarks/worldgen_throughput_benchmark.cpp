@@ -135,8 +135,7 @@ int main(int argc, char **argv) {
                  "usage: worldgen_throughput_benchmark <assets/worldgen26_1> "
                  "[--seed N] [--size N] [--threads N] [--repeat N] "
                  "[--no-strongholds] [--dim overworld|nether|end]\n"
-                 "       [--light] [--low-memory|--no-low-memory] "
-                 "[--serialize] [--install]\n"
+                 "       [--light] [--serialize] [--install]\n"
                  "       [--mem-report] [--jemalloc-dump FILE] "
                  "[--heap-profile FILE]\n");
     return 2;
@@ -151,7 +150,6 @@ int main(int argc, char **argv) {
   bool withLight = false;
   bool withSerialize = false;
   bool withInstall = false;
-  bool lowMemory = true;
   const char *jemallocDumpPath = nullptr;
   const char *heapProfilePath = nullptr;
   std::string dim = "overworld";
@@ -175,10 +173,6 @@ int main(int argc, char **argv) {
       withSerialize = true;
     } else if (arg == "--install") {
       withInstall = true;
-    } else if (arg == "--low-memory") {
-      lowMemory = true;
-    } else if (arg == "--no-low-memory") {
-      lowMemory = false;
     } else if (arg == "--jemalloc-dump" && i + 1 < argc) {
       jemallocDumpPath = argv[++i];
     } else if (arg == "--heap-profile" && i + 1 < argc) {
@@ -210,9 +204,6 @@ int main(int argc, char **argv) {
     if (withLight || withSerialize || withInstall) {
       world = std::make_unique<World>(dimensionFor(dim));
       if (withLight) {
-        // 低内存模式让光照工作线程按需直读 World 区块几何，不再为每个区块
-        // 常驻一份几何镜像（必须在 enableLighting 之前设置）。
-        world->setLowMemoryMode(lowMemory);
         LightWorkerOptions lightOptions;
         // 世界生成的 3x3 波前依赖邻居几何先就绪；打开 checkEdge 等价语义。
         lightOptions.deferUntilNeighborsReady = true;

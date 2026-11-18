@@ -251,7 +251,7 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
                              : BlockState::fromId(targetSection.get(localIndex));
   if (old == state)
     return false;
-  targetSection.set(localIndex, state.id(), lowMemoryMode_,
+  targetSection.set(localIndex, state.id(), /*compact=*/true,
                     directResizeMutex());
   updateChunkRandomTickMask(*changedChunk, chunkKey(targetCx, targetCz),
                             targetSi, targetSection.isRandomlyTicking());

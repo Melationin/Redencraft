@@ -155,8 +155,7 @@ public:
   // 可选启用的后台光照接管（L-1）。当前生产服务端默认关闭；尚未实现完整光照传播与协议级光照快照。
   void enableLighting(LightWorkerOptions options = {});
   void disableLighting();
-  void setLowMemoryMode(bool enabled);
-  bool lowMemoryMode() const noexcept { return lowMemoryMode_; }
+
   bool lightingEnabled() const { return lightService_ != nullptr; }
   LightService *lightService() const { return lightService_.get(); }
   void setCleanupManager(std::shared_ptr<PeriodicCleanupManager> manager,
@@ -800,12 +799,12 @@ private:
   std::vector<std::pair<int, Pos>> pendingPortalTransferIds_;
   std::unique_ptr<PoiStorage> poiStorage_;
   const LightOpticalTable *lightOptical_ = nullptr;
-  // 默认开启：区段按最小位宽压位、光照工作线程直读 World 几何不另存镜像。
-  bool lowMemoryMode_ = true;
+
   mutable std::unique_ptr<std::shared_mutex> lightDirectMutex_ =
       std::make_unique<std::shared_mutex>();
+  // 区段写入与光照工作线程直读共用的扩容锁：只要光照引擎在运行就必须持锁/原子写。
   std::shared_mutex *directResizeMutex() const noexcept {
-    return (lowMemoryMode_ && lightService_) ? lightDirectMutex_.get() : nullptr;
+    return lightService_ ? lightDirectMutex_.get() : nullptr;
   }
   static LightSectionView sectionToLightView(const Section &section,
                                              bool atomicHeader) noexcept;

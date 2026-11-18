@@ -631,8 +631,6 @@ void inlineSectionStorage() {
 }
 void lowMemorySectionCompaction() {
   World w;
-  assert(w.lowMemoryMode());  // 默认低内存
-  w.setLowMemoryMode(true);
   w.loadChunk(0, 0);
   const int secY = (64 - w.minY()) / 16 + (w.minY() >> 4);
   assert(w.sectionStorageBitsForTest(0, secY, 0) == 0);

@@ -37,8 +37,6 @@ struct DimensionLevel {
 // 打开多维度世界目录时的配置项，用于控制区块管理、视距、内存策略与维度过滤。
 struct ServerWorldOptions {
   bool withChunkManagers = true;
-  // 默认开启低内存：区段压位存储 + 光照线程直读 World 几何。可用 --no-low-memory 关闭。
-  bool lowMemoryMode = true;
   int viewDistance = 3;
   int simulationDistance = 10;
   int maxNeighborUpdates = 1000000;

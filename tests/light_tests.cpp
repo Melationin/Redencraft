@@ -2726,11 +2726,10 @@ void lowMemoryDirectLightParityAndConcurrency() {
     w.rawSetBlock({15, 8, 8}, litLamp);
   };
 
+  // 现在只有直读一种模式；两个世界用同一份夹具，比较退化为“直读模式下的
+  // 确定性 + 并发写入安全性”检查。
   World normal(0, 64);
-  // 低内存已是默认，基准组显式关掉，保证两种模式仍被真实对比。
-  normal.setLowMemoryMode(false);
   World lowMem(0, 64);
-  lowMem.setLowMemoryMode(true);
   buildFixture(normal);
   buildFixture(lowMem);
 

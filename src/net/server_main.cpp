@@ -578,7 +578,6 @@ int runServer(int argc, char **argv) {
     bool explicitSpawn = false, explicitOffset = false;
     bool consoleEnabled = true, fluidFixture = false, entityFixture = false,
          singlePlatform = false;
-    bool lowMemory = true;
     LitematicOptions schematicOptions;
     AnvilLoadOptions anvilOptions;
     ServerOptions options;
@@ -594,8 +593,7 @@ int runServer(int argc, char **argv) {
                "  [--dimension namespace:path] [--chunk x,z ...] [--ticks N] "
                "[--spawn x,y,z] [--offset x,y,z] [--view-distance 3] "
                "[--force-margin 2]\n"
-               "  [--allow-unsupported] [--skip-non-full-chunks] "
-               "[--no-low-memory]\n"
+               "  [--allow-unsupported] [--skip-non-full-chunks]\n"
                "  [--fluid-basin] [--single-platform] [--no-console] "
                "[--light-workers 1] [--ticket-view-distance 3] "
                "[--simulation-distance 10] [--command-permission-level 0] "
@@ -622,14 +620,6 @@ int runServer(int argc, char **argv) {
       }
       if (arg == "--skip-non-full-chunks") {
         anvilOptions.skipNonFullChunks = true;
-        continue;
-      }
-      if (arg == "--low-memory") {
-        lowMemory = true;
-        continue;
-      }
-      if (arg == "--no-low-memory") {
-        lowMemory = false;
         continue;
       }
       if (arg == "--fluid-basin") {
@@ -778,7 +768,6 @@ int runServer(int argc, char **argv) {
                                      std::string_view dimId) {
       standaloneWorld =
           std::make_unique<World>(spec, 1000000, dimId);
-      standaloneWorld->setLowMemoryMode(lowMemory);
     };
     auto loadBlockTagsInto = [&](World &targetWorld) {
       if (blockTagPacks.empty())
@@ -807,7 +796,6 @@ int runServer(int argc, char **argv) {
                                         : requestedDimension;
       ServerWorldOptions worldOpts;
       worldOpts.withChunkManagers = true;
-      worldOpts.lowMemoryMode = lowMemory;
       worldOpts.viewDistance = options.ticketViewDistance;
       worldOpts.simulationDistance = simulationDistance;
       worldOpts.extraBlockTagPacks = explicitBlockTagPacks;

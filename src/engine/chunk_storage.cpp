@@ -636,19 +636,8 @@ std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const 
   input->minBlockSectionY = minY_ >> 4;
   input->blockSectionCount = sectionCount();
   input->persistedLight = chunk->persistedLight;
-  if (lowMemoryMode_) {
-    input->directGeometry = true;
-    return input;
-  }
-  const auto optical = lightService_->opticalTable();
-  if (!optical)
-    throw std::logic_error("light service has no optical table");
-  input->geometrySections.reserve(static_cast<std::size_t>(sectionCount()));
-  for (int section = 0; section < sectionCount(); ++section) {
-    const Section &data = chunk->sections[section];
-    input->geometrySections.push_back(
-        makeLightGeometrySection(*optical, sectionToLightView(data, false)));
-  }
+  // 只有一种模式：光照工作线程直读 World 几何，不在 worker 侧保留镜像。
+  input->directGeometry = true;
   return input;
 }
 
@@ -672,20 +661,8 @@ int World::getBrightness(Pos pos, int skyDarken) const {
   return std::max(block, sky);
 }
 
-void World::setLowMemoryMode(bool enabled) {
-  if (lowMemoryMode_ == enabled)
-    return;
-  if (lightService_)
-    throw std::logic_error(
-        "cannot change low-memory mode while lighting is active");
-  lowMemoryMode_ = enabled;
-}
-
 bool World::adoptChunkLightDirectGeometry(int x, int z) {
   if (!lightService_)
-    return false;
-  // 非低内存模式没有 World 直读源，交给调用方重新提交值快照。
-  if (!lowMemoryMode_)
     return false;
   if (!lightService_->adoptDirectGeometry(x, z))
     return false;
@@ -702,7 +679,7 @@ void World::enableLighting(LightWorkerOptions options) {
     throw std::invalid_argument(
         "lighting requires minY aligned to a 16-block section");
   options.hasSkyLight = options.hasSkyLight && dimension_.hasSkyLight;
-  if (lowMemoryMode_ && !options.directWorld.context) {
+  if (!options.directWorld.context) {
     options.directWorld.context = this;
     options.directWorld.resizeMutex = lightDirectMutex_.get();
     options.directWorld.readSection = &World::directReadSection;
@@ -1100,7 +1077,7 @@ void World::rawSetBlock(Pos p, BlockState state) {
   Section &section = c->sections[si];
   const int index = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
   const BlockState::Id previous =
-      section.set(index, state.id(), lowMemoryMode_, directResizeMutex());
+      section.set(index, state.id(), /*compact=*/true, directResizeMutex());
   if (previous != state.id()) {
     updateChunkRandomTickMask(*c, chunkKey(cx, cz), si,
                               section.isRandomlyTicking());
@@ -1178,9 +1155,7 @@ void World::importSectionBlocks(
     }
   } else {
     const std::uint8_t targetBits =
-        palette.size() > 256
-            ? 16
-            : (lowMemoryMode_ ? minBitsForPaletteSize(palette.size()) : 8);
+        palette.size() > 256 ? 16 : minBitsForPaletteSize(palette.size());
     auto block = makeSectionStorageForBits(targetBits);
     std::uint16_t nonEmpty = 0;
     std::uint16_t tickingCount = 0;

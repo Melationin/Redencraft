@@ -230,9 +230,7 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
       const std::uint8_t targetBits =
           packed.palette.size() > 256
               ? 16
-              : (world_.lowMemoryMode()
-                     ? World::minBitsForPaletteSize(packed.palette.size())
-                     : 8);
+              : World::minBitsForPaletteSize(packed.palette.size());
       auto storage = World::makeSectionStorageForBits(targetBits);
       std::vector<std::uint8_t> paletteTicking(packed.palette.size(), 0);
       for (std::size_t i = 0; i < packed.palette.size(); ++i)
