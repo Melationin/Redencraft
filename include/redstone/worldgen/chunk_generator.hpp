@@ -150,6 +150,7 @@ public:
   // 生成至 `Full`，并将完整区块数据、后处理流体/形状刻与初始高度图安装到指定 `World`。
   bool generateAndInstallIntoWorld(ChunkTicketPos pos, World &world);
 
+
   const Stats &stats() const noexcept { return stats_; }
 
 private:

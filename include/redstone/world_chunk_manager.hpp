@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <cstdint>
@@ -17,13 +18,33 @@
 #include <map>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace redstone {
+
+namespace worldgen {
+class ChunkGenerator;
+class WorldGenScheduler;
+} // namespace worldgen
+
+// 在线世界生成统计：区分“驻留需求”（加载等级 <= FULL，生成后安装进 World）与
+// “缓冲需求”（等级 34..44，只推进到对应 ChunkStatus 并留在生成缓存中）。
+struct ChunkGenerationStats {
+  std::size_t requested = 0;
+  std::size_t completed = 0;
+  std::size_t failed = 0;
+  std::size_t bufferRequests = 0;
+  std::size_t bufferCompleted = 0;
+  std::size_t cachedChunks = 0;
+  std::size_t evicted = 0;
+};
 
 // 单个受管区块的聚合观测视图，汇总生命周期状态、光照状态、保存阻塞原因与错误文本。
 struct ManagedChunkInfo {
@@ -109,14 +130,18 @@ public:
   using EntityUuid = std::array<std::int32_t, 4>;
   static constexpr std::size_t compactEditBytes =
       sizeof(terrain::CompactBlockEdit);
+  // 可选的第 7 个参数挂载 26.1 世界生成器：磁盘缺失区块不再以 Missing 结束，
+  // 而是由专用生成线程按加载票等级生成，FULL 生成后经普通 install 路径进入 World 并落盘。
   WorldChunkManager(World &world, std::filesystem::path regionDirectory,
                     int viewDistance = 3, int simulationDistance = 10,
                     EntityChunkDataProbe entityProbe = {},
-                    std::shared_ptr<RawEntityStore> entityStore = {});
+                    std::shared_ptr<RawEntityStore> entityStore = {},
+                    std::shared_ptr<worldgen::ChunkGenerator> generator = {});
   WorldChunkManager(World &world, std::shared_ptr<RawChunkStore> store,
                     int viewDistance = 3, int simulationDistance = 10,
                     EntityChunkDataProbe entityProbe = {},
-                    std::shared_ptr<RawEntityStore> entityStore = {});
+                    std::shared_ptr<RawEntityStore> entityStore = {},
+                    std::shared_ptr<worldgen::ChunkGenerator> generator = {});
   ~WorldChunkManager() noexcept;
 
   WorldChunkManager(const WorldChunkManager &) = delete;
@@ -205,6 +230,17 @@ public:
   bool isManaged(const ChunkTicketPos &position) const;
   std::optional<ChunkLifecycleStatus>
   lifecycleStatus(const ChunkTicketPos &position) const;
+  // 世界生成是否挂载、累计统计与当前生成缓存大小（测试与诊断用）。
+  bool chunkGenerationEnabled() const { return generator_ != nullptr; }
+  ChunkGenerationStats generationStats() const;
+  // 生成缓存回收：只在生成线程处理任务后按玩家中心裁剪，主线程不触碰调度器。
+  void requestGenerationCacheTrimForTest() {
+    generationTrimRequested_.store(true, std::memory_order_release);
+  }
+  // 并行生成线程数；0 = 自动（hardware_concurrency/2 夹在 1..8）。
+  void setGenerationThreadsForTest(int threads) {
+    generationThreads_.store(threads, std::memory_order_relaxed);
+  }
 
   // 显式关服流程可等待已接收的 I/O 完成。会先拒绝新需求与迟到的加载安装，随后
   // 保存所有脏的受管区块（包括仍持有加载票的区块）。存在保存失败或阻塞的区块会
@@ -349,6 +385,36 @@ private:
   void refreshReadinessForChanges(std::span<const ChunkLevelChange> loading,
                                   std::span<const ChunkLevelChange> simulation);
 
+  // 在线世界生成：专用生成线程消费加载票需求，主线程只排空完成结果并通过
+  // ChunkLifecycleController 的普通安装路径落地。
+  struct GenerationJob {
+    ChunkTicketPos position;
+    int loadingLevel = ticket_levels::NoTicketSource;
+    std::uint64_t epoch = 0;
+    bool residency = false;
+    std::int64_t gameTime = 0;
+  };
+  struct CompletedGeneration {
+    ChunkTicketPos position;
+    std::uint64_t epoch = 0;
+    bool residency = false;
+    bool ok = false;
+    std::string detail;
+    LifecycleLoadedChunk loaded;
+    nbt::RootTag root;
+  };
+
+  void startGenerationThread();
+  void stopGenerationThread();
+  void generationLoop();
+  bool requestChunkGeneration(const ChunkTicketPos &position,
+                              std::uint64_t epoch, int loadingLevel);
+  void requestBufferGeneration(const ChunkTicketPos &position,
+                               int loadingLevel);
+  void cancelGeneration(const ChunkTicketPos &position);
+  void processCompletedGeneration();
+  void publishGenerationKeepCenters();
+
   // 在未单独提供 RawEntityStore 时，于地形读盘阶段同步探查实体区块可读性的包装存储。
   class EntityReadStore;
   World &world_;
@@ -399,6 +465,25 @@ private:
   std::atomic<bool> closing_{false};
   std::atomic<bool> closed_{false};
   ChunkShutdownResult lastShutdownResult_;
+
+  // ---- 世界生成（生成线程是管线唯一所有者）----
+  std::shared_ptr<worldgen::ChunkGenerator> generator_;
+  std::shared_ptr<RawChunkStore> generationStore_;
+  std::unique_ptr<worldgen::WorldGenScheduler> generationScheduler_;
+  std::thread generationThread_;
+  mutable std::mutex generationMutex_;
+  std::condition_variable generationReady_;
+  std::deque<GenerationJob> residencyGenerationJobs_;
+  std::map<ChunkTicketPos, int> bufferGenerationJobs_;
+  std::map<ChunkTicketPos, std::uint64_t> residencyGenerationQueued_;
+  std::deque<CompletedGeneration> completedGeneration_;
+  std::vector<ChunkTicketPos> generationKeepCenters_;
+  int generationKeepRadius_ = 15;
+  bool generationStopping_ = false;
+  std::atomic<bool> generationStop_{false};
+  std::atomic<bool> generationTrimRequested_{false};
+  std::atomic<int> generationThreads_{0};
+  ChunkGenerationStats generationStats_;
 };
 
 } // namespace redstone

@@ -1,4 +1,5 @@
 #include "redstone/chunk_lifecycle.hpp"
+#include "redstone/worldgen/proto_chunk.hpp"
 
 #include <algorithm>
 #include <array>
@@ -985,6 +986,90 @@ void testLightPatchRoundTrip() {
   controller.drain();
 }
 
+// 世界生成交接：磁盘缺失 -> requestGeneration -> 生成载荷 + 完整 NBT 模板 -> 普通 install ->
+// 模板可直接承接后续增量存盘；撤销需求后的迟到结果必须被 epoch 拒绝。
+void testGeneratedChunkHandoffAndTemplate() {
+  auto store = std::make_shared<BlockingStore>();
+  const ChunkTicketPos pos{4, 0};
+  store->statuses[pos] = StoreReadStatus::Missing;
+  Installs installs;
+  ChunkResidentCallbacks callbacks = callbacksFor(installs);
+  std::vector<std::uint64_t> requested;
+  callbacks.requestGeneration =
+      [&](const ChunkTicketPos &position, std::uint64_t epoch,
+          int loadingLevel) {
+        require(position == pos || position == ChunkTicketPos{5, 0},
+                "generation request position");
+        require(loadingLevel == LoadLevel, "generation request level");
+        requested.push_back(epoch);
+        return true;
+      };
+  ChunkLifecycleController controller(store, callbacks);
+  require(controller.updateDemand(pos, LoadLevel), "generation demand");
+  require(waitUntil(controller, [&] { return !requested.empty(); }),
+          "missing read must request generation");
+  require(controller.status(pos)->state == ChunkResidencyState::Reading,
+          "generation keeps the read pending");
+
+  const std::uint64_t epoch = requested.front();
+  worldgen::ProtoChunk proto(pos, -64, 384);
+  proto.setBlockState(0, -64, 0, BlockState("minecraft:stone"));
+  proto.setPersistedStatus(worldgen::ChunkStatusId::Full);
+  proto.setLightCorrect(false);
+  nbt::RootTag root = worldgen::encodeProtoChunkToNbt(proto);
+  LifecycleLoadedChunk loaded =
+      worldgen::promoteProtoChunkToLoaded(std::move(proto), epoch);
+  require(loaded.generated, "promoted chunk is marked generated");
+  require(loaded.entityData &&
+              loaded.entityData->status ==
+                  EntityChunkDataResult::Status::Empty,
+          "generated chunk has an empty entity slot");
+  require(controller.completeGeneratedChunk(pos, epoch, std::move(loaded),
+                                            std::move(root)),
+          "generated chunk accepted");
+  require(waitUntil(controller, [&] { return installs.count == 1; }),
+          "generated chunk installed");
+  require(installs.initialBlocks.front() == "minecraft:stone",
+          "generated terrain reached the install callback");
+  require(controller.templateCountForTest() == 1,
+          "generated NBT template is owned by the I/O worker");
+
+  // 模板可直接承接首次存盘：版本 1 被接受并写出完整 FULL 区块。
+  require(controller.requestSavePayload(pos, 1, {}),
+          "generated template accepts the first save");
+  require(waitUntil(controller, [&] { return store->writeCalls >= 1; }),
+          "generated chunk written by the I/O worker");
+  const auto writes = store->writes();
+  require(!writes.empty(), "generated write payload");
+  const terrain::DecodedChunk decoded =
+      terrain::decodeChunkNbt(std::span<const std::uint8_t>(writes.back()));
+  require(decoded.status == terrain::DecodeStatus::Ok,
+          "generated write decodes as a valid chunk");
+  require(decoded.statusName == "minecraft:full",
+          "generated write keeps FULL status");
+
+  // 第二次交接（已是 Resident）必须被拒绝。
+  require(!controller.completeGeneratedChunk(pos, epoch, LifecycleLoadedChunk{},
+                                             nbt::RootTag{}),
+          "second completion for a resident chunk is rejected");
+
+  // 撤销需求后，迟到的生成结果必须被拒绝且不安装。
+  const ChunkTicketPos latePos{5, 0};
+  store->statuses[latePos] = StoreReadStatus::Missing;
+  requested.clear();
+  require(controller.updateDemand(latePos, LoadLevel), "late demand");
+  require(waitUntil(controller, [&] { return !requested.empty(); }),
+          "late generation requested");
+  const std::uint64_t lateEpoch = requested.front();
+  require(controller.updateDemand(latePos, NoDemand), "late demand retired");
+  require(!controller.completeGeneratedChunk(latePos, lateEpoch,
+                                             LifecycleLoadedChunk{},
+                                             nbt::RootTag{}),
+          "stale generated chunk is rejected");
+  controller.drain();
+  require(installs.count == 1, "stale generation never installs");
+  controller.close();
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1009,6 +1094,7 @@ int main(int argc, char **argv) {
     testSameChunkWriteOrder();
     testCloseDrainsAndRejects();
     testLightPatchRoundTrip();
+    testGeneratedChunkHandoffAndTemplate();
     if (argc == 3)
       testRealDiskFixture(argv[2], scratch);
     std::cout << "chunk lifecycle tests passed"

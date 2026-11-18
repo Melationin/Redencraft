@@ -1,6 +1,7 @@
 #include "redstone/worldgen/chunk_generator.hpp"
 
 #include "redstone/engine.hpp"
+#include "redstone/light/chunk_input.hpp"
 #include "redstone/light/service.hpp"
 
 #include <algorithm>
@@ -15,55 +16,17 @@ bool needsPostProcess(const BlockState &state) {
   return !fluidStateOf(state).isEmpty();
 }
 
-GeometrySection makeGeometryFromProtoSection(const ProtoChunkSection &sec,
-                                            const LightOpticalTable &optical) {
-  GeometrySection g;
-  const std::uint8_t airClass = optical.classForState(0);
-  if (sec.hasOnlyAir()) {
-    g.empty = true;
-    g.uniform = true;
-    g.uniformClass = airClass;
-    return g;
-  }
-  auto cells = std::make_unique<GeometrySection::Cells>();
-  std::uint16_t nonAir = 0;
-  std::uint16_t unknown = 0;
-  const std::uint8_t firstClass = optical.classForState(sec.blockIdAt(0));
-  bool allSame = true;
-  for (std::size_t i = 0; i < kLightVolume; ++i) {
-    const std::uint8_t cls = optical.classForState(sec.blockIdAt(i));
-    (*cells)[i] = cls;
-    if (cls != firstClass)
-      allSame = false;
-    if (!optical[cls].air)
-      ++nonAir;
-    if (cls == 0)
-      ++unknown;
-  }
-  g.empty = (nonAir == 0);
-  g.nonAir = nonAir;
-  g.unknown = unknown;
-  if (allSame) {
-    g.uniform = true;
-    g.uniformClass = firstClass;
-  } else {
-    g.uniform = false;
-    g.cells = std::move(cells);
-  }
-  return g;
-}
-
 PersistedChunkLight extractPersistedLight(const ProtoChunk &proto) {
   PersistedChunkLight persisted;
   persisted.isLightOn = proto.isLightCorrect();
   persisted.sections.reserve(proto.sections().size());
   for (const ProtoChunkSection &sec : proto.sections()) {
-    if (!sec.blockLight().has_value() && !sec.skyLight().has_value())
+    if (!sec.blockLight.has_value() && !sec.skyLight.has_value())
       continue;
     PersistedLightSection ps;
     ps.sectionY = sec.sectionY();
-    ps.blockLight = sec.blockLight().copy();
-    ps.skyLight = sec.skyLight().copy();
+    ps.blockLight = sec.blockLight.copy();
+    ps.skyLight = sec.skyLight.copy();
     persisted.sections.push_back(std::move(ps));
   }
   return persisted;
@@ -76,20 +39,13 @@ std::uint64_t submitProtoChunkToLight(const ProtoChunk &proto, LightService &ls,
   const auto optical = ls.opticalTable();
   if (!optical)
     return 0;
-  LightChunkInput input;
-  input.chunkX = proto.pos().x;
-  input.chunkZ = proto.pos().z;
-  input.minBlockSectionY = proto.minSectionY();
-  input.blockSectionCount = proto.sectionCount();
+  // 统一光照入口：World::Chunk 与 ProtoChunk 共用同一个 BaseChunk 构建器。
+  std::optional<PersistedChunkLight> persisted;
   if (proto.isLightCorrect())
-    input.persistedLight = extractPersistedLight(proto);
-  else if (deferCompute)
-    input.completion = LightChunkInput::Completion::Deferred;
-  input.geometrySections.reserve(proto.sections().size());
-  for (const ProtoChunkSection &sec : proto.sections()) {
-    input.geometrySections.push_back(
-        makeGeometryFromProtoSection(sec, *optical));
-  }
+    persisted = extractPersistedLight(proto);
+  LightChunkInput input = buildLightChunkInput(
+      proto, *optical, std::move(persisted), /*directGeometry=*/false,
+      deferCompute && !proto.isLightCorrect());
   return ls.submitChunk(std::move(input));
 }
 
@@ -444,6 +400,7 @@ bool ChunkGenerationPipeline::generateAndInstallIntoWorld(ChunkTicketPos pos,
   return installProtoChunkIntoWorld(std::move(*protoOpt), world);
 }
 
+
 void refreshProtoChunkLight(ProtoChunk &proto, LightService &lightService) {
   lightService.drainPublished();
   const auto blockSnap = lightService.latestLayerChunk(
@@ -459,10 +416,10 @@ void refreshProtoChunkLight(ProtoChunk &proto, LightService &lightService) {
     const int secY = sec.sectionY();
     if (blockSnap)
       copySnapshotLayerToOptional(blockSnap->section(secY), LightLayer::Block,
-                                  sec.blockLight());
+                                  sec.blockLight);
     if (skySnap)
       copySnapshotLayerToOptional(skySnap->section(secY), LightLayer::Sky,
-                                  sec.skyLight());
+                                  sec.skyLight);
   }
 }
 
@@ -475,8 +432,9 @@ bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
 
   // 不在此时登记光照：方块还没导入，提交进去的会是“全空气”几何。
   world.loadChunk(pos.x, pos.z, /*registerLight=*/false);
-  for (const ProtoChunkSection &sec : proto.sections()) {
-    const auto &secBiomes = sec.biomes();
+  for (int secIndex = 0; secIndex < proto.sectionCount(); ++secIndex) {
+    const ProtoChunkSection &sec = proto.section(secIndex);
+    auto secBiomes = proto.biomes(secIndex, proto.defaultBiome());
     const bool uniformPlains =
         secBiomes.palette().size() <= 1 &&
         (secBiomes.palette().empty() ||

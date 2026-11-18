@@ -592,9 +592,12 @@ bool prepareSectionPatch(SectionPatchGroup &group, const EditView &edits,
   group.paletteIndex.clear();
   for (std::size_t i = 0; i < group.palette->list.size(); ++i) {
     PaletteEntry parsed;
-    if (!parseBlockState(group.palette->list[i], parsed) ||
-        !parsed.supported) {
-      error = "target section has an invalid or unsupported palette state";
+    // 世界生成区块可以包含“已注册但未实现模拟”的状态；补丁只需保留它们。
+    // 未注册名称仍然拒绝。
+    if (!parseBlockState(group.palette->list[i], parsed,
+                         /*allowUnimplementedBlocks=*/true) ||
+        findBlockByName(parsed.name) == nullptr) {
+      error = "target section has an invalid or unknown palette state";
       return false;
     }
     group.paletteIndex.emplace(parsed.state.id(), i);
@@ -724,7 +727,8 @@ bool applySectionPatch(SectionPatchGroup &group, const EditView &edits,
   return true;
 }
 
-bool validateSectionsReadOnly(const nbt::Tag &root, std::string &error) {
+bool validateSectionsReadOnly(const nbt::Tag &root, std::string &error,
+                              bool allowRegisteredUnsupported) {
   const nbt::Tag *sections = field(root, "sections");
   if (!sections || sections->type != 9 ||
       sections->listElementType != 10) {
@@ -766,11 +770,17 @@ bool validateSectionsReadOnly(const nbt::Tag &root, std::string &error) {
     }
     for (const nbt::Tag &entry : palette->list) {
       PaletteEntry parsed;
-      if (!parseBlockState(entry, parsed)) {
+      if (!parseBlockState(entry, parsed, allowRegisteredUnsupported)) {
         error = "block_states palette entry is invalid";
         return false;
       }
-      if (!parsed.supported) {
+      if (allowRegisteredUnsupported) {
+        // 只接受已注册名称；未注册方块仍然拒绝。
+        if (findBlockByName(parsed.name) == nullptr) {
+          error = "unknown block state: " + parsed.name;
+          return false;
+        }
+      } else if (!parsed.supported) {
         error = "unsupported block state: " + parsed.name;
         return false;
       }
@@ -1111,10 +1121,12 @@ DecodedChunk decodeChunkAt(const std::filesystem::path &regionDirectory,
   return result;
 }
 
-bool validateChunkRootForSave(const nbt::RootTag &root, std::string &error) {
+bool validateChunkRootForSave(const nbt::RootTag &root, std::string &error,
+                              bool allowRegisteredUnsupported) {
   error.clear();
   return validateEditableRoot(root, error) &&
-         validateSectionsReadOnly(root.value, error);
+         validateSectionsReadOnly(root.value, error,
+                                  allowRegisteredUnsupported);
 }
 
 namespace {

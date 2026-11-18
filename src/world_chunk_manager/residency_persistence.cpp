@@ -118,6 +118,9 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
     if (!inChunk(tick))
       continue;
     if (!isSupportedBlock(tick.id)) {
+      // 生成区块可能携带尚未实现模拟的计划刻类型：安全丢弃而不是拒绝整块。
+      if (loaded.generated)
+        continue;
       errors_[position] = "unsupported saved block tick type: " + tick.id;
       return false;
     }
@@ -164,6 +167,11 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
       errors_[position] = "decoded section cannot map into World storage";
       return false;
     }
+    // 区段是否可作为增量存盘目标：磁盘区块只有携带 block_states 的区段存在补丁目标；
+    // 生成模板（encodeProtoChunkToNbt）对全部区段都写了 block_states，包括纯空气段，
+    // 因此生成区块的每个区段都必须可写，否则在空区段放置方块会被误判为模板缺失。
+    if (loadedSection.blockStates || loaded.generated)
+      writableSections.insert(sectionY);
     World::Section &section = chunk.sections[sectionIndex];
     if (loadedSection.biomes && !loadedSection.biomes->palette.empty()) {
       const auto &srcBiomes = *loadedSection.biomes;
@@ -178,7 +186,8 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
           dstBiomes->indices[i] = static_cast<std::uint8_t>(
               cellVal < dstBiomes->palette.size() ? cellVal : 0);
         }
-        section.biomes = std::move(dstBiomes);
+        chunk.biomeSections[static_cast<std::size_t>(sectionIndex)] =
+            std::move(dstBiomes);
       }
     }
     if (!loadedSection.blockStates)
@@ -240,7 +249,6 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
       section.tickingBlockCount = tickingCount;
       section.storage = std::move(storage);
     }
-    writableSections.insert(sectionY);
   }
   chunk.refreshRandomTickMask(world_.sectionCount());
 
@@ -375,7 +383,12 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
     storedEntities.push_back(std::move(entity));
   }
 
-  chunk.lightLifecycleEpoch = ++nextLightLifecycleEpoch_;
+  // 加载生命周期由 ChunkLifecycleController 分配；Proto -> World 晋升时保持不变。
+  const std::uint64_t loadEpoch =
+      loaded.epoch != 0 ? loaded.epoch : ++nextLightLifecycleEpoch_;
+  chunk.loadEpoch = loadEpoch;
+  chunk.lightEpoch = loadEpoch;
+  chunk.lightLifecycleEpoch = loadEpoch;
   if (loaded.isLightOn) {
     PersistedChunkLight persisted;
     persisted.isLightOn = true;
@@ -408,6 +421,15 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
     errors_[position] = error.what();
     return false;
   }
+  // 原版 postLoadProtoChunk：生成期标记的待后处理位置（例如特征放置的水源/岩浆源）
+  // 在区块已经进入 World 之后重新请求流体刻，使它们从这里开始自然流动。
+  for (const Pos &post : loaded.postProcessingPositions) {
+    if (post.y < world_.minY() || post.y >= world_.maxY())
+      continue;
+    const FluidState fluid = fluidStateOf(world_.getBlock(post));
+    if (!fluid.isEmpty())
+      world_.scheduleFluidTick(post, fluid.getType(), 1);
+  }
   for (const auto &[uuid, position] : entityPositions)
     entityLastPositions_[uuid] = position;
 
@@ -427,6 +449,16 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
   if (managed.needsLightSave)
     pendingLightSave_.insert(position);
   managed_.emplace(position, std::move(managed));
+  if (loaded.generated) {
+    // 生成区块还没有任何存档副本：启用光照时由光照发布推进脏版本并触发首次落盘；
+    // 无光照世界立即标记脏，让专用 I/O 线程在常规自动保存中写出完整 NBT。
+    if (!world_.lightingEnabled()) {
+      ManagedChunk &fresh = managed_.at(position);
+      ++fresh.dirtyVersion;
+      (void)controller_->markDirty(position, fresh.dirtyVersion);
+      enqueueAutosaveCandidate(position);
+    }
+  }
   if (auto targets = entityMigrationTargets_.find(position);
       targets != entityMigrationTargets_.end()) {
     auto &target = managed_.at(position);

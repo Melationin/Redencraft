@@ -944,15 +944,16 @@ void fillBiomesFromNoise(ProtoChunk &chunk, const BiomeSource &biomeSource,
                          const ClimateSampler &sampler) {
   const int chunkStartQuartX = chunk.pos().x * 4;
   const int chunkStartQuartZ = chunk.pos().z * 4;
-  for (ProtoChunkSection &sec : chunk.sections()) {
-    const int secStartQuartY = sec.sectionY() * 4;
+  for (int secIndex = 0; secIndex < chunk.sectionCount(); ++secIndex) {
+    const int secStartQuartY = (chunk.minSectionY() + secIndex) * 4;
+    auto biomes = chunk.biomes(secIndex, chunk.defaultBiome());
     for (int qy = 0; qy < 4; ++qy) {
       for (int qx = 0; qx < 4; ++qx) {
         for (int qz = 0; qz < 4; ++qz) {
           const std::string_view biomeId = biomeSource.getNoiseBiome(
               chunkStartQuartX + qx, secStartQuartY + qy, chunkStartQuartZ + qz,
               sampler);
-          sec.biomes().set(qx, qy, qz, biomeId);
+          biomes.set(qx, qy, qz, biomeId);
         }
       }
     }

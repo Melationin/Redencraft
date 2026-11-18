@@ -82,6 +82,10 @@ public:
 
   WorldGenSchedulerStats stats() const;
 
+  // 最近一次批次中第一个生成阶段异常（生成器抛错）的描述；空表示没有失败。
+  // 异常不再逃出 worker 线程终止进程，而是在本批次结束时由 ensureStatusBatch 抛出。
+  std::string lastError() const;
+
 private:
   struct ChunkHolder;
   struct HolderShard;
@@ -105,6 +109,9 @@ private:
   void releaseActiveHolder();
   void waitUntilIdle();
   void workerLoop();
+  // 生成阶段抛错时释放该 holder 的等待者并记录错误，使批次可以失败返回而不是死锁。
+  std::vector<std::shared_ptr<ChunkHolder>>
+  recordStageFailure(ChunkHolder &holder, std::string detail);
 
   ChunkGenerator &generator_;
   std::int64_t worldSeed_ = 0;
@@ -139,6 +146,9 @@ private:
   std::atomic<std::size_t> parallelDispatches_{0};
   std::atomic<std::size_t> coloredDispatches_{0};
   std::atomic<std::size_t> holdersEvicted_{0};
+
+  mutable std::mutex errorMutex_;
+  std::string lastError_;
 
   std::vector<std::thread> workers_;
 };

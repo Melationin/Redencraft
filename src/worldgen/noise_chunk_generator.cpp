@@ -272,7 +272,7 @@ void NoiseBasedChunkGenerator::createBiomes(WorldGenRegion &region,
     const std::string_view fixedBiome =
         fbs->getNoiseBiome(0, 0, 0, emptySampler);
     for (int secIdx = 0; secIdx < sectionCount; ++secIdx)
-      chunk.section(secIdx).biomes().fill(fixedBiome);
+      chunk.biomes(secIdx, chunk.defaultBiome()).fill(fixedBiome);
     return;
   }
 
@@ -333,7 +333,7 @@ void NoiseBasedChunkGenerator::createBiomes(WorldGenRegion &region,
         if (yMask == 0) {
           const std::string_view biomeId = mnbs->getNoiseBiome(basePoint);
           for (int secIdx = 0; secIdx < sectionCount; ++secIdx) {
-            auto &biomes = chunk.section(secIdx).biomes();
+            auto biomes = chunk.biomes(secIdx, chunk.defaultBiome());
             for (int qy = 0; qy < 4; ++qy)
               biomes.set(qx, qy, qz, biomeId);
           }
@@ -341,7 +341,7 @@ void NoiseBasedChunkGenerator::createBiomes(WorldGenRegion &region,
         }
 
         for (int secIdx = 0; secIdx < sectionCount; ++secIdx) {
-          auto &biomes = chunk.section(secIdx).biomes();
+          auto biomes = chunk.biomes(secIdx, chunk.defaultBiome());
           const int quartMinY = (minSectionY + secIdx) << 2;
           for (int qy = 0; qy < 4; ++qy) {
             const int blockY = (quartMinY + qy) * 4;
@@ -375,12 +375,12 @@ void NoiseBasedChunkGenerator::createBiomes(WorldGenRegion &region,
   for (int qx = 0; qx < 4; ++qx) {
     for (int qz = 0; qz < 4; ++qz) {
       for (int secIdx = 0; secIdx < sectionCount; ++secIdx) {
-        ProtoChunkSection &section = chunk.section(secIdx);
+        auto biomes = chunk.biomes(secIdx, chunk.defaultBiome());
         const int quartMinY = (minSectionY + secIdx) << 2;
         for (int qy = 0; qy < 4; ++qy) {
           const std::string_view biomeId = biomeSource_->getNoiseBiome(
               quartMinX + qx, quartMinY + qy, quartMinZ + qz, sampler);
-          section.biomes().set(qx, qy, qz, biomeId);
+          biomes.set(qx, qy, qz, biomeId);
         }
       }
     }

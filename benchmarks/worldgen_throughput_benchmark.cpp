@@ -284,11 +284,11 @@ int main(int argc, char **argv) {
           refreshProtoChunkLight(*proto, *world->lightService());
         for (int s = 0; s < proto->sectionCount(); ++s) {
           const ProtoChunkSection &sec = proto->section(s);
-          if (sec.blockLight().has_value())
-            for (std::uint8_t value : *sec.blockLight())
+          if (sec.blockLight.has_value())
+            for (std::uint8_t value : *sec.blockLight)
               lightChecksum += value;
-          if (sec.skyLight().has_value())
-            for (std::uint8_t value : *sec.skyLight())
+          if (sec.skyLight.has_value())
+            for (std::uint8_t value : *sec.skyLight)
               lightChecksum += value;
         }
         // 诊断用：把每块的光照校验和逐行写出，便于两次运行逐块 diff。
@@ -297,19 +297,19 @@ int main(int argc, char **argv) {
             const ProtoChunkSection &sec = proto->section(s);
             std::uint64_t blockSum = 0;
             std::uint64_t skySum = 0;
-            if (sec.blockLight().has_value())
-              for (std::uint8_t value : *sec.blockLight())
+            if (sec.blockLight.has_value())
+              for (std::uint8_t value : *sec.blockLight)
                 blockSum += value;
-            if (sec.skyLight().has_value())
-              for (std::uint8_t value : *sec.skyLight())
+            if (sec.skyLight.has_value())
+              for (std::uint8_t value : *sec.skyLight)
                 skySum += value;
             if (FILE *dump = std::fopen(dumpPath, "a")) {
               std::fprintf(dump, "%d %d %d %llu %llu %d %d\n", request.pos.x,
                            request.pos.z, sec.sectionY(),
                            static_cast<unsigned long long>(blockSum),
                            static_cast<unsigned long long>(skySum),
-                           sec.blockLight().has_value() ? 1 : 0,
-                           sec.skyLight().has_value() ? 1 : 0);
+                           sec.blockLight.has_value() ? 1 : 0,
+                           sec.skyLight.has_value() ? 1 : 0);
               std::fclose(dump);
             }
           }

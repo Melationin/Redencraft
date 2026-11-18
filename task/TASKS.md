@@ -4058,4 +4058,38 @@ Evidence（`/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/SHA25
   4. `light_tests`、`light_protocol_tests`、官方 243 sky + 72 raw-layer golden、225 block golden 全部通过；最终源码完成一次全量构建与完整 **CTest** 且 100% 通过。
 - **计划改动文件**：`src/light.cpp`、`include/redstone/light.hpp`、`src/engine.cpp`（如有必要）、`tests/light_tests.cpp`（如需补充热路径/积压回归测试）、`docs/light-propagation-wsl.md`、`task/TASKS.md`。
 
+## 区块生成接入、统一区块数据层与在线存盘（2026-11-18，直接实现）
+
+**范围**：补全加载票驱动的区块生成（`WorldGenScheduler` 并行）、生成区块可模拟且经专用 I/O 线程落盘；统一 `ProtoChunk` / `World::Chunk` 的方块与生物群系存储；光照输入不再区分 chunk 类型；加载生命周期跨 Proto→World 保持。
+
+**实现**
+
+- 新增 `include/redstone/chunk_section.hpp`、`src/chunk_section.cpp`：`BlockSection`（原 `World::Section` 布局与计数）成为唯一区段存储；`World::Section` 保留别名；`ProtoChunk` 与 `World::Chunk` 都使用 `std::array<BlockSection, 24>`，计数不旁存。
+- 新增非虚 `BaseChunk`：位置/高度、`sections`、`biomeSections`、`loadEpoch`/`lightEpoch`/`lightCorrect`；`ProtoChunk`（经 `ChunkAccess`）与 `World::Chunk` 继承。生物群系迁到 `BaseChunk::biomeSections`，`BiomePaletteContainer` 改为非拥有视图；删除 `ProtoChunkPalette`/`ProtoChunkSection`/`worldgen::BiomePaletteContainer`。
+- 光照：新增 `include/redstone/light/chunk_input.hpp` / `src/light/chunk_input.cpp`，`World::makeLightChunkInput` 与 `submitProtoChunkToLight` 共用 `buildLightChunkInput(const BaseChunk&, ...)`；删除重复的 Proto 几何转换。
+- 生命周期：`ChunkLifecycleController` 的 epoch 写入 `ProtoChunk.loadEpoch/lightEpoch`，`promote` 保留，`World::installManagedChunk`/`loadChunk` 接受该 epoch；`World::Chunk.loadEpoch == lightLifecycleEpoch`。
+- 生成：`WorldChunkManager` 生成线程改为 `WorldGenScheduler` 批处理（驻留 ≤32/批、缓冲 ≤32/批，惰性创建、线程数 auto/可配），FULL 结果 `takeProtoChunk → NBT 模板 → promote → install`，34..44 仅推进缓存；缓存按玩家中心 `evictIdleOutsideRadius` 裁剪。删除 `ChunkGenerationPipeline` 的缓存 API。
+- 调度器：生成阶段异常不再从 worker 线程逃出（记录后由批次抛出）；`takeProtoChunk` 清除其他 holder 的 radius-8 缓存视图，修复真实生成器段错误。
+- 已注册未实现方块：受管加载/生成模板校验接受已注册状态（`allowRegisteredUnsupported` / `allowUnimplementedBlocks`），未注册名称仍拒绝；生成区块的未支持计划刻安全丢弃。
+- 服务端：`--worldgen <dir>` / `--no-worldgen`（默认 `assets/worldgen26_1`）；`ServerWorldOptions.worldgenDirectory` + 维度生成器工厂；无 `region` 目录的新世界也可生成；输出 `TICKETED_WORLDGEN` / `TICKETED_WORLDGEN_STATS`。
+
+**测试与证据**
+
+- 新增 `tests/chunk_generation_tests.cpp`（CMake 注册并传 `assets/worldgen26_1`）：生成→安装→可模拟（计划刻/流体后处理/3×3 可刻）、epoch 跨 Proto→World 不变、撤票驱逐后重读磁盘、缓冲等级不安装、过期结果丢弃、调度器缓存裁剪、真实 26.1 生成器集成 + Anvil 落盘解码。
+- `tests/chunk_lifecycle_tests.cpp` 新增生成交接/模板/首次存盘/过期拒绝。
+- 全量 CTest：**63/63 通过，39.7 s**。
+- Benchmark（WSL，本机）：
+  - `worldgen_throughput_benchmark assets/worldgen26_1 --size 8 --threads 8 --repeat 1`：64 chunks，wall 857.3 ms，13.40 ms/chunk，RSS peak 91 MB；
+  - 同 benchmark `--size 4 --threads 4 --serialize --install`：16 chunks，serialize 6.7 ms，install 5.6 ms，NBT 403460 B，install_mismatch 0/96；
+  - `redstone_block_light_benchmark 500`：mean_pair_ms 0.4753，worker error none；
+  - `redstone_fluid_perf_benchmark 200`：mean 0.0317 ms，p95 0.0543 ms，fingerprint c37c9b4793bf3cc3；
+  - `redstone_tick_benchmark` 需要 litematic 夹具，本工作树未找到，未运行。
+
+**明确没有做**
+
+- 生成期光照未提交（生成阶段 `lightService=nullptr`），安装后由 World 唯一 `LightService` 计算；epoch 已统一，后续可改为生成期提交并沿用同代次。
+- 生成区块的方块实体未安装（当前生成器也未产生），`SPAWN` 初始生物、部分结构/地物仍 `TODO`。
+- `ChunkAccess` 的生成期虚接口（`getHeight`/后处理/状态）仍在；方块存储与光照路径已无按 chunk 类型的分派。
+- 未运行真实 26.1 服务端逐区块差分，不能声称原版等价。
+
 任务进行中

@@ -2,6 +2,7 @@
 // 核心世界模拟引擎（`World`）与实体区段空间索引桶（`EntitySectionBucket`）。
 // 承载调色板压缩区段存储、按原版 26.1 顺序分离派发的更新链（形状更新、邻居通知、方块/流体计划刻、
 // 方块事件、活塞与容器方块实体、随机刻）、实体空间查询与按轴滑移碰撞/单遍推挤，以及光照和托管生命周期观测钩子。
+#include "redstone/chunk_section.hpp"
 #include "redstone/engine_types.hpp"
 #include "redstone/periodic_cleanup.hpp"
 #include <bit>
@@ -121,12 +122,19 @@ public:
   World &operator=(const World &) = delete;
   // ~registerLight=false~ 只建立区块节点、不向光照引擎提交登记，用于“生成后再
   // 统一登记”的晋升路径（此时方块还没导入，提交进去的会是空几何）。
-  void loadChunk(int x, int z, bool registerLight = true);
+  // `lightEpoch` 非 0 时沿用调用方提供的加载/光照生命周期（ProtoChunk 晋升路径），
+  // 否则按新的加载生命周期递增。
+  void loadChunk(int x, int z, bool registerLight = true,
+                 std::uint64_t lightEpoch = 0);
   // 让本地区块的生命周期代次对齐引擎里已有的登记。生成路径接管流水线先前的
   // 登记时需要它，否则存档/网络侧会认为光照属于上一个生命周期而永远不就绪。
   void alignChunkLightLifecycle(int x, int z);
   void unloadChunk(int x, int z);
   bool isChunkLoaded(int x, int z) const;
+  // 测试可见：区块当前的加载生命周期与光照生命周期代次。
+  // 受管安装必须让两者等于生成/读取请求的代次（Proto -> World 不换代）。
+  std::uint64_t chunkLoadEpochForTest(int x, int z) const;
+  std::uint64_t chunkLightEpochForTest(int x, int z) const;
   bool isLoaded(Pos pos) const;
   // 显式有序的数据包列表，按优先级从低到高排列。仅在全部新定义构建完成后才原子替换当前世界的标签快照。
   BlockTagRegistry::ReloadResult reloadBlockTags(const std::vector<std::filesystem::path> &packs);
@@ -174,7 +182,7 @@ public:
   ChunkSnapshot snapshotChunk(int chunkX, int chunkZ) const;
   std::string_view getNoiseBiome(int quartX, int quartY, int quartZ) const;
   void setSectionBiomes(int chunkX, int sectionY, int chunkZ,
-                        std::shared_ptr<const SectionBiomes> biomes);
+                        std::shared_ptr<SectionBiomes> biomes);
   bool setBlock(Pos pos, BlockState state, int flags = 3, int limit = 512);
   // 对应 `Level.removeBlock`：写回该位置当前所属的流体遗留方块而非强制写空气，
   // 从而使含水宿主方块被破坏后能保留水体（`Level.java:276-280`）。`movedByPiston` 与原版一样设置标志位 64。
@@ -193,21 +201,17 @@ public:
                     std::string_view dimensionId = {});
   // `LevelChunkSection` 容量：24 * 16 = 384 格纵向跨度，覆盖默认 `-64..320` 维度。
   // 区块区段表采用该大小的固定内联数组以消除每区段指针跳转，因此构造函数会拒绝更高的世界。
-  static constexpr int kSectionCapacity = 24;
-  // Lithium 风格的随机刻微区段布局：将 4096 个方块单元划分为 17 个 <= 248 单元的切片，
-  // 保证每个切片内的可随机刻方块计数能装入 `uint8_t` 而永不溢出。
-  static constexpr int kRandomTickMinisectionSize = 248;
+  // 共享区段容量与随机刻微区段布局定义在 chunk_section.hpp，World 保留同名别名。
+  static constexpr int kSectionCapacity = redstone::kSectionCapacity;
+  static constexpr int kRandomTickMinisectionSize =
+      redstone::kRandomTickMinisectionSize;
   static constexpr int kRandomTickMinisectionCount =
-      (kLightVolume + kRandomTickMinisectionSize - 1) /
-      kRandomTickMinisectionSize;
+      redstone::kRandomTickMinisectionCount;
   static constexpr int kRandomTickLastMinisectionSize =
-      kLightVolume -
-      kRandomTickMinisectionSize * (kRandomTickMinisectionCount - 1);
+      redstone::kRandomTickLastMinisectionSize;
   // 对应 `ServerLevelMixin.MAX_COUNT_FOR_BLOCK_SEARCH_AFTER_RANDOM_CHANCE = 4096 * 0.09375`：
   // 低于该阈值走微区段稀疏直达路径，高于该阈值直接按随机索引探测。
   static constexpr int kRandomTickSparseThreshold = 384;
-  static_assert(kSectionCapacity <= 32,
-                "randomTickingSectionMask requires <= 32 sections");
   std::optional<BlockState> coralPlacementState(Pos pos,
                                                 const BlockState &selected,
                                                 Direction clickedFace);
@@ -604,213 +608,23 @@ private:
   void tickFluidAt(Pos pos, const Fluid *expected);
   std::unique_ptr<LightChunkInput> makeLightChunkInput(int x, int z) const;
   void runEvents();
-  // 对应 `LevelChunkSection`：基于调色板压缩的方块状态容器。空区段仅用单个空气值表示（`PalettedContainer bits=0`），无需堆存储。
-  //
-  // 所有位宽的调色板存储共用同一个基类指针，因此每个 `Section` 最多只持有一块堆内存，且“当前活跃的是哪种位宽实现”
-  // 由堆块自身携带，无需用两个必须互斥的可空成员来表达。
-  // 固定容量设计（8 位上限恰好 256 个调色板项；4096 个单元格的区段最多只有 4096 种不同状态，故 16 位永不溢出）
-  // 保证了写入单元格索引和向调色板追加新状态时数组永远不会重分配或搬移，从而确保读取线程/指针看到的存储地址在生命周期内稳定不变。
-  struct SectionStorage {
-    std::uint16_t paletteSize = 0;
-    std::uint8_t bits = 0; // 取值 1..8 或 16；在存储块构造时固定
-  };
-  template <std::uint8_t Bits>
-  struct SectionStoragePacked final : SectionStorage {
-    static_assert(Bits >= 1 && Bits <= 7);
-    static constexpr std::size_t kPerWord = std::size_t{64} / Bits;
-    static constexpr std::size_t kWords =
-        (kLightVolume + kPerWord - 1) / kPerWord;
-    static constexpr std::size_t kPaletteCapacity = std::size_t{1} << Bits;
-    static constexpr std::uint64_t kMask = (std::uint64_t{1} << Bits) - 1u;
+  // 统一区段：World 与 ProtoChunk 共用 chunk_section.hpp 的 Section 存储与计数。
+  using Section = redstone::BlockSection;
+  using SectionStorage = redstone::SectionStorage;
+  using SectionStorage8 = redstone::SectionStorage8;
+  using SectionStorage16 = redstone::SectionStorage16;
 
-    SectionStoragePacked() { bits = Bits; }
-    std::array<std::uint64_t, kWords> words{};
-    std::array<BlockState::Id, kPaletteCapacity> palette{};
-    std::array<std::uint8_t, kPaletteCapacity> paletteTicking{};
-
-    std::uint16_t indexAt(std::size_t cell) const noexcept {
-      const std::size_t word = cell / kPerWord;
-      const std::size_t shift = (cell % kPerWord) * Bits;
-      return static_cast<std::uint16_t>((words[word] >> shift) & kMask);
-    }
-    void setIndexAt(std::size_t cell, std::uint16_t value) noexcept {
-      const std::size_t word = cell / kPerWord;
-      const std::size_t shift = (cell % kPerWord) * Bits;
-      words[word] = (words[word] & ~(kMask << shift)) |
-                    ((static_cast<std::uint64_t>(value) & kMask) << shift);
-    }
-    void atomicSetIndexAt(std::size_t cell, std::uint16_t value) noexcept {
-      const std::size_t word = cell / kPerWord;
-      const std::size_t shift = (cell % kPerWord) * Bits;
-      const std::uint64_t next =
-          (words[word] & ~(kMask << shift)) |
-          ((static_cast<std::uint64_t>(value) & kMask) << shift);
-      std::atomic_ref<std::uint64_t>(words[word])
-          .store(next, std::memory_order_release);
-    }
-  };
-  struct SectionStorage8 final : SectionStorage {
-    static constexpr std::size_t kPaletteCapacity = 256;
-    SectionStorage8() { bits = 8; }
-    std::array<std::uint8_t, kLightVolume> indices{}; // 零初始化
-    std::array<BlockState::Id, 256> palette{};
-    std::array<std::uint8_t, 256> paletteTicking{};
-
-    std::uint16_t indexAt(std::size_t cell) const noexcept {
-      return indices[cell];
-    }
-    void setIndexAt(std::size_t cell, std::uint16_t value) noexcept {
-      indices[cell] = static_cast<std::uint8_t>(value);
-    }
-    void atomicSetIndexAt(std::size_t cell, std::uint16_t value) noexcept {
-      std::atomic_ref<std::uint8_t>(indices[cell])
-          .store(static_cast<std::uint8_t>(value), std::memory_order_release);
-    }
-  };
-  struct SectionStorage16 final : SectionStorage {
-    static constexpr std::size_t kPaletteCapacity = kLightVolume;
-    SectionStorage16() { bits = 16; }
-    std::array<std::uint16_t, kLightVolume> indices{};
-    std::array<BlockState::Id, kLightVolume> palette{};
-    std::array<std::uint8_t, kLightVolume> paletteTicking{};
-
-    std::uint16_t indexAt(std::size_t cell) const noexcept {
-      return indices[cell];
-    }
-    void setIndexAt(std::size_t cell, std::uint16_t value) noexcept {
-      indices[cell] = value;
-    }
-    void atomicSetIndexAt(std::size_t cell, std::uint16_t value) noexcept {
-      std::atomic_ref<std::uint16_t>(indices[cell])
-          .store(value, std::memory_order_release);
-    }
-  };
   static std::uint8_t minBitsForPaletteSize(std::size_t paletteSize) noexcept {
-    if (paletteSize <= 2)
-      return 1;
-    if (paletteSize <= 4)
-      return 2;
-    if (paletteSize <= 8)
-      return 3;
-    if (paletteSize <= 16)
-      return 4;
-    if (paletteSize <= 32)
-      return 5;
-    if (paletteSize <= 64)
-      return 6;
-    if (paletteSize <= 128)
-      return 7;
-    if (paletteSize <= 256)
-      return 8;
-    return 16;
+    return redstone::minBitsForPaletteSize(paletteSize);
   }
   static std::shared_ptr<SectionStorage>
   makeSectionStorageForBits(std::uint8_t bits) {
-    switch (bits) {
-    case 1:
-      return std::make_shared<SectionStoragePacked<1>>();
-    case 2:
-      return std::make_shared<SectionStoragePacked<2>>();
-    case 3:
-      return std::make_shared<SectionStoragePacked<3>>();
-    case 4:
-      return std::make_shared<SectionStoragePacked<4>>();
-    case 5:
-      return std::make_shared<SectionStoragePacked<5>>();
-    case 6:
-      return std::make_shared<SectionStoragePacked<6>>();
-    case 7:
-      return std::make_shared<SectionStoragePacked<7>>();
-    case 8:
-      return std::make_shared<SectionStorage8>();
-    case 16:
-      return std::make_shared<SectionStorage16>();
-    default:
-      return nullptr;
-    }
+    return redstone::makeSectionStorageForBits(bits);
   }
   template <typename StoragePtr, typename Fn>
   static decltype(auto) visitSectionStorage(StoragePtr *base, Fn &&fn) {
-    if constexpr (std::is_const_v<StoragePtr>) {
-      switch (base->bits) {
-      case 1:
-        return fn(static_cast<const SectionStoragePacked<1> *>(base));
-      case 2:
-        return fn(static_cast<const SectionStoragePacked<2> *>(base));
-      case 3:
-        return fn(static_cast<const SectionStoragePacked<3> *>(base));
-      case 4:
-        return fn(static_cast<const SectionStoragePacked<4> *>(base));
-      case 5:
-        return fn(static_cast<const SectionStoragePacked<5> *>(base));
-      case 6:
-        return fn(static_cast<const SectionStoragePacked<6> *>(base));
-      case 7:
-        return fn(static_cast<const SectionStoragePacked<7> *>(base));
-      case 8:
-        return fn(static_cast<const SectionStorage8 *>(base));
-      case 16:
-        return fn(static_cast<const SectionStorage16 *>(base));
-      }
-      return fn(static_cast<const SectionStorage16 *>(base));
-    } else {
-      switch (base->bits) {
-      case 1:
-        return fn(static_cast<SectionStoragePacked<1> *>(base));
-      case 2:
-        return fn(static_cast<SectionStoragePacked<2> *>(base));
-      case 3:
-        return fn(static_cast<SectionStoragePacked<3> *>(base));
-      case 4:
-        return fn(static_cast<SectionStoragePacked<4> *>(base));
-      case 5:
-        return fn(static_cast<SectionStoragePacked<5> *>(base));
-      case 6:
-        return fn(static_cast<SectionStoragePacked<6> *>(base));
-      case 7:
-        return fn(static_cast<SectionStoragePacked<7> *>(base));
-      case 8:
-        return fn(static_cast<SectionStorage8 *>(base));
-      case 16:
-        return fn(static_cast<SectionStorage16 *>(base));
-      }
-      return fn(static_cast<SectionStorage16 *>(base));
-    }
+    return redstone::visitSectionStorage(base, std::forward<Fn>(fn));
   }
-  struct Section {
-    std::uint16_t nonEmpty = 0;
-    std::uint16_t tickingBlockCount = 0;
-    BlockState::Id single = 0;
-    std::array<std::uint8_t, kRandomTickMinisectionCount>
-        randomTickByMinisection{};
-    std::shared_ptr<SectionStorage> storage; // 空指针表示单值区段（无需分配调色板）
-    std::shared_ptr<const SectionBiomes> biomes; // 空指针表示全区段默认 minecraft:plains
-    Section() = default;
-    // 拷贝会导致共享底层 `storage` 别名，因此设为仅可移动；`Chunk` 本身也不可拷贝，故无任何调用点需要拷贝。
-    Section(const Section &) = delete;
-    Section &operator=(const Section &) = delete;
-    Section(Section &&) noexcept = default;
-    Section &operator=(Section &&) noexcept = default;
-    std::uint8_t bits() const { return storage ? storage->bits : 0; }
-    // 仅当当前活跃实现恰好为对应位宽时返回非空指针，否则返回 nullptr。
-    const SectionStorage8 *as8() const {
-      return storage && storage->bits == 8
-                 ? static_cast<const SectionStorage8 *>(storage.get())
-                 : nullptr;
-    }
-    const SectionStorage16 *as16() const {
-      return storage && storage->bits == 16
-                 ? static_cast<const SectionStorage16 *>(storage.get())
-                 : nullptr;
-    }
-    bool hasOnlyAir() const { return nonEmpty == 0; }
-    bool isRandomlyTicking() const { return tickingBlockCount > 0; }
-    void initSingleRandomTick(BlockState::Id state);
-    BlockState::Id get(int index) const;
-    bool tryGetRandomlyTicking(int index, BlockState::Id &outId) const;
-    BlockState::Id set(int index, BlockState::Id state, bool compact = false,
-                       std::shared_mutex *resizeMutex = nullptr);
-  };
   static BlockState::Id readSectionCell(const Section &sec, int cell) noexcept {
     if (!sec.storage)
       return sec.single;
@@ -820,7 +634,8 @@ private:
           return blk->palette[blk->indexAt(c)];
         });
   }
-  struct Chunk {
+  // World 区块：方块区段与生物群系来自共享 BaseChunk，模拟状态只追加在派生部分。
+  struct Chunk : public BaseChunk {
     static constexpr std::uint32_t kInvalidRandomTickIndex =
         std::numeric_limits<std::uint32_t>::max();
     bool loaded = true;
@@ -837,7 +652,6 @@ private:
     // 区段数组直接内联在 `Chunk` 中：从区块到区段头只需一次指针解引用，消除逐区段堆分配且所有区段头内存连续。
     // 默认构造的 `Section` 即为空存储的单值空气区段，因此无需额外维护“是否存在”标记；
     // 首次写入非空气方块时 `Section::set` 才会按需物化调色板。
-    std::array<Section, kSectionCapacity> sections;
     std::unique_ptr<ChunkHeightmaps> heightmaps;
     void refreshRandomTickMask(int count);
     void refreshPersistedLightIndex(int minSectionY, int numSections);

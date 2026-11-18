@@ -13,6 +13,11 @@
 
 namespace redstone {
 
+namespace worldgen {
+class ChunkGenerator;
+class WorldgenRegistries;
+} // namespace worldgen
+
 // 单个维度在运行时的完整上下文，对应原版的 ServerLevel + LevelChunk 缓存。
 // 存在原因：每个维度拥有独立的 World 模拟核心、region 目录、WorldChunkManager、加载票与派生种子，
 // 需要集中绑定在一起以便 ServerWorldSet 按维度隔离并统一调度。
@@ -21,6 +26,8 @@ struct DimensionLevel {
   std::filesystem::path regionDirectory;
   std::unique_ptr<World> world;
   std::unique_ptr<WorldChunkManager> chunkManager;
+  // 该维度的 26.1 噪声生成器；未挂载时缺失区块不生成。
+  std::shared_ptr<worldgen::ChunkGenerator> generator;
   std::vector<PersistentTicketRecord> initialTickets;
   std::uint64_t seed = 0;
   bool blockTagsLoaded = false;
@@ -37,6 +44,9 @@ struct ServerWorldOptions {
   std::vector<std::filesystem::path> extraBlockTagPacks;
   // 可选的维度 ID 过滤列表；为空时加载世界元数据中列出的全部维度。
   std::vector<std::string> dimensionsFilter;
+  // 26.1 worldgen 参数目录（含 noise/、density_function/、noise_settings/ 等）。
+  // 为空表示不启用世界生成；缺失区块保持原来的 Missing 语义。
+  std::filesystem::path worldgenDirectory;
 };
 
 // 统一持有共享的服务端元数据（level.dat 中的 Time、GameRules、WorldClocks）以及多维度 26.1 世界目录下的所有活跃 DimensionLevel。
@@ -98,6 +108,8 @@ private:
   std::vector<std::filesystem::path> blockTagPacks_;
   std::shared_ptr<PeriodicCleanupManager> cleanupManager_ =
       std::make_shared<PeriodicCleanupManager>();
+  // 生成器持有该注册表的引用，必须比 levels_ 活得久（声明在前、析构在后）。
+  std::shared_ptr<const worldgen::WorldgenRegistries> worldgenRegistries_;
   std::vector<std::unique_ptr<DimensionLevel>> levels_;
 };
 

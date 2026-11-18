@@ -49,6 +49,7 @@ elseif(NOT REDSTONE_ALLOCATOR STREQUAL "system")
 endif()
 add_library(redstone_core
   src/state.cpp
+  src/chunk_section.cpp
   src/blocks.cpp
   src/block_tags.cpp
   src/items.cpp
@@ -58,6 +59,7 @@ add_library(redstone_core
   src/fluid.cpp
   src/fluid_flow.cpp
   src/light/optical.cpp
+  src/light/chunk_input.cpp
   src/light/snapshot.cpp
   src/light/common.cpp
   src/light/block_light_engine.cpp
@@ -112,6 +114,7 @@ add_library(redstone_core
   src/worldgen/chunk_status.cpp
   src/worldgen/proto_chunk.cpp
   src/worldgen/chunk_generator.cpp
+  src/worldgen/generator_factory.cpp
   src/worldgen/worldgen_scheduler.cpp
   src/worldgen/random_source.cpp
   src/worldgen/noise.cpp
@@ -325,7 +328,7 @@ if(BUILD_TESTING)
       --faces "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_light_faces.tsv"
       --faces-source "${CMAKE_CURRENT_SOURCE_DIR}/src/light_occlusion.inc")
   endif()
-  foreach(name dimension poi portal engine periodic_cleanup entity entity_core entity_stage2 living_entity player_entity item piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap tickets region terrain_codec entity_codec chunk_lifecycle world_chunk_manager world_clock worldgen_g0 worldgen_g1_noise worldgen_g1_router worldgen_g2_biome worldgen_g2_terrain worldgen_carver worldgen_g3_structures worldgen_g3_features worldgen_scheduler redstone_components containers item_registry item_use entity_movement entity_simple entity_vehicle entity_projectile entity_living entity_nbt)
+  foreach(name dimension poi portal engine periodic_cleanup entity entity_core entity_stage2 living_entity player_entity item piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap tickets region terrain_codec entity_codec chunk_lifecycle world_chunk_manager chunk_generation world_clock worldgen_g0 worldgen_g1_noise worldgen_g1_router worldgen_g2_biome worldgen_g2_terrain worldgen_carver worldgen_g3_structures worldgen_g3_features worldgen_scheduler redstone_components containers item_registry item_use entity_movement entity_simple entity_vehicle entity_projectile entity_living entity_nbt)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_core redstone_allocator)
@@ -349,6 +352,10 @@ if(BUILD_TESTING)
       elseif(name STREQUAL "world_chunk_manager")
         add_test(NAME ${name} COMMAND ${name}_tests
                  "${CMAKE_CURRENT_BINARY_DIR}/world-chunk-manager-test-scratch")
+      elseif(name STREQUAL "chunk_generation")
+        add_test(NAME ${name} COMMAND ${name}_tests
+                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/worldgen26_1")
+        set_tests_properties(${name} PROPERTIES TIMEOUT 600)
       elseif(name STREQUAL "poi")
         add_test(NAME ${name} COMMAND ${name}_tests
                  "${CMAKE_CURRENT_BINARY_DIR}/poi-test-scratch")

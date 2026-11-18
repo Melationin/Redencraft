@@ -6,6 +6,7 @@
 // 等到达 `FULL` 后再零拷贝或紧凑移交给运行态 `World`，既对齐原版 26.1 架构，也不拖累主循环与红石热路径的内存布局。
 
 #include "redstone/block.hpp"
+#include "redstone/chunk_section.hpp"
 #include "redstone/chunk_lifecycle.hpp"
 #include "redstone/engine_types.hpp"
 #include "redstone/fluid.hpp"
@@ -31,43 +32,6 @@ class World;
 } // namespace redstone
 
 namespace redstone::worldgen {
-
-// 4x4x4 Quart 生物群系调色板容器（对齐 26.1 `Strategy.createForBiomes`）。
-// 每个 16x16x16 区段包含 64 个生物群系采样单元，按 `(qy << 4) | (qz << 2) | qx` 索引；
-// 单独封装为紧凑本地调色板以便在无全局静态表时仍能直接与 Anvil NBT 双向无损编解码。
-class BiomePaletteContainer {
-public:
-  static constexpr std::size_t kCellCount = 64;
-
-  explicit BiomePaletteContainer(std::string defaultBiome = "minecraft:plains");
-
-  static constexpr std::size_t index(int qx, int qy, int qz) noexcept {
-    return static_cast<std::size_t>(((qy & 3) << 4) | ((qz & 3) << 2) |
-                                    (qx & 3));
-  }
-
-  const std::string &get(int qx, int qy, int qz) const;
-  void set(int qx, int qy, int qz, std::string_view biomeId);
-  void fill(std::string_view biomeId);
-
-  bool isUniform() const noexcept { return palette_.size() <= 1; }
-  const std::vector<std::string> &palette() const noexcept { return palette_; }
-  const std::array<std::uint8_t, kCellCount> &indices() const noexcept {
-    return indices_;
-  }
-
-  // 打包为 Anvil `sections[].biomes` 的调色板与 64 位位打包字数组，位宽与 26.1 `PalettedContainer.pack` 一致。
-  void pack(std::vector<std::string> &outPalette,
-            std::vector<std::uint64_t> &outData, int &outBits) const;
-  bool unpack(std::span<const std::string> palette,
-              std::span<const std::uint64_t> data, std::string &error);
-
-private:
-  std::uint8_t intern(std::string_view biomeId);
-
-  std::vector<std::string> palette_;
-  std::array<std::uint8_t, kCellCount> indices_{};
-};
 
 // 全区块三维雕刻位掩码（对齐 26.1 `CarvingMask.java`）。
 // 仅在首次调用 `set` 时按需分配 `256 * height / 64` 个字，未进入洞穴雕刻的区块保持零堆分配。
@@ -98,155 +62,7 @@ private:
   std::vector<std::uint64_t> words_;
 };
 
-// 生成期区段的调色板容器：空区段零分配；首次写入方块时使用 4 位调色板
-// （16 项、2 KiB 位打包索引），状态数超过容量再按 5/6/7/8/16 位扩展。
-class ProtoChunkPalette {
-public:
-  std::uint8_t bits() const noexcept { return bits_; }
-  bool empty() const noexcept { return bits_ == 0; }
-  std::size_t paletteSize() const noexcept { return palette_.size(); }
-  // 诊断用：位打包索引数组与调色板项数组各自占用的堆容量（字节）。
-  std::size_t indexBytes() const noexcept {
-    return words_.capacity() * sizeof(std::uint64_t);
-  }
-  std::size_t entryBytes() const noexcept {
-    return palette_.capacity() * sizeof(BlockState::Id);
-  }
-  BlockState::Id paletteEntry(std::size_t index) const noexcept {
-    return index < palette_.size() ? palette_[index] : BlockState::Id{0};
-  }
-  BlockState::Id idAt(std::size_t cell) const noexcept;
-  // 直接取位打包里的调色板下标，避免序列化时再走一次 idAt 的解引用。
-  std::uint16_t rawIndexAt(std::size_t cell) const noexcept {
-    return indexAt(cell);
-  }
-  const std::vector<std::uint64_t> &words() const noexcept { return words_; }
-  // 序列化快路径：调色板没有空洞（每项都被使用），且首次使用顺序与格子顺序
-  // 一致时，可以直接复用位打包 words_，无需逐格重建。
-  bool canSerializeDirectly() const noexcept;
-  BlockState::Id set(std::size_t cell, BlockState::Id value);
-  void clear() noexcept;
-
-private:
-  static constexpr std::size_t kCells = 4096;
-  static std::size_t wordsForBits(std::uint8_t bits) noexcept {
-    const std::size_t perWord = std::size_t{64} / bits;
-    return (kCells + perWord - 1) / perWord;
-  }
-  std::uint16_t indexAt(std::size_t cell) const noexcept;
-  void setIndexAt(std::size_t cell, std::uint16_t index) noexcept;
-  void expandTo(std::uint8_t bits);
-
-  std::vector<BlockState::Id> palette_;
-  std::vector<std::uint64_t> words_;
-  std::vector<std::uint16_t> refCount_;
-  std::vector<std::uint32_t> firstCell_;
-  std::uint8_t bits_ = 0;
-};
-
-// 世界生成期区段的两个光照层（BlockLight / SkyLight）。
-// 世界生成阶段只有挂了 LightService 的区块才会真正填充这两层，因此这里改为
-// 按需在堆上分配 2 KiB，而不是让每个区段都内联预留 2x2 KiB；对外接口保持
-// 与 std::optional<std::array<std::uint8_t, 2048>> 一致，避免改动调用方。
-class LightLayerStorage {
-public:
-  using Array = std::array<std::uint8_t, 2048>;
-
-  LightLayerStorage() noexcept = default;
-  LightLayerStorage(const LightLayerStorage &other) {
-    if (other.data_)
-      data_ = std::make_unique<Array>(*other.data_);
-  }
-  LightLayerStorage(LightLayerStorage &&other) noexcept = default;
-  LightLayerStorage &operator=(const LightLayerStorage &other) {
-    if (this != &other) {
-      if (other.data_)
-        data_ = std::make_unique<Array>(*other.data_);
-      else
-        data_.reset();
-    }
-    return *this;
-  }
-  LightLayerStorage &operator=(LightLayerStorage &&other) noexcept = default;
-  ~LightLayerStorage() = default;
-
-  bool has_value() const noexcept { return data_ != nullptr; }
-  explicit operator bool() const noexcept { return data_ != nullptr; }
-  void reset() noexcept { data_.reset(); }
-  Array &emplace() {
-    if (!data_)
-      data_ = std::make_unique<Array>();
-    return *data_;
-  }
-  Array &operator*() noexcept { return *data_; }
-  const Array &operator*() const noexcept { return *data_; }
-  Array *operator->() noexcept { return data_.get(); }
-  const Array *operator->() const noexcept { return data_.get(); }
-
-  // 晋升为运行态区块 / 持久化光照快照时的载荷转换。
-  std::optional<Array> copy() const {
-    return data_ ? std::optional<Array>(*data_) : std::nullopt;
-  }
-  std::optional<Array> take() {
-    std::optional<Array> out = copy();
-    data_.reset();
-    return out;
-  }
-  std::size_t heapBytes() const noexcept {
-    return data_ ? sizeof(Array) : std::size_t{0};
-  }
-
-private:
-  std::unique_ptr<Array> data_;
-};
-
-// 原型区块的单个 16x16x16 区段。方块缓冲按需惰性分配，纯空气区段不分配
-// 16 KiB 状态数组；非空区段从 4 位调色板开始，按不同状态数向上扩展。
-class ProtoChunkSection {
-public:
-  explicit ProtoChunkSection(
-      std::int8_t sectionY,
-      std::string defaultBiome = "minecraft:plains");
-
-  std::int8_t sectionY() const noexcept { return sectionY_; }
-  bool hasOnlyAir() const noexcept { return nonEmptyBlockCount_ == 0; }
-  std::uint16_t nonEmptyBlockCount() const noexcept {
-    return nonEmptyBlockCount_;
-  }
-
-  BlockState getBlockState(int localX, int localY, int localZ) const;
-  BlockState setBlockState(int localX, int localY, int localZ,
-                           const BlockState &state);
-  FluidState getFluidState(int localX, int localY, int localZ) const;
-
-  BiomePaletteContainer &biomes() noexcept { return biomes_; }
-  const BiomePaletteContainer &biomes() const noexcept { return biomes_; }
-
-  LightLayerStorage &blockLight() noexcept { return blockLight_; }
-  const LightLayerStorage &blockLight() const noexcept { return blockLight_; }
-  LightLayerStorage &skyLight() noexcept { return skyLight_; }
-  const LightLayerStorage &skyLight() const noexcept { return skyLight_; }
-
-  // 直接暴露 4096 格只读视图，便于批量编码 Anvil 调色板与晋升 `World` 区段。
-  // 按格读取状态 id，供 Anvil 编码、光照几何与晋升 World 区段使用。
-  BlockState::Id blockIdAt(std::size_t cell) const noexcept {
-    return palette_.idAt(cell);
-  }
-  const ProtoChunkPalette &palette() const noexcept { return palette_; }
-
-private:
-  static constexpr std::size_t cellIndex(int lx, int ly, int lz) noexcept {
-    return static_cast<std::size_t>(((ly & 15) << 8) | ((lz & 15) << 4) |
-                                    (lx & 15));
-  }
-
-  std::int8_t sectionY_ = 0;
-  std::uint16_t nonEmptyBlockCount_ = 0;
-  ProtoChunkPalette palette_;
-  BiomePaletteContainer biomes_;
-  LightLayerStorage blockLight_;
-  LightLayerStorage skyLight_;
-};
+using ProtoChunkSection = redstone::BlockSection;
 
 // 生成期 ProtoChunk 常驻堆内存的分项统计（仅诊断/基准使用）。
 // 把整批区块常驻内存拆成区段数组、方块调色板、生物群系调色板、高度图、
@@ -281,21 +97,16 @@ struct ProtoChunkMemoryUsage {
 
 // `ProtoChunk` 与 `ImposterProtoChunk` 共享的区块读写访问契约（对齐 26.1 `ChunkAccess`）。
 // 使 `WorldGenRegion` 无需区分邻域格里放的是正在生成的半成品区块还是已落盘完整的 `World` 区块。
-class ChunkAccess {
+class ChunkAccess : public BaseChunk {
 public:
+  ChunkAccess() = default;
+  ChunkAccess(ChunkAccess &&) noexcept = default;
+  ChunkAccess &operator=(ChunkAccess &&) noexcept = default;
+  ChunkAccess(const ChunkAccess &) = delete;
+  ChunkAccess &operator=(const ChunkAccess &) = delete;
   virtual ~ChunkAccess() = default;
 
-  virtual ChunkTicketPos pos() const noexcept = 0;
-  virtual int minY() const noexcept = 0;
-  virtual int height() const noexcept = 0;
-  int maxY() const noexcept { return minY() + height(); }
-  int minSectionY() const noexcept { return minY() >> 4; }
-  int sectionCount() const noexcept { return height() >> 4; }
   int maxSectionY() const noexcept { return minSectionY() + sectionCount() - 1; }
-  bool isOutsideBuildHeight(int y) const noexcept {
-    return y < minY() || y >= maxY();
-  }
-  int sectionIndex(int y) const noexcept { return (y >> 4) - minSectionY(); }
 
   virtual ChunkStatusId persistedStatus() const noexcept = 0;
   virtual void setPersistedStatus(ChunkStatusId status) = 0;
@@ -314,8 +125,6 @@ public:
   virtual int getHeight(HeightmapType type, int x, int z) = 0;
   virtual void markPosForPostprocessing(int x, int y, int z) = 0;
 
-  virtual bool isLightCorrect() const noexcept = 0;
-  virtual void setLightCorrect(bool correct) = 0;
 
   // Per-chunk cached `NoiseChunk` shared across `BIOMES` -> `NOISE` -> `SURFACE`
   // (matching `ChunkAccess.getOrCreateNoiseChunk` in 26.1).
@@ -345,10 +154,10 @@ class ProtoChunk : public ChunkAccess {
 public:
   ProtoChunk(ChunkTicketPos pos, int minY = -64, int height = 384,
              std::string defaultBiome = "minecraft:plains");
-
-  ChunkTicketPos pos() const noexcept override { return pos_; }
-  int minY() const noexcept override { return minY_; }
-  int height() const noexcept override { return height_; }
+  ProtoChunk(ProtoChunk &&) noexcept = default;
+  ProtoChunk &operator=(ProtoChunk &&) noexcept = default;
+  ProtoChunk(const ProtoChunk &) = delete;
+  ProtoChunk &operator=(const ProtoChunk &) = delete;
 
   ChunkStatusId persistedStatus() const noexcept override {
     return status_.value.load(std::memory_order_acquire);
@@ -371,9 +180,6 @@ public:
   void addPackedPostProcess(std::span<const std::int16_t> offsets,
                             int sectionIndex);
 
-  bool isLightCorrect() const noexcept override { return lightCorrect_; }
-  void setLightCorrect(bool correct) override { lightCorrect_ = correct; }
-
   // InitializeLight 阶段提交给光照引擎的请求序号，供 Light 阶段按区块等待。
   void setLightSubmissionGeneration(std::uint64_t generation) noexcept {
     lightGeneration_ = generation;
@@ -382,31 +188,22 @@ public:
     return lightGeneration_;
   }
 
+  std::string_view defaultBiome() const noexcept { return defaultBiome_; }
+
   std::int64_t inhabitedTime() const noexcept { return inhabitedTime_; }
   void setInhabitedTime(std::int64_t time) noexcept { inhabitedTime_ = time; }
 
-  // 区段数组按需分配：只有真正写入方块或生物群系的区块（BIOMES 阶段起）
-  // 才会创建全部区段；只停在 STRUCTURE_STARTS 的依赖区块不再为每个区段
-  // 预留调色板容器与光照槽。
-  void ensureSections() const;
-  bool hasSections() const noexcept { return !sections_.empty(); }
+  // 区段数据来自共享 BaseChunk：全部 sectionCount 个区段始终内联存在，
+  // 与 World::Chunk 使用同一份 BlockSection 存储与计数。
+  void ensureSections() const {}
+  bool hasSections() const noexcept { return true; }
 
-  ProtoChunkSection &section(int index) {
-    ensureSections();
-    return sections_.at(static_cast<std::size_t>(index));
-  }
+  ProtoChunkSection &section(int index) { return BaseChunk::section(index); }
   const ProtoChunkSection &section(int index) const {
-    ensureSections();
-    return sections_.at(static_cast<std::size_t>(index));
+    return BaseChunk::section(index);
   }
-  const std::vector<ProtoChunkSection> &sections() const {
-    ensureSections();
-    return sections_;
-  }
-  std::vector<ProtoChunkSection> &sections() {
-    ensureSections();
-    return sections_;
-  }
+  std::span<ProtoChunkSection> sections() { return sectionSpan(); }
+  std::span<const ProtoChunkSection> sections() const { return sectionSpan(); }
 
   Heightmap &getOrCreateHeightmapUnprimed(HeightmapType type);
   const Heightmap *findHeightmap(HeightmapType type) const;
@@ -508,15 +305,10 @@ protected:
     }
   };
 
-  ChunkTicketPos pos_;
-  int minY_;
-  int height_;
   AtomicChunkStatus status_{};
-  bool lightCorrect_ = false;
   std::int64_t inhabitedTime_ = 0;
   std::uint64_t lightGeneration_ = 0;
   std::string defaultBiome_ = "minecraft:plains";
-  mutable std::vector<ProtoChunkSection> sections_;
   mutable std::array<std::optional<Heightmap>, 6> heightmaps_{};
   std::uint8_t createdHeightmapMask_ = 0;
   mutable std::uint8_t dirtyHeightmapSummaryMask_ = 0;
@@ -543,10 +335,6 @@ public:
   const World &wrappedWorld() const noexcept { return world_; }
   bool allowWrites() const noexcept { return allowWrites_; }
 
-  ChunkTicketPos pos() const noexcept override { return pos_; }
-  int minY() const noexcept override { return minY_; }
-  int height() const noexcept override { return height_; }
-
   ChunkStatusId persistedStatus() const noexcept override {
     return ChunkStatusId::Full;
   }
@@ -566,9 +354,6 @@ public:
   int getHeight(HeightmapType type, int x, int z) override;
   void markPosForPostprocessing(int, int, int) override {}
 
-  bool isLightCorrect() const noexcept override { return lightCorrect_; }
-  void setLightCorrect(bool correct) override { lightCorrect_ = correct; }
-
 private:
   static constexpr HeightmapType fixType(HeightmapType type) noexcept {
     if (type == HeightmapType::WorldSurfaceWG)
@@ -579,11 +364,7 @@ private:
   }
 
   World &world_;
-  ChunkTicketPos pos_;
-  int minY_;
-  int height_;
   bool allowWrites_;
-  bool lightCorrect_ = true;
 };
 
 // 按原版 26.1 `SerializableChunkData.write()` 格式将原型区块序列化为 Anvil 区块 NBT（DataVersion=4786）。

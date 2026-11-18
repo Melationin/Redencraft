@@ -568,7 +568,8 @@ public:
 int runServer(int argc, char **argv) {
   try {
     std::filesystem::path assets = REDSTONE_PROTOCOL_DIR, worldPath,
-                          schematicPath, ticketedWorldPath;
+                          schematicPath, ticketedWorldPath, worldgenDirectory;
+    bool worldgenDisabled = false;
     std::string requestedDimension;
     std::vector<std::filesystem::path> blockTagPacks;
     int port = 25565, maxTicks = 0, forceMargin = 2;
@@ -597,15 +598,19 @@ int runServer(int argc, char **argv) {
                "  [--fluid-basin] [--single-platform] [--no-console] "
                "[--light-workers 1] [--ticket-view-distance 3] "
                "[--simulation-distance 10] [--command-permission-level 0] "
-               "[--data-pack path ...]\n"
+               "[--data-pack path ...] [--worldgen directory | --no-worldgen]\n"
                "Offline --world/--schematic modes do not save. "
                "--ticketed-world opens the overworld region and session.lock "
-               "for writes; entities, block entities, level.dat and tickets "
-               "are not persisted yet.\n";
+               "for writes; missing chunks are generated only when a "
+               "26.1 worldgen asset directory is available.\n";
         return 0;
       }
       if (arg == "--no-console") {
         consoleEnabled = false;
+        continue;
+      }
+      if (arg == "--no-worldgen") {
+        worldgenDisabled = true;
         continue;
       }
       if (arg == "--allow-unsupported") {
@@ -655,6 +660,8 @@ int runServer(int argc, char **argv) {
         assets = utf8Path(value);
       else if (arg == "--data-pack")
         blockTagPacks.push_back(utf8Path(value));
+      else if (arg == "--worldgen")
+        worldgenDirectory = utf8Path(value);
       else if (arg == "--dimension")
         requestedDimension = normalizeDimensionId(value);
       else if (arg == "--world")
@@ -729,6 +736,14 @@ int runServer(int argc, char **argv) {
       throw ProtocolError("--offset requires --schematic");
     if (anvilOptions.skipNonFullChunks && worldPath.empty())
       throw ProtocolError("--skip-non-full-chunks requires --world");
+    if (worldgenDisabled)
+      worldgenDirectory.clear();
+    else if (worldgenDirectory.empty()) {
+      const std::filesystem::path candidate =
+          std::filesystem::path(assets).parent_path() / "worldgen26_1";
+      if (std::filesystem::is_directory(candidate))
+        worldgenDirectory = candidate;
+    }
     ProtocolData data(assets);
     std::unique_ptr<World> standaloneWorld;
     std::optional<ServerWorldSet> worldSet;
@@ -792,7 +807,13 @@ int runServer(int argc, char **argv) {
       worldOpts.viewDistance = options.ticketViewDistance;
       worldOpts.simulationDistance = simulationDistance;
       worldOpts.extraBlockTagPacks = explicitBlockTagPacks;
+      worldOpts.worldgenDirectory = worldgenDirectory;
       worldSet = ServerWorldSet::open(ticketedWorldPath, worldOpts);
+      std::cout << "TICKETED_WORLDGEN "
+                << (worldgenDirectory.empty()
+                        ? std::string("disabled")
+                        : worldgenDirectory.string())
+                << std::endl;
       for (const auto &message : worldSet->dataPackSelection().diagnostics)
         std::cerr << "BLOCK_TAGS: " << message << std::endl;
       blockTagPacks = worldSet->blockTagPacks();
@@ -1600,10 +1621,19 @@ int runServer(int argc, char **argv) {
       bool allWorkersStopped = true;
       std::size_t totalSaved = 0;
       std::size_t totalUnsaved = 0;
+      ChunkGenerationStats totalGeneration;
       for (const auto &level : worldSet->levels()) {
         if (!level->chunkManager)
           continue;
         ChunkShutdownResult shutdown = level->chunkManager->close();
+        const ChunkGenerationStats generation =
+            level->chunkManager->generationStats();
+        totalGeneration.requested += generation.requested;
+        totalGeneration.completed += generation.completed;
+        totalGeneration.failed += generation.failed;
+        totalGeneration.bufferRequests += generation.bufferRequests;
+        totalGeneration.bufferCompleted += generation.bufferCompleted;
+        totalGeneration.evicted += generation.evicted;
         allComplete = allComplete && shutdown.complete;
         allWorkersStopped = allWorkersStopped && shutdown.workerStopped;
         totalSaved += shutdown.savedChunks.size();
@@ -1622,6 +1652,13 @@ int runServer(int argc, char **argv) {
                 << " saved=" << totalSaved << " unsaved=" << totalUnsaved
                 << " worker_stopped=" << (allWorkersStopped ? 1 : 0)
                 << " resident_installs=" << ticketedInstalls << std::endl;
+      std::cout << "TICKETED_WORLDGEN_STATS requested="
+                << totalGeneration.requested
+                << " generated=" << totalGeneration.completed
+                << " failed=" << totalGeneration.failed
+                << " buffer_requests=" << totalGeneration.bufferRequests
+                << " buffer_generated=" << totalGeneration.bufferCompleted
+                << " evicted=" << totalGeneration.evicted << std::endl;
       if (!allComplete)
         return 1;
       // Terrain has settled under the same world lock. Metadata and tickets

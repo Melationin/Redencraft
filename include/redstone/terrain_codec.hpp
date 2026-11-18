@@ -166,7 +166,10 @@ PatchResult patchBlockStatesCompact(
 
 // 只读存盘前校验：复用与 patchBlockStates / decode 完全相同的 DataVersion/FULL、区段调色板、
 // 位打包存储及已支持状态规则；既不分配已解码区段载荷，也不会放宽支持范围。
-bool validateChunkRootForSave(const nbt::RootTag &root, std::string &error);
+// `allowRegisteredUnsupported` 只放宽“已注册但未实现模拟”的方块状态（世界生成产出），
+// 未注册名称、损坏调色板等仍然拒绝。
+bool validateChunkRootForSave(const nbt::RootTag &root, std::string &error,
+                              bool allowRegisteredUnsupported = false);
 
 // 描述区块 block_ticks 与 fluid_ticks 的覆盖补丁。
 struct TickListPatch {

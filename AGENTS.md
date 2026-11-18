@@ -19,7 +19,7 @@
 
 - 世界只从 Anvil 与 litematic 投影读入，不回写存档；`--region` 显式选择一个维度目录。
 - 区块由显式 `loadChunk` / `unloadChunk` 控制，没有加载票和加载等级。
-- 没有世界生成；缺失区块不会生成。
+- 世界生成已接入 `WorldGenScheduler`（FULL 安装进 `World`，34..44 仅推进生成缓存）；`SPAWN` 初始生物、部分结构与地物、生成期方块实体与生成期光照仍是 `TODO`；未挂载 `--worldgen` 时缺失区块不生成。
 - 没有光照计算；协议区块包里的光照段是占位数据。
 - `gameTime` 已从 `level.dat` 的 `Time` 恢复（`src/storage.cpp:479`、`:513`），之后只在内存里递增；26.1 的 World Clocks（`world_clocks` 状态、`advance_time`）尚未实现，也不写回存档。
 

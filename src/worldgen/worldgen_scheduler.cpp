@@ -318,6 +318,10 @@ void WorldGenScheduler::ensureStatusBatch(
     ChunkTicketPos priorityAnchor) {
   if (requests.empty())
     return;
+  {
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    lastError_.clear();
+  }
 
   std::vector<std::shared_ptr<ChunkHolder>> toArm;
   toArm.reserve(requests.size());
@@ -345,6 +349,41 @@ void WorldGenScheduler::ensureStatusBatch(
     armHoldersIterative(std::move(toArm));
   }
   waitUntilIdle();
+  // 生成器异常不会从 worker 线程逃出终止进程；本批次在此显式失败。
+  std::string failure;
+  {
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    failure = lastError_;
+  }
+  if (!failure.empty())
+    throw std::runtime_error(failure);
+}
+
+std::string WorldGenScheduler::lastError() const {
+  std::lock_guard<std::mutex> lock(errorMutex_);
+  return lastError_;
+}
+
+std::vector<std::shared_ptr<WorldGenScheduler::ChunkHolder>>
+WorldGenScheduler::recordStageFailure(ChunkHolder &holder,
+                                      std::string detail) {
+  {
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    if (lastError_.empty())
+      lastError_ = "worldgen stage failed for chunk " +
+                   std::to_string(holder.pos.x) + "," +
+                   std::to_string(holder.pos.z) + ": " + detail;
+  }
+  std::vector<std::shared_ptr<ChunkHolder>> waiters;
+  {
+    std::lock_guard<std::mutex> lock(holder.mtx);
+    for (auto &list : holder.waitersByStage) {
+      waiters.insert(waiters.end(), list.begin(), list.end());
+      list.clear();
+    }
+    holder.execState = ExecState::Idle;
+  }
+  return waiters;
 }
 
 void WorldGenScheduler::armHoldersIterative(
@@ -623,7 +662,18 @@ void WorldGenScheduler::executeHolder(
     const std::uint8_t nextStage = static_cast<std::uint8_t>(cur + 1);
     const auto nextEnum = static_cast<ChunkStatusId>(nextStage);
 
-    runSingleStage(*holder, nextEnum, pyramid);
+    try {
+      runSingleStage(*holder, nextEnum, pyramid);
+    } catch (const std::exception &error) {
+      // 记录失败、释放等待者并结束该 holder 的本次执行，避免 worker 抛出终止进程。
+      std::vector<std::shared_ptr<ChunkHolder>> failedWaiters =
+          recordStageFailure(*holder, error.what());
+      releaseColorFlight();
+      if (!failedWaiters.empty())
+        notifyWaiters(failedWaiters);
+      releaseActiveHolder();
+      return;
+    }
     stepsExecuted_.fetch_add(1, std::memory_order_relaxed);
 
     std::vector<std::shared_ptr<ChunkHolder>> waiters;
@@ -805,17 +855,33 @@ ChunkAccess *WorldGenScheduler::findChunk(ChunkTicketPos pos) const {
 
 std::optional<ProtoChunk> WorldGenScheduler::takeProtoChunk(ChunkTicketPos pos) {
   const std::uint64_t key = packCoordKey(pos);
-  HolderShard &shard = shards_[shardIndex(key, kShardCount)];
-  std::unique_lock<std::shared_mutex> lock(shard.mtx);
-  auto it = shard.map.find(key);
-  if (it == shard.map.end())
-    return std::nullopt;
-  auto h = it->second;
-  auto *proto = dynamic_cast<ProtoChunk *>(h->chunk.get());
-  if (!proto)
-    return std::nullopt;
-  ProtoChunk moved(std::move(*proto));
-  shard.map.erase(it);
+  std::optional<ProtoChunk> moved;
+  {
+    HolderShard &shard = shards_[shardIndex(key, kShardCount)];
+    std::unique_lock<std::shared_mutex> lock(shard.mtx);
+    auto it = shard.map.find(key);
+    if (it == shard.map.end())
+      return std::nullopt;
+    auto h = it->second;
+    auto *proto = dynamic_cast<ProtoChunk *>(h->chunk.get());
+    if (!proto)
+      return std::nullopt;
+    moved.emplace(std::move(*proto));
+    shard.map.erase(it);
+  }
+  // 被取走的 chunk 可能仍被其他 holder 的 radius-8 只读缓存视图引用。
+  // 那些视图只是可重建的优化；统一清空，避免后续阶段读到悬空指针。
+  for (std::size_t s = 0; s < kShardCount; ++s) {
+    HolderShard &shard = shards_[s];
+    std::shared_lock<std::shared_mutex> lock(shard.mtx);
+    for (auto &[holderKey, holder] : shard.map) {
+      (void)holderKey;
+      if (holder->cachedR8View.empty())
+        continue;
+      std::lock_guard<std::mutex> hlock(holder->mtx);
+      holder->cachedR8View.clear();
+    }
+  }
   return moved;
 }
 

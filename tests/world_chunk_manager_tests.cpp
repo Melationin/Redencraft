@@ -2360,7 +2360,8 @@ void testRetainedCompactUnknownStateBlocksSave() {
   World world(-64, 320);
   ChunkResidentCallbacks installTemplate{
       [](LifecycleLoadedChunk &&) { return true; },
-      [](const ChunkTicketPos &, std::uint64_t) { return true; }};
+      [](const ChunkTicketPos &, std::uint64_t) { return true; },
+      {}};
   ChunkLifecycleController controller(store, installTemplate);
   require(controller.updateDemand(position, ticket_levels::FullChunkLevel),
           "unknown compact state loads its template");

@@ -1,5 +1,7 @@
 #include "engine/internal.hpp"
 
+#include "redstone/light/chunk_input.hpp"
+
 namespace redstone {
 World::World(int minY, int maxY, int maxNeighborUpdates)
     : minY_(minY), maxY_(maxY), maxUpdates_(maxNeighborUpdates),
@@ -166,52 +168,21 @@ const World::Chunk *World::chunkAtCached(int x, int z) const {
   slot.chunk = it == chunks_.end() ? nullptr : &it->second;
   return slot.chunk && slot.chunk->loaded ? slot.chunk : nullptr;
 }
+std::uint64_t World::chunkLoadEpochForTest(int x, int z) const {
+  const Chunk *chunk = chunkAt(x, z);
+  return chunk ? chunk->loadEpoch : 0;
+}
+
+std::uint64_t World::chunkLightEpochForTest(int x, int z) const {
+  const Chunk *chunk = chunkAt(x, z);
+  return chunk ? chunk->lightLifecycleEpoch : 0;
+}
+
 World::Chunk *World::chunkAt(int x, int z) {
   return const_cast<Chunk *>(chunkAtCached(x, z));
 }
 const World::Chunk *World::chunkAt(int x, int z) const {
   return chunkAtCached(x, z);
-}
-BlockState::Id World::Section::get(int index) const {
-  // PalettedContainer.get: palette entry of the stored index (bits == 0 means
-  // the section holds a single value and needs no storage at all).
-  const SectionStorage *base = storage.get();
-  if (!base)
-    return single;
-  const auto cell = static_cast<std::size_t>(index);
-  return visitSectionStorage(base, [cell](const auto *block) {
-    return block->palette[block->indexAt(cell)];
-  });
-}
-bool World::Section::tryGetRandomlyTicking(int index,
-                                          BlockState::Id &outId) const {
-  const SectionStorage *base = storage.get();
-  if (!base) {
-    if (!stateIsRandomlyTickingId(single))
-      return false;
-    outId = single;
-    return true;
-  }
-  const auto cell = static_cast<std::size_t>(index);
-  return visitSectionStorage(base, [cell, &outId](const auto *block) {
-    const auto idx = block->indexAt(cell);
-    if (!block->paletteTicking[idx])
-      return false;
-    outId = block->palette[idx];
-    return true;
-  });
-}
-void World::Section::initSingleRandomTick(BlockState::Id state) {
-  const bool ticking = stateIsRandomlyTickingId(state);
-  tickingBlockCount = ticking ? static_cast<std::uint16_t>(kLightVolume) : 0;
-  if (ticking) {
-    randomTickByMinisection.fill(
-        static_cast<std::uint8_t>(kRandomTickMinisectionSize));
-    randomTickByMinisection.back() =
-        static_cast<std::uint8_t>(kRandomTickLastMinisectionSize);
-  } else {
-    randomTickByMinisection.fill(0);
-  }
 }
 void World::Chunk::refreshRandomTickMask(int count) {
   std::uint32_t mask = 0;
@@ -235,134 +206,6 @@ void World::Chunk::refreshPersistedLightIndex(int minSectionY,
     }
   }
 }
-namespace {
-std::uint8_t nextSectionBitsForWidth(std::uint8_t bits) noexcept {
-  if (bits < 7)
-    return static_cast<std::uint8_t>(bits + 1);
-  if (bits == 7)
-    return 8;
-  return 16;
-}
-void updateSectionCounters(
-    std::uint16_t &nonEmpty, std::uint16_t &tickingBlockCount,
-    std::array<std::uint8_t, World::kRandomTickMinisectionCount> &minisections,
-    int index, BlockState::Id previous, BlockState::Id state) {
-  const bool previousAir = BlockState::fromId(previous).isAir();
-  const bool stateAir = BlockState::fromId(state).isAir();
-  std::uint16_t nextNonEmpty = nonEmpty;
-  if (previousAir && !stateAir)
-    ++nextNonEmpty;
-  else if (!previousAir && stateAir)
-    --nextNonEmpty;
-  if (nextNonEmpty != nonEmpty)
-    std::atomic_ref<std::uint16_t>(nonEmpty).store(nextNonEmpty,
-                                                   std::memory_order_relaxed);
-  const bool prevTicking = stateIsRandomlyTickingId(previous);
-  const bool nextTicking = stateIsRandomlyTickingId(state);
-  if (prevTicking != nextTicking) {
-    const std::size_t mini =
-        static_cast<std::size_t>(index) / World::kRandomTickMinisectionSize;
-    if (nextTicking) {
-      ++tickingBlockCount;
-      ++minisections[mini];
-    } else {
-      --tickingBlockCount;
-      --minisections[mini];
-    }
-  }
-}
-} // namespace
-BlockState::Id World::Section::set(int index, BlockState::Id state,
-                                   bool compact,
-                                   std::shared_mutex *resizeMutex) {
-  // PalettedContainer.getAndSet + LevelChunkSection.setBlockState counters.
-  const auto previous = get(index);
-  if (previous == state)
-    return previous;
-  const auto cell = static_cast<std::size_t>(index);
-  SectionStorage *base = storage.get();
-  if (!base) {
-    // A default block is value-initialised, so every cell already reads
-    // palette[0] == single and only the written cell needs an index.
-    auto next = makeSectionStorageForBits(compact ? 1 : 8);
-    visitSectionStorage(next.get(), [&](auto *block) {
-      block->palette[0] = single;
-      block->paletteTicking[0] = stateIsRandomlyTickingId(single) ? 1 : 0;
-      block->palette[1] = state;
-      block->paletteTicking[1] = stateIsRandomlyTickingId(state) ? 1 : 0;
-      block->paletteSize = 2;
-      block->setIndexAt(cell, 1);
-    });
-    if (resizeMutex) {
-      std::unique_lock lock(*resizeMutex);
-      storage = std::move(next);
-    } else {
-      storage = std::move(next);
-    }
-  } else {
-    visitSectionStorage(base, [&](auto *block) {
-      using BlockT = std::remove_pointer_t<decltype(block)>;
-      const auto end = block->palette.begin() + block->paletteSize;
-      auto found = std::find(block->palette.begin(), end, state);
-      std::uint16_t targetIdx = 0;
-      if (found == end) {
-        if (block->paletteSize < BlockT::kPaletteCapacity) {
-          targetIdx = block->paletteSize;
-          // Store palette slot BEFORE publishing paletteSize & cell index so a
-          // lockless reader observing targetIdx sees an initialized state id.
-          std::atomic_ref<BlockState::Id>(block->palette[targetIdx])
-              .store(state, std::memory_order_release);
-          block->paletteTicking[targetIdx] =
-              stateIsRandomlyTickingId(state) ? 1 : 0;
-          std::atomic_ref<std::uint16_t>(block->paletteSize)
-              .store(static_cast<std::uint16_t>(targetIdx + 1),
-                     std::memory_order_release);
-        } else {
-          if constexpr (std::is_same_v<BlockT, SectionStorage16>) {
-            // Unreachable: kLightVolume cells cannot hold more than
-            // kLightVolume distinct states. Fail loudly instead of overflowing.
-            throw std::logic_error("section palette overflow");
-          } else {
-            // HashMapPalette.grow: widen stored indices outside lock, then take
-            // resizeMutex only to swap storage.
-            auto nextStorage =
-                makeSectionStorageForBits(nextSectionBitsForWidth(block->bits));
-            visitSectionStorage(nextStorage.get(), [&](auto *wider) {
-              std::copy(block->palette.begin(), end, wider->palette.begin());
-              std::copy(block->paletteTicking.begin(),
-                        block->paletteTicking.begin() + block->paletteSize,
-                        wider->paletteTicking.begin());
-              wider->palette[block->paletteSize] = state;
-              wider->paletteTicking[block->paletteSize] =
-                  stateIsRandomlyTickingId(state) ? 1 : 0;
-              wider->paletteSize =
-                  static_cast<std::uint16_t>(block->paletteSize + 1);
-              for (std::size_t i = 0; i < kLightVolume; ++i)
-                wider->setIndexAt(i, block->indexAt(i));
-              wider->setIndexAt(cell, block->paletteSize);
-            });
-            if (resizeMutex) {
-              std::unique_lock lock(*resizeMutex);
-              storage = std::move(nextStorage);
-            } else {
-              storage = std::move(nextStorage);
-            }
-            return;
-          }
-        }
-      } else {
-        targetIdx = static_cast<std::uint16_t>(found - block->palette.begin());
-      }
-      if (resizeMutex)
-        block->atomicSetIndexAt(cell, targetIdx);
-      else
-        block->setIndexAt(cell, targetIdx);
-    });
-  }
-  updateSectionCounters(nonEmpty, tickingBlockCount, randomTickByMinisection,
-                        index, previous, state);
-  return previous;
-}
 bool World::installManagedChunk(
     int x, int z, Chunk &&chunk,
     const std::vector<ScheduledTick> &blockTicks,
@@ -375,6 +218,8 @@ bool World::installManagedChunk(
     return false;
   chunk.loaded = false;
   chunk.randomTickIndex = Chunk::kInvalidRandomTickIndex;
+  chunk.initialize({x, z}, minY_, maxY_ - minY_);
+  const std::uint64_t loadEpoch = chunk.lightEpoch;
   decltype(chunks_)::iterator insertedIt;
   {
     std::unique_lock<std::shared_mutex> resizeLock;
@@ -421,7 +266,7 @@ bool World::installManagedChunk(
       entities.push_back(entity);
       entitySectionAdd(*entity);
     }
-    loadChunk(x, z);
+    loadChunk(x, z, /*registerLight=*/true, loadEpoch);
     reconcilePoiFromChunk(x, z, insertedIt->second);
   } catch (...) {
     std::vector<std::shared_ptr<Entity>> insertedEntities;
@@ -611,7 +456,8 @@ void World::updateChunkRandomTickMask(Chunk &chunk, std::uint64_t key,
     removeRandomTickingChunk(chunk);
 }
 
-void World::loadChunk(int x, int z, bool registerLight) {
+void World::loadChunk(int x, int z, bool registerLight,
+                      std::uint64_t lightEpoch) {
   const auto key = chunkKey(x, z);
   // 已经常驻：节点、高度图、刻容器、光照登记、生命周期代次全部就位，重复调用
   // 不该有任何副作用（尤其不该再向光照引擎提交一次）。
@@ -628,11 +474,21 @@ void World::loadChunk(int x, int z, bool registerLight) {
     it = chunks_.emplace(key, Chunk{}).first;
   }
   auto &c = it->second;
+  c.initialize({x, z}, minY_, maxY_ - minY_);
   const bool wasLoaded = c.loaded;
   c.loaded = true;
-  // 接管流水线登记时（registerLight=false）不动代次，由对齐函数决定。
-  if (!wasLoaded && registerLight)
-    ++c.lightLifecycleEpoch;
+  // 接管流水线登记时（registerLight=false）不动代次，由对齐函数决定；
+  // 受管安装会显式传入生成/读取请求的加载生命周期，保证 Proto -> World 不变。
+  if (!wasLoaded && registerLight) {
+    if (lightEpoch != 0)
+      c.lightLifecycleEpoch = lightEpoch;
+    else
+      ++c.lightLifecycleEpoch;
+  }
+  if (lightEpoch != 0) {
+    c.loadEpoch = lightEpoch;
+    c.lightEpoch = lightEpoch;
+  }
   if (c.randomTickingSectionMask != 0)
     addRandomTickingChunk(c, key);
   if (!c.heightmaps)
@@ -1007,7 +863,7 @@ ChunkSnapshot World::snapshotChunk(int chunkX, int chunkZ) const {
       out.nonEmpty = section.nonEmpty;
       out.bits = section.bits();
       out.single = section.single;
-      out.biomes = section.biomes;
+      out.biomes = chunk->biomeSections[i];
       // The snapshot stays an owning copy: the network encoder runs off the
       // tick thread, so it must not read the live container.
       if (const SectionStorage *base = section.storage.get()) {
@@ -1037,7 +893,7 @@ std::string_view World::getNoiseBiome(int quartX, int quartY, int quartZ) const 
   const int chunkX = quartX >= 0 ? (quartX / 4) : ((quartX - 3) / 4);
   const int chunkZ = quartZ >= 0 ? (quartZ / 4) : ((quartZ - 3) / 4);
   const Chunk *chunk = chunkAt(chunkX, chunkZ);
-  if (!chunk || chunk->sections.empty())
+  if (!chunk)
     return "minecraft:plains";
   const int minQuartY = minY_ >= 0 ? (minY_ / 4) : ((minY_ - 3) / 4);
   const int maxQuartY = (maxY_ >= 0 ? (maxY_ / 4) : ((maxY_ - 3) / 4)) - 1;
@@ -1045,7 +901,7 @@ std::string_view World::getNoiseBiome(int quartX, int quartY, int quartZ) const 
   const int secIdx = sectionIndex(clampedY * 4);
   if (secIdx < 0 || secIdx >= static_cast<int>(chunk->sections.size()))
     return "minecraft:plains";
-  const auto &biomes = chunk->sections[static_cast<std::size_t>(secIdx)].biomes;
+  const auto &biomes = chunk->biomeSections[static_cast<std::size_t>(secIdx)];
   if (!biomes || biomes->palette.empty())
     return "minecraft:plains";
   const int lqx = quartX & 3;
@@ -1059,7 +915,7 @@ std::string_view World::getNoiseBiome(int quartX, int quartY, int quartZ) const 
 }
 
 void World::setSectionBiomes(int chunkX, int sectionY, int chunkZ,
-                             std::shared_ptr<const SectionBiomes> biomes) {
+                             std::shared_ptr<SectionBiomes> biomes) {
   // 只保证节点存在：设置群系不是光照输入变更，不应该顺手向光照引擎登记一次
   // （生成晋升路径正处在“方块尚未导入完”的中间态，那会触发一次错误的计算）。
   loadChunk(chunkX, chunkZ, /*registerLight=*/false);
@@ -1069,7 +925,7 @@ void World::setSectionBiomes(int chunkX, int sectionY, int chunkZ,
   const int secIdx = sectionIndex(sectionY * 16);
   if (secIdx < 0 || secIdx >= static_cast<int>(chunk->sections.size()))
     return;
-  chunk->sections[static_cast<std::size_t>(secIdx)].biomes = std::move(biomes);
+  chunk->biomeSections[static_cast<std::size_t>(secIdx)] = std::move(biomes);
 }
 std::vector<PistonSnapshot>
 World::snapshotChunkPistons(int chunkX, int chunkZ) const {

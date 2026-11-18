@@ -85,6 +85,23 @@ StoreWriteResult RegionFileStore::writeChunk(
   }
 }
 
+SerializedChunkStore::SerializedChunkStore(
+    std::shared_ptr<RawChunkStore> inner)
+    : inner_(std::move(inner)) {}
+
+StoreReadResult SerializedChunkStore::readChunk(
+    const ChunkTicketPos &position) {
+  std::lock_guard lock(mutex_);
+  return inner_->readChunk(position);
+}
+
+StoreWriteResult SerializedChunkStore::writeChunk(
+    const ChunkTicketPos &position, std::span<const std::uint8_t> bytes,
+    int timestampSeconds) {
+  std::lock_guard lock(mutex_);
+  return inner_->writeChunk(position, bytes, timestampSeconds);
+}
+
 RegionEntityStore::RegionEntityStore(
     std::filesystem::path entityDirectory)
     : entityDirectory_(std::move(entityDirectory)) {}
@@ -205,6 +222,7 @@ public:
       entry.status.detail.clear();
       enqueue(Command::invalidate(position, invalidEpoch));
       enqueue(Command::drop(position, invalidEpoch));
+      pendingGenerated_.erase(position);
       entries_.erase(found);
       return true;
     }
@@ -333,6 +351,42 @@ public:
     return true;
   }
 
+  bool completeGeneratedChunk(const ChunkTicketPos &position,
+                              std::uint64_t epoch,
+                              LifecycleLoadedChunk &&loaded,
+                              nbt::RootTag &&root) {
+    auto found = entries_.find(position);
+    if (found == entries_.end() || found->second.status.epoch != epoch ||
+        found->second.status.state != ChunkResidencyState::Reading ||
+        !found->second.status.demand || !accepting())
+      return false;
+    PendingGenerated pending;
+    pending.epoch = epoch;
+    pending.loaded = std::move(loaded);
+    pendingGenerated_[position] = std::move(pending);
+    Command command = Command::installGenerated(position, epoch);
+    command.root.emplace(std::move(root));
+    if (!enqueue(std::move(command))) {
+      pendingGenerated_.erase(position);
+      return false;
+    }
+    return true;
+  }
+
+  void failGeneratedChunk(const ChunkTicketPos &position,
+                          std::uint64_t epoch, std::string detail) {
+    auto found = entries_.find(position);
+    if (found == entries_.end() || found->second.status.epoch != epoch ||
+        found->second.status.state != ChunkResidencyState::Reading ||
+        !found->second.status.demand)
+      return;
+    pendingGenerated_.erase(position);
+    if (detail.empty())
+      detail = "world generation failed";
+    handleLoadFailure(position, found->second, ChunkLoadFailure::Corrupt,
+                      std::move(detail));
+  }
+
   bool retryEviction(const ChunkTicketPos &position) {
     auto found = entries_.find(position);
     if (found == entries_.end() ||
@@ -354,14 +408,50 @@ public:
       if (found == entries_.end() ||
           found->second.status.epoch != result.epoch) {
         if (result.kind == ResultKind::LoadReady ||
-            result.kind == ResultKind::LoadFailed)
+            result.kind == ResultKind::LoadFailed ||
+            result.kind == ResultKind::GenerationReady)
           enqueue(Command::drop(result.position, result.epoch));
+        if (result.kind == ResultKind::GenerationReady ||
+            result.kind == ResultKind::GenerationFailed) {
+          auto pending = pendingGenerated_.find(result.position);
+          if (pending != pendingGenerated_.end() &&
+              pending->second.epoch == result.epoch)
+            pendingGenerated_.erase(pending);
+        }
         continue;
       }
       Entry &entry = found->second;
       if (result.kind == ResultKind::LoadReady) {
         handleLoadReady(result.position, entry, std::move(result.loaded));
       } else if (result.kind == ResultKind::LoadFailed) {
+        handleLoadFailure(result.position, entry, result.failure,
+                          std::move(result.detail));
+      } else if (result.kind == ResultKind::GenerationNeeded) {
+        bool started = false;
+        try {
+          started = callbacks_.requestGeneration &&
+                    callbacks_.requestGeneration(result.position,
+                                                 result.epoch,
+                                                 entry.status.demandLevel);
+        } catch (...) {
+          started = false;
+        }
+        if (!started)
+          handleLoadFailure(result.position, entry, ChunkLoadFailure::Missing,
+                            std::move(result.detail));
+      } else if (result.kind == ResultKind::GenerationReady) {
+        auto pending = pendingGenerated_.find(result.position);
+        if (pending != pendingGenerated_.end() &&
+            pending->second.epoch == result.epoch) {
+          LifecycleLoadedChunk loaded = std::move(pending->second.loaded);
+          pendingGenerated_.erase(pending);
+          handleLoadReady(result.position, entry, std::move(loaded));
+        } else {
+          handleLoadFailure(result.position, entry, ChunkLoadFailure::Io,
+                            "generated chunk payload is missing");
+        }
+      } else if (result.kind == ResultKind::GenerationFailed) {
+        pendingGenerated_.erase(result.position);
         handleLoadFailure(result.position, entry, result.failure,
                           std::move(result.detail));
       } else if (result.kind == ResultKind::SaveDone) {
@@ -372,8 +462,10 @@ public:
         if (current != entries_.end() &&
             current->second.status.epoch == result.epoch &&
             !current->second.status.demand &&
-            !current->second.resident && current->second.inFlightSaves == 0)
+            !current->second.resident && current->second.inFlightSaves == 0) {
+          pendingGenerated_.erase(result.position);
           entries_.erase(current);
+        }
       }
     }
     return processed;
@@ -418,11 +510,29 @@ public:
     entityTemplates_.clear();
     workerEpochs_.clear();
     workerWrittenVersions_.clear();
+    pendingGenerated_.clear();
   }
 
 private:
-  enum class CommandKind { Load, Save, Invalidate, DropTemplate, LedgerSample };
-  enum class ResultKind { LoadReady, LoadFailed, SaveDone, DropDone };
+  enum class CommandKind {
+    Load,
+    Save,
+    Invalidate,
+    DropTemplate,
+    LedgerSample,
+    InstallGenerated,
+  };
+  enum class ResultKind {
+    LoadReady,
+    LoadFailed,
+    SaveDone,
+    DropDone,
+    // 磁盘上没有该区块：主线程决定是否交给世界生成。
+    GenerationNeeded,
+    // I/O worker 已持有生成模板，可以安装。
+    GenerationReady,
+    GenerationFailed,
+  };
 
   struct Command {
     CommandKind kind = CommandKind::Load;
@@ -474,6 +584,14 @@ private:
       result.kind = CommandKind::LedgerSample;
       return result;
     }
+    static Command installGenerated(const ChunkTicketPos &position,
+                                    std::uint64_t epoch) {
+      Command result;
+      result.kind = CommandKind::InstallGenerated;
+      result.position = position;
+      result.epoch = epoch;
+      return result;
+    }
   };
 
   struct Result {
@@ -496,6 +614,12 @@ private:
   struct WorkerEntityTemplate {
     std::uint64_t epoch = 0;
     nbt::RootTag root;
+  };
+
+  // 生成线程已产出、等待 worker 装好模板后由主线程安装的载荷。只在主线程访问。
+  struct PendingGenerated {
+    std::uint64_t epoch = 0;
+    LifecycleLoadedChunk loaded;
   };
 
   bool beginRead(const ChunkTicketPos &position, Entry &entry) {
@@ -648,6 +772,10 @@ private:
       processLoad(std::move(command));
       return;
     }
+    if (command.kind == CommandKind::InstallGenerated) {
+      processInstallGenerated(std::move(command));
+      return;
+    }
     processSave(std::move(command));
   }
 
@@ -680,15 +808,27 @@ private:
     }
     if (raw.status != StoreReadStatus::Found) {
       Result result;
-      result.kind = ResultKind::LoadFailed;
       result.position = command.position;
       result.epoch = command.epoch;
-      result.failure = mapReadFailure(raw.status);
-      result.detail = std::move(raw.detail);
+      if (raw.status == StoreReadStatus::Missing) {
+        // 缺失区块按 26.1 语义交给世界生成：主线程在 drain() 中决定是否有生成器，
+        // 没有生成器时仍走原来的 Missing 失败路径。
+        result.kind = ResultKind::GenerationNeeded;
+        result.detail = std::move(raw.detail);
+      } else {
+        result.kind = ResultKind::LoadFailed;
+        result.failure = mapReadFailure(raw.status);
+        result.detail = std::move(raw.detail);
+      }
       post(std::move(result));
       return;
     }
-    terrain::DecodedChunk decoded = terrain::decodeChunkNbt(raw.nbt);
+    terrain::DecodeOptions decodeOptions;
+    // 世界生成会产出已注册但尚未实现模拟的方块；受管加载必须能读回自己写出的区块。
+    // 未注册名称/损坏调色板仍由解码器拒绝。
+    decodeOptions.allowUnimplementedBlocks = true;
+    terrain::DecodedChunk decoded =
+        terrain::decodeChunkNbt(raw.nbt, decodeOptions);
     if (decoded.status == terrain::DecodeStatus::Ok &&
         (decoded.chunkX != command.position.x ||
          decoded.chunkZ != command.position.z)) {
@@ -800,6 +940,35 @@ private:
     result.loaded.entityRecords = std::move(entityRecords);
     result.loaded.entitySlotPresent = entitySlotPresent;
     result.loaded.entities = std::move(decoded.entities);
+    post(std::move(result));
+  }
+
+  // 校验世界生成交付的完整 NBT 模板并交给 worker 持有：后续增量保存直接在该模板上打补丁。
+  // 校验失败不安装区块，避免把不受支持的生成状态写进存档。
+  void processInstallGenerated(Command command) {
+    if (!advanceEpoch(command.position, command.epoch, false))
+      return;
+    std::string error;
+    if (!command.root ||
+        !rootMatchesPosition(*command.root, command.position, error) ||
+        !terrain::validateChunkRootForSave(*command.root, error,
+                                           /*allowRegisteredUnsupported=*/true)) {
+      Result result;
+      result.kind = ResultKind::GenerationFailed;
+      result.position = command.position;
+      result.epoch = command.epoch;
+      result.failure = ChunkLoadFailure::Corrupt;
+      result.detail =
+          error.empty() ? "generated chunk has no NBT template" : error;
+      post(std::move(result));
+      return;
+    }
+    templates_[command.position] =
+        WorkerTemplate{command.epoch, std::move(*command.root)};
+    Result result;
+    result.kind = ResultKind::GenerationReady;
+    result.position = command.position;
+    result.epoch = command.epoch;
     post(std::move(result));
   }
 
@@ -1045,6 +1214,7 @@ private:
 
   void handleLoadFailure(const ChunkTicketPos &position, Entry &entry,
                          ChunkLoadFailure failure, std::string detail) {
+    pendingGenerated_.erase(position);
     entry.resident = false;
     entry.status.failure = failure;
     entry.status.detail = std::move(detail);
@@ -1141,6 +1311,7 @@ private:
   std::map<ChunkTicketPos, Entry> entries_;
   std::map<ChunkTicketPos, WorkerTemplate> templates_;
   std::map<ChunkTicketPos, WorkerEntityTemplate> entityTemplates_;
+  std::map<ChunkTicketPos, PendingGenerated> pendingGenerated_;
   std::map<ChunkTicketPos, std::uint64_t> workerEpochs_;
   // Version is paired with the worker lifecycle epoch; a late save cannot
   // make a newer same-coordinate generation look written.
@@ -1203,6 +1374,19 @@ bool ChunkLifecycleController::requestSaveOwnedRoot(
     nbt::RootTag &&root) {
   return impl_->requestSaveOwnedRoot(position, snapshotVersion,
                                      std::move(root));
+}
+
+bool ChunkLifecycleController::completeGeneratedChunk(
+    const ChunkTicketPos &position, std::uint64_t epoch,
+    LifecycleLoadedChunk &&loaded, nbt::RootTag &&root) {
+  return impl_->completeGeneratedChunk(position, epoch, std::move(loaded),
+                                       std::move(root));
+}
+
+void ChunkLifecycleController::failGeneratedChunk(
+    const ChunkTicketPos &position, std::uint64_t epoch,
+    std::string detail) {
+  impl_->failGeneratedChunk(position, epoch, std::move(detail));
 }
 
 bool ChunkLifecycleController::retryEviction(

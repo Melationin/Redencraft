@@ -1,9 +1,12 @@
 #include "redstone/server_worlds.hpp"
 
 #include "redstone/portal.hpp"
+#include "redstone/worldgen/generator_factory.hpp"
+#include "redstone/worldgen/noise_router.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -72,6 +75,12 @@ ServerWorldSet ServerWorldSet::open(const std::filesystem::path &worldDir,
   for (const auto &rawId : options.dimensionsFilter)
     filterSet.insert(normalizeDimensionId(rawId));
 
+  if (!options.worldgenDirectory.empty()) {
+    set.worldgenRegistries_ = std::make_shared<worldgen::WorldgenRegistries>(
+        worldgen::WorldgenRegistries::loadFromDirectory(
+            options.worldgenDirectory));
+  }
+
   for (const DimensionStem &stem : set.metadata_.dimensions) {
     if (!filterSet.empty() && !filterSet.contains(stem.id))
       continue;
@@ -86,6 +95,14 @@ ServerWorldSet ServerWorldSet::open(const std::filesystem::path &worldDir,
     level->seed = deriveDimensionSeed(
         static_cast<std::uint64_t>(set.metadata_.seed), stem.id);
     level->world->setSeed(level->seed);
+    if (set.worldgenRegistries_) {
+      level->generator = worldgen::createVanillaChunkGenerator(
+          *set.worldgenRegistries_, stem.id, stem.type);
+      if (!level->generator) {
+        std::cerr << "WORLDGEN unsupported dimension " << stem.id
+                  << ": missing chunks will not be generated" << std::endl;
+      }
+    }
     level->world->setGameTime(set.metadata_.gameTime);
     level->world->tntExplodes = set.metadata_.gameRules.tntExplodes;
     level->world->waterSourceConversion =
@@ -104,13 +121,16 @@ ServerWorldSet ServerWorldSet::open(const std::filesystem::path &worldDir,
       level->blockTagsLoaded = true;
       level->blockTagPackCount = set.blockTagPacks_.size();
     }
+    // 启用世界生成时允许全新的世界目录：region/ 会在第一次写盘时创建。
     if (options.withChunkManagers &&
-        std::filesystem::is_directory(level->regionDirectory)) {
+        (std::filesystem::is_directory(level->regionDirectory) ||
+         level->generator != nullptr)) {
       const auto ticketPath = ticketDataPath(level->regionDirectory);
       level->initialTickets = loadPersistentTickets(ticketPath);
       level->chunkManager = std::make_unique<WorldChunkManager>(
           *level->world, level->regionDirectory, options.viewDistance,
-          options.simulationDistance);
+          options.simulationDistance, EntityChunkDataProbe{},
+          std::shared_ptr<RawEntityStore>{}, level->generator);
       if (!level->initialTickets.empty()) {
         std::vector<std::pair<ChunkTicketPos, Ticket>> restore;
         restore.reserve(level->initialTickets.size());

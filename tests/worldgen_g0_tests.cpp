@@ -187,7 +187,8 @@ void testStatusAndPyramid() {
 
 void testBiomeContainerAndCarvingMask() {
   for (int count : {1, 2, 4, 8, 16, 64}) {
-    BiomePaletteContainer box("minecraft:plains");
+    std::shared_ptr<SectionBiomes> boxStorage;
+    BiomePaletteContainer box(boxStorage, "minecraft:plains");
     for (int qy = 0; qy < 4; ++qy) {
       for (int qz = 0; qz < 4; ++qz) {
         for (int qx = 0; qx < 4; ++qx) {
@@ -214,7 +215,8 @@ void testBiomeContainerAndCarvingMask() {
     else if (count == 64)
       require(bits == 6, "64 biomes -> 6 bits");
 
-    BiomePaletteContainer restored;
+    std::shared_ptr<SectionBiomes> restoredStorage;
+    BiomePaletteContainer restored(restoredStorage, "minecraft:plains");
     std::string err;
     require(restored.unpack(palette, data, err), err.c_str());
     for (int qy = 0; qy < 4; ++qy) {
