@@ -4092,4 +4092,6 @@ Evidence（`/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/SHA25
 - `ChunkAccess` 的生成期虚接口（`getHeight`/后处理/状态）仍在；方块存储与光照路径已无按 chunk 类型的分派。
 - 未运行真实 26.1 服务端逐区块差分，不能声称原版等价。
 
-任务进行中
+实现提交：`ab4ac75`（代码、测试、文档同一提交）。
+
+任务已完成
