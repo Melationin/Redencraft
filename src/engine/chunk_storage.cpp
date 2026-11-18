@@ -636,8 +636,7 @@ std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const 
   input->minBlockSectionY = minY_ >> 4;
   input->blockSectionCount = sectionCount();
   input->persistedLight = chunk->persistedLight;
-  // 只有一种模式：光照工作线程直读 World 几何，不在 worker 侧保留镜像。
-  input->directGeometry = true;
+  // 只登记直读元数据：工作线程按坐标从 World 读区段，不在 worker 侧保留镜像。
   return input;
 }
 

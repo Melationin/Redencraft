@@ -431,12 +431,9 @@ void testLightReadsProtoChunkHandle() {
   proto.setPersistedStatus(worldgen::ChunkStatusId::Full);
   auto shared = std::make_shared<worldgen::ProtoChunk>(std::move(proto));
 
-  LightChunkInput input = buildLightChunkInput(
-      *shared, *service.opticalTable(), std::nullopt, /*directGeometry=*/true,
-      /*deferCompute=*/false, shared);
+  LightChunkInput input =
+      buildLightChunkInput(*shared, std::nullopt, /*deferCompute=*/false, shared);
   require(input.chunkHandle == shared, "input carries the chunk handle");
-  require(input.geometrySections.empty(),
-          "handle submission copies no geometry sections");
   require(service.submitChunk(std::move(input)) != 0,
           "handle submission accepted without a World direct source");
   require(service.flushAndWait(), "light worker settles");

@@ -28,7 +28,7 @@
 namespace redstone {
 
 // `LightService` 的 Pimpl 私有实现。
-// 存在原因：在主线程与单一后台工作线程之间划分严格的数据所有权边界——主线程仅操作 `versions`/`mainVersions`/`latestBlock`/`latestSky` 及三个 SPSC 队列的生产端，工作线程独占 `geometry`/`directChunks`/`lastReady*`/`protocolBase*` 及两个传播器的缓冲池，并通过 `atomic::wait` + 缓存行隔离降低唤醒与统计竞争。
+// 存在原因：在主线程与单一后台工作线程之间划分严格的数据所有权边界——主线程仅操作 `versions`/`mainVersions`/`latestBlock`/`latestSky` 及三个 SPSC 队列的生产端，工作线程独占 `directChunks`/`lastReady*`/`protocolBase*` 及两个传播器的缓冲池，并通过 `atomic::wait` + 缓存行隔离降低唤醒与统计竞争。
 class LightService::Impl {
 public:
   Impl(int minSection, int sectionCount, LightWorkerOptions workerOptions);
@@ -119,8 +119,6 @@ private:
     return opticalTable->classForState(stateId);
   }
   void loadGeometry(std::uint64_t key, LightChunkInput &input);
-  GeometrySection *geometrySection(std::uint64_t key, int sectionY);
-  const GeometrySection *geometrySection(std::uint64_t key, int sectionY) const;
   std::optional<LightSectionView> readDirectSection(std::uint64_t key,
                                                     int sectionY) const;
   struct SectionMetaSummary {
@@ -143,7 +141,7 @@ private:
                                 std::uint64_t epoch,
                                 std::shared_ptr<LightChunkSnapshot> &blockShell,
                                 std::shared_ptr<LightChunkSnapshot> &skyShell) const;
-  RawCellResult applyRawGeometryCell(std::uint64_t key, int sectionY,
+  RawCellResult applyRawCell(std::uint64_t key, int sectionY,
                                      std::uint16_t localIndex,
                                      BlockState::Id stateId);
   // 配合 `workerSleeping` 与 `wakeSequence` 实现无锁唤醒，避免每次方块变更都抢占互斥锁。
@@ -217,9 +215,7 @@ private:
   light_internal::FlatSet<std::uint64_t, light_internal::UInt64Hash> needsCompute;
   light_internal::FlatSet<std::uint64_t, light_internal::UInt64Hash> needsUpdate;
   std::shared_ptr<const LightOpticalTable> opticalTable;
-  light_internal::FlatMap<std::uint64_t, light_internal::GeometryChunk,
-                          light_internal::UInt64Hash>
-      geometry;
+
   light_internal::FlatMap<std::uint64_t, light_internal::DirectChunkMeta,
                           light_internal::UInt64Hash>
       directChunks;

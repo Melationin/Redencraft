@@ -209,56 +209,6 @@ std::shared_ptr<const LightOpticalTable> defaultLightOpticalTable() {
   return table;
 }
 
-GeometrySection makeLightGeometrySection(const LightOpticalTable &optical,
-                                         const LightSectionView &section) {
-  GeometrySection result;
-  if (section.bits == 0) {
-    result.uniformClass = optical.classForState(section.single);
-    const auto &klass = optical[result.uniformClass];
-    result.nonAir = klass.air ? 0 : kLightVolume;
-    result.empty = result.nonAir == 0;
-    result.unknown = klass.properties.supported ? 0 : kLightVolume;
-    return result;
-  }
-  const bool validBits =
-      (section.bits >= 1 && section.bits <= 8) || section.bits == 16;
-  if (!validBits)
-    throw std::runtime_error("World section has invalid palette width");
-  if (section.palette.empty())
-    throw std::runtime_error("World section has an empty palette");
-  if (section.bits == 8 && section.cells8.size() < kLightVolume)
-    throw std::runtime_error("World section has truncated 8-bit indices");
-  if (section.bits == 16 && section.cells16.size() < kLightVolume)
-    throw std::runtime_error("World section has truncated 16-bit indices");
-  if (section.bits >= 1 && section.bits <= 7) {
-    const std::size_t perWord = std::size_t{64} / section.bits;
-    const std::size_t requiredWords = (kLightVolume + perWord - 1) / perWord;
-    if (section.packedWords.size() < requiredWords)
-      throw std::runtime_error("World section has truncated packed words");
-  }
-
-  std::vector<std::uint8_t> palette;
-  palette.reserve(section.palette.size());
-  for (BlockState::Id state : section.palette)
-    palette.push_back(optical.classForState(state));
-
-  result.cells = std::make_unique<GeometrySection::Cells>();
-  for (std::size_t i = 0; i < kLightVolume; ++i) {
-    const std::uint16_t index = section.paletteIndexAt(i);
-    if (index >= palette.size())
-      throw std::runtime_error("World section palette index out of range");
-    (*result.cells)[i] = palette[index];
-  }
-  result.uniform = false;
-  for (std::uint8_t classId : *result.cells) {
-    const auto &klass = optical[classId];
-    result.nonAir += klass.air ? 0 : 1;
-    result.unknown += klass.properties.supported ? 0 : 1;
-  }
-  result.empty = result.nonAir == 0;
-  return result;
-}
-
 const BlockLightProperties &unsupportedLightProperties() noexcept {
   return kUnsupportedLightProperties;
 }

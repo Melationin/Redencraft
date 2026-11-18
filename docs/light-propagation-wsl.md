@@ -128,8 +128,8 @@ The opening sections above are historical. The current implementation uses indep
 
 Remaining large copies:
 
-1. Chunk load and authoritative refresh convert live World::Chunk::Section directly into GeometrySection on the world thread. There is no LightRawSection copy and no queued second geometry representation. A nonuniform section allocates one unique 4096-byte uint8 optical-class array; a uniform section allocates none.
-2. Conversion creates only a temporary palette-sized uint8 map from World palette indices to optical classes. It is released after the section has been written.
+1. There is no geometry mirror at all any more. The worker reads live sections through a `shared_ptr<const BaseChunk>` handle (generation) or the `World` direct-read callback, converting palette indices to optical classes per query. A uniform section still costs no cell array because the single state is read directly.
+2. The only per-chunk light memory is the computed layer data itself: two layers x (`blockSectionCount + 2`) sections x 2048 bytes, allocated only for mixed sections; uniform sections stay header-only.
 3. Uniform-to-Mixed propagation allocates its 2048-byte atomic page once. Mixed batches do not recopy it. Wire encoding necessarily reads the 2048 atomic bytes into the outgoing packet.
 
 Validation for the final tree is in /home/zhddsj/.local/state/redstone-cpp/wsl-stage1-final-20261112/. No CTest was run. The official golden files were not changed.

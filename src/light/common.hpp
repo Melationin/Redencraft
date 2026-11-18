@@ -558,14 +558,6 @@ struct WorkingChunk {
   LightSectionSnapshot *sectionForEdit(int sectionY);
 };
 
-// 工作线程持有的单区块完整光学几何镜像（仅标准模式使用；直读模式使用 `DirectChunkMeta`）。
-struct GeometryChunk {
-  int chunkX = 0;
-  int chunkZ = 0;
-  std::uint64_t lifecycleEpoch = 0;
-  std::vector<GeometrySection> sections;
-};
-
 // 一轮合批经 `prepareBatch` 折叠并差分后的输入摘要，供方块光与天空光两个传播阶段共用。
 struct PreparedBatch {
   FlatSet<std::uint64_t, UInt64Hash> touched;
@@ -691,11 +683,10 @@ private:
 };
 
 // 工作线程自持的只读上下文宿主，暴露给独立的方块光与天空光传播器使用（除队列计数遥测与本地 L1 几何缓存外均为只读）。
-// 存在原因：统一屏蔽“标准 `GeometryChunk` 镜像”与“直读 `DirectWorldGeometrySource` 视图”两种底层数据源差异，并用 64 槽 L1 缓存加速高频坐标的光学属性查询。
+// 存在原因：统一屏蔽“生成期 `BaseChunk` 句柄”与“`DirectWorldGeometrySource` 实时区块”两种数据源差异，并用 64 槽 L1 缓存加速高频坐标的光学属性查询。
 struct LightEngineHost {
   LightEngineHost(
       int minSection, int sectionCount, const LightOpticalTable &table,
-      const FlatMap<std::uint64_t, GeometryChunk, UInt64Hash> &geo,
       const FlatMap<std::uint64_t, DirectChunkMeta, UInt64Hash> &directMeta,
       const LightWorkerOptions::DirectWorldGeometrySource &directSource,
       const FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>,
@@ -704,7 +695,7 @@ struct LightEngineHost {
                     UInt64Hash> &readySky,
       std::uint64_t &queueEntries, std::uint64_t &unloadedSkips)
       : minBlockSectionY(minSection), blockSectionCount(sectionCount),
-        opticalTable(table), geometry(geo), directChunks(directMeta),
+        opticalTable(table), directChunks(directMeta),
         directWorld(directSource), lastReadyBlock(readyBlock),
         lastReadySky(readySky), lightQueueEntries(queueEntries),
         unloadedNeighborSkips(unloadedSkips) {}
@@ -712,7 +703,6 @@ struct LightEngineHost {
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
   const LightOpticalTable &opticalTable;
-  const FlatMap<std::uint64_t, GeometryChunk, UInt64Hash> &geometry;
   const FlatMap<std::uint64_t, DirectChunkMeta, UInt64Hash> &directChunks;
   LightWorkerOptions::DirectWorldGeometrySource directWorld{};
   const FlatMap<std::uint64_t, std::shared_ptr<LightChunkSnapshot>, UInt64Hash>
@@ -733,7 +723,7 @@ struct LightEngineHost {
     if (inbox == nullptr)
       return false;
     const std::uint64_t key = chunkKey(to.x >> 4, to.z >> 4);
-    if (!geometry.contains(key))
+    if (!hasChunkGeometry(key))
       return false;
     const auto &ready = sky ? lastReadySky : lastReadyBlock;
     if (ready.find(key) != ready.end())
@@ -763,11 +753,6 @@ struct LightEngineHost {
   const BlockLightProperties &propertiesForState(BlockState::Id state) const {
     return opticalClass(opticalTable.classForState(state)).properties;
   }
-  struct GeoCacheEntry {
-    std::uint64_t key = 0;
-    const GeometryChunk *chunk = nullptr;
-    bool valid = false;
-  };
   struct DirectSectionCacheEntry {
     std::uint64_t key = 0;
     int sectionY = 0;
@@ -777,13 +762,10 @@ struct LightEngineHost {
   };
   const DirectSectionCacheEntry *
   lookupDirectSectionCache(std::uint64_t key, int sectionY) const;
-  const GeometryChunk *geometryChunk(std::uint64_t key) const;
   bool hasChunkGeometry(std::uint64_t key) const;
-  const GeometrySection *geometrySection(std::uint64_t key, int sectionY) const;
   std::optional<LightSectionView> directSectionView(std::uint64_t key,
                                                     int sectionY) const;
-  std::optional<bool> geometrySectionNonEmpty(std::uint64_t key,
-                                              int sectionY) const;
+  std::optional<bool> sectionNonEmpty(std::uint64_t key, int sectionY) const;
   // 查询世界坐标处的方块光学属性；若遇到未受支持方块，将 `incomplete` 置为 true 以阻止本轮标记为 `protocolReady`。
   const BlockLightProperties &blockPropertiesAt(int x, int y, int z,
                                                 bool &incomplete) const;
@@ -793,7 +775,6 @@ struct LightEngineHost {
       LightLayer layer, std::uint64_t key) const;
 
 private:
-  mutable std::array<GeoCacheEntry, 64> geoCache_{};
   mutable std::array<DirectSectionCacheEntry, 64> directSectionCache_{};
 };
 

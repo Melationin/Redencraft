@@ -345,11 +345,10 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
         work.position = pos;
         // 有句柄就零拷贝直读（worker 读这个 ProtoChunk 的区段），否则退回值快照。
         work.input = buildLightChunkInput(
-            proto, *optical,
+            proto,
             proto.isLightCorrect()
                 ? std::optional<PersistedChunkLight>(extractPersistedLight(proto))
                 : std::nullopt,
-            /*directGeometry=*/chunkHandle != nullptr,
             /*deferCompute=*/!proto.isLightCorrect(), std::move(chunkHandle));
         lightQueue->push(std::move(work));
       }

@@ -172,35 +172,10 @@ void LightValues::ensureMixed() {
   }
 }
 
-const GeometryChunk *LightEngineHost::geometryChunk(std::uint64_t key) const {
-  const std::size_t slot = chunkL1Slot(key);
-  GeoCacheEntry &entry = geoCache_[slot];
-  if (entry.valid && entry.key == key)
-    return entry.chunk;
-  entry.key = key;
-  const auto found = geometry.find(key);
-  entry.chunk = found == geometry.end() ? nullptr : &found->second;
-  entry.valid = true;
-  return entry.chunk;
-}
-
 bool LightEngineHost::hasChunkGeometry(std::uint64_t key) const {
-  if (geometryChunk(key) != nullptr)
-    return true;
   const auto it = directChunks.find(key);
   return it != directChunks.end() &&
          (it->second.chunk != nullptr || directWorld.context != nullptr);
-}
-
-const GeometrySection *LightEngineHost::geometrySection(std::uint64_t key,
-                                                        int sectionY) const {
-  const GeometryChunk *chunk = geometryChunk(key);
-  if (!chunk)
-    return nullptr;
-  const int index = sectionY - minBlockSectionY;
-  if (index < 0 || index >= blockSectionCount)
-    return nullptr;
-  return &chunk->sections[static_cast<std::size_t>(index)];
 }
 
 LightSectionView sectionViewOfLiveChunk(const BaseChunk &chunk, int sectionY,
@@ -295,10 +270,7 @@ LightEngineHost::directSectionView(std::uint64_t key, int sectionY) const {
 }
 
 std::optional<bool>
-LightEngineHost::geometrySectionNonEmpty(std::uint64_t key,
-                                         int sectionY) const {
-  if (const GeometrySection *geo = geometrySection(key, sectionY))
-    return !geo->empty;
+LightEngineHost::sectionNonEmpty(std::uint64_t key, int sectionY) const {
   if (const auto *entry = lookupDirectSectionCache(key, sectionY))
     return !entry->view.empty;
   return std::nullopt;
@@ -311,12 +283,6 @@ LightEngineHost::sectionPropertiesAt(std::uint64_t key, int x, int y,
       y >= (minBlockSectionY + blockSectionCount) * 16)
     return &emptyLightProperties();
   const int sectionY = y >> 4;
-  if (const GeometrySection *geometry = geometrySection(key, sectionY)) {
-    const std::uint16_t classId =
-        geometry->uniform ? geometry->uniformClass
-                          : geometry->at(lightIndex(x, y, z));
-    return &opticalClass(classId).properties;
-  }
   if (const auto *entry = lookupDirectSectionCache(key, sectionY)) {
     const BlockState::Id state = entry->view.atomicStateAt(lightIndex(x, y, z));
     return &propertiesForState(state);

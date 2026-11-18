@@ -210,7 +210,7 @@ struct PersistedChunkLight {
 };
 
 // 主线程向 `LightService::submitChunk` 提交区块加载/重载时使用的输入载荷。
-// 之所以同时支持 `geometrySections` 与 `directGeometry`，是为了兼顾独立测试/标准快照隔离模式与 `World` 直读低内存模式。
+// 只登记元数据：`chunkHandle`（生成期 ProtoChunk）或 `(chunkX, chunkZ)` 经 `World` 直读回调取几何。
 struct LightChunkInput {
   int chunkX = 0;
   int chunkZ = 0;
@@ -218,12 +218,9 @@ struct LightChunkInput {
   std::uint64_t lifecycleEpoch = 0;
   int minBlockSectionY = 0;
   int blockSectionCount = 0;
-  // 当 `directGeometry` 为 false 时，须包含恰好 `blockSectionCount` 个由 `World::Chunk::Section` 或测试用 `LightSectionView` 转换而来的区块段几何；若启用 `directGeometry`，则省略 `geometrySections` 并由工作线程按需直读。
-  bool directGeometry = false;
-  // 生成期零拷贝句柄：非空时工作线程直接读该区块的区段，`geometrySections` 为空。
-  // 句柄同时保证对象存活；安装后由 `adoptDirectGeometry` 换成 `World` 直读。
+  // 非空时工作线程直接读这个区块的区段（生成期 `ProtoChunk`），句柄同时保活；
+  // 为空时按 `(chunkX, chunkZ)` 通过 `World` 直读回调取几何。
   std::shared_ptr<const BaseChunk> chunkHandle;
-  std::vector<GeometrySection> geometrySections;
   std::optional<PersistedChunkLight> persistedLight;
   // 本次提交如何推进到“完整区块”：
   //   Immediate —— 立即在工作线程计算（默认）。

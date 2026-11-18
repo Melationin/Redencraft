@@ -54,28 +54,8 @@ private:
 // 返回全局共享的默认只读光学表实例（线程安全懒初始化）。
 std::shared_ptr<const LightOpticalTable> defaultLightOpticalTable();
 
-// 单个 16x16x16 区块段的紧凑光学几何表示。
-// 之所以存在该结构，是为了让光照工作线程脱离实时 `World` 持有独立且极省内存的光学镜像：均一区块段不分配单元数组，混合区块段仅拥有恰好 4096 字节的光学类别 ID 数组。
-struct GeometrySection {
-  using Cells = std::array<std::uint8_t, kLightVolume>;
-
-  bool empty = true;
-  bool uniform = true;
-  std::uint8_t uniformClass = 0;
-  std::unique_ptr<Cells> cells;
-  std::uint16_t nonAir = 0;
-  std::uint16_t unknown = 0;
-
-  // 返回局部线性索引处的光学类别 ID（均一区块段直接返回 `uniformClass`）。
-  std::uint16_t at(std::size_t index) const {
-    if (uniform)
-      return uniformClass;
-    return (*cells)[index];
-  }
-};
-
-// 指向实时 `World` 区块段的只读视图。
-// 存在原因：在标准模式下，主线程通过它在世界线程上同步转换为 `GeometrySection`；在直读低内存模式下，光照工作线程可在扩容锁保护下借用实时 `World` 区块段并通过原子读取获取方块状态，从而省去每区块 4 KiB 的几何副本开销。
+// 指向实时区块段（`World` 或生成期 `ProtoChunk`）的只读视图。
+// 光照工作线程通过原子读取直接借用实时区块段，因此不再需要每区块一份几何镜像。
 struct LightSectionView {
   bool empty = true;
   // 调色板位宽编码：`0` 表示单值 `single`，`1..7` 表示位打包 `packedWords`，`8` 表示 `cells8`，`16` 表示 `cells16`。
@@ -99,7 +79,7 @@ struct LightSectionView {
     return static_cast<std::uint16_t>((words[wordIndex] >> shift) & mask);
   }
 
-  // 非原子读取指定单元的调色板索引（用于标准模式下主线程同步转换 `GeometrySection`）。
+  // 非原子读取指定单元的调色板索引。
   std::uint16_t paletteIndexAt(std::size_t cell) const noexcept {
     if (bits == 8)
       return cells8[cell];
@@ -146,9 +126,5 @@ struct LightSectionView {
         std::memory_order_acquire);
   }
 };
-
-// 将只读的 `LightSectionView` 转换为光照工作线程自持的紧凑 `GeometrySection`。
-GeometrySection makeLightGeometrySection(const LightOpticalTable &optical,
-                                         const LightSectionView &section);
 
 } // namespace redstone

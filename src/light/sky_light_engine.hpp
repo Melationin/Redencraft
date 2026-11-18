@@ -184,7 +184,6 @@ private:
   void allocateSection(std::uint64_t chunkKeyValue, int sectionY);
   const BlockLightProperties &sourcePropertyAt(std::uint64_t key, int x, int y,
                                                int z) const;
-  bool sourceEmptyGeometry(const GeometrySection *geometry) const;
   static bool isSourceEdgeOccluded(const BlockLightProperties &top,
                                    const BlockLightProperties &bottom);
   int findSourceBelow(std::uint64_t key, int x, int z, int topY) const;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <atomic>
 #include <sstream>
 #include <filesystem>
@@ -28,32 +29,104 @@ void require(bool condition, const std::string &message) {
     throw std::runtime_error(message);
 }
 
-GeometrySection makeUniformGeometrySection(const BlockState &state) {
-  const auto optical = defaultLightOpticalTable();
-  LightSectionView view;
-  view.empty = state.id() == airState().id();
-  view.bits = 0;
-  view.single = state.id();
-  return makeLightGeometrySection(*optical, view);
+// 直读夹具：真实 `BaseChunk`，光照工作线程按句柄直接读它的区段。
+std::shared_ptr<BaseChunk> makeFixtureChunk(int chunkX, int chunkZ,
+                                            int minBlockSectionY,
+                                            int blockSectionCount) {
+  auto chunk = std::make_shared<BaseChunk>();
+  chunk->initialize({chunkX, chunkZ}, minBlockSectionY * 16,
+                    blockSectionCount * 16);
+  return chunk;
 }
 
-GeometrySection makeIndexedGeometrySection(
-    const BlockState &fallback,
-    const std::vector<std::pair<Pos, BlockState>> &overrides, bool empty) {
-  const auto optical = defaultLightOpticalTable();
-  std::vector<BlockState::Id> palette{fallback.id()};
-  std::array<std::uint8_t, kLightVolume> cells{};
-  for (const auto &[pos, state] : overrides) {
-    palette.push_back(state.id());
-    cells[lightIndex(pos.x, pos.y, pos.z)] =
-        static_cast<std::uint8_t>(palette.size() - 1);
+// 直读模式下引擎不再保存几何镜像：报告变更之前必须先把方块写进夹具区块，
+// 工作线程按变更顺序读到的才是新状态。
+std::map<std::pair<int, int>, std::vector<std::shared_ptr<BaseChunk>>> &
+fixtureRegistry() {
+  static std::map<std::pair<int, int>,
+                  std::vector<std::shared_ptr<BaseChunk>>>
+      registry;
+  return registry;
+}
+
+LightChunkInput inputFor(const std::shared_ptr<BaseChunk> &chunk) {
+  LightChunkInput input;
+  input.chunkX = chunk->pos().x;
+  input.chunkZ = chunk->pos().z;
+  input.minBlockSectionY = chunk->minSectionY();
+  input.blockSectionCount = chunk->sectionCount();
+  input.chunkHandle = chunk;
+  auto &list = fixtureRegistry()[{input.chunkX, input.chunkZ}];
+  if (std::find(list.begin(), list.end(), chunk) == list.end())
+    list.push_back(chunk);
+  return input;
+}
+
+void setCell(BaseChunk &chunk, int sectionIndex, Pos local,
+             const BlockState &state) {
+  BlockSection &section = chunk.sections[static_cast<std::size_t>(sectionIndex)];
+  section.set(lightIndex(local.x, local.y, local.z), state.id(),
+              /*compact=*/true);
+}
+
+void setUniformSection(BaseChunk &chunk, int sectionIndex,
+                       const BlockState &state) {
+  BlockSection &section = chunk.sections[static_cast<std::size_t>(sectionIndex)];
+  section.storage.reset();
+  section.single = state.id();
+  section.nonEmpty = state.isAir() ? 0 : kLightVolume;
+  section.initSingleRandomTick(state.id());
+}
+
+// 只把状态写进夹具区块（批量上报路径用）。
+void writeFixtureCell(LightCellUpdate update) {
+  const auto found = fixtureRegistry().find({update.x >> 4, update.z >> 4});
+  if (found == fixtureRegistry().end())
+    return;
+  for (const std::shared_ptr<BaseChunk> &ptr : found->second) {
+    BaseChunk &chunk = *ptr;
+    const int index = (update.y - chunk.minY()) >> 4;
+    if (index < 0 || index >= chunk.sectionCount())
+      continue;
+    chunk.sections[static_cast<std::size_t>(index)].set(
+        lightIndex(update.x & 15, update.y & 15, update.z & 15), update.state,
+        /*compact=*/true);
   }
-  LightSectionView view;
-  view.empty = empty;
-  view.bits = 8;
-  view.palette = std::move(palette);
-  view.cells8 = cells;
-  return makeLightGeometrySection(*optical, view);
+}
+
+void reportCell(LightService &service, LightCellUpdate update) {
+  const auto found = fixtureRegistry().find({update.x >> 4, update.z >> 4});
+  bool sameClass = false;
+  if (found != fixtureRegistry().end()) {
+    // 同一坐标可能对应多个夹具（同一份输入喂给两个服务）：全部写一遍，
+    // 只有当坐标只对应一个夹具时才做“光学类别未变就不上报”的过滤，
+    // 与 `World` 的过滤语义保持一致。
+    const bool filter = found->second.size() == 1;
+    const auto table = defaultLightOpticalTable();
+    for (const std::shared_ptr<BaseChunk> &ptr : found->second) {
+      BaseChunk &chunk = *ptr;
+      const int index = (update.y - chunk.minY()) >> 4;
+      if (index < 0 || index >= chunk.sectionCount())
+        continue;
+      BlockSection &section = chunk.sections[static_cast<std::size_t>(index)];
+      const std::size_t cell =
+          lightIndex(update.x & 15, update.y & 15, update.z & 15);
+      const BlockState::Id previous = section.get(cell);
+      section.set(cell, update.state, /*compact=*/true);
+      if (filter && table->classForState(previous) ==
+                        table->classForState(update.state))
+        sameClass = true;
+    }
+  }
+  if (sameClass)
+    return;
+  service.reportBlockCell(update);
+}
+
+// 每个用例开始前清空夹具登记，避免上一个用例的同坐标区块干扰过滤判断。
+template <class Fn> void runTest(Fn &&fn) {
+  fixtureRegistry().clear();
+  fn();
 }
 
 std::vector<std::string> splitTabs(const std::string &line) {
@@ -82,56 +155,31 @@ LightChunkInput emptyChunkFixture(int chunkX, int chunkZ,
 
 LightChunkInput chunkFixture(int chunkX, int chunkZ, int minBlockSectionY,
                              int blockSectionCount) {
-  auto input =
-      rawEmptyChunkFixture(chunkX, chunkZ, minBlockSectionY, blockSectionCount);
-  if (!input.geometrySections.empty()) {
-    const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
-    input.geometrySections[0] =
-        makeIndexedGeometrySection(airState(), {{{1, 2, 3}, lamp}}, false);
-  }
-  return input;
+  auto chunk = makeFixtureChunk(chunkX, chunkZ, minBlockSectionY,
+                                blockSectionCount);
+  const auto lamp = Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
+  setCell(*chunk, 0, {1, 2, 3}, lamp);
+  return inputFor(chunk);
 }
 
 LightChunkInput rawEmptyChunkFixture(int chunkX, int chunkZ,
                                     int minBlockSectionY,
                                     int blockSectionCount) {
-  LightChunkInput input;
-  input.chunkX = chunkX;
-  input.chunkZ = chunkZ;
-  input.minBlockSectionY = minBlockSectionY;
-  input.blockSectionCount = blockSectionCount;
-  const auto optical = defaultLightOpticalTable();
-  LightSectionView air;
-  air.empty = true;
-  air.bits = 0;
-  air.single = airState().id();
-  input.geometrySections.reserve(blockSectionCount);
-  for (int section = 0; section < blockSectionCount; ++section)
-    input.geometrySections.push_back(makeLightGeometrySection(*optical, air));
-  return input;
+  return inputFor(
+      makeFixtureChunk(chunkX, chunkZ, minBlockSectionY, blockSectionCount));
 }
 
 LightChunkInput skyRoofChunk(int chunkX, int chunkZ) {
-  auto input = rawEmptyChunkFixture(chunkX, chunkZ, 0, 1);
-  const auto optical = defaultLightOpticalTable();
-  std::array<std::uint8_t, kLightVolume> cells{};
+  auto chunk = makeFixtureChunk(chunkX, chunkZ, 0, 1);
   for (int z = 0; z < 16; ++z)
     for (int x = 0; x < 16; ++x)
-      cells[lightIndex(x, 8, z)] = 1;
-  const std::array<BlockState::Id, 2> palette = {
-      airState().id(), Blocks::STONE.defaultState().id()};
-  LightSectionView view;
-  view.empty = false;
-  view.bits = 8;
-  view.palette = palette;
-  view.cells8 = cells;
-  input.geometrySections[0] = makeLightGeometrySection(*optical, view);
-  return input;
+      setCell(*chunk, 0, {x, 8, z}, Blocks::STONE.defaultState());
+  return inputFor(chunk);
 }
 
 bool reportBlock(LightService &service, int chunkX, int chunkZ, Pos position,
                  const BlockState &, const BlockState &newState) {
-  service.reportBlockCell({chunkX * 16 + (position.x & 15), position.y,
+  reportCell(service, {chunkX * 16 + (position.x & 15), position.y,
                            chunkZ * 16 + (position.z & 15), newState.id()});
   return true;
 }
@@ -139,7 +187,7 @@ bool reportBlock(LightService &service, int chunkX, int chunkZ, Pos position,
 void reportOwnedCell(LightService &service, int chunkX, int chunkZ,
                      Pos position, const BlockState &state,
                      bool = false, std::uint64_t = 0) {
-  service.reportBlockCell({chunkX * 16 + (position.x & 15), position.y,
+  reportCell(service, {chunkX * 16 + (position.x & 15), position.y,
                            chunkZ * 16 + (position.z & 15), state.id()});
 }
 
@@ -210,10 +258,10 @@ void sectionRangesAndSnapshots() {
   auto input = chunkFixture(-2, 3, -4, 3);
   require(input.minLightSectionY() == -5 && input.lightSectionCount() == 5,
           "light range is min block section - 1 with two padding sections");
-  require(input.geometrySections.size() == 3 &&
-              !input.geometrySections[0].uniform &&
-              input.geometrySections[1].uniform,
-          "geometry sections store compact uniform or 4096-cell class arrays");
+  require(input.blockSectionCount == 3 &&
+              input.chunkHandle->sections[0].storage != nullptr &&
+              input.chunkHandle->sections[1].storage == nullptr,
+          "fixture chunk carries real per-section storage");
 
   LightService service(-4, 3, LightWorkerOptions{1000, 4096, false, false});
   const auto generation = service.submitChunk(std::move(input));
@@ -399,7 +447,7 @@ void workerPublicationAndInvalidation() {
   const int beforeLight =
       first->section(-4)->light(LightLayer::Block, 1, 4, 5);
 
-  service.reportBlockCell(
+  reportCell(service, 
       {3 * 16 + 1, (-4) * 16 + 4, (-2) * 16 + 5,
        Blocks::REDSTONE_LAMP.defaultState().with("lit", "true").id()});
   require(service.waitIdleForTesting(), "worker applies block change");
@@ -530,7 +578,7 @@ void workerQueueAndClose() {
   const auto loadGeneration = batching.submitChunk(chunkFixture(5, 0, -1, 1));
   require(loadGeneration == 1, "batched fixture loads once");
   for (int x = 0; x < 2; ++x)
-    batching.reportBlockCell(
+    reportCell(batching, 
         {5 * 16 + x, -15, 1,
          (x == 0 ? Blocks::STONE.defaultState()
                  : Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"))
@@ -569,9 +617,11 @@ void workerQueueAndClose() {
   }
   require(windowed.waitIdleForTesting(), "windowed worker finishes cleanly");
   const auto afterWindow = windowed.stats();
+  // 直读模式没有几何镜像可对比批前状态：A→B→A 在窗口内折叠成一个“最新状态”
+  // 上报，传播器读实时方块后发现没有变化自然收敛（只多一次空传播，不是错误）。
   require(afterWindow.processedBatches == batchesBefore + 1 &&
-              afterWindow.processedBlockChanges == 0,
-          "timed collection window deduplicates toggling writes in one batch");
+              afterWindow.processedBlockChanges == 1,
+          "timed collection window collapses toggling writes into one cell");
 }
 
 void recoverableChangesAndBoundedPublication() {
@@ -583,7 +633,7 @@ void recoverableChangesAndBoundedPublication() {
   const auto lampOn =
       Blocks::REDSTONE_LAMP.defaultState().with("lit", "true");
   for (int x = 0; x < 4; ++x)
-    service.reportBlockCell({10 * 16 + x, -15, 1, lampOn.id()});
+    reportCell(service, {10 * 16 + x, -15, 1, lampOn.id()});
   require(service.unloadChunk(9, 0), "unload tombstone is retained");
   require(service.stats().pendingChunks >= 2,
           "pending controls remain in the SPSC delivery queue while paused");
@@ -606,7 +656,7 @@ void recoverableChangesAndBoundedPublication() {
           "coalesced result has a worker publication revision");
 
   for (int i = 0; i < 200; ++i)
-    service.reportBlockCell(
+    reportCell(service, 
         {10 * 16 + (i & 15), -16, 0,
          (i & 1 ? Blocks::STONE.defaultState() : lampOn).id()});
   require(service.waitIdleForTesting(), "long pending write reaches worker");
@@ -616,10 +666,10 @@ void recoverableChangesAndBoundedPublication() {
   LightService sectionBatch(-1, 1, LightWorkerOptions{100, 16, true});
   require(sectionBatch.submitChunk(emptyChunkFixture(11, 0, -1, 1)) != 0,
           "empty section batch fixture loads");
-  sectionBatch.reportBlockCell(
+  reportCell(sectionBatch, 
       {11 * 16 + 1, -15, 1, Blocks::STONE.defaultState().id()});
-  sectionBatch.reportBlockCell({11 * 16 + 1, -15, 1, airState().id()});
-  sectionBatch.reportBlockCell({11 * 16 + 2, -15, 1, lampOn.id()});
+  reportCell(sectionBatch, {11 * 16 + 1, -15, 1, airState().id()});
+  reportCell(sectionBatch, {11 * 16 + 2, -15, 1, lampOn.id()});
   sectionBatch.resumeForTesting();
   require(sectionBatch.waitIdleForTesting(), "unordered cell batch completes");
   sectionBatch.drainPublished();
@@ -1229,10 +1279,9 @@ void skyLightPropagation() {
           "same-epoch open refresh relights the neighboring roofed boundary");
 
   LightService topWater(0, 1);
-  auto waterColumn = emptyChunkFixture(0, 0, 0, 1);
-  waterColumn.geometrySections[0] =
-      makeUniformGeometrySection(Blocks::WATER.defaultState());
-  require(topWater.submitChunk(std::move(waterColumn)) != 0,
+  auto waterChunk = makeFixtureChunk(0, 0, 0, 1);
+  setUniformSection(*waterChunk, 0, Blocks::WATER.defaultState());
+  require(topWater.submitChunk(inputFor(waterChunk)) != 0,
           "top water column loads");
   auto topWaterSnapshot = settledChunk(topWater, 0, 0);
   require(skyLightAt(topWaterSnapshot, 8, 15, 8) == 14 &&
@@ -1712,9 +1761,9 @@ void splitLightWorkerParityAndIsolation() {
   };
   auto changeBoth = [&](Pos position, const BlockState &,
                         const BlockState &newState) {
-    single.reportBlockCell(
+    reportCell(single, 
         {position.x, position.y, position.z, newState.id()});
-    doubled.reportBlockCell(
+    reportCell(doubled, 
         {position.x, position.y, position.z, newState.id()});
   };
 
@@ -2076,10 +2125,9 @@ void blockLightStaleAndAuthoritativeRefresh() {
               blockLightAt(refreshedWest, -1, 8, 0) == 0,
           "authoritative input removes local and cross-boundary old light");
 
-  auto withSource = emptyChunkFixture(0, 0, 0, 1);
-  withSource.geometrySections[0] =
-      makeIndexedGeometrySection(air, {{{0, 8, 0}, lamp}}, false);
-  require(refresh.submitChunk(std::move(withSource)) != 0,
+  auto withSourceChunk = makeFixtureChunk(0, 0, 0, 1);
+  setCell(*withSourceChunk, 0, {0, 8, 0}, lamp);
+  require(refresh.submitChunk(inputFor(withSourceChunk)) != 0,
           "same-epoch authoritative snapshot adds a source");
   auto addedEast = settledChunk(refresh, 0, 0);
   refresh.drainPublished();
@@ -2174,6 +2222,7 @@ void negativeChunkFirstInBatch() {
           "negative chunk fixture loads");
   (void)settledChunk(direct, -1, -1);
   const LightCellUpdate change{pos.x, pos.y, pos.z, lamp.id()};
+  writeFixtureCell(change);
   direct.reportBlockCells({&change, 1});
   require(blockLightAt(settledChunk(direct, -1, -1), pos.x, pos.y, pos.z) == 15,
           "a bulk change to (-1,-1) survives as the first and only chunk");
@@ -2294,9 +2343,9 @@ void directionalShapeOcclusion() {
 void incompleteMetadataIsExplicit() {
   const BlockState unsupported("minecraft:future_light_probe",
                                  {{"future", "value"}});
-  auto input = emptyChunkFixture(0, 0, 0, 1);
-  input.geometrySections[0] = makeIndexedGeometrySection(
-      airState(), {{{4, 5, 6}, unsupported}}, false);
+  auto fixture = makeFixtureChunk(0, 0, 0, 1);
+  setCell(*fixture, 0, {4, 5, 6}, unsupported);
+  LightChunkInput input = inputFor(fixture);
   LightService service(0, 1);
   require(service.submitChunk(std::move(input)) != 0,
           "incomplete metadata fixture loads");
@@ -2499,14 +2548,12 @@ void persistedLightReuseNeighborPropagationAndStatus() {
   // - Under the roof at x=15, y=20, z=8 we seed persisted BlockLight=12 and
   //   SkyLight=14, while section 0 is omitted from PersistedChunkLight.sections
   //   (all zeros in NBT -> Uniform(0) instead of false inherit-15).
-  LightChunkInput persisted = emptyChunkFixture(0, 0, 0, 2);
-  std::vector<std::pair<Pos, BlockState>> sec1Blocks;
+  auto persistedChunk = makeFixtureChunk(0, 0, 0, 2);
   for (int lx = 0; lx < 16; ++lx) {
     for (int lz = 0; lz < 16; ++lz)
-      sec1Blocks.push_back({{lx, 6, lz}, Blocks::STONE.defaultState()});
+      setCell(*persistedChunk, 1, {lx, 6, lz}, Blocks::STONE.defaultState());
   }
-  persisted.geometrySections[1] =
-      makeIndexedGeometrySection(airState(), sec1Blocks, false);
+  LightChunkInput persisted = inputFor(persistedChunk);
 
   PersistedChunkLight saved;
   saved.isLightOn = true;
@@ -2562,14 +2609,12 @@ void persistedLightReuseNeighborPropagationAndStatus() {
   // Unload checks and neighbor light completion:
   // Load dark neighbor chunk (1,0) covered by a roof at y=22 so any light at
   // (16,20,8) MUST arrive from chunk (0,0)'s outgoing persisted boundary.
-  LightChunkInput neighbor = emptyChunkFixture(1, 0, 0, 2);
-  std::vector<std::pair<Pos, BlockState>> neighborSec1;
+  auto neighborChunk = makeFixtureChunk(1, 0, 0, 2);
   for (int lx = 0; lx < 16; ++lx) {
     for (int lz = 0; lz < 16; ++lz)
-      neighborSec1.push_back({{lx, 6, lz}, Blocks::STONE.defaultState()});
+      setCell(*neighborChunk, 1, {lx, 6, lz}, Blocks::STONE.defaultState());
   }
-  neighbor.geometrySections[1] =
-      makeIndexedGeometrySection(airState(), neighborSec1, false);
+  LightChunkInput neighbor = inputFor(neighborChunk);
   require(service.submitChunk(std::move(neighbor)) != 0,
           "neighbor chunk submission succeeds");
   require(service.flushAndWait(std::chrono::seconds(2)),
@@ -2589,7 +2634,7 @@ void persistedLightReuseNeighborPropagationAndStatus() {
   // Verify skyColumnSources initialized cleanly for persisted chunk: punching a
   // hole in chunk (0,0)'s roof lets sky light stream down into y=10..21.
   LightCellUpdate openHole{4, 22, 4, airState().id()};
-  service.reportBlockCell(openHole);
+  reportCell(service, openHole);
   require(service.flushAndWait(std::chrono::seconds(2)),
           "post-persisted edit flushes");
   service.drainPublished();
@@ -2623,13 +2668,11 @@ void persistedNeighborsSkipRedundantSeedingAndEditPropagates() {
 
   auto makeRoofedPersisted = [&](int cx, int cz, int lx, int lz, int blockVal,
                                  int skyVal) {
-    LightChunkInput chunk = emptyChunkFixture(cx, cz, 0, 2);
-    std::vector<std::pair<Pos, BlockState>> sec1Blocks;
+    auto roofChunk = makeFixtureChunk(cx, cz, 0, 2);
     for (int x = 0; x < 16; ++x)
       for (int z = 0; z < 16; ++z)
-        sec1Blocks.push_back({{x, 6, z}, Blocks::STONE.defaultState()});
-    chunk.geometrySections[1] =
-        makeIndexedGeometrySection(airState(), sec1Blocks, false);
+        setCell(*roofChunk, 1, {x, 6, z}, Blocks::STONE.defaultState());
+    LightChunkInput chunk = inputFor(roofChunk);
 
     PersistedChunkLight saved;
     saved.isLightOn = true;
@@ -2676,13 +2719,11 @@ void persistedNeighborsSkipRedundantSeedingAndEditPropagates() {
 
   // Loading non-persisted dark chunk (3,0) next to persisted (2,0) must still
   // propagate (2,0)'s persisted boundary into (3,0).
-  LightChunkInput unpersisted = emptyChunkFixture(3, 0, 0, 2);
-  std::vector<std::pair<Pos, BlockState>> sec1Blocks;
+  auto unpersistedChunk = makeFixtureChunk(3, 0, 0, 2);
   for (int x = 0; x < 16; ++x)
     for (int z = 0; z < 16; ++z)
-      sec1Blocks.push_back({{x, 6, z}, Blocks::STONE.defaultState()});
-  unpersisted.geometrySections[1] =
-      makeIndexedGeometrySection(airState(), sec1Blocks, false);
+      setCell(*unpersistedChunk, 1, {x, 6, z}, Blocks::STONE.defaultState());
+  LightChunkInput unpersisted = inputFor(unpersistedChunk);
   require(service.submitChunk(std::move(unpersisted)) != 0,
           "submit non-persisted (3,0)");
   require(service.flushAndWait(std::chrono::seconds(2)),
@@ -2695,7 +2736,7 @@ void persistedNeighborsSkipRedundantSeedingAndEditPropagates() {
           "persisted (2,0) propagates to non-persisted neighbor (3,0)");
 
   // Subsequent block edit on (1,0) still triggers sky eligibility + propagation.
-  service.reportBlockCell({18, 22, 8, airState().id()});
+  reportCell(service, {18, 22, 8, airState().id()});
   require(service.flushAndWait(std::chrono::seconds(2)),
           "flush post-persisted edit");
   service.drainPublished();
@@ -2845,46 +2886,46 @@ void computeRequestMergesWithPendingLoad() {
 int main(int argc, char **argv) {
   try {
     require(argc == 2, "light_tests needs assets/light26_1");
-    dataLayerLayout();
-    sectionRangesAndSnapshots();
-    opticalMetadata();
+    runTest(dataLayerLayout);
+    runTest(sectionRangesAndSnapshots);
+    runTest(opticalMetadata);
     opticalAssetCoverage(argv[1]);
-    workerPublicationAndInvalidation();
-    publicationBatchVisibility();
-    coalescedProtocolDeltaIsCumulative();
-    workerQueueAndClose();
-    recoverableChangesAndBoundedPublication();
-    ownedCellQueueGrowthAndWakeup();
-    ownedCellLifecycleRejectsReloadStaleWork();
-    growableResultQueueHandsOffBurst();
-    segmentedQueuesPreserveConcurrentLifecycle();
-    rawSubmissionAndGeometryMirror();
-    authoritativeRefreshOutranksQueuedCells();
-    wideWorldInputsRemainOwned();
-    blockLightPropagation();
-    skyLightPropagation();
-    skyLayerIndexAndMissingInheritance();
-    incrementalSkyColumnSources();
-    splitLightWorkerParityAndIsolation();
-    independentMutableLayerPublication();
-    worldBrightnessComposesSeparateLayers();
-    blockLightStaleAndAuthoritativeRefresh();
-    blockLightVerticalPadding();
-    crossBatchPublicationOrdering();
-    negativeChunkFirstInBatch();
-    blockLightBoundariesAndEpochs();
-    directionalShapeOcclusion();
-    incompleteMetadataIsExplicit();
-    destructorClosesWorker();
-    frozenWorldDrainsLightResults();
-    worldHooks();
-    worldLifecycleQueueGrowthIsLossless();
-    pausedWorldRecoveryAndImport();
-    persistedLightReuseNeighborPropagationAndStatus();
-    persistedNeighborsSkipRedundantSeedingAndEditPropagates();
-    deferredComputeStates();
-    computeRequestMergesWithPendingLoad();
-    lowMemoryDirectLightParityAndConcurrency();
+    runTest(workerPublicationAndInvalidation);
+    runTest(publicationBatchVisibility);
+    runTest(coalescedProtocolDeltaIsCumulative);
+    runTest(workerQueueAndClose);
+    runTest(recoverableChangesAndBoundedPublication);
+    runTest(ownedCellQueueGrowthAndWakeup);
+    runTest(ownedCellLifecycleRejectsReloadStaleWork);
+    runTest(growableResultQueueHandsOffBurst);
+    runTest(segmentedQueuesPreserveConcurrentLifecycle);
+    runTest(rawSubmissionAndGeometryMirror);
+    runTest(authoritativeRefreshOutranksQueuedCells);
+    runTest(wideWorldInputsRemainOwned);
+    runTest(blockLightPropagation);
+    runTest(skyLightPropagation);
+    runTest(skyLayerIndexAndMissingInheritance);
+    runTest(incrementalSkyColumnSources);
+    runTest(splitLightWorkerParityAndIsolation);
+    runTest(independentMutableLayerPublication);
+    runTest(worldBrightnessComposesSeparateLayers);
+    runTest(blockLightStaleAndAuthoritativeRefresh);
+    runTest(blockLightVerticalPadding);
+    runTest(crossBatchPublicationOrdering);
+    runTest(negativeChunkFirstInBatch);
+    runTest(blockLightBoundariesAndEpochs);
+    runTest(directionalShapeOcclusion);
+    runTest(incompleteMetadataIsExplicit);
+    runTest(destructorClosesWorker);
+    runTest(frozenWorldDrainsLightResults);
+    runTest(worldHooks);
+    runTest(worldLifecycleQueueGrowthIsLossless);
+    runTest(pausedWorldRecoveryAndImport);
+    runTest(persistedLightReuseNeighborPropagationAndStatus);
+    runTest(persistedNeighborsSkipRedundantSeedingAndEditPropagates);
+    runTest(deferredComputeStates);
+    runTest(computeRequestMergesWithPendingLoad);
+    runTest(lowMemoryDirectLightParityAndConcurrency);
     std::cout << "light tests passed\n";
     return 0;
   } catch (const std::exception &error) {

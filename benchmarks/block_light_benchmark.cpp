@@ -13,14 +13,14 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 LightChunkInput emptyChunk() {
+  auto chunk = std::make_shared<BaseChunk>();
+  chunk->initialize({0, 0}, 0, 16);
   LightChunkInput input;
   input.chunkX = 0;
   input.chunkZ = 0;
   input.minBlockSectionY = 0;
   input.blockSectionCount = 1;
-  const auto table = defaultLightOpticalTable();
-  const LightSectionView view{true, 0, airState().id(), {}, {}, {}};
-  input.geometrySections.push_back(makeLightGeometrySection(*table, view));
+  input.chunkHandle = chunk;
   return input;
 }
 

@@ -10,16 +10,12 @@
 
 namespace redstone {
 
-// 从统一区块基类构建 LightService 提交载荷。
-// - directGeometry = true 时只登记区块元数据，几何由工作线程按需直读（World 低内存模式）。
-// - deferCompute = true 且没有持久化光照时，只注册几何并停在“未计算”。
+// 从统一区块基类构建 LightService 提交载荷：只登记元数据（绝不复制几何），
+// 工作线程通过 `chunkHandle`（生成期 ProtoChunk）或 `World` 直读回调按区段取实时数据。
+// `deferCompute` 为真时只注册、停在“未计算”，由 `Light` 阶段的 compute 请求首次计算。
 // 调用方负责设置 lifecycleEpoch（加载生命周期与光照生命周期现在是同一个令牌）。
-// `chunkHandle` 非空时只登记句柄、完全不复制几何：工作线程直接读该 `BaseChunk` 的区段。
-// 生成路径在 `Features` 之后方块已冻结，因此只需保证对象在登记期间存活。
-LightChunkInput buildLightChunkInput(const BaseChunk &chunk,
-                                     const LightOpticalTable &optical,
-                                     std::optional<PersistedChunkLight> persistedLight,
-                                     bool directGeometry, bool deferCompute,
-                                     std::shared_ptr<const BaseChunk> chunkHandle = {});
+LightChunkInput buildLightChunkInput(
+    const BaseChunk &chunk, std::optional<PersistedChunkLight> persistedLight,
+    bool deferCompute, std::shared_ptr<const BaseChunk> chunkHandle = {});
 
 } // namespace redstone

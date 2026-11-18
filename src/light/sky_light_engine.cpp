@@ -600,12 +600,9 @@ SkyLightPropagator::initialWorkingLayer(std::uint64_t chunkKeyValue,
 
 bool SkyLightPropagator::blockSectionNonEmpty(int x, int y, int z) const {
   const auto key = chunkKey(x, z);
-  // 先查已经注册的光学几何：它在 InitializeLight 阶段就已登记，与“这个区块是否
+  // 先查已经注册的几何：它在 InitializeLight 阶段就已登记，与“这个区块是否
   // 已经发布过光照快照”无关。
-  if (const GeometrySection *geometry = owner.geometrySection(key, y))
-    return !geometry->empty;
-  if (const std::optional<bool> nonEmpty =
-          owner.geometrySectionNonEmpty(key, y))
+  if (const std::optional<bool> nonEmpty = owner.sectionNonEmpty(key, y))
     return *nonEmpty;
   const LightChunkSnapshot *chunk = stateFor(key);
   if (!chunk || y < chunk->minBlockSectionY ||
@@ -845,15 +842,6 @@ const BlockLightProperties &SkyLightPropagator::sourcePropertyAt(
   return props ? *props : unsupportedLightProperties();
 }
 
-bool SkyLightPropagator::sourceEmptyGeometry(
-    const GeometrySection *geometry) const {
-  if (!geometry || !geometry->empty || !geometry->uniform)
-    return false;
-  const auto &properties = owner.opticalClass(geometry->uniformClass).properties;
-  return properties.supported && properties.dampening == 0 &&
-         !hasLightFaceRect(properties, 0) && !hasLightFaceRect(properties, 1);
-}
-
 bool SkyLightPropagator::isSourceEdgeOccluded(
     const BlockLightProperties &top, const BlockLightProperties &bottom) {
   if (bottom.supported && bottom.dampening != 0)
@@ -871,13 +859,12 @@ int SkyLightPropagator::findSourceBelow(std::uint64_t key, int x, int z,
   const int bottomSectionY = minY >> 4;
   const BlockLightProperties *topState = &sourcePropertyAt(key, x, topY, z);
   for (int sectionY = firstSectionY; sectionY >= bottomSectionY; --sectionY) {
-    const GeometrySection *geometry = owner.geometrySection(key, sectionY);
     const std::optional<LightSectionView> direct =
-        geometry ? std::nullopt : owner.directSectionView(key, sectionY);
+        owner.directSectionView(key, sectionY);
     const int baseY = sectionY * 16;
     const int localStart = sectionY == firstSectionY ? (firstBottomY & 15) : 15;
-    bool uniformEmpty = sourceEmptyGeometry(geometry);
-    if (!uniformEmpty && direct && direct->empty && direct->bits == 0) {
+    bool uniformEmpty = false;
+    if (direct && direct->empty && direct->bits == 0) {
       const auto &properties = owner.propertiesForState(direct->single);
       uniformEmpty = properties.supported && properties.dampening == 0 &&
                      !hasLightFaceRect(properties, 0) &&
@@ -890,18 +877,11 @@ int SkyLightPropagator::findSourceBelow(std::uint64_t key, int x, int z,
       topState = &empty;
       continue;
     }
-    if (!geometry && !direct)
+    if (!direct)
       return baseY + localStart + 1;
     for (int localY = localStart; localY >= 0; --localY) {
-      const BlockLightProperties &bottom =
-          geometry
-              ? owner.opticalClass(
-                        geometry->uniform
-                            ? geometry->uniformClass
-                            : geometry->at(lightIndex(x, baseY + localY, z)))
-                    .properties
-              : owner.propertiesForState(
-                    direct->atomicStateAt(lightIndex(x, baseY + localY, z)));
+      const BlockLightProperties &bottom = owner.propertiesForState(
+          direct->atomicStateAt(lightIndex(x, baseY + localY, z)));
       if (isSourceEdgeOccluded(*topState, bottom))
         return baseY + localY + 1;
       topState = &bottom;
@@ -917,12 +897,11 @@ int SkyLightPropagator::computeSource(std::uint64_t key, int x, int z) const {
   const auto &empty = emptyLightProperties();
   const BlockLightProperties *top = &empty;
   for (int sectionY = topSectionY; sectionY >= bottomSectionY; --sectionY) {
-    const GeometrySection *geometry = owner.geometrySection(key, sectionY);
     const std::optional<LightSectionView> direct =
-        geometry ? std::nullopt : owner.directSectionView(key, sectionY);
+        owner.directSectionView(key, sectionY);
     const int baseY = sectionY * 16;
-    bool uniformEmpty = sourceEmptyGeometry(geometry);
-    if (!uniformEmpty && direct && direct->empty && direct->bits == 0) {
+    bool uniformEmpty = false;
+    if (direct && direct->empty && direct->bits == 0) {
       const auto &properties = owner.propertiesForState(direct->single);
       uniformEmpty = properties.supported && properties.dampening == 0 &&
                      !hasLightFaceRect(properties, 0) &&
@@ -934,18 +913,11 @@ int SkyLightPropagator::computeSource(std::uint64_t key, int x, int z) const {
       top = &empty;
       continue;
     }
-    if (!geometry && !direct)
+    if (!direct)
       return baseY + 16;
     for (int localY = 15; localY >= 0; --localY) {
-      const BlockLightProperties &bottom =
-          geometry
-              ? owner.opticalClass(
-                        geometry->uniform
-                            ? geometry->uniformClass
-                            : geometry->at(lightIndex(x, baseY + localY, z)))
-                    .properties
-              : owner.propertiesForState(
-                    direct->atomicStateAt(lightIndex(x, baseY + localY, z)));
+      const BlockLightProperties &bottom = owner.propertiesForState(
+          direct->atomicStateAt(lightIndex(x, baseY + localY, z)));
       if (isSourceEdgeOccluded(*top, bottom))
         return baseY + localY + 1;
       top = &bottom;

@@ -69,10 +69,8 @@ void BlockLightPropagator::seedChunk(std::uint64_t key) {
     const bool inBlockRange =
         sectionY >= chunk->minBlockSectionY &&
         sectionY < chunk->minBlockSectionY + chunk->blockSectionCount;
-    const GeometrySection *geometry = owner.geometrySection(key, sectionY);
     const std::optional<LightSectionView> direct =
-        (!geometry && inBlockRange) ? owner.directSectionView(key, sectionY)
-                                    : std::nullopt;
+        inBlockRange ? owner.directSectionView(key, sectionY) : std::nullopt;
     const BlockLightProperties *singleDirectProps =
         (direct && direct->bits == 0)
             ? &owner.propertiesForState(direct->single)
@@ -83,19 +81,11 @@ void BlockLightPropagator::seedChunk(std::uint64_t key) {
       const int y = (index >> 8) & 15;
       const BlockLightProperties &properties =
           inBlockRange
-              ? (geometry
-                     ? owner.opticalClass(
-                           geometry->uniform
-                               ? geometry->uniformClass
-                               : geometry->at(static_cast<std::size_t>(index)))
-                           .properties
-                     : (singleDirectProps
-                            ? *singleDirectProps
-                            : (direct
-                                   ? owner.propertiesForState(
-                                         direct->atomicStateAt(
-                                             static_cast<std::size_t>(index)))
-                                   : unsupportedLightProperties())))
+              ? (singleDirectProps
+                     ? *singleDirectProps
+                     : (direct ? owner.propertiesForState(direct->atomicStateAt(
+                                     static_cast<std::size_t>(index)))
+                               : unsupportedLightProperties()))
               : emptyLightProperties();
       if (inBlockRange && !properties.supported)
         incomplete = true;

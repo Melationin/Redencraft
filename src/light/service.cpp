@@ -22,7 +22,6 @@ using light_internal::applyThreadAffinity;
 using light_internal::chunkKey;
 using light_internal::currentThreadCpuMs;
 using light_internal::emptyLightProperties;
-using light_internal::GeometryChunk;
 using light_internal::GeometryInput;
 using light_internal::GrowableSpscRing;
 using light_internal::LayerOutcome;
@@ -176,20 +175,10 @@ std::uint64_t LightService::Impl::nextRequestGeneration() {
 void LightService::Impl::loadGeometry(std::uint64_t key, LightChunkInput &input) {
   if (readyChunks.insert(key).second)
     justBecameReady.push_back(key);
-  if (input.directGeometry) {
-    geometry.erase(key);
-    directChunks[key] = light_internal::DirectChunkMeta{
-        input.chunkX, input.chunkZ, input.lifecycleEpoch,
-        std::move(input.chunkHandle)};
-    return;
-  }
-  directChunks.erase(key);
-  GeometryChunk chunk;
-  chunk.chunkX = input.chunkX;
-  chunk.chunkZ = input.chunkZ;
-  chunk.lifecycleEpoch = input.lifecycleEpoch;
-  chunk.sections = std::move(input.geometrySections);
-  geometry[key] = std::move(chunk);
+  // 只有直读一种来源：句柄（生成期 ProtoChunk）或 World 回调。
+  directChunks[key] = light_internal::DirectChunkMeta{
+      input.chunkX, input.chunkZ, input.lifecycleEpoch,
+      std::move(input.chunkHandle)};
 }
 
 std::optional<LightSectionView>
@@ -212,8 +201,6 @@ LightService::Impl::readDirectSection(std::uint64_t key, int sectionY) const {
 
 LightService::Impl::SectionMetaSummary
 LightService::Impl::sectionMetaSummary(std::uint64_t key, int sectionY) const {
-  if (const GeometrySection *geo = geometrySection(key, sectionY))
-    return {geo->empty, geo->unknown};
   const auto view = readDirectSection(key, sectionY);
   if (!view)
     return {};
@@ -238,28 +225,6 @@ LightService::Impl::sectionMetaSummary(std::uint64_t key, int sectionY) const {
     }
   }
   return {view->empty, unknown};
-}
-
-GeometrySection *LightService::Impl::geometrySection(std::uint64_t key,
-                                                     int sectionY) {
-  const auto chunk = geometry.find(key);
-  if (chunk == geometry.end())
-    return nullptr;
-  const int index = sectionY - minBlockSectionY;
-  if (index < 0 || index >= blockSectionCount)
-    return nullptr;
-  return &chunk->second.sections[static_cast<std::size_t>(index)];
-}
-
-const GeometrySection *
-LightService::Impl::geometrySection(std::uint64_t key, int sectionY) const {
-  const auto chunk = geometry.find(key);
-  if (chunk == geometry.end())
-    return nullptr;
-  const int index = sectionY - minBlockSectionY;
-  if (index < 0 || index >= blockSectionCount)
-    return nullptr;
-  return &chunk->second.sections[static_cast<std::size_t>(index)];
 }
 
 const std::shared_ptr<LightChunkSnapshot> &
@@ -335,11 +300,7 @@ void LightService::Impl::applyPersistedChunkLight(
 
   int chunkX = 0;
   int chunkZ = 0;
-  if (const auto geoIt = geometry.find(key); geoIt != geometry.end()) {
-    chunkX = geoIt->second.chunkX;
-    chunkZ = geoIt->second.chunkZ;
-  } else if (const auto dirIt = directChunks.find(key);
-             dirIt != directChunks.end()) {
+  if (const auto dirIt = directChunks.find(key); dirIt != directChunks.end()) {
     chunkX = dirIt->second.chunkX;
     chunkZ = dirIt->second.chunkZ;
   } else {
@@ -351,8 +312,6 @@ void LightService::Impl::applyPersistedChunkLight(
     skyShell = makeRawLayerShell(key, chunkX, chunkZ, generation, epoch);
 
   auto sectionNonEmptyInChunk = [&](int secY) {
-    if (const GeometrySection *geo = geometrySection(key, secY))
-      return !geo->empty;
     if (const auto view = readDirectSection(key, secY))
       return !view->empty;
     return false;
@@ -418,45 +377,6 @@ void LightService::Impl::syncRawLayerGeometry(
     mutableSec->empty = targetEmpty;
     mutableSec->unsupportedCells = targetUnknown;
   }
-}
-
-LightService::Impl::RawCellResult LightService::Impl::applyRawGeometryCell(
-    std::uint64_t key, int sectionY, std::uint16_t localIndex,
-    BlockState::Id stateId) {
-  RawCellResult result;
-  GeometrySection *section = geometrySection(key, sectionY);
-  if (!section)
-    return result;
-  const std::uint16_t oldClass = section->at(localIndex);
-  const std::uint16_t newClass = classForState(stateId);
-  const auto &oldOptical = opticalClass(oldClass);
-  const auto &newOptical = opticalClass(newClass);
-  result.opticalChanged = oldOptical.properties != newOptical.properties ||
-                          oldOptical.air != newOptical.air;
-  if (!result.opticalChanged)
-    return result;
-  const bool oldEmpty = section->empty;
-  if (!oldOptical.air)
-    --section->nonAir;
-  if (!oldOptical.properties.supported)
-    --section->unknown;
-  if (!newOptical.air)
-    ++section->nonAir;
-  if (!newOptical.properties.supported)
-    ++section->unknown;
-  if (section->uniform && oldClass == section->uniformClass) {
-    if (newClass != section->uniformClass) {
-      section->cells = std::make_unique<GeometrySection::Cells>();
-      section->cells->fill(static_cast<std::uint8_t>(section->uniformClass));
-      (*section->cells)[localIndex] = static_cast<std::uint8_t>(newClass);
-      section->uniform = false;
-    }
-  } else {
-    (*section->cells)[localIndex] = static_cast<std::uint8_t>(newClass);
-  }
-  section->empty = section->nonAir == 0;
-  result.emptyChanged = oldEmpty != section->empty;
-  return result;
 }
 
 void LightService::Impl::notifyWorkerSleeping() {
@@ -647,8 +567,6 @@ LightService::Impl::opticalPropertiesForTesting(int x, int y, int z) const {
   if (busy || !pending.empty() || !ringEmpty())
     return std::nullopt;
   const std::uint64_t key = chunkKey(x >> 4, z >> 4);
-  if (const GeometrySection *section = geometrySection(key, y >> 4))
-    return opticalClass(section->at(lightIndex(x, y, z))).properties;
   if (const auto view = readDirectSection(key, y >> 4))
     return opticalClass(classForState(view->atomicStateAt(lightIndex(x, y, z))))
         .properties;
@@ -974,30 +892,10 @@ bool LightService::Impl::validInput(const LightChunkInput &input) const {
   if (input.minBlockSectionY != minBlockSectionY ||
       input.blockSectionCount != blockSectionCount)
     return false;
-  if (input.directGeometry) {
-    // 句柄直读不依赖 World 回调；否则必须有 World 直读源。
-    if (!input.chunkHandle &&
-        (!options.directWorld.context || !options.directWorld.readSection))
-      return false;
-    if (!input.geometrySections.empty())
-      return false;
-  } else {
-    if (input.geometrySections.size() !=
-        static_cast<std::size_t>(blockSectionCount))
-      return false;
-    for (const GeometrySection &section : input.geometrySections) {
-      if (section.uniform) {
-        if (section.cells || section.uniformClass >= opticalTable->classCount())
-          return false;
-      } else if (!section.cells) {
-        return false;
-      } else {
-        for (std::uint8_t classId : *section.cells)
-          if (classId >= opticalTable->classCount())
-            return false;
-      }
-    }
-  }
+  // 句柄直读不依赖 World 回调；没有句柄时必须配置 World 直读源。
+  if (!input.chunkHandle &&
+      (!options.directWorld.context || !options.directWorld.readSection))
+    return false;
   if (input.persistedLight) {
     std::unordered_set<int> seenYs;
     const int minLightY = input.minLightSectionY();
@@ -1389,28 +1287,21 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
   const auto applyCells = [&](std::uint64_t key, int chunkX, int chunkZ,
                               const PendingChunk &command) {
     bool anyDirty = false;
-    const bool direct = directChunks.contains(key);
+    if (!directChunks.contains(key))
+      return false;
+    // 直读模式不维护几何副本：单元格变化一律按脏点送给传播器，由它去读实时状态。
     for (const auto &[slot, value] : command.ownedCells) {
+      (void)value;
       const int sectionY =
           static_cast<int>(std::bit_cast<std::int32_t>(slot) >> 12);
       const std::uint16_t localIndex =
           static_cast<std::uint16_t>(slot & 0xFFFu);
-      bool dirtyCell = direct;
-      if (!direct) {
-        const RawCellResult change =
-            applyRawGeometryCell(key, sectionY, localIndex, value.state);
-        const bool geometryMissing = geometrySection(key, sectionY) == nullptr;
-        dirtyCell = change.opticalChanged || change.emptyChanged ||
-                    geometryMissing;
-      }
-      if (dirtyCell) {
-        ++statsChanges;
-        anyDirty = true;
-        prepared.changedPositions.push_back(
-            {chunkX * 16 + static_cast<int>(localIndex & 15),
-             sectionY * 16 + static_cast<int>((localIndex >> 8) & 15),
-             chunkZ * 16 + static_cast<int>((localIndex >> 4) & 15)});
-      }
+      ++statsChanges;
+      anyDirty = true;
+      prepared.changedPositions.push_back(
+          {chunkX * 16 + static_cast<int>(localIndex & 15),
+           sectionY * 16 + static_cast<int>((localIndex >> 8) & 15),
+           chunkZ * 16 + static_cast<int>((localIndex >> 4) & 15)});
     }
     return anyDirty;
   };
@@ -1420,8 +1311,7 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
     prepared.maxGeneration =
         std::max(prepared.maxGeneration, command.generation);
     if (command.adoptDirectGeometry) {
-      // 只把几何来源换成直读：丢弃镜像、登记直读元数据，光照值与“完整”状态原样保留。
-      geometry.erase(key);
+      // 把生成期句柄换成 World 直读登记，光照值与“完整”状态原样保留。
       directChunks[key] = light_internal::DirectChunkMeta{
           command.chunkX, command.chunkZ, command.lifecycleEpoch};
       continue;
@@ -1439,25 +1329,18 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
 
     if (command.load) {
       prepared.removed.erase(key);
-      const auto existingGeoIt = geometry.find(key);
       const auto existingDirectIt = directChunks.find(key);
       const auto &oldLayer = storedLayerSnapshot(LightLayer::Block, key);
       const std::uint64_t existingEpoch =
-          existingGeoIt != geometry.end()
-              ? existingGeoIt->second.lifecycleEpoch
-              : (existingDirectIt != directChunks.end()
-                     ? existingDirectIt->second.lifecycleEpoch
-                     : (oldLayer ? oldLayer->lifecycleEpoch : 0));
-      const bool hasExisting = existingGeoIt != geometry.end() ||
-                               existingDirectIt != directChunks.end() ||
+          existingDirectIt != directChunks.end()
+              ? existingDirectIt->second.lifecycleEpoch
+              : (oldLayer ? oldLayer->lifecycleEpoch : 0);
+      const bool hasExisting = existingDirectIt != directChunks.end() ||
                                static_cast<bool>(oldLayer);
       const bool replacedEpoch =
           hasExisting && existingEpoch != command.lifecycleEpoch;
       const bool sameEpoch =
           hasExisting && existingEpoch == command.lifecycleEpoch;
-      std::optional<GeometryChunk> previousGeo;
-      if (sameEpoch && existingGeoIt != geometry.end())
-        previousGeo = std::move(existingGeoIt->second);
       loadGeometry(key, *command.load);
       if (replacedEpoch) {
         lastReadyBlock.erase(key);
@@ -1467,47 +1350,13 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
         skyColumnSources.erase(key);
         prepared.replaced.insert(key);
       } else if (sameEpoch) {
+        // 直读模式没有旧几何可以逐格 diff：重置快照让这次输入重新播种。
         prepared.replaced.insert(key);
-        if (previousGeo) {
-          const GeometryChunk &newGeo = geometry.at(key);
-          const std::size_t geoCount =
-              std::min(previousGeo->sections.size(), newGeo.sections.size());
-          for (std::size_t s = 0; s < geoCount; ++s) {
-            const int sectionY = minBlockSectionY + static_cast<int>(s);
-            const GeometrySection &oldSec = previousGeo->sections[s];
-            const GeometrySection &newSec = newGeo.sections[s];
-            if (oldSec.uniform && newSec.uniform) {
-              const auto &oldOpt = opticalClass(oldSec.uniformClass);
-              const auto &newOpt = opticalClass(newSec.uniformClass);
-              if (oldOpt.properties == newOpt.properties &&
-                  oldOpt.air == newOpt.air)
-                continue;
-            }
-            for (int index = 0; index < kLightVolume; ++index) {
-              const auto &oldOpt =
-                  opticalClass(oldSec.at(static_cast<std::size_t>(index)));
-              const auto &newOpt =
-                  opticalClass(newSec.at(static_cast<std::size_t>(index)));
-              if (oldOpt.properties == newOpt.properties &&
-                  oldOpt.air == newOpt.air)
-                continue;
-              const int x = index & 15;
-              const int z = (index >> 4) & 15;
-              const int y = (index >> 8) & 15;
-              prepared.changedPositions.push_back({newGeo.chunkX * 16 + x,
-                                                   sectionY * 16 + y,
-                                                   newGeo.chunkZ * 16 + z});
-            }
-          }
-        } else if (command.load->directGeometry) {
-          // Direct mode keeps no prior geometry copy to diff cell-by-cell;
-          // reset light snapshots so a full re-seed/persisted load runs cleanly.
-          lastReadyBlock.erase(key);
-          lastReadySky.erase(key);
-          protocolBaseBlock.erase(key);
-          protocolBaseSky.erase(key);
-          skyColumnSources.erase(key);
-        }
+        lastReadyBlock.erase(key);
+        lastReadySky.erase(key);
+        protocolBaseBlock.erase(key);
+        protocolBaseSky.erase(key);
+        skyColumnSources.erase(key);
       }
       if (command.load->completion == LightChunkInput::Completion::Deferred &&
           !command.compute && !command.load->persistedLight) {
@@ -1563,11 +1412,7 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
 
     int chunkX = 0;
     int chunkZ = 0;
-    if (const auto geoIt = geometry.find(key); geoIt != geometry.end()) {
-      chunkX = geoIt->second.chunkX;
-      chunkZ = geoIt->second.chunkZ;
-    } else if (const auto dirIt = directChunks.find(key);
-               dirIt != directChunks.end()) {
+    if (const auto dirIt = directChunks.find(key); dirIt != directChunks.end()) {
       chunkX = dirIt->second.chunkX;
       chunkZ = dirIt->second.chunkZ;
     } else {
@@ -1682,11 +1527,11 @@ LayerOutcome LightService::Impl::executeBlockLayer(
   result.layers = layerWorkspace(prepared, LightLayer::Block);
   std::uint64_t queueEntries = 0;
   std::uint64_t unloadedSkips = 0;
-  LightEngineHost host{minBlockSectionY,  blockSectionCount,
-                       *opticalTable,     geometry,
-                       directChunks,      options.directWorld,
-                       lastReadyBlock,    lastReadySky,
-                       queueEntries,      unloadedSkips};
+  LightEngineHost host{minBlockSectionY,    blockSectionCount,
+                       *opticalTable,       directChunks,
+                       options.directWorld, lastReadyBlock,
+                       lastReadySky,        queueEntries,
+                       unloadedSkips};
   host.deferredBlock = &deferredBlockCells;
   host.deferredSky = &deferredSkyCells;
   light_internal::BlockLightPropagator propagation(host, result.layers.chunks,
@@ -1778,11 +1623,11 @@ LayerOutcome LightService::Impl::executeSkyLayer(const PreparedBatch &prepared) 
   result.layers = layerWorkspace(prepared, LightLayer::Sky);
   std::uint64_t queueEntries = 0;
   std::uint64_t unloadedSkips = 0;
-  LightEngineHost host{minBlockSectionY,  blockSectionCount,
-                       *opticalTable,     geometry,
-                       directChunks,      options.directWorld,
-                       lastReadyBlock,    lastReadySky,
-                       queueEntries,      unloadedSkips};
+  LightEngineHost host{minBlockSectionY,    blockSectionCount,
+                       *opticalTable,       directChunks,
+                       options.directWorld, lastReadyBlock,
+                       lastReadySky,        queueEntries,
+                       unloadedSkips};
   host.deferredBlock = &deferredBlockCells;
   host.deferredSky = &deferredSkyCells;
   // 存储资格判定范围：首批计算只看本批真正要算的区块（窗口 = 自身 + 8 邻居，
@@ -1968,10 +1813,7 @@ void LightService::Impl::publishIndependentLayer(const PreparedBatch &prepared,
     view->propagationComplete = outcome.complete;
     view->protocolReady = outcome.complete;
     std::uint32_t unsupported = 0;
-    if (const auto geoIt = geometry.find(key); geoIt != geometry.end()) {
-      for (const GeometrySection &sec : geoIt->second.sections)
-        unsupported += sec.unknown;
-    } else if (directChunks.contains(key)) {
+    if (directChunks.contains(key)) {
       for (int sectionY = minBlockSectionY;
            sectionY < minBlockSectionY + blockSectionCount; ++sectionY)
         unsupported += sectionMetaSummary(key, sectionY).unknown;
@@ -2044,7 +1886,6 @@ LightService::Impl::processBatch(std::vector<PendingChunk> &batch) {
   executeLayers(prepared);
   refreshScratchMetrics();
   for (std::uint64_t key : prepared.removed) {
-    geometry.erase(key);
     directChunks.erase(key);
     lastReadyBlock.erase(key);
     lastReadySky.erase(key);
