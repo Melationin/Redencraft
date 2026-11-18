@@ -1,5 +1,7 @@
 #include "light/common.hpp"
 
+#include "redstone/chunk_section.hpp"
+
 #include <limits>
 
 #ifdef _WIN32
@@ -185,7 +187,9 @@ const GeometryChunk *LightEngineHost::geometryChunk(std::uint64_t key) const {
 bool LightEngineHost::hasChunkGeometry(std::uint64_t key) const {
   if (geometryChunk(key) != nullptr)
     return true;
-  return directWorld.context && directChunks.contains(key);
+  const auto it = directChunks.find(key);
+  return it != directChunks.end() &&
+         (it->second.chunk != nullptr || directWorld.context != nullptr);
 }
 
 const GeometrySection *LightEngineHost::geometrySection(std::uint64_t key,
@@ -199,11 +203,54 @@ const GeometrySection *LightEngineHost::geometrySection(std::uint64_t key,
   return &chunk->sections[static_cast<std::size_t>(index)];
 }
 
+LightSectionView sectionViewOfLiveChunk(const BaseChunk &chunk, int sectionY,
+                                        int minBlockSectionY,
+                                        int blockSectionCount) {
+  LightSectionView view;
+  const int index = sectionY - minBlockSectionY;
+  if (index < 0 || index >= blockSectionCount ||
+      index >= chunk.sectionCount())
+    return view;
+  const BlockSection &section = chunk.sections[static_cast<std::size_t>(index)];
+  const std::uint16_t nonEmpty =
+      std::atomic_ref<std::uint16_t>(
+          const_cast<std::uint16_t &>(section.nonEmpty))
+          .load(std::memory_order_relaxed);
+  view.empty = nonEmpty == 0;
+  const SectionStorage *base = section.storage.get();
+  if (!base) {
+    view.bits = 0;
+    view.single = section.single;
+    return view;
+  }
+  const std::uint16_t paletteSize =
+      std::atomic_ref<std::uint16_t>(
+          const_cast<std::uint16_t &>(base->paletteSize))
+          .load(std::memory_order_acquire);
+  view.bits = base->bits;
+  view.storageOwner = section.storage;
+  visitSectionStorage(base, [&](const auto *typed) {
+    view.palette =
+        std::span<const BlockState::Id>(typed->palette.data(), paletteSize);
+    using BlockT =
+        std::remove_cv_t<std::remove_pointer_t<decltype(typed)>>;
+    if constexpr (std::is_same_v<BlockT, SectionStorage8>) {
+      view.cells8 = std::span<const std::uint8_t>(typed->indices.data(),
+                                                  typed->indices.size());
+    } else if constexpr (std::is_same_v<BlockT, SectionStorage16>) {
+      view.cells16 = std::span<const std::uint16_t>(typed->indices.data(),
+                                                    typed->indices.size());
+    } else {
+      view.packedWords = std::span<const std::uint64_t>(typed->words.data(),
+                                                        typed->words.size());
+    }
+  });
+  return view;
+}
+
 const LightEngineHost::DirectSectionCacheEntry *
 LightEngineHost::lookupDirectSectionCache(std::uint64_t key,
                                           int sectionY) const {
-  if (!directWorld.context)
-    return nullptr;
   const int index = sectionY - minBlockSectionY;
   if (index < 0 || index >= blockSectionCount)
     return nullptr;
@@ -217,6 +264,17 @@ LightEngineHost::lookupDirectSectionCache(std::uint64_t key,
   entry.valid = true;
   const auto metaIt = directChunks.find(key);
   if (metaIt == directChunks.end()) {
+    entry.present = false;
+    entry.view = LightSectionView{};
+    return nullptr;
+  }
+  if (metaIt->second.chunk) {
+    entry.present = true;
+    entry.view = sectionViewOfLiveChunk(*metaIt->second.chunk, sectionY,
+                                        minBlockSectionY, blockSectionCount);
+    return &entry;
+  }
+  if (!directWorld.context) {
     entry.present = false;
     entry.view = LightSectionView{};
     return nullptr;

@@ -255,7 +255,7 @@ void testProtoChunkPersistenceAndPipeline(
                 carvedAccess->persistedStatus() == ChunkStatusId::Carvers,
             "level 35 generates to Carvers");
     auto protoOpt = partial.takeProtoChunk({0, 0});
-    require(protoOpt.has_value(), "take ProtoChunk at Carvers");
+    require(protoOpt != nullptr, "take ProtoChunk at Carvers");
 
     ProtoChunk &proto = *protoOpt;
     require(proto.getBlockState(0, 63, 0) == defaultState("grass_block"),

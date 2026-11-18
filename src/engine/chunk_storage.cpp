@@ -279,9 +279,10 @@ bool World::installManagedChunk(
     if (lightAlreadySubmitted) {
       ++generatedLightAdoptions_;
       alignChunkLightLifecycle(x, z);
-      // 低内存模式：生成期提交的是 ProtoChunk 的几何副本，安装后 World 数据与它
-      // 完全一致，直接切成直读，避免每个生成区块长期常驻一份镜像。
-      adoptChunkLightDirectGeometry(x, z);
+      // 低内存模式：生成期登记的是 ProtoChunk 句柄，安装后 World 数据与它完全一致，
+      // 直接切成直读；非低内存模式没有直读源，退回值快照。
+      if (!adoptChunkLightDirectGeometry(x, z))
+        reloadChunkLight(x, z);
     }
     reconcilePoiFromChunk(x, z, insertedIt->second);
   } catch (...) {
@@ -680,10 +681,16 @@ void World::setLowMemoryMode(bool enabled) {
   lowMemoryMode_ = enabled;
 }
 
-void World::adoptChunkLightDirectGeometry(int x, int z) {
-  if (!lowMemoryMode_ || !lightService_)
-    return;
-  (void)lightService_->adoptDirectGeometry(x, z);
+bool World::adoptChunkLightDirectGeometry(int x, int z) {
+  if (!lightService_)
+    return false;
+  // 非低内存模式没有 World 直读源，交给调用方重新提交值快照。
+  if (!lowMemoryMode_)
+    return false;
+  if (!lightService_->adoptDirectGeometry(x, z))
+    return false;
+  alignChunkLightLifecycle(x, z);
+  return true;
 }
 
 void World::enableLighting(LightWorkerOptions options) {

@@ -169,18 +169,18 @@ ChunkAccess *ChunkGenerationPipeline::findChunk(ChunkTicketPos pos) const {
   return it == chunks_.end() ? nullptr : it->second.get();
 }
 
-std::optional<ProtoChunk>
+std::shared_ptr<ProtoChunk>
 ChunkGenerationPipeline::takeProtoChunk(ChunkTicketPos pos) {
   auto it = chunks_.find(pos);
   if (it == chunks_.end())
-    return std::nullopt;
-  auto *proto = dynamic_cast<ProtoChunk *>(it->second.get());
+    return nullptr;
+  auto proto = std::dynamic_pointer_cast<ProtoChunk>(it->second);
   if (!proto)
-    return std::nullopt;
-  ProtoChunk result = std::move(*proto);
+    return nullptr;
+  it->second.reset();
   chunks_.erase(it);
   startedLoadedFromStore_.erase(pos);
-  return result;
+  return proto;
 }
 
 ChunkAccess &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
@@ -189,7 +189,7 @@ ChunkAccess &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
 
   if (residentWorld_ != nullptr &&
       residentWorld_->isChunkLoaded(pos.x, pos.z)) {
-    auto imposter = std::make_unique<ImposterProtoChunk>(*residentWorld_, pos,
+    auto imposter = std::make_shared<ImposterProtoChunk>(*residentWorld_, pos,
                                                          false);
     ChunkAccess &ref = *imposter;
     chunks_.emplace(pos, std::move(imposter));
@@ -208,7 +208,7 @@ ChunkAccess &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
                                  std::to_string(pos.x) + "," +
                                  std::to_string(pos.z) + "): " + err);
       }
-      auto ptr = std::make_unique<ProtoChunk>(std::move(*loaded));
+      auto ptr = std::make_shared<ProtoChunk>(std::move(*loaded));
       ChunkAccess &ref = *ptr;
       chunks_.emplace(pos, std::move(ptr));
       startedLoadedFromStore_[pos] = true;
@@ -220,7 +220,7 @@ ChunkAccess &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
     }
   }
 
-  auto proto = std::make_unique<ProtoChunk>(pos, generator_.chunkMinY(),
+  auto proto = std::make_shared<ProtoChunk>(pos, generator_.chunkMinY(),
                                             generator_.chunkHeight());
   ChunkAccess &ref = *proto;
   chunks_.emplace(pos, std::move(proto));
@@ -285,8 +285,12 @@ void ChunkGenerationPipeline::advanceOneStep(ChunkTicketPos pos,
   if (auto *proto = dynamic_cast<ProtoChunk *>(&chunk)) {
     WorldGenRegion region(step, chunk, std::move(squareCache), radius,
                           worldSeed_);
+    std::shared_ptr<const BaseChunk> handle;
+    if (auto it = chunks_.find(pos); it != chunks_.end())
+      handle = std::static_pointer_cast<const BaseChunk>(it->second);
     executeChunkGenerationStep(generator_, region, *proto, step.targetStatus(),
-                               worldSeed_, lightContext_.get(), lightQueue_);
+                               worldSeed_, lightContext_.get(), lightQueue_,
+                               std::move(handle));
   }
   ++stats_.stepsExecuted;
 }
@@ -295,7 +299,8 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
                                 ProtoChunk &proto, ChunkStatusId targetStatus,
                                 std::int64_t worldSeed,
                                 LightOpticalContext *lightContext,
-                                GeneratedLightQueue *lightQueue) {
+                                GeneratedLightQueue *lightQueue,
+                                std::shared_ptr<const BaseChunk> chunkHandle) {
   const ChunkTicketPos pos = proto.pos();
   switch (targetStatus) {
   case ChunkStatusId::Empty:
@@ -338,12 +343,14 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
         // 生成 worker 只构造纯值输入；真正的 submitChunk 由主线程 pump 完成。
         GeneratedLightWork work;
         work.position = pos;
+        // 有句柄就零拷贝直读（worker 读这个 ProtoChunk 的区段），否则退回值快照。
         work.input = buildLightChunkInput(
             proto, *optical,
             proto.isLightCorrect()
                 ? std::optional<PersistedChunkLight>(extractPersistedLight(proto))
                 : std::nullopt,
-            /*directGeometry=*/false, /*deferCompute=*/!proto.isLightCorrect());
+            /*directGeometry=*/chunkHandle != nullptr,
+            /*deferCompute=*/!proto.isLightCorrect(), std::move(chunkHandle));
         lightQueue->push(std::move(work));
       }
     }
@@ -382,10 +389,10 @@ ChunkAccess *ChunkGenerationPipeline::ensureForLoadingLevel(ChunkTicketPos pos,
 bool ChunkGenerationPipeline::generateAndInstallIntoWorld(ChunkTicketPos pos,
                                                           World &world) {
   ensureStatus(pos, ChunkStatusId::Full);
-  auto protoOpt = takeProtoChunk(pos);
-  if (!protoOpt)
+  std::shared_ptr<ProtoChunk> proto = takeProtoChunk(pos);
+  if (!proto)
     return world.isChunkLoaded(pos.x, pos.z);
-  return installProtoChunkIntoWorld(std::move(*protoOpt), world);
+  return installProtoChunkIntoWorld(std::move(proto), world);
 }
 
 
@@ -411,8 +418,9 @@ void refreshProtoChunkLight(ProtoChunk &proto, LightService &lightService) {
   }
 }
 
-bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
-  ProtoChunk proto = std::move(protoInput);
+bool installProtoChunkIntoWorld(std::shared_ptr<ProtoChunk> protoPtr,
+                              World &world) {
+  ProtoChunk &proto = *protoPtr;
   const ChunkTicketPos pos = proto.pos();
   // 备份待后处理坐标（用于晋升为 LevelChunk 后立即调度流体/形状刻）。
   auto postProcessCopy = proto.postProcessing();
@@ -444,25 +452,19 @@ bool installProtoChunkIntoWorld(ProtoChunk &&protoInput, World &world) {
       sb->indices = secBiomes.indices();
       world.setSectionBiomes(pos.x, sectionY, pos.z, std::move(sb));
     }
-    // 零拷贝：位宽/调色板/计数器/随机刻分桶原样移交，不再按调色板重建。
-    if (!world.adoptSectionStorage(pos.x, pos.z, sectionY, std::move(sec)))
+    // 零拷贝：位宽/调色板/计数器/随机刻分桶原样移交（共享底层存储），不再按
+    // 调色板重建；原型本身保持可用，直到光照引擎在其安装后切换到 World 直读。
+    if (!world.adoptSectionStorage(pos.x, pos.z, sectionY, sec.share()))
       throw std::runtime_error("generated section cannot be adopted by World");
   }
   // 只重建刚导入的这一个区块：整世界重扫会让 N 个区块的导入变成 O(N^2)。
   world.primeHeightmaps(pos.x, pos.z);
   if (persistedLight)
     world.setChunkPersistedLight(pos.x, pos.z, std::move(*persistedLight));
-  if (proto.lightSubmissionGeneration() != 0) {
-    // 流水线已经登记过这个区块（几何与导入后的方块一致）：直接接管，
-    // 只把本地生命周期代次对齐到引擎那一代，避免同一块光被重算一遍。
-    world.alignChunkLightLifecycle(pos.x, pos.z);
-    world.adoptChunkLightDirectGeometry(pos.x, pos.z);
-  } else {
-    // 流水线没登记过（例如未挂载 LightService 的调用方）：由 World 现在登记。
-    // 只重投当前区块：refreshLightSnapshots() 会重投所有已加载区块，逐区块晋升时
-    // 是 O(N^2) 次提交（实测 50x50 会因此 OOM）。
+  // 生成期已经登记过（句柄或几何）：直接接管，不重算；只有引擎里没有该区块时
+  // （例如未挂载 LightService 的调用方）才重新提交。
+  if (!world.adoptChunkLightDirectGeometry(pos.x, pos.z))
     world.reloadChunkLight(pos.x, pos.z);
-  }
 
   // 执行原版 postLoadProtoChunk 对应的 postProcessing（例如唤醒特征放置的水源/岩浆源）。
   for (std::size_t s = 0; s < postProcessCopy.size(); ++s) {

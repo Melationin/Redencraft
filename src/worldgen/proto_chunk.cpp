@@ -968,34 +968,36 @@ decodeProtoChunkNbt(std::span<const std::uint8_t> nbtBytes, int minY, int height
   return decodeProtoChunkFromDecoded(decoded, minY, height, error);
 }
 
-LifecycleLoadedChunk promoteProtoChunkToLoaded(ProtoChunk &&chunk,
-                                               std::uint64_t epoch) {
+LifecycleLoadedChunk promoteProtoChunkToLoaded(
+    std::shared_ptr<ProtoChunk> chunk, std::uint64_t epoch) {
+  ProtoChunk &source = *chunk;
   LifecycleLoadedChunk out;
-  out.position = chunk.pos();
+  out.position = source.pos();
   out.epoch = epoch;
-  out.chunkX = chunk.pos().x;
-  out.chunkZ = chunk.pos().z;
+  out.chunkX = source.pos().x;
+  out.chunkZ = source.pos().z;
   out.statusName = "minecraft:full";
-  out.isLightOn = chunk.isLightCorrect();
+  out.isLightOn = source.isLightCorrect();
   // 世界生成产出的区块：管理器据此把它纳入受管持久化并重新调度后处理流体刻。
   out.generated = true;
   out.entityData = EntityChunkDataResult{
       EntityChunkDataResult::Status::Empty, {}};
-  out.postProcessingPositions.reserve(chunk.postProcessing().size());
-  const int minSectionY = chunk.minSectionY();
-  for (std::size_t section = 0; section < chunk.postProcessing().size();
+  out.postProcessingPositions.reserve(source.postProcessing().size());
+  const int minSectionY = source.minSectionY();
+  for (std::size_t section = 0; section < source.postProcessing().size();
        ++section) {
     const int sectionY = minSectionY + static_cast<int>(section);
-    for (std::int16_t packed : chunk.postProcessing()[section]) {
-      out.postProcessingPositions.push_back(
-          ProtoChunk::unpackOffsetCoordinates(packed, chunk.pos(), sectionY));
+    for (std::int16_t packed : source.postProcessing()[section]) {
+      out.postProcessingPositions.push_back(ProtoChunk::unpackOffsetCoordinates(
+          packed, source.pos(), sectionY));
     }
   }
-  if (chunk.isLightCorrect()) {
+  auto &base = static_cast<redstone::BaseChunk &>(source);
+  if (source.isLightCorrect()) {
     // 带持久化光照的原型（例如磁盘恢复后继续生成）：保留 terrain 视图，
     // 让安装路径按 isLightOn 还原光照层。
-    out.sections.reserve(chunk.sections().size());
-    for (ProtoChunkSection &sec : chunk.sections()) {
+    out.sections.reserve(source.sections().size());
+    for (ProtoChunkSection &sec : source.sections()) {
       // 所有区段都保留：生成区块的 NBT 模板包含全部区段，管理器的可写区段集合
       // 必须与之一致，否则在空区段放置方块会被错误地标记为“模板缺失”。
       terrain::Section dst;
@@ -1003,8 +1005,8 @@ LifecycleLoadedChunk promoteProtoChunkToLoaded(ProtoChunk &&chunk,
       if (!sec.hasOnlyAir())
         dst.blockStates = packSectionBlocks(sec);
       terrain::PackedBiomes packedBiomes;
-      chunk.biomes(static_cast<int>(&sec - chunk.sections().data()),
-                   chunk.defaultBiome())
+      source.biomes(static_cast<int>(&sec - source.sections().data()),
+                    source.defaultBiome())
           .pack(packedBiomes.palette, packedBiomes.data,
                 packedBiomes.bitsPerEntry);
       dst.biomes = std::move(packedBiomes);
@@ -1013,19 +1015,24 @@ LifecycleLoadedChunk promoteProtoChunkToLoaded(ProtoChunk &&chunk,
       out.sections.push_back(std::move(dst));
     }
   } else {
-    // 零拷贝晋升：位宽、调色板、计数器与随机刻分桶全部原样移交，安装时直接
-    // move 进 World 区段；不再 pack 成 terrain::Section 再重建一遍。
-    out.prebuiltSectionCount = chunk.sectionCount();
-    out.prebuiltMinSectionY = chunk.minSectionY();
-    // `ProtoChunk::sections()` 掩盖了基类的同名成员数组，这里显式走 BaseChunk。
-    auto &base = static_cast<redstone::BaseChunk &>(chunk);
-    out.prebuiltSections = std::move(base.sections);
-    out.prebuiltBiomes = std::move(base.biomeSections);
+    // 零拷贝晋升：区段“共享”底层 `SectionStorage`，不再 pack 成 terrain::Section
+    // 再重建一遍。之所以是共享而不是搬走：光照引擎可能仍持有这个 ProtoChunk 的
+    // `shared_ptr` 并直接读它的区段，安装后由 adoptDirectGeometry 换成 World 直读，
+    // 那之后原型才会被释放。
+    out.prebuiltSectionCount = source.sectionCount();
+    out.prebuiltMinSectionY = source.minSectionY();
+    out.prebuiltSections.emplace();
+    out.prebuiltBiomes.emplace();
+    for (int i = 0; i < source.sectionCount(); ++i) {
+      const std::size_t index = static_cast<std::size_t>(i);
+      (*out.prebuiltSections)[index] = base.sections[index].share();
+      (*out.prebuiltBiomes)[index] = base.biomeSections[index];
+    }
   }
-  out.blockTicks = std::move(chunk.blockTicks());
-  out.fluidTicks = std::move(chunk.fluidTicks());
-  out.movingPistons = std::move(chunk.movingPistons());
-  out.entities = std::move(chunk.entities());
+  out.blockTicks = std::move(source.blockTicks());
+  out.fluidTicks = std::move(source.fluidTicks());
+  out.movingPistons = std::move(source.movingPistons());
+  out.entities = std::move(source.entities());
   return out;
 }
 

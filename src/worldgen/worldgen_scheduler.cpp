@@ -109,7 +109,8 @@ struct WorldGenScheduler::ChunkHolder {
   std::uint8_t color = 0;
 
   std::mutex mtx;
-  std::unique_ptr<ChunkAccess> chunk;
+  // 共享所有权：生成期光照直接持有同一个区块对象的 shared_ptr（零拷贝直读）。
+  std::shared_ptr<ChunkAccess> chunk;
   std::uint8_t currentStage = 0;
   std::uint8_t initialPersistedStage = 0;
   std::uint8_t explicitTarget = 0;
@@ -237,14 +238,14 @@ WorldGenScheduler::getOrCreateHolder(ChunkTicketPos pos,
 
   // Create outside shard lock only if needed? Hold unique_lock on shard after
   // loading/creating chunk, keeping storeMutex_ strictly ordered outside shard.mtx.
-  std::unique_ptr<ChunkAccess> loadedChunk;
+  std::shared_ptr<ChunkAccess> loadedChunk;
   bool fromLoaded = false;
   if (residentWorld_ != nullptr || diskStore_ != nullptr) {
     std::lock_guard<std::mutex> slock(storeMutex_);
     if (residentWorld_ != nullptr &&
         residentWorld_->isChunkLoaded(pos.x, pos.z)) {
       loadedChunk =
-          std::make_unique<ImposterProtoChunk>(*residentWorld_, pos, false);
+          std::make_shared<ImposterProtoChunk>(*residentWorld_, pos, false);
       fromLoaded = true;
     } else if (diskStore_ != nullptr) {
       const StoreReadResult raw = diskStore_->readChunk(pos);
@@ -257,7 +258,7 @@ WorldGenScheduler::getOrCreateHolder(ChunkTicketPos pos,
                                    std::to_string(pos.x) + "," +
                                    std::to_string(pos.z) + "): " + err);
         }
-        loadedChunk = std::make_unique<ProtoChunk>(std::move(*decoded));
+        loadedChunk = std::make_shared<ProtoChunk>(std::move(*decoded));
         fromLoaded = true;
         chunksLoadedFromStore_.fetch_add(1, std::memory_order_relaxed);
       } else if (raw.status != StoreReadStatus::Missing) {
@@ -267,7 +268,7 @@ WorldGenScheduler::getOrCreateHolder(ChunkTicketPos pos,
   }
 
   if (!loadedChunk) {
-    loadedChunk = std::make_unique<ProtoChunk>(pos, generator_.chunkMinY(),
+    loadedChunk = std::make_shared<ProtoChunk>(pos, generator_.chunkMinY(),
                                                generator_.chunkHeight());
   }
 
@@ -780,7 +781,7 @@ void WorldGenScheduler::runSingleStage(ChunkHolder &holder,
 
   // 光照阶段只把纯值工作投递给主线程；生成 worker 绝不直接调用 LightService。
   executeChunkGenerationStep(generator_, region, *proto, nextStage, worldSeed_,
-                             lightContext_.get(), lightQueue_);
+                             lightContext_.get(), lightQueue_, holder.chunk);
 
   if (nextStage == ChunkStatusId::Features && !holder.cachedR8View.empty()) {
     std::vector<ChunkAccess *>{}.swap(holder.cachedR8View);
@@ -839,20 +840,23 @@ ChunkAccess *WorldGenScheduler::findChunk(ChunkTicketPos pos) const {
   return h ? h->chunk.get() : nullptr;
 }
 
-std::optional<ProtoChunk> WorldGenScheduler::takeProtoChunk(ChunkTicketPos pos) {
+std::shared_ptr<ProtoChunk>
+WorldGenScheduler::takeProtoChunk(ChunkTicketPos pos) {
   const std::uint64_t key = packCoordKey(pos);
-  std::optional<ProtoChunk> moved;
+  std::shared_ptr<ProtoChunk> moved;
   {
     HolderShard &shard = shards_[shardIndex(key, kShardCount)];
     std::unique_lock<std::shared_mutex> lock(shard.mtx);
     auto it = shard.map.find(key);
     if (it == shard.map.end())
-      return std::nullopt;
+      return nullptr;
     auto h = it->second;
-    auto *proto = dynamic_cast<ProtoChunk *>(h->chunk.get());
+    auto proto = std::dynamic_pointer_cast<ProtoChunk>(h->chunk);
     if (!proto)
-      return std::nullopt;
-    moved.emplace(std::move(*proto));
+      return nullptr;
+    // 只交出 shared_ptr：对象地址保持稳定，光照引擎持有的句柄继续有效。
+    moved = std::move(proto);
+    h->chunk.reset();
     shard.map.erase(it);
   }
   // 被取走的 chunk 可能仍被其他 holder 的 radius-8 只读缓存视图引用。
@@ -874,10 +878,10 @@ std::optional<ProtoChunk> WorldGenScheduler::takeProtoChunk(ChunkTicketPos pos) 
 bool WorldGenScheduler::generateAndInstallIntoWorld(ChunkTicketPos pos,
                                                     World &world) {
   ensureStatus(pos, ChunkStatusId::Full);
-  auto protoOpt = takeProtoChunk(pos);
-  if (!protoOpt)
+  std::shared_ptr<ProtoChunk> proto = takeProtoChunk(pos);
+  if (!proto)
     return world.isChunkLoaded(pos.x, pos.z);
-  return installProtoChunkIntoWorld(std::move(*protoOpt), world);
+  return installProtoChunkIntoWorld(std::move(proto), world);
 }
 
 std::size_t WorldGenScheduler::evictIdleOutsideRadius(

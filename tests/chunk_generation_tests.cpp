@@ -418,6 +418,35 @@ void testSchedulerCacheEviction() {
 }
 
 // 6) 真实 26.1 生成器接入 WorldChunkManager：生成、安装、模拟与专用 I/O 落盘。
+// 5a) 生成期光照零拷贝：直接把 ProtoChunk 的 shared_ptr 交给光照线程读，没有
+// World 直读源也能工作，证明 worker 真的在按句柄读实时区段。
+void testLightReadsProtoChunkHandle() {
+  LightWorkerOptions opts;
+  opts.batchWindowMs = 0;
+  LightService service(-4, 24, opts);
+  worldgen::ProtoChunk proto({0, 0}, -64, 384);
+  require(proto.setBlockState(0, 64, 0,
+                              BlockState("minecraft:glowstone")).has_value(),
+          "proto accepts a light source");
+  proto.setPersistedStatus(worldgen::ChunkStatusId::Full);
+  auto shared = std::make_shared<worldgen::ProtoChunk>(std::move(proto));
+
+  LightChunkInput input = buildLightChunkInput(
+      *shared, *service.opticalTable(), std::nullopt, /*directGeometry=*/true,
+      /*deferCompute=*/false, shared);
+  require(input.chunkHandle == shared, "input carries the chunk handle");
+  require(input.geometrySections.empty(),
+          "handle submission copies no geometry sections");
+  require(service.submitChunk(std::move(input)) != 0,
+          "handle submission accepted without a World direct source");
+  require(service.flushAndWait(), "light worker settles");
+  service.drainPublished();
+  const auto block = service.latestLayerChunk(LightLayer::Block, 0, 0);
+  require(block != nullptr, "block light layer published for the handle chunk");
+  require(block->lightValue(LightLayer::Block, 0, 64, 0) == 15,
+          "worker read the live proto section through the handle");
+}
+
 // 5b) 零拷贝晋升：ProtoChunk 的区段存储原样 move 进安装载荷，不再重编码地形。
 void testPromotionMovesSectionStorage() {
   worldgen::ProtoChunk proto({3, -2}, -64, 384);
@@ -429,8 +458,8 @@ void testPromotionMovesSectionStorage() {
   require(storage != nullptr, "proto section materialized storage");
   const std::uint16_t nonEmpty = proto.section(0).nonEmpty;
 
-  LifecycleLoadedChunk loaded =
-      worldgen::promoteProtoChunkToLoaded(std::move(proto), 7);
+  LifecycleLoadedChunk loaded = worldgen::promoteProtoChunkToLoaded(
+      std::make_shared<worldgen::ProtoChunk>(std::move(proto)), 7);
   require(loaded.prebuiltSections.has_value(),
           "promotion hands over the section array itself");
   require(loaded.sections.empty(),
@@ -556,6 +585,7 @@ int main(int argc, char **argv) {
     testBufferLevelsDoNotInstall();
     testStaleGenerationIsDiscarded();
     testSchedulerCacheEviction();
+    testLightReadsProtoChunkHandle();
     testPromotionMovesSectionStorage();
     testGenerationTimeLightSubmission();
     if (argc >= 2)

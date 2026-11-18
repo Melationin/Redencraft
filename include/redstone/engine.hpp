@@ -130,8 +130,10 @@ public:
   // 让本地区块的生命周期代次对齐引擎里已有的登记。生成路径接管流水线先前的
   // 登记时需要它，否则存档/网络侧会认为光照属于上一个生命周期而永远不就绪。
   void alignChunkLightLifecycle(int x, int z);
-  // 低内存模式：安装完成后把该区块的光照登记切换成直读 World 几何（释放生成期镜像）。
-  void adoptChunkLightDirectGeometry(int x, int z);
+  // 安装完成后把该区块的光照登记切换成直读 World 几何（释放生成期句柄/镜像），
+  // 并对齐光照生命周期代次。返回 false 表示引擎里没有该区块或当前模式没有
+  // World 直读源，调用方需要自行重新提交。
+  bool adoptChunkLightDirectGeometry(int x, int z);
   void unloadChunk(int x, int z);
   bool isChunkLoaded(int x, int z) const;
   // 测试可见：区块当前的加载生命周期与光照生命周期代次。

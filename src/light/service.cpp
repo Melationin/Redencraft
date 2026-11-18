@@ -179,7 +179,8 @@ void LightService::Impl::loadGeometry(std::uint64_t key, LightChunkInput &input)
   if (input.directGeometry) {
     geometry.erase(key);
     directChunks[key] = light_internal::DirectChunkMeta{
-        input.chunkX, input.chunkZ, input.lifecycleEpoch};
+        input.chunkX, input.chunkZ, input.lifecycleEpoch,
+        std::move(input.chunkHandle)};
     return;
   }
   directChunks.erase(key);
@@ -193,13 +194,16 @@ void LightService::Impl::loadGeometry(std::uint64_t key, LightChunkInput &input)
 
 std::optional<LightSectionView>
 LightService::Impl::readDirectSection(std::uint64_t key, int sectionY) const {
-  if (!options.directWorld.context)
-    return std::nullopt;
   if (sectionY < minBlockSectionY ||
       sectionY >= minBlockSectionY + blockSectionCount)
     return std::nullopt;
   const auto metaIt = directChunks.find(key);
   if (metaIt == directChunks.end())
+    return std::nullopt;
+  if (metaIt->second.chunk)
+    return light_internal::sectionViewOfLiveChunk(
+        *metaIt->second.chunk, sectionY, minBlockSectionY, blockSectionCount);
+  if (!options.directWorld.context)
     return std::nullopt;
   return options.directWorld.readSection(
       options.directWorld.context, metaIt->second.chunkX,
@@ -971,8 +975,11 @@ bool LightService::Impl::validInput(const LightChunkInput &input) const {
       input.blockSectionCount != blockSectionCount)
     return false;
   if (input.directGeometry) {
-    if (!options.directWorld.context || !options.directWorld.readSection ||
-        !input.geometrySections.empty())
+    // 句柄直读不依赖 World 回调；否则必须有 World 直读源。
+    if (!input.chunkHandle &&
+        (!options.directWorld.context || !options.directWorld.readSection))
+      return false;
+    if (!input.geometrySections.empty())
       return false;
   } else {
     if (input.geometrySections.size() !=

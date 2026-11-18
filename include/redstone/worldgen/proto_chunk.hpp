@@ -384,7 +384,7 @@ decodeProtoChunkNbt(std::span<const std::uint8_t> nbtBytes, int minY, int height
 
 // 将到达 `ChunkStatusId::Full` 的 `ProtoChunk` 转换为 `ChunkLifecycleController` 使用的
 // `LifecycleLoadedChunk` 载荷，供 `WorldChunkManager::installLoaded` 正式挂载进主世界。
-LifecycleLoadedChunk promoteProtoChunkToLoaded(ProtoChunk &&chunk,
-                                               std::uint64_t epoch);
+LifecycleLoadedChunk promoteProtoChunkToLoaded(
+    std::shared_ptr<ProtoChunk> chunk, std::uint64_t epoch);
 
 } // namespace redstone::worldgen

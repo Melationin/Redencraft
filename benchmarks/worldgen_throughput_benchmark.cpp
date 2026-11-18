@@ -401,7 +401,7 @@ int main(int argc, char **argv) {
                 proto->getBlockState(lx, y, lz).id()};
           }
           const auto t0 = std::chrono::steady_clock::now();
-          if (installProtoChunkIntoWorld(std::move(*proto), *world)) {
+          if (installProtoChunkIntoWorld(std::move(proto), *world)) {
             ++installed;
             for (const Sample &s : samples) {
               ++installSamples;
@@ -417,6 +417,12 @@ int main(int argc, char **argv) {
       const double pipelineMs = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - serStart)
                                     .count();
+      // 安装完成后排空一次光照工作：adopt 命令会释放生成期句柄，这样 rss_kb
+      // 反映的是稳态常驻，而不是尚未处理完的句柄。
+      if (world && world->lightService() != nullptr) {
+        world->lightService()->flushAndWait();
+        world->drainLightPublications();
+      }
       std::printf("pipeline light=%d serialize=%d install=%d "
                   "serialized=%zu installed=%zu nbt_bytes=%zu "
                   "nbt_blocklight_chunks=%zu nbt_skylight_chunks=%zu "

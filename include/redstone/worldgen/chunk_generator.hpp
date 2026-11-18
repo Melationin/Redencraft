@@ -208,7 +208,7 @@ public:
   ChunkAccess *ensureForLoadingLevel(ChunkTicketPos pos, int loadingLevel);
 
   ChunkAccess *findChunk(ChunkTicketPos pos) const;
-  std::optional<ProtoChunk> takeProtoChunk(ChunkTicketPos pos);
+  std::shared_ptr<ProtoChunk> takeProtoChunk(ChunkTicketPos pos);
 
   // 生成至 `Full`，并将完整区块数据、后处理流体/形状刻与初始高度图安装到指定 `World`。
   bool generateAndInstallIntoWorld(ChunkTicketPos pos, World &world);
@@ -227,7 +227,7 @@ private:
   World *residentWorld_ = nullptr;
   std::shared_ptr<LightOpticalContext> lightContext_;
   GeneratedLightQueue *lightQueue_ = nullptr;
-  std::map<ChunkTicketPos, std::unique_ptr<ChunkAccess>> chunks_;
+  std::map<ChunkTicketPos, std::shared_ptr<ChunkAccess>> chunks_;
   std::map<ChunkTicketPos, bool> startedLoadedFromStore_;
   Stats stats_;
 };
@@ -239,13 +239,15 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
                                 ProtoChunk &proto, ChunkStatusId targetStatus,
                                 std::int64_t worldSeed,
                                 LightOpticalContext *lightContext,
-                                GeneratedLightQueue *lightQueue);
+                                GeneratedLightQueue *lightQueue,
+                                std::shared_ptr<const BaseChunk> chunkHandle = {});
 
 // 将到达 `Full` 的 `ProtoChunk` 零拷贝/紧凑写入运行态 `World` 并调度后处理流体刻。
 // 从光照引擎的最新快照刷新 ProtoChunk 的光照层（晋升/存档前调用）。
 // 光照的权威数据在光照引擎里可变地更新，ProtoChunk 里的层只是存档缓存。
 void refreshProtoChunkLight(ProtoChunk &proto, LightService &lightService);
 
-bool installProtoChunkIntoWorld(ProtoChunk &&proto, World &world);
+bool installProtoChunkIntoWorld(std::shared_ptr<ProtoChunk> proto,
+                                World &world);
 
 } // namespace redstone::worldgen

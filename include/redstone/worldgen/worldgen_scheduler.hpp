@@ -72,7 +72,8 @@ public:
   std::size_t heldChunkCount() const;
   void forEachHeldChunk(
       const std::function<void(const ChunkAccess &)> &visitor) const;
-  std::optional<ProtoChunk> takeProtoChunk(ChunkTicketPos pos);
+  // 取走区块的所有权（不移动对象本身，光照引擎可能仍持有它的 shared_ptr）。
+  std::shared_ptr<ProtoChunk> takeProtoChunk(ChunkTicketPos pos);
 
   // 生成至 `Full` 并通过共享安装路径写入运行态 `World`。
   bool generateAndInstallIntoWorld(ChunkTicketPos pos, World &world);

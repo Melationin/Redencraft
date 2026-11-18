@@ -287,6 +287,17 @@ bool BlockSection::tryGetRandomlyTicking(int index, BlockState::Id &outId) const
   });
 }
 
+BlockSection BlockSection::share() const {
+  BlockSection out;
+  out.nonEmpty = nonEmpty;
+  out.tickingBlockCount = tickingBlockCount;
+  out.single = single;
+  out.setSectionY(sectionY_);
+  out.randomTickByMinisection = randomTickByMinisection;
+  out.storage = storage;
+  return out;
+}
+
 void BlockSection::initSingleRandomTick(BlockState::Id state) {
   const bool ticking = stateIsRandomlyTickingId(state);
   tickingBlockCount = ticking ? static_cast<std::uint16_t>(kLightVolume) : 0;

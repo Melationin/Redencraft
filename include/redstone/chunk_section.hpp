@@ -302,6 +302,11 @@ public:
   bool hasOnlyAir() const { return nonEmpty == 0; }
   bool isRandomlyTicking() const { return tickingBlockCount > 0; }
 
+  // 共享底层存储的浅拷贝：复制计数、单值、随机刻分桶与区段号，`storage` 保持同一份。
+  // Proto -> World 晋升用它把区段交给 World，同时让仍持有 ProtoChunk 指针的光照
+  // 工作线程可以继续读到同一份方块数据（不会把源对象掏空）。
+  BlockSection share() const;
+
   BlockState::Id get(int index) const;
   bool tryGetRandomlyTicking(int index, BlockState::Id &outId) const;
   void initSingleRandomTick(BlockState::Id state);

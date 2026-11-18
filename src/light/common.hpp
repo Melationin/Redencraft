@@ -30,10 +30,20 @@ const BlockLightProperties &unsupportedLightProperties() noexcept;
 namespace redstone::light_internal {
 
 // 直读低内存模式下记录在工作线程中的区块元数据（无需保存几何单元，仅保留坐标与生命周期代次）。
+// 把实时 `BaseChunk` 的单个区段包装成直读视图：与 `World::sectionToLightView`
+// 相同的原子读取契约（索引原子读、paletteSize 原子读），并用 `storageOwner`
+// 延长底层存储的生命周期。
+LightSectionView sectionViewOfLiveChunk(const BaseChunk &chunk, int sectionY,
+                                        int minBlockSectionY,
+                                        int blockSectionCount);
+
 struct DirectChunkMeta {
   int chunkX = 0;
   int chunkZ = 0;
   std::uint64_t lifecycleEpoch = 0;
+  // 非空时直接读这个区块对象（生成期的 `ProtoChunk`，安装后换成 `World` 直读）。
+  // 句柄同时负责保活：登记期间对象不会被销毁，安装或卸载时由控制命令替换。
+  std::shared_ptr<const BaseChunk> chunk;
 };
 
 // 线程 CPU 亲和性设置结果，记录实际生效的掩码与平台错误码。

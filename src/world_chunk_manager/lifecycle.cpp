@@ -1388,7 +1388,7 @@ void WorldChunkManager::generationLoop() {
         result.detail = failure;
       } else {
         try {
-          std::optional<worldgen::ProtoChunk> proto =
+          std::shared_ptr<worldgen::ProtoChunk> proto =
               generationScheduler_->takeProtoChunk(job.position);
           if (!proto)
             throw std::runtime_error(
@@ -1398,7 +1398,7 @@ void WorldChunkManager::generationLoop() {
           proto->lightEpoch = job.epoch;
           // 在晋升前序列化完整 NBT：这是该区块之后所有增量存盘的模板。
           result.root = worldgen::encodeProtoChunkToNbt(*proto, job.gameTime);
-          result.loaded = worldgen::promoteProtoChunkToLoaded(std::move(*proto),
+          result.loaded = worldgen::promoteProtoChunkToLoaded(std::move(proto),
                                                               job.epoch);
           result.ok = true;
         } catch (const std::exception &error) {

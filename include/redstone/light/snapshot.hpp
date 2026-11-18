@@ -15,6 +15,10 @@
 
 namespace redstone {
 
+// 生成期零拷贝句柄指向的区块基类；这里只前向声明，避免
+// chunk_section.hpp -> engine_types.hpp -> light.hpp -> service.hpp 的循环包含。
+class BaseChunk;
+
 static_assert(sizeof(std::atomic<std::uint8_t>) == 1,
               "published light state and page bytes must stay one byte");
 static_assert(std::atomic<std::uint8_t>::is_always_lock_free,
@@ -216,6 +220,9 @@ struct LightChunkInput {
   int blockSectionCount = 0;
   // 当 `directGeometry` 为 false 时，须包含恰好 `blockSectionCount` 个由 `World::Chunk::Section` 或测试用 `LightSectionView` 转换而来的区块段几何；若启用 `directGeometry`，则省略 `geometrySections` 并由工作线程按需直读。
   bool directGeometry = false;
+  // 生成期零拷贝句柄：非空时工作线程直接读该区块的区段，`geometrySections` 为空。
+  // 句柄同时保证对象存活；安装后由 `adoptDirectGeometry` 换成 `World` 直读。
+  std::shared_ptr<const BaseChunk> chunkHandle;
   std::vector<GeometrySection> geometrySections;
   std::optional<PersistedChunkLight> persistedLight;
   // 本次提交如何推进到“完整区块”：

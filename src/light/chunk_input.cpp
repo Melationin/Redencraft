@@ -47,7 +47,8 @@ LightSectionView sectionViewForLight(const BlockSection &section,
 LightChunkInput buildLightChunkInput(const BaseChunk &chunk,
                                      const LightOpticalTable &optical,
                                      std::optional<PersistedChunkLight> persistedLight,
-                                     bool directGeometry, bool deferCompute) {
+                                     bool directGeometry, bool deferCompute,
+                                     std::shared_ptr<const BaseChunk> chunkHandle) {
   LightChunkInput input;
   input.chunkX = chunk.pos().x;
   input.chunkZ = chunk.pos().z;
@@ -58,6 +59,12 @@ LightChunkInput buildLightChunkInput(const BaseChunk &chunk,
     input.persistedLight = std::move(persistedLight);
   } else if (deferCompute) {
     input.completion = LightChunkInput::Completion::Deferred;
+  }
+  if (chunkHandle) {
+    // 零拷贝：登记句柄，工作线程按区段直接读这个区块对象。
+    input.chunkHandle = std::move(chunkHandle);
+    input.directGeometry = true;
+    return input;
   }
   if (directGeometry) {
     input.directGeometry = true;

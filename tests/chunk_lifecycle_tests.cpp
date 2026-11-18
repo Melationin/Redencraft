@@ -1025,8 +1025,8 @@ void testGeneratedChunkHandoffAndTemplate() {
   proto.setPersistedStatus(worldgen::ChunkStatusId::Full);
   proto.setLightCorrect(false);
   nbt::RootTag root = worldgen::encodeProtoChunkToNbt(proto);
-  LifecycleLoadedChunk loaded =
-      worldgen::promoteProtoChunkToLoaded(std::move(proto), epoch);
+  LifecycleLoadedChunk loaded = worldgen::promoteProtoChunkToLoaded(
+      std::make_shared<worldgen::ProtoChunk>(std::move(proto)), epoch);
   require(loaded.generated, "promoted chunk is marked generated");
   require(loaded.entityData &&
               loaded.entityData->status ==
