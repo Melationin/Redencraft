@@ -3,6 +3,7 @@
 // 将 `NoiseChunk` 缓存气候采样器、`Aquifer` 含水层、`OreVeinifier` 巨型矿脉、
 // 三线性噪声网格插值与 `SurfaceSystem` 地表规则串联为可按世界种子驱动的 `ChunkGenerator` 实现。
 
+#include "redstone/hash.hpp"
 #include "redstone/worldgen/biome_source.hpp"
 #include "redstone/worldgen/chunk_generator.hpp"
 #include "redstone/worldgen/feature.hpp"
@@ -12,12 +13,12 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string_view>
-#include <unordered_map>
 
 namespace redstone::worldgen {
 
@@ -68,13 +69,17 @@ public:
                     std::int64_t worldSeed) const;
 
 private:
-  std::shared_ptr<NoiseChunk>
-  getOrCreateNoiseChunk(ChunkAccess &chunk, RandomState &rs,
+  using StructureStartsMap =
+      std::map<std::string, StructureStart, std::less<>>;
+
+  NoiseChunk &
+  getOrCreateNoiseChunk(ProtoChunk &chunk, RandomState &rs,
+                        std::int64_t worldSeed,
                         const WorldGenRegion *region = nullptr,
                         bool requireTerrain = true) const;
 
-  // applyCarvers 的源区块群系只依赖 (worldSeed, chunkX, chunkZ)，同一源区块会被
-  // 最多 289 个目标区块重复采样；按 32 分片做有界 memoization。
+  // applyCarvers 的源区块群系与 StructureStarts 都只依赖 (worldSeed, chunkX, chunkZ)，
+  // 按 32 分片做有界 memoization。
   struct CarverBiomeKey {
     std::int64_t seed = 0;
     std::int32_t x = 0;
@@ -86,26 +91,39 @@ private:
   };
   struct CarverBiomeShard {
     mutable std::mutex mutex;
-    std::unordered_map<CarverBiomeKey, std::uint16_t, CarverBiomeKeyHash> map;
+    phmap::flat_hash_map<CarverBiomeKey, std::uint16_t, CarverBiomeKeyHash> map;
+  };
+  struct StructureStartsShard {
+    mutable std::mutex mutex;
+    std::deque<CarverBiomeKey> order;
+    phmap::flat_hash_map<CarverBiomeKey,
+                         std::shared_ptr<const StructureStartsMap>,
+                         CarverBiomeKeyHash>
+        map;
   };
   std::string_view carverBiomeAt(ChunkTicketPos pos, std::int64_t worldSeed,
                                  RandomState &rs) const;
+  std::shared_ptr<const StructureStartsMap>
+  structureStartsAt(ChunkTicketPos pos, std::int64_t worldSeed) const;
 
   const WorldgenRegistries &registries_;
   NoiseGeneratorSettings settings_;
   std::shared_ptr<const BiomeSource> biomeSource_;
   FluidPicker globalFluidPicker_;
   mutable std::mutex mutex_;
-  mutable std::unordered_map<std::int64_t, std::unique_ptr<RandomState>>
+  mutable phmap::flat_hash_map<std::int64_t, std::unique_ptr<RandomState>>
       randomStates_;
-  mutable std::unordered_map<std::int64_t,
-                             std::unique_ptr<ChunkGeneratorStructureState>>
+  mutable phmap::flat_hash_map<std::int64_t,
+                               std::unique_ptr<ChunkGeneratorStructureState>>
       structureStates_;
   bool concentricRingsEnabled_ = true;
   int levelMinY_ = 0;
   int levelHeight_ = 0;
   mutable std::array<CarverBiomeShard, 32> carverBiomeCache_;
+  mutable std::array<StructureStartsShard, 32> structureStartsCache_;
   std::vector<StepFeatureData> featuresPerStep_;
 };
+
+BaseChunk::OpaqueUniquePtr cloneChunkStructureDataRaw(const void *raw);
 
 } // namespace redstone::worldgen

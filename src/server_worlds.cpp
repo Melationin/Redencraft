@@ -1,5 +1,6 @@
 #include "redstone/server_worlds.hpp"
 
+#include "redstone/hash.hpp"
 #include "redstone/portal.hpp"
 #include "redstone/worldgen/generator_factory.hpp"
 #include "redstone/worldgen/noise_router.hpp"
@@ -8,7 +9,6 @@
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
-#include <unordered_set>
 
 namespace redstone {
 namespace {
@@ -71,7 +71,7 @@ ServerWorldSet ServerWorldSet::open(const std::filesystem::path &worldDir,
   for (const auto &extra : options.extraBlockTagPacks)
     set.blockTagPacks_.push_back(extra);
 
-  std::unordered_set<std::string> filterSet;
+  phmap::flat_hash_set<std::string, AnkerlStringHash, std::equal_to<>> filterSet;
   for (const auto &rawId : options.dimensionsFilter)
     filterSet.insert(normalizeDimensionId(rawId));
 
@@ -129,6 +129,10 @@ ServerWorldSet ServerWorldSet::open(const std::filesystem::path &worldDir,
           *level->world, level->regionDirectory, options.viewDistance,
           options.simulationDistance, EntityChunkDataProbe{},
           std::shared_ptr<RawEntityStore>{}, level->generator);
+      if (options.worldgenThreads > 0)
+        level->chunkManager->setGenerationThreads(options.worldgenThreads);
+      level->chunkManager->setAsyncWorldGenLight(options.asyncWorldGenLight);
+      level->chunkManager->setSaveOnlyOnUnload(options.saveOnlyOnUnload);
       if (!level->initialTickets.empty()) {
         std::vector<std::pair<ChunkTicketPos, Ticket>> restore;
         restore.reserve(level->initialTickets.size());

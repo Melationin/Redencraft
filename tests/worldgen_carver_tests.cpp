@@ -24,7 +24,7 @@ std::string stateKey(const BlockState &s) {
   return out;
 }
 
-std::uint64_t fnvHashChunk(const ChunkAccess &chunk) {
+std::uint64_t fnvHashChunk(const BaseChunk &chunk) {
   std::uint64_t h = 0xcbf29ce484222325ULL;
   const int minX = chunk.pos().x << 4;
   const int minZ = chunk.pos().z << 4;
@@ -47,7 +47,7 @@ std::uint64_t fnvHashChunk(const ChunkAccess &chunk) {
   return h;
 }
 
-void assertCarvedHash(ChunkAccess &chunk, std::uint64_t expected,
+void assertCarvedHash(BaseChunk &chunk, std::uint64_t expected,
                       std::string_view label) {
   const std::uint64_t got = fnvHashChunk(chunk);
   if (got != expected) {
@@ -100,8 +100,8 @@ int main(int argc, char **argv) {
         {{-15, 5}, 0x3d26862e72a9d57aULL},
     };
     for (const auto &[pos, expectedHash] : cases) {
-      ChunkAccess &c = pipe.ensureStatus(pos, ChunkStatusId::Carvers);
-      assert(c.persistedStatus() == ChunkStatusId::Carvers);
+      BaseChunk &c = pipe.ensureStatus(pos, ChunkStatusId::Carvers);
+      assert(chunkPersistedStatus(c) == ChunkStatusId::Carvers);
       assertCarvedHash(
           c, expectedHash,
           "overworld(" + std::to_string(pos.x) + "," + std::to_string(pos.z) +
@@ -117,9 +117,9 @@ int main(int argc, char **argv) {
         MultiNoiseBiomeSource::createNether());
     NoiseBasedChunkGenerator gen(reg, *neSettings, neBiomes, redstone::netherDimensionType().minY, redstone::netherDimensionType().height);
     ChunkGenerationPipeline pipe(gen, kSeed);
-    ChunkAccess &c =
+    BaseChunk &c =
         pipe.ensureStatus(ChunkTicketPos{-1, 0}, ChunkStatusId::Carvers);
-    assert(c.persistedStatus() == ChunkStatusId::Carvers);
+    assert(chunkPersistedStatus(c) == ChunkStatusId::Carvers);
     assertCarvedHash(c, 0x1eb32a77db78b70bULL, "nether(-1,0)");
   }
 

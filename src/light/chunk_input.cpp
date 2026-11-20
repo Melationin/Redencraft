@@ -8,7 +8,8 @@ namespace redstone {
 
 LightChunkInput buildLightChunkInput(
     const BaseChunk &chunk, std::optional<PersistedChunkLight> persistedLight,
-    bool deferCompute, std::shared_ptr<const BaseChunk> chunkHandle) {
+    bool deferCompute, std::shared_ptr<const BaseChunk> chunkHandle,
+    std::shared_ptr<const PrecomputedChunkLight> precomputedLight) {
   LightChunkInput input;
   input.chunkX = chunk.pos().x;
   input.chunkZ = chunk.pos().z;
@@ -19,6 +20,8 @@ LightChunkInput buildLightChunkInput(
     throw std::invalid_argument("chunk section count is outside engine capacity");
   if (persistedLight) {
     input.persistedLight = std::move(persistedLight);
+  } else if (precomputedLight && precomputedLight->isLightOn) {
+    input.precomputedLight = std::move(precomputedLight);
   } else if (deferCompute) {
     input.completion = LightChunkInput::Completion::Deferred;
   }

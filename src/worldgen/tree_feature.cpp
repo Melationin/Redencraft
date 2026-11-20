@@ -1,6 +1,7 @@
 #include "redstone/worldgen/feature.hpp"
 
 #include "redstone/block_tags.hpp"
+#include "redstone/hash.hpp"
 #include "redstone/worldgen/chunk_generator.hpp"
 #include "redstone/worldgen/noise_chunk_generator.hpp"
 #include "redstone/worldgen/noise_router.hpp"
@@ -14,7 +15,6 @@
 #include <set>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <vector>
 
 namespace redstone::worldgen {
@@ -39,7 +39,7 @@ struct PosHash {
 
 struct PosSet {
   std::vector<Pos> order;
-  std::unordered_set<Pos, PosHash> seen;
+  phmap::flat_hash_set<Pos, PosHash> seen;
 
   bool add(Pos p) {
     if (seen.insert(p).second) {
@@ -1516,7 +1516,7 @@ void updateTreeLeaves(WorldGenRegion &region, int minX, int minY, int minZ,
   }
 
   std::array<std::vector<Pos>, 7> buckets;
-  std::array<std::unordered_set<Pos, PosHash>, 7> queued;
+  std::array<phmap::flat_hash_set<Pos, PosHash>, 7> queued;
   for (const Pos &lp : trunks.order) {
     if (queued[0].insert(lp).second)
       buckets[0].push_back(lp);

@@ -76,8 +76,8 @@ CarvingMask CarvingMask::fromLongArray(std::span<const std::uint64_t> data,
 
 ProtoChunk::ProtoChunk(ChunkTicketPos pos, int minY, int height,
                        std::string defaultBiome)
-    : defaultBiome_(defaultBiome.empty() ? std::string("minecraft:plains")
-                                         : std::move(defaultBiome)) {
+    : BaseChunk(ChunkKind::Proto) {
+  setDefaultBiome(std::move(defaultBiome));
   if ((minY & 15) != 0 || height <= 0 || (height & 15) != 0) {
     throw std::invalid_argument(
         "ProtoChunk minY and height must be multiples of 16");
@@ -131,28 +131,16 @@ std::optional<BlockState> ProtoChunk::setBlockState(int x, int y, int z,
   const int lx = x & 15;
   const int ly = y & 15;
   const int lz = z & 15;
-  const BlockState oldState = sec.setBlockState(lx, ly, lz, state);
+  const BlockState oldState = BlockState::fromId(sec.set(
+      static_cast<int>(BlockSection::cellIndex(lx, ly, lz)), state.id(), false,
+      resizeMutex));
+  bumpBlockMutationSeq();
   if (createdHeightmapMask_ != 0) {
     dirtyHeightmapColsMask_[static_cast<std::size_t>((lz << 4) | lx)] |=
         createdHeightmapMask_;
     dirtyHeightmapSummaryMask_ |= createdHeightmapMask_;
   }
   return oldState;
-}
-
-std::string_view ProtoChunk::getNoiseBiome(int quartX, int quartY,
-                                           int quartZ) const {
-  const int minQuartY = minY_ >> 2;
-  const int maxQuartY = (maxY() >> 2) - 1;
-  const int clampedY = std::clamp(quartY, minQuartY, maxQuartY);
-  const int secIdx = (clampedY >> 2) - minSectionY();
-  const auto &storage = biomeSections[static_cast<std::size_t>(secIdx)];
-  if (!storage || storage->palette.empty())
-    return defaultBiome_;
-  const std::uint8_t pIdx =
-      storage->indices[BiomePaletteContainer::index(quartX & 3, clampedY & 3,
-                                                    quartZ & 3)];
-  return storage->palette[pIdx < storage->palette.size() ? pIdx : 0];
 }
 
 void ProtoChunk::setNoiseBiome(int quartX, int quartY, int quartZ,
@@ -385,6 +373,33 @@ int ProtoChunk::getHeight(HeightmapType type, int x, int z) {
   return heightmaps_[idx]->firstAvailable(lx, lz) - 1;
 }
 
+std::optional<std::array<Heightmap, 4>> ProtoChunk::takeFinalHeightmaps() {
+  static constexpr std::array<HeightmapType, 4> kFinalTypes = {
+      HeightmapType::WorldSurface,
+      HeightmapType::OceanFloor,
+      HeightmapType::MotionBlocking,
+      HeightmapType::MotionBlockingNoLeaves,
+  };
+  primeHeightmaps(kFinalTypes);
+  flushDirtyHeightmaps();
+  for (HeightmapType t : kFinalTypes) {
+    if (!heightmaps_[static_cast<std::size_t>(t)].has_value())
+      return std::nullopt;
+  }
+  std::array<Heightmap, 4> out{
+      std::move(*heightmaps_[static_cast<std::size_t>(kFinalTypes[0])]),
+      std::move(*heightmaps_[static_cast<std::size_t>(kFinalTypes[1])]),
+      std::move(*heightmaps_[static_cast<std::size_t>(kFinalTypes[2])]),
+      std::move(*heightmaps_[static_cast<std::size_t>(kFinalTypes[3])]),
+  };
+  for (HeightmapType t : kFinalTypes) {
+    const std::size_t idx = static_cast<std::size_t>(t);
+    heightmaps_[idx].reset();
+    createdHeightmapMask_ &= static_cast<std::uint8_t>(~(1u << idx));
+  }
+  return out;
+}
+
 void ProtoChunk::markPosForPostprocessing(int x, int y, int z) {
   if (isOutsideBuildHeight(y))
     return;
@@ -429,45 +444,6 @@ void ProtoChunk::addStructureReference(std::string_view structureId,
   if (std::find(vec.begin(), vec.end(), packedStartChunkPos) == vec.end())
     vec.push_back(packedStartChunkPos);
 }
-
-ImposterProtoChunk::ImposterProtoChunk(World &world, ChunkTicketPos pos,
-                                       bool allowWrites)
-    : world_(world), allowWrites_(allowWrites) {
-  initialize(pos, world.minY(), world.maxY() - world.minY());
-}
-
-BlockState ImposterProtoChunk::getBlockState(int x, int y, int z) const {
-  return world_.getBlock({(pos_.x << 4) + (x & 15), y, (pos_.z << 4) + (z & 15)});
-}
-
-FluidState ImposterProtoChunk::getFluidState(int x, int y, int z) const {
-  return fluidStateOf(world_.getBlock(
-      {(pos_.x << 4) + (x & 15), y, (pos_.z << 4) + (z & 15)}));
-}
-
-std::optional<BlockState> ImposterProtoChunk::setBlockState(
-    int x, int y, int z, const BlockState &state, int flags) {
-  (void)flags;
-  if (!allowWrites_)
-    return std::nullopt;
-  const Pos p{(pos_.x << 4) + (x & 15), y, (pos_.z << 4) + (z & 15)};
-  const BlockState old = world_.getBlock(p);
-  world_.setBlock(p, state, 0);
-  return old;
-}
-
-std::string_view ImposterProtoChunk::getNoiseBiome(int, int, int) const {
-  // TODO: 当 World::Chunk 接入 BiomeSection 存储后，从底层区段容器读取真实生物群系。
-  return "minecraft:plains";
-}
-
-void ImposterProtoChunk::setNoiseBiome(int, int, int, std::string_view) {}
-
-int ImposterProtoChunk::getHeight(HeightmapType type, int x, int z) {
-  return world_.height(fixType(type), (pos_.x << 4) + (x & 15),
-                       (pos_.z << 4) + (z & 15));
-}
-
 
 void ProtoChunkMemoryUsage::add(const ProtoChunkMemoryUsage &o) noexcept {
   chunkObject += o.chunkObject;
@@ -734,43 +710,107 @@ nbt::RootTag encodeProtoChunkToNbt(const ProtoChunk &chunk,
   addCompoundField(root.value, "Status",
                    makeStringTag(std::string(status.name())));
 
+  const auto preLight = chunk.precomputedLight();
+  const bool usePrecomputed = preLight && preLight->isLightOn;
+  const auto addLayerTag = [](nbt::Tag &secTag, const char *name,
+                              const LightLayerSnapshot &layer) {
+    if (layer.isMissing())
+      return;
+    if (layer.isUniform()) {
+      const std::uint8_t v = layer.uniformValue();
+      if (v == 0)
+        return;
+      nbt::Tag tag;
+      tag.type = 7;
+      tag.bytes.assign(kLightLayerBytes,
+                       static_cast<std::int8_t>(v | (v << 4)));
+      addCompoundField(secTag, name, std::move(tag));
+      return;
+    }
+    const auto &page = layer.packedPtr();
+    if (!page)
+      return;
+    bool allZero = true;
+    for (std::size_t i = 0; i < kLightLayerBytes; ++i) {
+      if (page->bytes[i].load(std::memory_order_relaxed) != 0) {
+        allZero = false;
+        break;
+      }
+    }
+    if (allZero)
+      return;
+    nbt::Tag tag;
+    tag.type = 7;
+    tag.bytes.resize(kLightLayerBytes);
+    for (std::size_t i = 0; i < kLightLayerBytes; ++i)
+      tag.bytes[i] = static_cast<std::int8_t>(
+          page->bytes[i].load(std::memory_order_relaxed));
+    addCompoundField(secTag, name, std::move(tag));
+  };
+  const auto emitPaddingSection = [&](nbt::Tag &listTag, int secY,
+                                      std::size_t layerIdx) {
+    if (!usePrecomputed)
+      return;
+    nbt::Tag padTag;
+    padTag.type = 10;
+    addCompoundField(padTag, "Y", makeByteTag(static_cast<std::int8_t>(secY)));
+    if (layerIdx < preLight->blockLayers.size())
+      addLayerTag(padTag, "BlockLight", preLight->blockLayers[layerIdx]);
+    if (preLight->skyLightEnabled && layerIdx < preLight->skyLayers.size())
+      addLayerTag(padTag, "SkyLight", preLight->skyLayers[layerIdx]);
+    if (padTag.compound.size() > 1)
+      listTag.list.push_back(std::move(padTag));
+  };
+
   nbt::Tag sectionsTag;
   sectionsTag.type = 9;
   sectionsTag.listElementType = 10;
-  sectionsTag.list.reserve(chunk.sections().size());
-  for (const ProtoChunkSection &sec : chunk.sections()) {
+  sectionsTag.list.reserve(chunk.sections().size() + 2);
+  emitPaddingSection(sectionsTag, chunk.minSectionY() - 1, 0);
+  for (std::size_t secIdx = 0; secIdx < chunk.sections().size(); ++secIdx) {
+    const ProtoChunkSection &sec = chunk.sections()[secIdx];
     nbt::Tag secTag;
     secTag.type = 10;
     addCompoundField(secTag, "Y", makeByteTag(sec.sectionY()));
     addCompoundField(secTag, "block_states",
                      makeBlockStatesTag(packSectionBlocks(sec)));
     addCompoundField(secTag, "biomes",
-                     makeBiomesTag(chunk.biomes(
-                         static_cast<int>(&sec - chunk.sections().data()),
-                         chunk.defaultBiome())));
-    if (sec.blockLight) {
-      nbt::Tag bl;
-      bl.type = 7;
-      const auto &layer = *sec.blockLight;
-      bl.bytes.assign(reinterpret_cast<const std::int8_t *>(layer.data()),
-                      reinterpret_cast<const std::int8_t *>(layer.data()) +
-                          layer.size());
-      addCompoundField(secTag, "BlockLight", std::move(bl));
-    }
-    if (sec.skyLight) {
-      nbt::Tag sl;
-      sl.type = 7;
-      const auto &skyLayer = *sec.skyLight;
-      sl.bytes.assign(reinterpret_cast<const std::int8_t *>(skyLayer.data()),
-                      reinterpret_cast<const std::int8_t *>(skyLayer.data()) +
-                          skyLayer.size());
-      addCompoundField(secTag, "SkyLight", std::move(sl));
+                     makeBiomesTag(chunk.biomes(static_cast<int>(secIdx),
+                                                chunk.defaultBiome())));
+    if (usePrecomputed) {
+      const std::size_t layerIdx = secIdx + 1;
+      if (layerIdx < preLight->blockLayers.size())
+        addLayerTag(secTag, "BlockLight", preLight->blockLayers[layerIdx]);
+      if (preLight->skyLightEnabled && layerIdx < preLight->skyLayers.size())
+        addLayerTag(secTag, "SkyLight", preLight->skyLayers[layerIdx]);
+    } else {
+      if (sec.blockLight) {
+        nbt::Tag bl;
+        bl.type = 7;
+        const auto &layer = *sec.blockLight;
+        bl.bytes.assign(reinterpret_cast<const std::int8_t *>(layer.data()),
+                        reinterpret_cast<const std::int8_t *>(layer.data()) +
+                            layer.size());
+        addCompoundField(secTag, "BlockLight", std::move(bl));
+      }
+      if (sec.skyLight) {
+        nbt::Tag sl;
+        sl.type = 7;
+        const auto &skyLayer = *sec.skyLight;
+        sl.bytes.assign(
+            reinterpret_cast<const std::int8_t *>(skyLayer.data()),
+            reinterpret_cast<const std::int8_t *>(skyLayer.data()) +
+                skyLayer.size());
+        addCompoundField(secTag, "SkyLight", std::move(sl));
+      }
     }
     sectionsTag.list.push_back(std::move(secTag));
   }
+  emitPaddingSection(sectionsTag, chunk.minSectionY() + chunk.sectionCount(),
+                     static_cast<std::size_t>(chunk.sectionCount() + 1));
   addCompoundField(root.value, "sections", std::move(sectionsTag));
 
-  if (chunk.isLightCorrect())
+  if (chunk.isLightCorrect() || usePrecomputed)
     addCompoundField(root.value, "isLightOn", makeByteTag(1));
 
   nbt::Tag beList;
@@ -964,6 +1004,9 @@ decodeProtoChunkNbt(std::span<const std::uint8_t> nbtBytes, int minY, int height
   terrain::DecodeOptions opts;
   opts.requireFullStatus = false;
   opts.retainRawBlockEntities = true;
+  // 世界生成与在线读取可遇到已注册但尚未实现运行期模拟的 26.1 方块状态；
+  // 未注册名称或损坏调色板仍由 decodeChunkNbt 拒绝。
+  opts.allowUnimplementedBlocks = true;
   const terrain::DecodedChunk decoded = terrain::decodeChunkNbt(nbtBytes, opts);
   return decodeProtoChunkFromDecoded(decoded, minY, height, error);
 }

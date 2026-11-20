@@ -130,11 +130,12 @@ void LightValues::fillInheritedMixed(
         ((cols[static_cast<std::size_t>(base + 1)] & 15u) << 4));
   }
   layer_ = LightLayerSnapshot::mixedEmpty();
+  auto *bytes = layer_.shared()->bytes;
   for (int y = 0; y < 16; ++y) {
     const std::size_t planeOffset = static_cast<std::size_t>(y) << 7;
     for (int byte = 0; byte < 128; ++byte)
-      layer_.writePackedByte(planeOffset + static_cast<std::size_t>(byte),
-                             row[static_cast<std::size_t>(byte)]);
+      bytes[planeOffset + static_cast<std::size_t>(byte)].store(
+          row[static_cast<std::size_t>(byte)], std::memory_order_relaxed);
   }
 }
 
@@ -160,13 +161,7 @@ std::optional<std::uint8_t> LightValues::uniformValue() const {
 
 void LightValues::ensureMixed() {
   if (layer_.isUniform()) {
-    const std::uint8_t fillValue = layer_.uniformValue();
-    LightLayerRef mixed = LightLayerSnapshot::mixedEmpty();
-    const std::uint8_t packed =
-        static_cast<std::uint8_t>((fillValue << 4) | (fillValue & 15));
-    for (std::size_t byte = 0; byte < kLightLayerBytes; ++byte)
-      mixed.writePackedByte(byte, packed);
-    layer_ = std::move(mixed);
+    layer_ = LightLayerSnapshot::mixedFilled(layer_.uniformValue());
   } else if (layer_.isMissing()) {
     layer_ = LightLayerSnapshot::mixedEmpty();
   }
@@ -174,14 +169,19 @@ void LightValues::ensureMixed() {
 
 bool LightEngineHost::hasChunkGeometry(std::uint64_t key) const {
   const auto it = directChunks.find(key);
-  return it != directChunks.end() &&
-         (it->second.chunk != nullptr || directWorld.context != nullptr);
+  if (it == directChunks.end())
+    return false;
+  if (it->second.chunk != nullptr && !it->second.chunk->isInvalidated())
+    return true;
+  return directWorld.context != nullptr;
 }
 
 LightSectionView sectionViewOfLiveChunk(const BaseChunk &chunk, int sectionY,
                                         int minBlockSectionY,
                                         int blockSectionCount) {
   LightSectionView view;
+  if (chunk.isInvalidated())
+    return view;
   const int index = sectionY - minBlockSectionY;
   if (index < 0 || index >= blockSectionCount ||
       index >= chunk.sectionCount())
@@ -229,8 +229,11 @@ LightEngineHost::lookupDirectSectionCache(std::uint64_t key,
   const int index = sectionY - minBlockSectionY;
   if (index < 0 || index >= blockSectionCount)
     return nullptr;
-  const std::size_t slot =
-      (chunkL1Slot(key) ^ (static_cast<std::size_t>(sectionY) * 29u)) & 63u;
+  const int chunkX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+  const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+  const std::size_t slot = ((static_cast<std::size_t>(chunkX) & 3u) << 7) |
+                           ((static_cast<std::size_t>(chunkZ) & 3u) << 5) |
+                           (static_cast<std::size_t>(sectionY) & 31u);
   DirectSectionCacheEntry &entry = directSectionCache_[slot];
   if (entry.valid && entry.key == key && entry.sectionY == sectionY)
     return entry.present ? &entry : nullptr;
@@ -243,7 +246,7 @@ LightEngineHost::lookupDirectSectionCache(std::uint64_t key,
     entry.view = LightSectionView{};
     return nullptr;
   }
-  if (metaIt->second.chunk) {
+  if (metaIt->second.chunk && !metaIt->second.chunk->isInvalidated()) {
     entry.present = true;
     entry.view = sectionViewOfLiveChunk(*metaIt->second.chunk, sectionY,
                                         minBlockSectionY, blockSectionCount);

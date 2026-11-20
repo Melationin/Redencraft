@@ -28,9 +28,10 @@ namespace redstone::detail {
 struct Tables {
   std::vector<const Block *> blocks;
   std::vector<BlockState> states;
-  std::unordered_map<std::string_view, const Block *> byName;
+  phmap::flat_hash_map<std::string_view, const Block *, AnkerlStringHash>
+      byName;
   std::deque<Block> owned; // blocks registered after startup (imported names)
-  std::unordered_map<BlockState::Id, Extension> extensions;
+  phmap::flat_hash_map<BlockState::Id, Extension> extensions;
 };
 
 Tables &tables() {

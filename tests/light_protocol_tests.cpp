@@ -1,4 +1,5 @@
 #include "redstone/net/session.hpp"
+#include "redstone/hash.hpp"
 
 #include <algorithm>
 #include <array>
@@ -113,7 +114,7 @@ void expectedLayer(const LightChunkSnapshot &current,
                    std::vector<std::uint64_t> &data,
                    std::vector<std::uint64_t> &empty,
                    std::vector<int> &dataSections) {
-  std::unordered_set<int> dirty;
+  phmap::flat_hash_set<int> dirty;
   if (previous)
     for (const auto &change : current.changedSections)
       if (layer == LightLayer::Sky ? change.sky : change.block)
@@ -262,6 +263,7 @@ void strictInitialDynamicClearAndReload(const ProtocolData &data) {
   options.chunks.push_back({0, 0});
   options.spawn = {8.5, 70, 8.5};
   options.viewDistance = 2;
+  options.sendChunksBeforeLightReady = false;
   Session session(world, data, options);
   world.lightPublicationObserver =
       [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
@@ -393,6 +395,7 @@ void readyIncompleteReadyDelta(const ProtocolData &data) {
   options.chunks.push_back({0, 0});
   options.spawn = {8.5, 70, 8.5};
   options.viewDistance = 2;
+  options.sendChunksBeforeLightReady = false;
   Session session(world, data, options);
   world.lightPublicationObserver =
       [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
@@ -469,6 +472,7 @@ void evictedReadyBaseFallsBack(const ProtocolData &data) {
   options.chunks.push_back({0, 0});
   options.spawn = {8.5, 70, 8.5};
   options.viewDistance = 2;
+  options.sendChunksBeforeLightReady = false;
   Session session(world, data, options);
   world.lightPublicationObserver =
       [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
@@ -617,6 +621,7 @@ void explicitWorldLifecycleIsolation(const ProtocolData &data) {
   options.chunks.push_back({0, 0});
   options.spawn = {8.5, 70, 8.5};
   options.viewDistance = 2;
+  options.sendChunksBeforeLightReady = false;
   Session session(world, data, options);
   world.lightPublicationObserver =
       [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
@@ -772,6 +777,7 @@ void lightBackpressure(const ProtocolData &data) {
   ServerOptions options;
   options.chunks.push_back({0, 0});
   options.viewDistance = 2;
+  options.sendChunksBeforeLightReady = false;
   Session session(world, data, options);
   (void)join(session, data);
   (void)drain(session);
@@ -881,6 +887,7 @@ void unpublishedLightDefersJoin(const ProtocolData &data) {
   options.chunks.push_back({0, 0});
   options.spawn = {8.5, 70, 8.5};
   options.viewDistance = 2;
+  options.sendChunksBeforeLightReady = false;
   Session session(world, data, options);
   world.lightPublicationObserver =
       [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
@@ -928,6 +935,7 @@ void unknownOpticsRemainUnpublished(const ProtocolData &data) {
   ServerOptions options;
   options.chunks.push_back({0, 0});
   options.viewDistance = 2;
+  options.sendChunksBeforeLightReady = false;
   Session session(world, data, options);
   auto packets = join(session, data);
   require(packetOf(packets, data.packet("play", "clientbound",
@@ -1006,6 +1014,121 @@ void independentLayerDeltaUsesWriteMetadata() {
           "layer delta refuses a view carrying the other layer tag");
 }
 
+void immediateChunkSendThenLightUpdateAndForgetSkip(const ProtocolData &data) {
+  World world;
+  world.loadChunk(0, 0);
+  world.loadChunk(-2, 0);
+  world.loadChunk(1, 0);
+  world.loadChunk(2, 0);
+  world.rawSetBlock({8, 64, 8}, Blocks::SMOOTH_STONE.defaultState());
+  world.rawSetBlock({4, 65, 4}, Blocks::GLOWSTONE.defaultState());
+  world.rawSetBlock({-28, 65, 4}, Blocks::GLOWSTONE.defaultState());
+  world.enableLighting(LightWorkerOptions{1000, 4096, true, true});
+  auto *service = world.lightService();
+  require(service && combinedForTesting(*service, 0, 0) == nullptr,
+          "paused worker has no published initial light");
+
+  ServerOptions options;
+  options.chunks = {{0, 0}, {-2, 0}};
+  options.spawn = {8.5, 70, 8.5};
+  options.viewDistance = 2;
+  options.unlimitedNetwork = true;
+  require(options.sendChunksBeforeLightReady,
+          "sendChunksBeforeLightReady defaults to true");
+  Session session(world, data, options);
+  world.lightPublicationObserver =
+      [&](std::shared_ptr<const LightChunkSnapshot> snapshot) {
+        session.lightPublished(std::move(snapshot));
+      };
+
+  // Both (0,0) and (-2,0) plus player_position must arrive immediately on join
+  // even while LightService is paused and has no published snapshots.
+  auto joined = join(session, data);
+  int joinedChunkCount = 0;
+  bool sawPos = false;
+  std::vector<std::pair<int, int>> joinedCoords;
+  const int chunkId = data.packet("play", "clientbound", "level_chunk_with_light");
+  const int posId = data.packet("play", "clientbound", "player_position");
+  const int lightId = data.packet("play", "clientbound", "light_update");
+  const int forgetId = data.packet("play", "clientbound", "forget_level_chunk");
+  for (const auto &body : joined) {
+    Reader r(body);
+    const int id = r.varInt();
+    if (id == chunkId) {
+      ++joinedChunkCount;
+      const int cx = r.i32();
+      const int cz = r.i32();
+      joinedCoords.emplace_back(cx, cz);
+    } else if (id == posId) {
+      sawPos = true;
+    }
+  }
+  require(joinedChunkCount == 2 && sawPos,
+          "unlit chunks and player_position send immediately when "
+          "sendChunksBeforeLightReady is enabled");
+
+  // Move player east so (-2,0) is forgotten (outside viewDistance=2 around x=2),
+  // while (0,0) stays visible.
+  moveTo(session, data, 32.5, 8.5);
+  auto movePackets = drainPlay(session);
+  bool forgotMinusTwo = false;
+  for (const auto &body : movePackets) {
+    Reader r(body);
+    if (r.varInt() == forgetId) {
+      const int cz = r.i32();
+      const int cx = r.i32();
+      if (cx == -2 && cz == 0)
+        forgotMinusTwo = true;
+    }
+  }
+  require(forgotMinusTwo, "distant unlit chunk (-2,0) receives forget_level_chunk");
+
+  // Resume LightService: (0,0) must receive full-layer light_update packets,
+  // while forgotten (-2,0) must NOT receive any light_update.
+  service->resumeForTesting();
+  require(service->waitIdleForTesting(), "deferred initial light completes");
+  world.tick();
+  session.tick();
+  auto lightPackets = drainPlay(session);
+  int updatesForOrigin = 0;
+  int updatesForForgotten = 0;
+  for (const auto &body : lightPackets) {
+    Reader r(body);
+    if (r.varInt() == lightId) {
+      const int cx = r.varInt();
+      const int cz = r.varInt();
+      if (cx == 0 && cz == 0)
+        ++updatesForOrigin;
+      if (cx == -2 && cz == 0)
+        ++updatesForForgotten;
+    }
+  }
+  require(updatesForOrigin == 2,
+          "visible unlit chunk (0,0) receives full block+sky light_update once "
+          "LightService completes");
+  require(updatesForForgotten == 0,
+          "forgotten chunk (-2,0) skips light_update");
+
+  // Subsequent block edit in (0,0) produces incremental light_update cleanly.
+  world.setBlock({8, 65, 8}, Blocks::REDSTONE_LAMP.defaultState().with("lit", "true"));
+  require(service->waitIdleForTesting(), "edit light completes");
+  world.tick();
+  session.tick();
+  auto editPackets = drainPlay(session);
+  bool sawOriginDelta = false;
+  for (const auto &body : editPackets) {
+    Reader r(body);
+    if (r.varInt() == lightId) {
+      const int cx = r.varInt();
+      const int cz = r.varInt();
+      if (cx == 0 && cz == 0)
+        sawOriginDelta = true;
+    }
+  }
+  require(sawOriginDelta,
+          "subsequent edit after initial light_update emits incremental delta");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1024,6 +1147,7 @@ int main(int argc, char **argv) {
     nativeServerFixturePublishesEveryChunk();
     unpublishedLightDefersJoin(data);
     unknownOpticsRemainUnpublished(data);
+    immediateChunkSendThenLightUpdateAndForgetSkip(data);
     lightBackpressure(data);
     if (const char *path = std::getenv("REDSTONE_PLAY_FIXTURE")) {
       std::ofstream file(path, std::ios::binary);

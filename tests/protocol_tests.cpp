@@ -528,6 +528,15 @@ void sessionOutputLimit(const ProtocolData &data) {
   other.sendTickTime(1.0, 1);
   assert(completed && !other.closed());
   assert(other.takeOutputItems().size() == 1);
+
+  ServerOptions unlimitedOptions = options;
+  unlimitedOptions.unlimitedNetwork = true;
+  Session unlimited(world, data, unlimitedOptions);
+  join(unlimited, data);
+  for (std::size_t i = 0; i < maxQueuedOutputPackets + 8; ++i)
+    unlimited.sendTickTime(1.0, static_cast<std::int64_t>(i));
+  assert(!unlimited.closed());
+  assert(unlimited.takeOutputItems().size() == maxQueuedOutputPackets + 8);
 }
 
 // F-7 / N-01: a section snapshot that mixes plain water, flowing lava and a

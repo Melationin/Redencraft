@@ -14,8 +14,9 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_set>
 #include <vector>
+
+#include "redstone/hash.hpp"
 
 namespace redstone {
 // 以空手（无精准采集/时运）评估方块的战利品掉落，供 `destroyBlock`、`updateOrDestroy`、活塞推碎与爆炸使用。
@@ -519,7 +520,7 @@ private:
                                   const std::vector<Movement> &movements);
   int checkInsideBlocksSegment(World &world, Vec3 from, Vec3 to,
                                InsideBlockEffectApplier &collector,
-                               std::unordered_set<std::uint64_t> &visitedBlocks,
+                               phmap::flat_hash_set<std::uint64_t> &visitedBlocks,
                                int maxIterations);
   bool removalObserved_ = false;
   // 仅在无回调碰撞收集与解算阶段复用的临时缓冲区，避免每刻移动检测重复分配堆内存。

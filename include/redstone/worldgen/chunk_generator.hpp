@@ -76,23 +76,31 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     return optical_;
   }
-  void set(std::shared_ptr<const LightOpticalTable> optical) {
+  bool skyLightEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return skyLightEnabled_;
+  }
+  void set(std::shared_ptr<const LightOpticalTable> optical,
+           bool skyLightEnabled = true) {
     std::lock_guard<std::mutex> lock(mutex_);
     optical_ = std::move(optical);
+    skyLightEnabled_ = skyLightEnabled;
   }
 
 private:
   mutable std::mutex mutex_;
   std::shared_ptr<const LightOpticalTable> optical_;
+  bool skyLightEnabled_ = true;
 };
 
 // 对齐原版 26.1 `WorldGenRegion.java`：向单个生成步骤暴露中心区块及有限邻域切片。
 // 所有跨区块读写均受 `ChunkStep::directDependencies()` 与 `ChunkStep::blockStateWriteRadius()` 门控。
 class WorldGenRegion {
 public:
-  WorldGenRegion(const ChunkStep &step, ChunkAccess &center,
-                 std::vector<ChunkAccess *> squareCache, int radius,
-                 std::int64_t worldSeed);
+  WorldGenRegion(const ChunkStep &step, ProtoChunk &center,
+                 std::vector<BaseChunk *> squareCache, int radius,
+                 std::int64_t worldSeed,
+                 std::vector<std::shared_ptr<BaseChunk>> pinnedChunks = {});
 
   ChunkTicketPos centerPos() const noexcept { return center_.pos(); }
   const ChunkStep &generatingStep() const noexcept { return step_; }
@@ -102,10 +110,10 @@ public:
   int maxY() const noexcept { return center_.maxY(); }
 
   bool hasChunk(int chunkX, int chunkZ) const noexcept;
-  ChunkAccess *getChunkIfAllowed(int chunkX, int chunkZ,
-                                 ChunkStatusId minStatus = ChunkStatusId::Empty) const;
-  ChunkAccess &getChunk(int chunkX, int chunkZ,
-                        ChunkStatusId minStatus = ChunkStatusId::Empty) const;
+  BaseChunk *getChunkIfAllowed(int chunkX, int chunkZ,
+                               ChunkStatusId minStatus = ChunkStatusId::Empty) const;
+  BaseChunk &getChunk(int chunkX, int chunkZ,
+                      ChunkStatusId minStatus = ChunkStatusId::Empty) const;
 
   bool ensureCanWrite(int x, int y, int z) const noexcept;
   BlockState getBlockState(int x, int y, int z) const;
@@ -117,8 +125,9 @@ public:
 
 private:
   const ChunkStep &step_;
-  ChunkAccess &center_;
-  std::vector<ChunkAccess *> cache_;
+  ProtoChunk &center_;
+  std::vector<BaseChunk *> cache_;
+  std::vector<std::shared_ptr<BaseChunk>> pinned_;
   int radius_ = 0;
   int stride_ = 1;
   std::int64_t worldSeed_ = 0;
@@ -198,27 +207,28 @@ public:
                           RawChunkStore *diskStore = nullptr,
                           World *residentWorld = nullptr,
                           std::shared_ptr<LightOpticalContext> lightContext = {},
-                          GeneratedLightQueue *lightQueue = nullptr);
+                          GeneratedLightQueue *lightQueue = nullptr,
+                          bool asyncWorldGenLight = true);
 
   // 确保目标区块达到 `targetStatus`（若已在更高阶段则直接返回）。
   // 使用 `LOADING_PYRAMID` 当区块已在磁盘处于较后阶段时可跳过前面已固化的邻域递归。
-  ChunkAccess &ensureStatus(ChunkTicketPos pos, ChunkStatusId targetStatus);
+  BaseChunk &ensureStatus(ChunkTicketPos pos, ChunkStatusId targetStatus);
 
   // 将目标区块推进到当前加载票等级所要求的状态（等级 > 44 则不触发生成并返回 nullptr）。
-  ChunkAccess *ensureForLoadingLevel(ChunkTicketPos pos, int loadingLevel);
+  BaseChunk *ensureForLoadingLevel(ChunkTicketPos pos, int loadingLevel);
 
-  ChunkAccess *findChunk(ChunkTicketPos pos) const;
+  BaseChunk *findChunk(ChunkTicketPos pos) const;
   std::shared_ptr<ProtoChunk> takeProtoChunk(ChunkTicketPos pos);
 
-  // 生成至 `Full`，并将完整区块数据、后处理流体/形状刻与初始高度图安装到指定 `World`。
+  // 生成至 `Full` 并通过共享安装路径写入运行态 `World`。
   bool generateAndInstallIntoWorld(ChunkTicketPos pos, World &world);
 
 
   const Stats &stats() const noexcept { return stats_; }
 
 private:
-  ChunkAccess &getOrLoadChunk(ChunkTicketPos pos);
-  void advanceOneStep(ChunkTicketPos pos, ChunkAccess &chunk,
+  BaseChunk &getOrLoadChunk(ChunkTicketPos pos);
+  void advanceOneStep(ChunkTicketPos pos, BaseChunk &chunk,
                       const ChunkStep &step, bool fromLoadedProto);
 
   ChunkGenerator &generator_;
@@ -227,7 +237,8 @@ private:
   World *residentWorld_ = nullptr;
   std::shared_ptr<LightOpticalContext> lightContext_;
   GeneratedLightQueue *lightQueue_ = nullptr;
-  std::map<ChunkTicketPos, std::shared_ptr<ChunkAccess>> chunks_;
+  bool asyncWorldGenLight_ = true;
+  std::map<ChunkTicketPos, std::shared_ptr<BaseChunk>> chunks_;
   std::map<ChunkTicketPos, bool> startedLoadedFromStore_;
   Stats stats_;
 };
@@ -240,7 +251,8 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
                                 std::int64_t worldSeed,
                                 LightOpticalContext *lightContext,
                                 GeneratedLightQueue *lightQueue,
-                                std::shared_ptr<const BaseChunk> chunkHandle = {});
+                                std::shared_ptr<const BaseChunk> chunkHandle = {},
+                                bool asyncWorldGenLight = true);
 
 // 将到达 `Full` 的 `ProtoChunk` 零拷贝/紧凑写入运行态 `World` 并调度后处理流体刻。
 // 从光照引擎的最新快照刷新 ProtoChunk 的光照层（晋升/存档前调用）。

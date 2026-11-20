@@ -29,5 +29,8 @@ __pycache__/
 /validation/safesave_order/vanilla/whitelist.json
 /validation/random_tick_bench/runtime/
 /validation/random_tick_bench/mod/.gradle/
-/validation/random_tick_bench/mod/build/
-/validation/random_tick_bench/mod/run/
+/validation/random_tick_bench/mod/
+/run/
+/fabric-bench/
+/ref/
+*:Zone.Identifier

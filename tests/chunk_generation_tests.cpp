@@ -6,11 +6,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -82,9 +84,31 @@ public:
   int height() const noexcept override { return 384; }
 
   std::atomic<int> delayMs{0};
+  std::atomic<int> started{0};
+  std::optional<ChunkTicketPos> gatePos;
+  std::atomic<bool> gateEntered{false};
+  std::atomic<bool> gateRelease{true};
+  std::mutex gateMutex;
+  std::condition_variable gateCv;
+
+  void releaseGate() {
+    {
+      std::lock_guard lock(gateMutex);
+      gateRelease.store(true, std::memory_order_release);
+    }
+    gateCv.notify_all();
+  }
 
   void fillFromNoise(worldgen::WorldGenRegion &, worldgen::ProtoChunk &chunk,
                      std::int64_t) override {
+    started.fetch_add(1, std::memory_order_relaxed);
+    if (gatePos && chunk.pos() == *gatePos) {
+      gateEntered.store(true, std::memory_order_release);
+      std::unique_lock lock(gateMutex);
+      gateCv.wait(lock, [&] {
+        return gateRelease.load(std::memory_order_acquire);
+      });
+    }
     if (delayMs.load(std::memory_order_relaxed) > 0) {
       std::this_thread::sleep_for(
           std::chrono::milliseconds(delayMs.load(std::memory_order_relaxed)));
@@ -272,6 +296,7 @@ void testGeneratedChunkPersistsAndReloads() {
   auto generator = std::make_shared<TestGenerator>(false);
   WorldChunkManager manager(world, store, 2, 4, emptyEntityProbe, {},
                             generator);
+  manager.setSaveOnlyOnUnload(false);
   manager.setAutosaveLimitsForTest({64, 8, 32,
                                     std::chrono::milliseconds{5},
                                     std::chrono::milliseconds{20},
@@ -371,27 +396,126 @@ void testBufferLevelsDoNotInstall() {
   (void)manager.close();
 }
 
-// 4) 需求在生成完成前撤销：迟到结果被 epoch 拒绝，绝不安装。
+// 4) 需求在生成完成前撤销：迟到结果被 epoch 拒绝或被流式取消，统计精确闭合且绝不安装。
 void testStaleGenerationIsDiscarded() {
+  // Part A: 取消待处理/在途的驻留需求，验证统计闭合与零泄漏。
+  {
+    World world;
+    auto store = std::make_shared<MemoryStore>();
+    auto generator = std::make_shared<TestGenerator>(false);
+    generator->delayMs.store(30);
+    WorldChunkManager manager(world, store, 2, 4, emptyEntityProbe, {},
+                              generator);
+    manager.addPlayer(1, {0, 0});
+    require(pumpUntil(manager,
+                      [&] {
+                        return manager.generationStats().requested > 0 &&
+                               generator->started.load() > 0;
+                      }),
+            "generation started with residency demand before removal");
+    manager.removePlayer(1);
+    require(pumpUntil(manager,
+                      [&] {
+                        const ChunkGenerationStats st =
+                            manager.generationStats();
+                        return st.requested > 0 &&
+                               st.requested ==
+                                   st.completed + st.failed + st.cancelled &&
+                               manager.managedChunks().empty();
+                      }),
+            "cancelled/stale residency generation reconciles cleanly");
+    const ChunkGenerationStats st = manager.generationStats();
+    require(st.cancelled > 0 || st.completed > 0,
+            "residency demand either cancelled or completed stale");
+    require(st.failed == 0, "stale demand removal causes no failures");
+    require(!world.isChunkLoaded(0, 0) && !world.isChunkLoaded(-2, -2),
+            "rejected/cancelled generated chunks never enter World");
+    require(manager.close().complete, "stale cancellation world closes cleanly");
+  }
+
+  // Part B: 显式门控中心区块 (0,0) 在 fillFromNoise 中途撤票，确认在途结果被丢弃且绝不安装。
+  {
+    World world;
+    auto store = std::make_shared<MemoryStore>();
+    auto generator = std::make_shared<TestGenerator>(false);
+    generator->gatePos = ChunkTicketPos{0, 0};
+    generator->gateRelease.store(false, std::memory_order_release);
+    WorldChunkManager manager(world, store, 2, 4, emptyEntityProbe, {},
+                              generator);
+    manager.addPlayer(1, {0, 0});
+    require(pumpUntil(manager,
+                      [&] {
+                        return generator->gateEntered.load(
+                            std::memory_order_acquire);
+                      },
+                      15000),
+            "center chunk (0,0) entered fillFromNoise");
+    manager.removePlayer(1);
+    generator->releaseGate();
+    require(pumpUntil(manager,
+                      [&] {
+                        const ChunkGenerationStats st =
+                            manager.generationStats();
+                        return st.requested > 0 &&
+                               st.requested ==
+                                   st.completed + st.failed + st.cancelled &&
+                               manager.managedChunks().empty();
+                      },
+                      15000),
+            "in-flight gated residency generation settles without leaking");
+    const ChunkGenerationStats st = manager.generationStats();
+    require(st.failed == 0, "gated in-flight discard causes no failures");
+    require(!world.isChunkLoaded(0, 0) && !world.isChunkLoaded(-2, -2),
+            "gated in-flight chunk (0,0) never enters World after player leaves");
+    require(manager.close().complete, "gated discard world closes cleanly");
+  }
+}
+
+void testStreamingStatsReconciliationAndPriority() {
   World world;
   auto store = std::make_shared<MemoryStore>();
   auto generator = std::make_shared<TestGenerator>(false);
-  generator->delayMs.store(50);
+  generator->delayMs.store(8);
   WorldChunkManager manager(world, store, 2, 4, emptyEntityProbe, {},
                             generator);
+
   manager.addPlayer(1, {0, 0});
   require(pumpUntil(manager,
                     [&] { return manager.generationStats().requested > 0; }),
-          "generation queued before demand removal");
-  manager.removePlayer(1);
+          "initial player demand submitted");
+
+  // Rapidly move the player far away across multiple positions.
+  const std::vector<ChunkTicketPos> moves = {
+      {4, 0}, {8, 0}, {12, 0}, {20, 0}};
+  for (const ChunkTicketPos &target : moves) {
+    manager.movePlayer(1, target);
+    manager.pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  // Wait for final center (20, 0) to load, stats to reconcile, and stale (0, 0) to evict.
   require(pumpUntil(manager,
-                    [&] { return manager.generationStats().completed > 0; }),
-          "in-flight generation finished after demand removal");
-  require(pumpUntil(manager, [&] { return manager.managedChunks().empty(); }),
-          "rejected generated chunks never become managed");
-  require(!world.isChunkLoaded(0, 0) && !world.isChunkLoaded(-2, -2),
-          "rejected generated chunks never enter World");
-  (void)manager.close();
+                    [&] {
+                      const ChunkGenerationStats st =
+                          manager.generationStats();
+                      return world.isChunkLoaded(20, 0) &&
+                             !world.isChunkLoaded(0, 0) &&
+                             st.requested ==
+                                 st.completed + st.failed + st.cancelled;
+                    },
+                    30000),
+          "rapid player move stabilizes at final center with reconciled stats");
+
+  const ChunkGenerationStats st = manager.generationStats();
+  require(st.requested > 0, "streaming requested chunks recorded");
+  require(st.completed >= 1, "final player chunks completed");
+  require(st.failed == 0, "no failed chunks during rapid move");
+  require(st.requested == st.completed + st.failed + st.cancelled,
+          "requested equals completed + failed + cancelled");
+  require(world.isChunkLoaded(20, 0), "final player center chunk is loaded");
+  require(!world.isChunkLoaded(0, 0),
+          "origin chunk evicted/cancelled after rapid move");
+  require(manager.close().complete, "rapid move world closes cleanly");
 }
 
 // 5) 并行调度器的生成缓存按玩家中心裁剪，只保留 keep 半径内的半成品。
@@ -479,6 +603,8 @@ void testGenerationTimeLightSubmission() {
   auto store = std::make_shared<MemoryStore>();
   auto generator = std::make_shared<TestGenerator>(false);
   WorldChunkManager manager(world, store, 2, 4, emptyEntityProbe, {}, generator);
+  manager.setAsyncWorldGenLight(false);
+  manager.setSaveOnlyOnUnload(false);
   manager.addPlayer(1, {0, 0});
   require(pumpUntil(manager, [&] { return world.isChunkLoaded(0, 0); }, 20000),
           "generated chunk installed with lighting enabled");
@@ -513,6 +639,20 @@ void testGenerationTimeLightSubmission() {
   require(world.lightService()->latestLayerChunk(LightLayer::Block, 0, 0) !=
               nullptr,
           "generated chunk publishes a block light layer");
+  require(world.lightService()->isChunkSettled(0, 0),
+          "generated chunk is settled before runtime edits");
+  require(world.lightService()->stats().lightQueueEntries == 0,
+          "initial light queue is drained with zero backlog");
+  require(tickUntil(manager, [&] { return store->hasPayload({0, 0}); }, 20000),
+          "generated lit chunk saves once to store");
+  {
+    const auto initialSaved = store->payload({0, 0});
+    require(initialSaved.has_value(), "initial chunk payload exists");
+    const auto decoded =
+        terrain::decodeChunkNbt(std::span<const std::uint8_t>(*initialSaved));
+    require(decoded.isLightOn,
+            "initial saved chunk NBT already carries isLightOn=1");
+  }
 
   // 默认低内存：安装后已切换为直读 World 几何，运行时埋光源必须立刻被光照线程看到。
   require(manager.setBlock({0, 0, 0}, BlockState("minecraft:glowstone")),
@@ -520,8 +660,15 @@ void testGenerationTimeLightSubmission() {
   require(pumpUntil(
               manager,
               [&] { return world.getBrightness({0, 0, 0}, 0) == 15; }, 20000),
-          "direct light reads observe runtime edits after adoptDirectGeometry");
+          "direct light reads observe runtime edits after ChunkMap install");
   require(manager.close().complete, "lighting generation world closes cleanly");
+  {
+    const auto finalSaved = store->payload({0, 0});
+    require(finalSaved.has_value(), "final chunk payload exists");
+    const auto decoded =
+        terrain::decodeChunkNbt(std::span<const std::uint8_t>(*finalSaved));
+    require(decoded.isLightOn, "final saved chunk preserves isLightOn=1");
+  }
 }
 
 void testRealGeneratorInstall(const std::filesystem::path &assets) {
@@ -538,6 +685,7 @@ void testRealGeneratorInstall(const std::filesystem::path &assets) {
   auto store = std::make_shared<MemoryStore>();
   WorldChunkManager manager(world, store, 2, 4, emptyEntityProbe, {},
                             generator);
+  manager.setSaveOnlyOnUnload(false);
   manager.setGenerationThreadsForTest(4);
   manager.setAutosaveLimitsForTest({64, 8, 32,
                                     std::chrono::milliseconds{5},
@@ -573,6 +721,102 @@ void testRealGeneratorInstall(const std::filesystem::path &assets) {
   require(manager.close().complete, "real generated world closes cleanly");
 }
 
+// 7) 默认快速模式：非阻塞世界生成光照 + 仅在卸载/关闭时保存（生成后不立即自动保存）。
+void testAsyncWorldGenLightAndSaveOnlyOnUnload() {
+  World world;
+  LightWorkerOptions lightOpts;
+  lightOpts.batchWindowMs = 0;
+  world.enableLighting(lightOpts);
+  auto store = std::make_shared<MemoryStore>();
+  auto generator = std::make_shared<TestGenerator>(false);
+  WorldChunkManager manager(world, store, 2, 4, emptyEntityProbe, {},
+                            generator);
+  require(manager.asyncWorldGenLight(), "asyncWorldGenLight defaults to true");
+  require(manager.saveOnlyOnUnload(), "saveOnlyOnUnload defaults to true");
+  manager.setAutosaveLimitsForTest({64, 8, 32,
+                                    std::chrono::milliseconds{5},
+                                    std::chrono::milliseconds{20},
+                                    std::chrono::milliseconds{20}});
+  manager.setForced({0, 0}, true);
+  require(pumpUntil(manager, [&] { return world.isChunkLoaded(0, 0); }, 20000),
+          "center chunk generated and installed in fast mode");
+  require(pumpUntil(
+              manager,
+              [&] {
+                const LightService::ChunkStatus st =
+                    world.lightService()->chunkStatus(0, 0);
+                return st.complete && !st.pending;
+              },
+              20000),
+          "background LightService settles asynchronously");
+  world.drainLightPublications();
+
+  // Pump and tick several times while chunk remains held: saveOnlyOnUnload must
+  // NOT eagerly persist freshly generated chunks.
+  for (int i = 0; i < 10; ++i) {
+    manager.serverTick(true, true);
+    manager.pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  require(!store->hasPayload({0, 0}),
+          "saveOnlyOnUnload skips eager autosave right after generation");
+
+  // Ensure all post-tick water/neighbor light settles before unloading, then
+  // verify unload persists the settled chunk with isLightOn=1.
+  require(world.lightService()->flushAndWait(), "light settles before unload");
+  manager.pump();
+  require(pumpUntil(
+              manager,
+              [&] {
+                const auto st = manager.managedStatus({0, 0});
+                return st && st->light && st->light->complete &&
+                       !st->light->pending;
+              },
+              20000),
+          "chunk light is settled right before unload");
+
+  // Unload by removing forced ticket: dirty generated chunk MUST persist on unload.
+  manager.setForced({0, 0}, false);
+  require(pumpUntil(manager, [&] { return manager.managedChunks().empty(); },
+                    20000),
+          "generated chunk saves and evicts cleanly on demand removal");
+  require(store->hasPayload({0, 0}),
+          "generated chunk is persisted on unload");
+  {
+    const auto saved = store->payload({0, 0});
+    require(saved.has_value(), "unloaded chunk payload exists");
+    const auto decoded =
+        terrain::decodeChunkNbt(std::span<const std::uint8_t>(*saved));
+    require(decoded.status == terrain::DecodeStatus::Ok &&
+                decoded.statusName == "minecraft:full",
+            "unloaded generated chunk decodes as FULL Anvil chunk");
+    require(decodedBlock(decoded, 5, 70, 5) == "minecraft:diamond_block",
+            "unloaded generated chunk preserves generated features");
+  }
+
+  // Also verify player-driven generation skips eager autosave while held and
+  // persists cleanly on shutdown close().
+  manager.addPlayer(1, {20, 0});
+  require(pumpUntil(manager, [&] { return world.isChunkLoaded(20, 0); }, 20000),
+          "player chunk (20,0) generated and installed in fast mode");
+  for (int i = 0; i < 10; ++i) {
+    manager.serverTick(true, true);
+    manager.pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  require(!store->hasPayload({20, 0}),
+          "saveOnlyOnUnload skips eager autosave for player-held chunk (20,0)");
+  require(manager.close().complete, "fast mode world closes cleanly");
+  {
+    const auto saved = store->payload({20, 0});
+    require(saved.has_value(), "shutdown persisted chunk (20,0)");
+    const auto decoded =
+        terrain::decodeChunkNbt(std::span<const std::uint8_t>(*saved));
+    require(decoded.status == terrain::DecodeStatus::Ok && decoded.isLightOn,
+            "shutdown persisted chunk (20,0) carries isLightOn=1");
+  }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -581,10 +825,12 @@ int main(int argc, char **argv) {
     testGeneratedChunkPersistsAndReloads();
     testBufferLevelsDoNotInstall();
     testStaleGenerationIsDiscarded();
+    testStreamingStatsReconciliationAndPriority();
     testSchedulerCacheEviction();
     testLightReadsProtoChunkHandle();
     testPromotionMovesSectionStorage();
     testGenerationTimeLightSubmission();
+    testAsyncWorldGenLightAndSaveOnlyOnUnload();
     if (argc >= 2)
       testRealGeneratorInstall(argv[1]);
     std::cout << "chunk generation tests passed"

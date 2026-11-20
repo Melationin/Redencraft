@@ -4810,6 +4810,7 @@ void testManagedLightDelayedNeighborCompletion() {
   World world(0, 64);
   world.enableLighting();
   WorldChunkManager manager(world, store);
+  manager.setSaveOnlyOnUnload(false);
   manager.setForced(origin, true);
   require(waitManager(manager, [&] {
             auto st = manager.managedStatus(origin);
@@ -4865,6 +4866,7 @@ void testManagedLightBacklogAutosaveNonBlocking() {
   World world(0, 64);
   world.enableLighting();
   WorldChunkManager manager(world, store);
+  manager.setSaveOnlyOnUnload(false);
   AutosaveLimits limits;
   limits.cooldown = std::chrono::milliseconds{0};
   limits.failureBackoff = std::chrono::milliseconds{0};
@@ -4959,6 +4961,7 @@ void testManagedLightUnloadReloadStaleEpochIsolation() {
   World world(0, 64);
   world.enableLighting();
   WorldChunkManager manager(world, store);
+  manager.setSaveOnlyOnUnload(false);
   manager.setForced(pos, true);
   require(waitManager(manager, [&] {
             auto st = manager.managedStatus(pos);
@@ -5081,6 +5084,71 @@ void testRealWorldLightPersistenceCycle(
   }
 }
 
+void testGenerationPinPreventsTransientEviction() {
+  auto store = std::make_shared<FakeStore>();
+  const ChunkTicketPos position{310, 0};
+  store->setPayload(position, makeChunkNbt(position));
+  World world(-64, 320);
+  WorldChunkManager manager(world, store);
+  manager.setForced(position, true);
+  require(waitManager(manager, [&] {
+            return world.isChunkLoaded(position.x, position.z);
+          }),
+          "pinned eviction test chunk installs");
+  auto holder = world.chunkMap().findHolder(position);
+  auto chunk = holder ? holder->chunkShared() : nullptr;
+  require(holder && chunk, "managed chunk holder and chunk present");
+  chunk->addGenerationUser();
+  require(chunk->generationUserCount() == 1, "generationUserCount increments");
+
+  // Drop demand: transient pin must block eviction without marking a permanent blocker.
+  manager.setForced(position, false);
+  for (int i = 0; i < 10; ++i) {
+    manager.pump();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  require(world.isChunkLoaded(position.x, position.z),
+          "pinned chunk stays resident while generationUserCount > 0");
+  auto st = manager.managedStatus(position);
+  require(st && st->blocker.empty(),
+          "generation pin must not become a sticky blocker");
+
+  chunk->releaseGenerationUser();
+  require(chunk->generationUserCount() == 0, "generationUserCount decrements");
+  require(waitManager(manager, [&] {
+            return !world.isChunkLoaded(position.x, position.z);
+          }),
+          "chunk unloads after generationUserCount drops to 0");
+  require(manager.close().complete, "pinned eviction test closes cleanly");
+}
+
+void testPlayerMoveDoesNotBlockChunkSaves() {
+  auto store = std::make_shared<FakeStore>();
+  auto entities = std::make_shared<FakeEntityStore>();
+  const ChunkTicketPos c0{320, 0};
+  const ChunkTicketPos c1{321, 0};
+  store->setPayload(c0, makeChunkNbt(c0));
+  store->setPayload(c1, makeChunkNbt(c1));
+  World world(-64, 320);
+  WorldChunkManager manager(world, store, 2, 4, {}, entities);
+  manager.setForced(c0, true);
+  manager.setForced(c1, true);
+  require(waitManager(manager, [&] {
+            return world.isChunkLoaded(c0.x, c0.z) &&
+                   world.isChunkLoaded(c1.x, c1.z);
+          }),
+          "player move chunks install");
+  auto player = std::make_shared<ServerPlayer>(
+      world, Vec3{(c0.x << 4) + 8.0, 64.0, 8.0}, "Walker");
+  world.addEntity(player);
+  player->applyClientMovement(world, Vec3{(c1.x << 4) + 8.0, 64.0, 8.0},
+                              0.0f, 0.0f, true);
+  manager.rawSetBlock({c0.x << 4, 0, 0}, Blocks::STONE.defaultState());
+  const auto shutdown = manager.close();
+  require(shutdown.complete && shutdown.unsavedChunks.empty(),
+          "player crossing chunk boundary must not block chunk saves");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -5158,6 +5226,8 @@ int main(int argc, char **argv) {
     testMigrationWorkIsEventDrivenWithUnreadyTargets();
     testCrossChunkItemMigrationReloadsOnce();
     testDuplicateItemUuidRejectsSecondChunk();
+    testGenerationPinPreventsTransientEviction();
+    testPlayerMoveDoesNotBlockChunkSaves();
     if (argc >= 5)
       testRealMovingPistonLifecycle(argv[4], scratch);
     if (argc == 6) {

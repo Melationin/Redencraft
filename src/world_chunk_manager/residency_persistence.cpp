@@ -1,6 +1,8 @@
 #include "redstone/world_chunk_manager.hpp"
 #include "redstone/entity.hpp"
 #include "redstone/piston.hpp"
+#include "redstone/worldgen/noise_chunk_generator.hpp"
+#include "redstone/worldgen/proto_chunk.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -153,7 +155,53 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
   chunk.loaded = false;
   std::set<int> writableSections;
 
-  if (loaded.prebuiltSections && loaded.prebuiltBiomes) {
+  if (loaded.generatedProto) {
+    auto holder = world_.chunkMap().findHolder(position);
+    std::unique_lock<std::shared_mutex> protoLock;
+    if (holder && holder->protoShared().get() == loaded.generatedProto.get())
+      protoLock = std::unique_lock<std::shared_mutex>(holder->chunkMutex());
+    const auto &proto = *loaded.generatedProto;
+    chunk.initialize(position, world_.minY(), world_.maxY() - world_.minY());
+    chunk.setDefaultBiome(std::string(proto.defaultBiome()));
+    const int minSecY = world_.minY() >> 4;
+    const int count = world_.sectionCount();
+    const int protoCount = proto.sectionCount();
+    const auto &protoBase = static_cast<const BaseChunk &>(proto);
+    for (int i = 0; i < count; ++i) {
+      const int secY = minSecY + i;
+      writableSections.insert(secY);
+      const std::size_t idx = static_cast<std::size_t>(i);
+      if (i < protoCount) {
+        chunk.sections[idx] = protoBase.sections[idx].share();
+        chunk.sections[idx].setSectionY(static_cast<std::int8_t>(secY));
+        chunk.sections[idx].blockLight.reset();
+        chunk.sections[idx].skyLight.reset();
+        chunk.biomeSections[idx] = protoBase.biomeSections[idx];
+      }
+    }
+    if (auto finalMaps = loaded.generatedProto->takeFinalHeightmaps()) {
+      chunk.heightmaps =
+          std::make_unique<ChunkHeightmaps>(std::move(*finalMaps));
+    }
+    chunk.setStructureStartsRaw(worldgen::cloneChunkStructureDataRaw(
+        loaded.generatedProto->structureStartsRaw()));
+    if (loaded.isLightOn && !chunk.persistedLight.has_value()) {
+      PersistedChunkLight persisted;
+      persisted.isLightOn = true;
+      for (int i = 0; i < protoCount; ++i) {
+        const BlockSection &sec = proto.section(i);
+        if (!sec.blockLight.has_value() && !sec.skyLight.has_value())
+          continue;
+        PersistedLightSection lightSec;
+        lightSec.sectionY = sec.sectionY();
+        lightSec.blockLight = sec.blockLight.copy();
+        lightSec.skyLight = sec.skyLight.copy();
+        persisted.sections.push_back(std::move(lightSec));
+      }
+      chunk.persistedLight = std::move(persisted);
+      chunk.refreshPersistedLightIndex(minSecY, count);
+    }
+  } else if (loaded.prebuiltSections && loaded.prebuiltBiomes) {
     // 生成路径：区段存储已经在 ProtoChunk 里按最终位宽构建好，直接 move 进来。
     for (int i = 0; i < loaded.prebuiltSectionCount; ++i) {
       const int sectionY = loaded.prebuiltMinSectionY + i;
@@ -276,23 +324,26 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
   }
   chunk.refreshRandomTickMask(world_.sectionCount());
 
-  chunk.heightmaps = std::make_unique<ChunkHeightmaps>(
-      world_.minY(), world_.sectionCount() * 16);
-  int highestSectionPosition = world_.minY();
-  for (int section = world_.sectionCount(); section-- > 0;) {
-    if (!chunk.sections[section].hasOnlyAir()) {
-      highestSectionPosition = (world_.minY() >> 4) * 16 + section * 16 + 16;
-      break;
+  if (!chunk.heightmaps) {
+    chunk.heightmaps = std::make_unique<ChunkHeightmaps>(
+        world_.minY(), world_.sectionCount() * 16);
+    int highestSectionPosition = world_.minY();
+    for (int section = world_.sectionCount(); section-- > 0;) {
+      if (!chunk.sections[section].hasOnlyAir()) {
+        highestSectionPosition =
+            (world_.minY() >> 4) * 16 + section * 16 + 16;
+        break;
+      }
     }
+    chunk.heightmaps->prime(
+        highestSectionPosition, [&chunk, this](int x, int y, int z) {
+          const int section = world_.sectionIndex(y);
+          if (section < 0 || section >= world_.sectionCount())
+            return airState();
+          const int index = ((y & 15) << 8) | ((z & 15) << 4) | (x & 15);
+          return BlockState::fromId(chunk.sections[section].get(index));
+        });
   }
-  chunk.heightmaps->prime(
-      highestSectionPosition, [&chunk, this](int x, int y, int z) {
-        const int section = world_.sectionIndex(y);
-        if (section < 0 || section >= world_.sectionCount())
-          return airState();
-        const int index = ((y & 15) << 8) | ((z & 15) << 4) | (x & 15);
-        return BlockState::fromId(chunk.sections[section].get(index));
-      });
 
   std::vector<std::shared_ptr<PistonMovingBlockEntity>> movingPistons;
   movingPistons.reserve(loaded.movingPistons.size());
@@ -363,8 +414,15 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
             entity = std::move(tnt);
           } else if constexpr (std::is_same_v<
                                    T, entity_codec::FallingBlockEntityData>) {
+            BlockState fallingState = defaultState(decoded.blockId);
+            if (const Block *block = findBlockByName(decoded.blockId)) {
+              std::uint32_t variant = block->stateDefinition().defaultVariant();
+              if (block->stateDefinition().variantOf(decoded.blockProperties,
+                                                     variant))
+                fallingState = BlockState::fromId(block->firstState() + variant);
+            }
             auto falling = std::make_shared<FallingBlockEntity>(
-                world_, position, defaultState(decoded.blockId));
+                world_, position, std::move(fallingState));
             falling->setDeltaMovement(
                 Vec3{decoded.motion[0], decoded.motion[1], decoded.motion[2]});
             falling->yaw = decoded.rotation[0];
@@ -421,7 +479,7 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
   if (loaded.lightComputeGeneration != 0)
     chunk.requiredLightGeneration = std::max(
         chunk.requiredLightGeneration, loaded.lightComputeGeneration);
-  if (loaded.isLightOn) {
+  if (loaded.isLightOn && !chunk.persistedLight.has_value()) {
     PersistedChunkLight persisted;
     persisted.isLightOn = true;
     const int minLightSec = (world_.minY() >> 4) - 1;
@@ -478,17 +536,20 @@ bool WorldChunkManager::installLoaded(LifecycleLoadedChunk &&loaded) {
   managed.writableSections = std::move(writableSections);
   managed.initialLightComplete = loaded.isLightOn;
   managed.needsLightSave = world_.lightingEnabled() && !loaded.isLightOn;
+  managed.generated = loaded.generated;
   if (managed.needsLightSave)
     pendingLightSave_.insert(position);
   managed_.emplace(position, std::move(managed));
   if (loaded.generated) {
-    // 生成区块还没有任何存档副本：启用光照时由光照发布推进脏版本并触发首次落盘；
-    // 无光照世界立即标记脏，让专用 I/O 线程在常规自动保存中写出完整 NBT。
-    if (!world_.lightingEnabled()) {
+    // 生成区块还没有任何存档副本：
+    // - 开启 saveOnlyOnUnload_ 时直接标脏但不入积极自动保存队列，仅在卸载/手动保存/关服时落盘；
+    // - 关闭 saveOnlyOnUnload_ 时若无光照或已完成初始光照则立即入队自动保存，否则等光照首次收敛后保存。
+    if (saveOnlyOnUnload_ || !world_.lightingEnabled() || loaded.isLightOn) {
       ManagedChunk &fresh = managed_.at(position);
       ++fresh.dirtyVersion;
       (void)controller_->markDirty(position, fresh.dirtyVersion);
-      enqueueAutosaveCandidate(position);
+      if (!saveOnlyOnUnload_)
+        enqueueAutosaveCandidate(position);
     }
   }
   if (auto targets = entityMigrationTargets_.find(position);
@@ -555,6 +616,12 @@ bool WorldChunkManager::evictLoaded(const ChunkTicketPos &position,
       world_.snapshotChunkItemEntities(position.x, position.z);
   if (!world_.removeManagedChunk(position.x, position.z, reason,
                                  allowTransientDrop)) {
+    if (reason == "chunk is pinned by active world generation") {
+      found->second.transientEventRetryScheduled = true;
+      found->second.transientEventRetryTime = world_.gameTime() + 1;
+      errors_[position] = std::move(reason);
+      return false;
+    }
     found->second.blocker = reason;
     errors_[position] = std::move(reason);
     return false;
@@ -599,7 +666,7 @@ void WorldChunkManager::recordBlockMutation(Pos pos,
     chunk.blocker = "edited block belongs to a section absent from the save template";
     errors_[position] = chunk.blocker;
   }
-  if (!isSupportedBlock(newState.name()) || !newState.isSchemaState()) {
+  if (!newState.isSchemaState() || findBlockByName(newState.name()) == nullptr) {
     chunk.blocker = "edited block state is outside the persistent codec support";
     errors_[position] = chunk.blocker;
   }
@@ -705,7 +772,8 @@ void WorldChunkManager::processLightSaveCompletions() {
       pendingLightSave_.erase(position);
       ++chunk.dirtyVersion;
       (void)controller_->markDirty(position, chunk.dirtyVersion);
-      enqueueAutosaveCandidate(position);
+      if (!saveOnlyOnUnload_)
+        enqueueAutosaveCandidate(position);
     }
   }
 }
@@ -1259,12 +1327,13 @@ bool WorldChunkManager::scheduleSave(const ChunkTicketPos &position,
       chunk.initialLightBaselineRecorded = true;
       chunk.needsLightSave = false;
       pendingLightSave_.erase(position);
-    } else {
+      payload.light = std::move(lightPatch);
+    } else if (!chunk.initialLightComplete) {
       lightPatch.isLightOn = false;
       chunk.needsLightSave = true;
       pendingLightSave_.insert(position);
+      payload.light = std::move(lightPatch);
     }
-    payload.light = std::move(lightPatch);
   }
 
   const std::uint64_t snapshotVersion = chunk.dirtyVersion;

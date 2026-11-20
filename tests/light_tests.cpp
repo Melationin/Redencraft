@@ -1,5 +1,8 @@
 #include "redstone/engine.hpp"
 #include "redstone/light.hpp"
+#include "redstone/light/chunk_input.hpp"
+#include "redstone/light/initial_chunk_lighter.hpp"
+#include "redstone/worldgen.hpp"
 #include "redstone/storage.hpp"
 
 #include <algorithm>
@@ -2883,6 +2886,236 @@ void computeRequestMergesWithPendingLoad() {
   require(service.isChunkSettled(0, 0), "merged chunk reaches complete");
 }
 
+// 外部安装（生成器 -> 独立 World）必须把光照几何直读源从 ProtoChunk 句柄重定基到
+// World/ChunkMap 直读，而不是整块重算：已发布层与协议基准保留，ProtoChunk 句柄释放。
+void installRebindsLightGeometryWithoutRecompute() {
+  World world(-64, 320);
+  LightWorkerOptions options;
+  options.batchWindowMs = 0;
+  world.enableLighting(options);
+  auto *service = world.lightService();
+
+  auto proto = std::make_shared<worldgen::ProtoChunk>(ChunkTicketPos{0, 0}, -64,
+                                                      384);
+  require(proto->setBlockState(3, 64, 5,
+                               BlockState("minecraft:glowstone")).has_value(),
+          "proto accepts a light source");
+
+  auto input =
+      buildLightChunkInput(*proto, std::nullopt, /*deferCompute=*/true, proto);
+  require(service->submitChunk(std::move(input)) != 0,
+          "generation-time geometry registers against the ProtoChunk handle");
+  require(service->requestChunkCompute(0, 0) != 0, "first compute requested");
+  require(service->waitIdleForTesting(), "generation-time light settles");
+  service->drainPublished();
+  const auto before = service->latestLayerChunk(LightLayer::Block, 0, 0);
+  require(before != nullptr && blockLightAt(before, 3, 64, 5) == 15,
+          "proto geometry produced block light");
+  const LightService::Stats statsBefore = service->stats();
+  require(statsBefore.rebindings == 0, "no rebinding before install");
+
+  require(world.installGeneratedProtoChunk(proto),
+          "external install promotes the proto");
+  require(service->waitIdleForTesting(), "rebinding command drains");
+  const auto after = service->latestLayerChunk(LightLayer::Block, 0, 0);
+  require(after == before,
+          "install rebinding keeps the published light revision");
+  require(service->stats().rebindings == statsBefore.rebindings + 1,
+          "install rebinds the geometry source exactly once");
+  require(service->stats().published == statsBefore.published,
+          "install rebinding publishes no new light");
+  require(service->stats().rejected == statsBefore.rejected,
+          "install rebinding needs no fallback reload");
+  require(proto.use_count() == 1,
+          "light worker released the ProtoChunk handle after rebinding");
+  require(blockLightAt(after, 3, 64, 5) == 15 &&
+              blockLightAt(after, 4, 64, 5) == 14,
+          "block light values survive the rebind");
+
+  require(world.setBlock({6, 64, 5}, BlockState("minecraft:glowstone")),
+          "installed chunk accepts a runtime light source");
+  require(service->waitIdleForTesting(), "post-install edit settles");
+  service->drainPublished();
+  const auto edited = service->latestLayerChunk(LightLayer::Block, 0, 0);
+  require(edited != before && edited->revision > before->revision,
+          "post-install edits publish a newer revision");
+  require(blockLightAt(edited, 6, 64, 5) == 15,
+          "direct World geometry keeps light live after rebinding");
+  world.disableLighting();
+}
+
+void precomputedAdoptionAndOcclusionTable() {
+  // 1) 54x54 静态遮挡表与 BlockLightProperties 全方向一致。
+  const auto air = lightPropertiesOf(airState());
+  const auto stone = lightPropertiesOf(BlockState("minecraft:stone"));
+  const auto topSlab =
+      lightPropertiesOf(BlockState("minecraft:stone_slab").with("type", "top"));
+  const auto bottomSlab =
+      lightPropertiesOf(BlockState("minecraft:stone_slab").with("type", "bottom"));
+  const auto northStair = lightPropertiesOf(
+      BlockState("minecraft:oak_stairs").with("facing", "north").with("half", "bottom"));
+  const auto extPiston = lightPropertiesOf(
+      BlockState("minecraft:piston").with("facing", "north").with("extended", "true"));
+
+  const std::array<BlockLightProperties, 6> samples = {
+      air, stone, topSlab, bottomSlab, northStair, extPiston};
+  constexpr std::array<LightDirection, 6> dirs = {
+      LightDirection::Down,  LightDirection::Up,   LightDirection::North,
+      LightDirection::South, LightDirection::West, LightDirection::East};
+  for (const auto &a : samples) {
+    for (const auto &b : samples) {
+      for (LightDirection d : dirs) {
+        require(lightFaceShapesOcclude(a, b, d) ==
+                    lightFaceShapeIdsOcclude(a.occlusionShapeId,
+                                             b.occlusionShapeId, d),
+                "54x54 shape ID table matches BlockLightProperties occlusion");
+      }
+    }
+  }
+  require(!lightFaceShapesOcclude(bottomSlab, topSlab, LightDirection::Up),
+          "bottom slab lower half to top slab upper half leaves Up face open");
+  require(lightFaceShapesOcclude(topSlab, bottomSlab, LightDirection::Up),
+          "top slab full top + bottom slab full bottom occlude Up");
+  require(!lightFaceShapesOcclude(air, bottomSlab, LightDirection::Down),
+          "air -> bottom slab Down is open (bottom slab only occludes its bottom face)");
+  require(lightFaceShapesOcclude(bottomSlab, air, LightDirection::Down),
+          "bottom slab -> air Down is occluded by bottom slab bottom face");
+  require(lightFaceShapesOcclude(air, extPiston, LightDirection::North),
+          "extended north piston occludes light entering from North");
+  require(!lightFaceShapesOcclude(air, extPiston, LightDirection::South),
+          "extended north piston leaves South open");
+
+  // 2) PrecomputedChunkLight 零拷贝采纳（无 BFS + 即时唤醒 + rebind + 增量编辑等价）。
+  World preWorld(-64, 320);
+  LightWorkerOptions fastOpts;
+  fastOpts.batchWindowMs = 30; // 验证 precomputedLight 绕过 30ms 合批等待立即发布
+  preWorld.enableLighting(fastOpts);
+  auto *preSvc = preWorld.lightService();
+
+  World refWorld(-64, 320);
+  LightWorkerOptions refOpts;
+  refOpts.batchWindowMs = 0;
+  refWorld.enableLighting(refOpts);
+  auto *refSvc = refWorld.lightService();
+
+  auto proto =
+      std::make_shared<worldgen::ProtoChunk>(ChunkTicketPos{0, 0}, -64, 384);
+  for (int x = 0; x < 8; ++x)
+    for (int z = 0; z < 16; ++z)
+      proto->setBlockState(x, 70, z, BlockState("minecraft:stone"));
+  proto->setBlockState(8, 64, 8, BlockState("minecraft:glowstone"));
+  proto->setBlockState(8, 68, 8,
+                       BlockState("minecraft:stone_slab").with("type", "top"));
+
+  auto pre = computeInitialChunkLight(
+      {nullptr, nullptr, nullptr, nullptr, proto.get(), nullptr, nullptr, nullptr,
+       nullptr},
+      *preSvc->opticalTable(), true);
+  require(pre && pre->isLightOn && pre->hasSkySources &&
+              pre->unsupportedCells == 0,
+          "initial lighter produced valid precomputed chunk light");
+
+  const std::uint64_t tStart = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  const std::uint64_t gen = preSvc->submitChunk(
+      buildLightChunkInput(*proto, std::nullopt, false, proto, pre));
+  require(gen != 0, "precomputed chunk submitted");
+  require(preSvc->waitForChunk(0, 0, gen, std::chrono::milliseconds{500}),
+          "precomputed chunk settles via immediate wakeup");
+  const std::uint64_t tEnd = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  require(tEnd - tStart < 25,
+          "precomputedLight bypassed the 30ms batch window");
+  require(preSvc->stats().lightQueueEntries == 0,
+          "precomputedLight adopted with zero BFS entries");
+  require(preSvc->isChunkSettled(0, 0), "precomputed chunk is settled");
+  preWorld.drainLightPublications();
+
+  const auto adoptedBlock = preSvc->latestLayerChunk(LightLayer::Block, 0, 0);
+  const auto adoptedSky = preSvc->latestLayerChunk(LightLayer::Sky, 0, 0);
+  require(adoptedBlock && adoptedBlock->protocolReady &&
+              adoptedBlock->blockLightComplete,
+          "adopted block snapshot is protocolReady");
+  require(adoptedSky && adoptedSky->protocolReady &&
+              adoptedSky->skyLightComplete,
+          "adopted sky snapshot is protocolReady");
+
+  // 对比无 precomputedLight 的标准 LightService 路径：
+  auto refProto =
+      std::make_shared<worldgen::ProtoChunk>(ChunkTicketPos{0, 0}, -64, 384);
+  for (int x = 0; x < 8; ++x)
+    for (int z = 0; z < 16; ++z)
+      refProto->setBlockState(x, 70, z, BlockState("minecraft:stone"));
+  refProto->setBlockState(8, 64, 8, BlockState("minecraft:glowstone"));
+  refProto->setBlockState(8, 68, 8,
+                          BlockState("minecraft:stone_slab").with("type", "top"));
+  require(refWorld.installGeneratedProtoChunk(refProto),
+          "reference world installs proto");
+  require(refSvc->flushAndWait(), "reference light converges");
+  refWorld.drainLightPublications();
+
+  require(preWorld.installGeneratedProtoChunk(proto),
+          "precomputed proto installs into World via rebind");
+  require(preSvc->waitIdleForTesting(), "rebind drains");
+  require(preSvc->stats().rebindings == 1 &&
+              preSvc->stats().lightQueueEntries == 0,
+          "rebind did not recompute precomputed chunk");
+
+  for (int y : {63, 64, 65, 68, 69, 70, 71}) {
+    for (int z = 0; z < 16; ++z) {
+      for (int x = 0; x < 16; ++x) {
+        require(preWorld.getBrightness({x, y, z}, 0) ==
+                    refWorld.getBrightness({x, y, z}, 0),
+                "adopted initial block & sky brightness match reference");
+      }
+    }
+  }
+
+  // 运行时增量编辑（方块光 + 天空光遮挡解除）应保持完全一致。
+  preWorld.setBlock({8, 66, 8}, BlockState("minecraft:glowstone"));
+  refWorld.setBlock({8, 66, 8}, BlockState("minecraft:glowstone"));
+  preWorld.setBlock({4, 70, 4}, airState());
+  refWorld.setBlock({4, 70, 4}, airState());
+  require(preSvc->flushAndWait(), "preWorld runtime edit settles");
+  require(refSvc->flushAndWait(), "refWorld runtime edit settles");
+  preWorld.drainLightPublications();
+  refWorld.drainLightPublications();
+
+  for (int y : {63, 64, 66, 68, 69, 70, 71}) {
+    for (int z = 0; z < 16; ++z) {
+      for (int x = 0; x < 16; ++x) {
+        require(preWorld.getBrightness({x, y, z}, 0) ==
+                    refWorld.getBrightness({x, y, z}, 0),
+                "incremental block & sky edits after adoption match reference");
+      }
+    }
+  }
+
+  // unsupportedCells > 0 时 protocolReady 必须保持 false。
+  auto badPre = std::make_shared<PrecomputedChunkLight>(*pre);
+  badPre->unsupportedCells = 3;
+  LightChunkInput badInput =
+      buildLightChunkInput(*proto, std::nullopt, false, nullptr, badPre);
+  badInput.chunkX = 3;
+  badInput.chunkZ = 3;
+  badInput.lifecycleEpoch = 99;
+  LightService isolated(-4, 24, refOpts);
+  auto dummy =
+      std::make_shared<worldgen::ProtoChunk>(ChunkTicketPos{3, 3}, -64, 384);
+  badInput.chunkHandle = dummy;
+  require(isolated.submitChunk(std::move(badInput)) != 0,
+          "precomputed chunk with unsupported cells accepted");
+  require(isolated.flushAndWait(), "isolated service settles");
+  isolated.drainPublished();
+  const auto badSnap = isolated.latestLayerChunk(LightLayer::Block, 3, 3);
+  require(badSnap && !badSnap->protocolReady && badSnap->unsupportedCells == 3,
+          "precomputed chunk with unsupportedCells > 0 stays protocolReady == false");
+}
+
 int main(int argc, char **argv) {
   try {
     require(argc == 2, "light_tests needs assets/light26_1");
@@ -2926,6 +3159,8 @@ int main(int argc, char **argv) {
     runTest(deferredComputeStates);
     runTest(computeRequestMergesWithPendingLoad);
     runTest(lowMemoryDirectLightParityAndConcurrency);
+    runTest(installRebindsLightGeometryWithoutRecompute);
+    runTest(precomputedAdoptionAndOcclusionTable);
     std::cout << "light tests passed\n";
     return 0;
   } catch (const std::exception &error) {

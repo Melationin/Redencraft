@@ -10,7 +10,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 
 #include "light/common.hpp"
@@ -63,11 +62,10 @@ struct OfficialLightFaceState {
 const BlockLightProperties kUnsupportedLightProperties{};
 constexpr int kFaceScale = 1'000'000;
 
-std::span<const LightFaceRect> faceRects(const BlockLightProperties &properties,
-                                         int direction) {
-  if (properties.occlusionShapeId >= std::size(kLightFaceShapes))
+std::span<const LightFaceRect> faceRectsById(std::size_t shapeId, int direction) {
+  if (shapeId >= std::size(kLightFaceShapes))
     return {};
-  const LightFaceShape &shape = kLightFaceShapes[properties.occlusionShapeId];
+  const LightFaceShape &shape = kLightFaceShapes[shapeId];
   if ((shape.present & (1u << direction)) == 0)
     return {};
   const LightFaceRectSpan *span = nullptr;
@@ -140,24 +138,47 @@ bool faceUnionCovers(std::span<const LightFaceRect> first,
 
 } // namespace
 
-namespace light_internal {
+namespace detail {
 
-bool hasLightFaceRect(const BlockLightProperties &properties, int direction) {
-  return !faceRects(properties, direction).empty();
-}
+const std::array<std::array<std::uint8_t, kLightOcclusionShapeTableSize>,
+                 kLightOcclusionShapeTableSize>
+    kLightFaceOcclusionTable = [] {
+      static_assert(std::size(kLightFaceShapes) <= kLightOcclusionShapeTableSize,
+                    "occlusion shape table exceeds 54 entries");
+      std::array<std::array<std::uint8_t, kLightOcclusionShapeTableSize>,
+                 kLightOcclusionShapeTableSize>
+          table{};
+      for (std::size_t a = 0; a < kLightOcclusionShapeTableSize; ++a) {
+        for (std::size_t b = 0; b < kLightOcclusionShapeTableSize; ++b) {
+          std::uint8_t mask = 0;
+          for (int dir = 0; dir < 6; ++dir) {
+            const auto first = faceRectsById(a, dir);
+            const auto second = faceRectsById(b, dir ^ 1);
+            if ((!first.empty() || !second.empty()) &&
+                faceUnionCovers(first, second))
+              mask |= static_cast<std::uint8_t>(1u << dir);
+          }
+          table[a][b] = mask;
+        }
+      }
+      return table;
+    }();
 
-bool faceShapesOcclude(const BlockLightProperties &from,
-                       const BlockLightProperties &to, int direction) {
-  if (!from.supported || !to.supported)
-    return true;
-  const auto first = faceRects(from, direction);
-  const auto second = faceRects(to, direction ^ 1);
-  if (first.empty() && second.empty())
-    return false;
-  return faceUnionCovers(first, second);
-}
+const std::array<std::uint8_t, kLightOcclusionShapeTableSize>
+    kLightFaceRectMask = [] {
+      std::array<std::uint8_t, kLightOcclusionShapeTableSize> masks{};
+      for (std::size_t id = 0; id < std::size(kLightFaceShapes); ++id) {
+        std::uint8_t mask = 0;
+        for (int dir = 0; dir < 6; ++dir) {
+          if (!faceRectsById(id, dir).empty())
+            mask |= static_cast<std::uint8_t>(1u << dir);
+        }
+        masks[id] = mask;
+      }
+      return masks;
+    }();
 
-} // namespace light_internal
+} // namespace detail
 
 LightOpticalTable::LightOpticalTable() {
   classes_.push_back({{}, false}); // conservative unsupported sentinel
@@ -179,7 +200,8 @@ LightOpticalTable::LightOpticalTable() {
     for (std::size_t i = 0; i < unsupportedBlocks.size() && i < 40; ++i)
       std::fprintf(stderr, "  %s\n", unsupportedBlocks[i]->name().c_str());
   }
-  std::unordered_map<std::uint64_t, std::uint8_t> byOptics;
+  phmap::flat_hash_map<std::uint64_t, std::uint8_t, light_internal::UInt64Hash>
+      byOptics;
   for (BlockState::Id stateId = 0; stateId < detail::gStateCount; ++stateId) {
     const BlockState state = BlockState::fromId(stateId);
     const BlockLightProperties properties = lightPropertiesOf(state);
@@ -272,13 +294,6 @@ bool hasDifferentLightProperties(const BlockLightProperties &oldProperties,
 
 bool hasDifferentSectionLightProperties(bool wasEmpty, bool isEmpty) {
   return wasEmpty != isEmpty;
-}
-
-bool lightFaceShapesOcclude(const BlockLightProperties &from,
-                            const BlockLightProperties &to,
-                            LightDirection direction) {
-  return light_internal::faceShapesOcclude(from, to,
-                                           static_cast<int>(direction));
 }
 
 } // namespace redstone

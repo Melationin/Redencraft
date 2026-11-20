@@ -16,6 +16,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -578,14 +579,22 @@ bool isFullCubeForTemplateSort(const BlockState &state) noexcept {
   return state.block().metadata().conductor;
 }
 
-std::string resolvePoolAlias(const StructureDefinition &def,
-                             std::string_view poolId,
-                             const std::map<std::string, std::string, std::less<>> &aliases) {
+std::string_view
+resolvePoolAlias(const StructureDefinition &def, std::string_view poolId,
+                 const std::map<std::string, std::string, std::less<>> &aliases) {
+  (void)def;
+  if (aliases.empty())
+    return poolId;
+  if (poolId.find(':') != std::string_view::npos) {
+    if (auto it = aliases.find(poolId); it != aliases.end())
+      return it->second;
+    return poolId;
+  }
+  // 未带命名空间的 id 很少见；只有这种路径才需要构造临时 key。
   const std::string key = normId(poolId);
   if (auto it = aliases.find(key); it != aliases.end())
     return it->second;
-  (void)def;
-  return key;
+  return poolId;
 }
 
 void resolveAliasEntry(const StructureDefinition::PoolAliasEntry &entry,
@@ -626,12 +635,14 @@ void resolveAliasEntry(const StructureDefinition::PoolAliasEntry &entry,
   }
 }
 
-std::vector<StructurePoolElement>
+// 只保留池元素的指针：权重展开数量（即 RNG 消耗与洗牌顺序）不变，但不再为
+// 每个候选复制 StructurePoolElement 的字符串与 children 向量。
+std::vector<const StructurePoolElement *>
 shuffledPoolTemplates(const StructureTemplatePool &pool, RandomSource &rng) {
-  std::vector<StructurePoolElement> expanded;
+  std::vector<const StructurePoolElement *> expanded;
   for (const auto &we : pool.elements) {
     for (int i = 0; i < we.weight; ++i)
-      expanded.push_back(we.element);
+      expanded.push_back(&we.element);
   }
   javaShuffle(expanded, rng);
   return expanded;
@@ -668,26 +679,43 @@ BoundingBox elementBoundingBox(const StructurePoolElement &el,
   return BoundingBox{pos.x, pos.y, pos.z, pos.x, pos.y, pos.z};
 }
 
-std::vector<JigsawBlockInfo>
+// 指向模板自有 jigsaw 数据的轻量引用：洗牌与排序只搬 32 字节，不再复制
+// JigsawBlockInfo 的 6 个字符串。offset 对应 getJigsaws(pos, rot) 的平移。
+struct ShuffledJigsaw {
+  const JigsawBlockInfo *borrowed = nullptr;
+  std::unique_ptr<JigsawBlockInfo> owned;
+  Pos offset{};
+  const JigsawBlockInfo &get() const { return owned ? *owned : *borrowed; }
+  Pos position() const {
+    const Pos &p = get().info.pos;
+    return Pos{p.x + offset.x, p.y + offset.y, p.z + offset.z};
+  }
+};
+
+std::vector<ShuffledJigsaw>
 elementShuffledJigsaws(const StructurePoolElement &el,
                        const StructureTemplateCache &templates, Pos pos,
                        Rotation rot, RandomSource &rng) {
-  std::vector<JigsawBlockInfo> jigsaws;
+  std::vector<ShuffledJigsaw> jigsaws;
   if (el.kind == StructurePoolElement::Kind::Single ||
       el.kind == StructurePoolElement::Kind::LegacySingle) {
     if (const auto *tmpl = templates.getOrLoad(el.location)) {
-      jigsaws = tmpl->getJigsaws(pos, rot);
+      const auto &src = tmpl->jigsawsFor(pos, rot);
+      jigsaws.reserve(src.size());
+      for (const auto &j : src)
+        jigsaws.push_back(ShuffledJigsaw{&j, nullptr, pos});
     }
   } else if (el.kind == StructurePoolElement::Kind::Feature) {
-    JigsawBlockInfo jb;
-    jb.info.pos = pos;
-    jb.info.state = Blocks::JIGSAW.defaultState().with("orientation", "down_south");
-    jb.name = "minecraft:bottom";
-    jb.target = "minecraft:empty";
-    jb.pool = "minecraft:empty";
-    jb.finalState = "minecraft:air";
-    jb.joint = "rollable";
-    jigsaws.push_back(std::move(jb));
+    auto jb = std::make_unique<JigsawBlockInfo>();
+    jb->info.pos = pos;
+    jb->info.state =
+        Blocks::JIGSAW.defaultState().with("orientation", "down_south");
+    jb->name = "minecraft:bottom";
+    jb->target = "minecraft:empty";
+    jb->pool = "minecraft:empty";
+    jb->finalState = "minecraft:air";
+    jb->joint = "rollable";
+    jigsaws.push_back(ShuffledJigsaw{nullptr, std::move(jb), Pos{0, 0, 0}});
   } else if (el.kind == StructurePoolElement::Kind::List &&
              !el.children.empty()) {
     jigsaws =
@@ -695,8 +723,9 @@ elementShuffledJigsaws(const StructurePoolElement &el,
   }
   javaShuffle(jigsaws, rng);
   std::stable_sort(jigsaws.begin(), jigsaws.end(),
-                   [](const JigsawBlockInfo &a, const JigsawBlockInfo &b) {
-                     return a.selectionPriority > b.selectionPriority;
+                   [](const ShuffledJigsaw &a, const ShuffledJigsaw &b) {
+                     return a.get().selectionPriority >
+                            b.get().selectionPriority;
                    });
   return jigsaws;
 }
@@ -951,22 +980,25 @@ BoundingBox StructureTemplate::boundingBox(Pos anchor, Rotation rotation,
   return BoundingBox::fromCorners(c1, c2).moved(anchor.x, anchor.y, anchor.z);
 }
 
-std::vector<JigsawBlockInfo> StructureTemplate::getJigsaws(Pos pos,
-                                                           Rotation rotation) const {
-  std::vector<JigsawBlockInfo> out;
+const std::vector<JigsawBlockInfo> &
+StructureTemplate::jigsawsFor(Pos pos, Rotation rotation) const {
+  static const std::vector<JigsawBlockInfo> kEmpty;
   if (palettes.empty())
-    return out;
+    return kEmpty;
   std::size_t palIdx = 0;
   if (palettes.size() > 1) {
     LegacyRandomSource r(positionalSeedHash(pos.x, pos.y, pos.z));
     palIdx = static_cast<std::size_t>(
         r.nextInt(static_cast<std::int32_t>(palettes.size())));
   }
-  const auto &src =
-      palettes[palIdx].jigsawsByRotation[static_cast<std::size_t>(rotation)];
+  return palettes[palIdx].jigsawsByRotation[static_cast<std::size_t>(rotation)];
+}
+
+std::vector<JigsawBlockInfo> StructureTemplate::getJigsaws(Pos pos,
+                                                           Rotation rotation) const {
+  std::vector<JigsawBlockInfo> out = jigsawsFor(pos, rotation);
   if (pos.x == 0 && pos.y == 0 && pos.z == 0)
-    return src;
-  out = src;
+    return out;
   for (auto &j : out) {
     j.info.pos.x += pos.x;
     j.info.pos.y += pos.y;
@@ -1107,19 +1139,19 @@ StructureTemplate::loadFromGzipNbtFile(const std::filesystem::path &p) {
 
 const StructureTemplate *
 StructureTemplateCache::getOrLoad(std::string_view templateId) const {
-  const std::string key = normId(templateId);
   {
-    std::lock_guard lock(mutex_);
-    if (auto it = cache_.find(key); it != cache_.end())
+    std::shared_lock lock(mutex_);
+    if (auto it = cache_.find(templateId); it != cache_.end())
       return it->second.get();
   }
+  const std::string key = normId(templateId);
   const std::filesystem::path file =
       nbtRoot_ / (stripNamespace(key) + ".nbt");
   if (!std::filesystem::exists(file))
     return nullptr;
-  auto loaded =
-      std::make_shared<StructureTemplate>(StructureTemplate::loadFromGzipNbtFile(file));
-  std::lock_guard lock(mutex_);
+  auto loaded = std::make_shared<StructureTemplate>(
+      StructureTemplate::loadFromGzipNbtFile(file));
+  std::unique_lock lock(mutex_);
   auto [it, inserted] = cache_.emplace(key, std::move(loaded));
   return it->second.get();
 }
@@ -1208,7 +1240,7 @@ std::optional<StructureStart> generateJigsawStructureStart(
 
   const Rotation centerRot =
       static_cast<Rotation>(random.nextInt(4));
-  const std::string resolvedStartPool =
+  const std::string_view resolvedStartPool =
       resolvePoolAlias(def, def.startPool, aliases);
   const auto *centerPool = regs.findTemplatePool(resolvedStartPool);
   if (!centerPool)
@@ -1226,8 +1258,8 @@ std::optional<StructureStart> generateJigsawStructureStart(
                                                 startPos, centerRot, random);
     bool found = false;
     for (const auto &jb : jigsaws) {
-      if (jb.name == def.startJigsawName) {
-        anchoredPos = jb.info.pos;
+      if (jb.get().name == def.startJigsawName) {
+        anchoredPos = jb.position();
         found = true;
         break;
       }
@@ -1333,32 +1365,35 @@ std::optional<StructureStart> generateJigsawStructureStart(
 
     struct PieceState {
       std::size_t pieceIdx = 0;
-      StructurePoolElement element;
+      const StructurePoolElement *element = nullptr;
       std::shared_ptr<FreeRegion> free;
       int depth = 0;
     };
     std::map<int, std::deque<PieceState>, std::greater<int>> placing;
 
     auto tryChildren = [&](const PieceState &srcState) {
-      const StructurePiece srcPieceCopy = result.pieces[srcState.pieceIdx];
-      const BoundingBox srcBB = srcPieceCopy.boundingBox;
+      // 只拷贝后续用到的标量：result.pieces 会在本次调用中 push_back，引用会失效，
+      // 但不需要复制整条 StructurePiece（含模板 id 字符串与 junction 向量）。
+      const StructurePiece &srcPiece = result.pieces[srcState.pieceIdx];
+      const BoundingBox srcBB = srcPiece.boundingBox;
+      const Pos srcPos = srcPiece.position;
+      const Rotation srcRot = srcPiece.rotation;
       const int srcBoxY = srcBB.minY;
-      const bool srcRigid = srcState.element.projectionRigid;
+      const bool srcRigid = srcState.element->projectionRigid;
       std::shared_ptr<FreeRegion> insideFree;
 
       for (const auto &srcJigsaw :
-           elementShuffledJigsaws(srcState.element, *templates,
-                                  srcPieceCopy.position, srcPieceCopy.rotation,
+           elementShuffledJigsaws(*srcState.element, *templates, srcPos, srcRot,
                                   random)) {
         Direction srcDir = Direction::North, srcTop = Direction::Up;
-        jigsawOrientation(srcJigsaw.info.state, srcDir, srcTop);
-        const Pos srcJigPos = srcJigsaw.info.pos;
+        jigsawOrientation(srcJigsaw.get().info.state, srcDir, srcTop);
+        const Pos srcJigPos = srcJigsaw.position();
         const Pos targetJigPos = srcJigPos.relative(srcDir);
         const int srcJigLocalY = srcJigPos.y - srcBoxY;
         int cachedBaseHeight = std::numeric_limits<int>::min();
 
-        const std::string targetPoolId =
-            resolvePoolAlias(def, srcJigsaw.pool, aliases);
+        const std::string_view targetPoolId =
+            resolvePoolAlias(def, srcJigsaw.get().pool, aliases);
         const auto *targetPool = regs.findTemplatePool(targetPoolId);
         if (!targetPool)
           continue;
@@ -1381,7 +1416,7 @@ std::optional<StructureStart> generateJigsawStructureStart(
           childrenFree = srcState.free;
         }
 
-        std::vector<StructurePoolElement> candidates;
+        std::vector<const StructurePoolElement *> candidates;
         if (srcState.depth != def.size) {
           auto mainCands = shuffledPoolTemplates(*targetPool, random);
           candidates.insert(candidates.end(),
@@ -1396,28 +1431,28 @@ std::optional<StructureStart> generateJigsawStructureStart(
         }
 
         bool placedThisJigsaw = false;
-        for (const auto &targetEl : candidates) {
+        for (const StructurePoolElement *targetEl : candidates) {
           if (placedThisJigsaw ||
-              targetEl.kind == StructurePoolElement::Kind::Empty) {
+              targetEl->kind == StructurePoolElement::Kind::Empty) {
             break;
           }
           for (Rotation targetRot : shuffledRotations(random)) {
             if (placedThisJigsaw)
               break;
             const auto targetJigsaws = elementShuffledJigsaws(
-                targetEl, *templates, Pos{0, 0, 0}, targetRot, random);
-            const BoundingBox hackBox =
-                elementBoundingBox(targetEl, *templates, Pos{0, 0, 0}, targetRot);
+                *targetEl, *templates, Pos{0, 0, 0}, targetRot, random);
+            const BoundingBox hackBox = elementBoundingBox(
+                *targetEl, *templates, Pos{0, 0, 0}, targetRot);
             int expandTo = 0;
             if (def.useExpansionHack && hackBox.ySpan() <= 16) {
               for (const auto &tj : targetJigsaws) {
                 Direction td = Direction::North, tt = Direction::Up;
-                jigsawOrientation(tj.info.state, td, tt);
-                const Pos adj = tj.info.pos.relative(td);
+                jigsawOrientation(tj.get().info.state, td, tt);
+                const Pos adj = tj.position().relative(td);
                 if (!hackBox.isInside(adj.x, adj.y, adj.z))
                   continue;
-                const std::string cPoolId =
-                    resolvePoolAlias(def, tj.pool, aliases);
+                const std::string_view cPoolId =
+                    resolvePoolAlias(def, tj.get().pool, aliases);
                 if (const auto *cp = regs.findTemplatePool(cPoolId)) {
                   expandTo = std::max(expandTo, elementMaxYSpan(*cp, *templates));
                   if (const auto *cfb = regs.findTemplatePool(cp->fallback)) {
@@ -1429,15 +1464,15 @@ std::optional<StructureStart> generateJigsawStructureStart(
             }
 
             for (const auto &targetJig : targetJigsaws) {
-              if (!jigsawCanAttach(srcJigsaw, targetJig))
+              if (!jigsawCanAttach(srcJigsaw.get(), targetJig.get()))
                 continue;
-              const Pos targetJigLocal = targetJig.info.pos;
+              const Pos targetJigLocal = targetJig.position();
               const Pos rawBoxPos{targetJigPos.x - targetJigLocal.x,
                                   targetJigPos.y - targetJigLocal.y,
                                   targetJigPos.z - targetJigLocal.z};
-              const BoundingBox rawBB =
-                  elementBoundingBox(targetEl, *templates, rawBoxPos, targetRot);
-              const bool targetRigid = targetEl.projectionRigid;
+              const BoundingBox rawBB = elementBoundingBox(
+                  *targetEl, *templates, rawBoxPos, targetRot);
+              const bool targetRigid = targetEl->projectionRigid;
               const Pos step = Pos{0, 0, 0}.relative(srcDir);
               const int deltaY =
                   srcJigLocalY - targetJigLocal.y + step.y;
@@ -1474,7 +1509,7 @@ std::optional<StructureStart> generateJigsawStructureStart(
                   targetRigid ? (srcGDelta - deltaY) : 1;
               const std::size_t newIdx = result.pieces.size();
               result.pieces.push_back(
-                  makePiece(targetEl, targetBoxPos, targetGDelta, targetRot,
+                  makePiece(*targetEl, targetBoxPos, targetGDelta, targetRot,
                             targetBB));
 
               int junctionY = 0;
@@ -1501,7 +1536,7 @@ std::optional<StructureStart> generateJigsawStructureStart(
                                  srcJigPos.z, -deltaY, srcRigid});
 
               if (srcState.depth + 1 <= def.size) {
-                placing[srcJigsaw.placementPriority].push_back(
+                placing[srcJigsaw.get().placementPriority].push_back(
                     PieceState{newIdx, targetEl, childrenFree,
                                srcState.depth + 1});
               }
@@ -1513,7 +1548,7 @@ std::optional<StructureStart> generateJigsawStructureStart(
       }
     };
 
-    tryChildren(PieceState{0, centerElement, outerFree, 0});
+    tryChildren(PieceState{0, &centerElement, outerFree, 0});
     while (!placing.empty()) {
       auto topIt = placing.begin();
       auto state = std::move(topIt->second.front());

@@ -1,4 +1,5 @@
 #include "redstone/entity_codec.hpp"
+#include "redstone/block.hpp"
 #include <algorithm>
 
 #include <cmath>
@@ -103,6 +104,22 @@ bool normalizeItemEntity(ItemEntityData &item, std::string &error) {
 
 bool normalizeTntEntity(TntEntityData &entity, std::string &error) {
   return normalizeEntityBase(entity, "tnt", error);
+}
+
+bool validateFallingBlockState(
+    const std::string &blockId,
+    const std::map<std::string, std::string> &properties, std::string &error) {
+  const Block *block = findBlockByName(blockId);
+  if (!block) {
+    error = "falling block state is not registered";
+    return false;
+  }
+  std::uint32_t variant = 0;
+  if (!block->stateDefinition().variantOf(properties, variant)) {
+    error = "falling block state properties are invalid";
+    return false;
+  }
+  return true;
 }
 
 bool normalizeFallingBlockEntity(FallingBlockEntityData &entity,
@@ -406,18 +423,43 @@ bool decodeFallingBlock(const nbt::Tag &entity, std::int32_t chunkX,
   out.fireTicks = static_cast<int>(fire->number);
   out.fallDistance = fall->real;
 
+  out.blockId = "minecraft:sand";
+  out.blockProperties.clear();
   const nbt::Tag *blockState = field(entity, "BlockState");
   if (blockState) {
-    const nbt::Tag *name = blockState->type == 10
-                               ? required(*blockState, "Name", 8)
-                               : nullptr;
-    if (!name || name->text != "minecraft:sand" ||
-        blockState->compound.size() != 1) {
-      error = "falling block state is not the supported default sand state";
+    if (blockState->type != 10) {
+      error = "falling block BlockState is not a compound";
       return false;
     }
+    for (const auto &[key, value] : blockState->compound) {
+      (void)value;
+      if (key != "Name" && key != "Properties") {
+        error = "falling block BlockState contains unsupported field: " + key;
+        return false;
+      }
+    }
+    const nbt::Tag *name = required(*blockState, "Name", 8);
+    if (!name) {
+      error = "falling block BlockState is missing Name";
+      return false;
+    }
+    out.blockId = name->text;
+    if (const nbt::Tag *props = field(*blockState, "Properties")) {
+      if (props->type != 10) {
+        error = "falling block BlockState Properties is not a compound";
+        return false;
+      }
+      for (const auto &[k, v] : props->compound) {
+        if (v.type != 8) {
+          error = "falling block BlockState property is not a string";
+          return false;
+        }
+        out.blockProperties[k] = v.text;
+      }
+    }
   }
-  out.blockId = "minecraft:sand";
+  if (!validateFallingBlockState(out.blockId, out.blockProperties, error))
+    return false;
 
   const nbt::Tag *time = field(entity, "Time");
   if (time) {
@@ -445,27 +487,25 @@ bool decodeFallingBlock(const nbt::Tag &entity, std::int32_t chunkX,
     error = "falling block boolean field is invalid";
     return false;
   }
+  out.fallDamagePerDistance = 0.0f;
   const nbt::Tag *damagePerDistance = field(entity, "FallHurtAmount");
   if (damagePerDistance) {
     if (damagePerDistance->type != 5 ||
         !std::isfinite(damagePerDistance->real) ||
-        static_cast<float>(damagePerDistance->real) != 0.0f) {
+        damagePerDistance->real < 0.0) {
       error = "falling block damage behaviour is unsupported";
       return false;
     }
-  }
-  out.fallDamagePerDistance = 0.0f;
-  const nbt::Tag *damageMax = field(entity, "FallHurtMax");
-  if (damageMax) {
-    if (damageMax->type != 3 || damageMax->number != 40) {
-      error = "falling block damage behaviour is unsupported";
-      return false;
-    }
+    out.fallDamagePerDistance = static_cast<float>(damagePerDistance->real);
   }
   out.fallDamageMax = 40;
-  if (out.hurtEntities) {
-    error = "falling block HurtEntities is unsupported";
-    return false;
+  const nbt::Tag *damageMax = field(entity, "FallHurtMax");
+  if (damageMax) {
+    if (damageMax->type != 3 || damageMax->number < 0) {
+      error = "falling block damage behaviour is unsupported";
+      return false;
+    }
+    out.fallDamageMax = static_cast<int>(damageMax->number);
   }
   return true;
 }
@@ -865,10 +905,12 @@ nbt::Tag encodeFallingBlockEntity(const FallingBlockEntityData &source,
                                     std::string &error) {
   FallingBlockEntityData entity = source;
   if (!normalizeFallingBlockEntity(entity, error) ||
-      entity.uuid == EntityUuid{} || entity.blockId != "minecraft:sand" ||
+      entity.uuid == EntityUuid{} ||
+      !validateFallingBlockState(entity.blockId, entity.blockProperties,
+                                 error) ||
       entity.time < 0 || entity.time >= std::numeric_limits<int>::max() ||
-      entity.hurtEntities || entity.fallDamagePerDistance != 0.0f ||
-      entity.fallDamageMax != 40) {
+      !std::isfinite(entity.fallDamagePerDistance) ||
+      entity.fallDamagePerDistance < 0.0f || entity.fallDamageMax < 0) {
     if (error.empty())
       error = "falling block snapshot is invalid";
     return {};
@@ -892,16 +934,23 @@ nbt::Tag encodeFallingBlockEntity(const FallingBlockEntityData &source,
   add(tag, "Invulnerable", integerTag(1, 0));
   nbt::Tag block;
   block.type = 10;
-  add(block, "Name", stringTag("minecraft:sand"));
+  add(block, "Name", stringTag(entity.blockId));
+  if (!entity.blockProperties.empty()) {
+    nbt::Tag props;
+    props.type = 10;
+    for (const auto &[k, v] : entity.blockProperties)
+      add(props, k, stringTag(v));
+    add(block, "Properties", std::move(props));
+  }
   add(tag, "BlockState", std::move(block));
   add(tag, "Time", integerTag(3, entity.time));
   add(tag, "DropItem", integerTag(1, entity.dropItem ? 1 : 0));
-  add(tag, "HurtEntities", integerTag(1, 0));
+  add(tag, "HurtEntities", integerTag(1, entity.hurtEntities ? 1 : 0));
   nbt::Tag damagePerDistance;
   damagePerDistance.type = 5;
-  damagePerDistance.real = 0.0;
+  damagePerDistance.real = entity.fallDamagePerDistance;
   add(tag, "FallHurtAmount", std::move(damagePerDistance));
-  add(tag, "FallHurtMax", integerTag(3, 40));
+  add(tag, "FallHurtMax", integerTag(3, entity.fallDamageMax));
   add(tag, "CancelDrop", integerTag(1, entity.cancelDrop ? 1 : 0));
   return tag;
 }

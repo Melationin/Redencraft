@@ -56,8 +56,8 @@ struct TntEntityData {
   float explosionPower = 4.0f;
 };
 
-// C++ 下落方块路径目前提供标准沙子语义：重力、自由落体、落地放置与遇阻掉落。
-// 紧凑编解码器仅接受该精确默认沙子状态；红沙、砾石、砸伤、TileEntityData、自定义方块状态等未建模变体必须整体拒绝，以免丢失状态。
+// C++ 下落方块持久化支持已注册的 schema 方块状态（`Name` + 可选 `Properties`）及伤害参数；
+// `TileEntityData` 与未在 26.1 注册表内建模的方块状态仍整体拒绝，以免丢失状态。
 struct FallingBlockEntityData {
   std::array<std::int32_t, 4> uuid{};
   std::array<double, 3> pos{};
@@ -67,6 +67,7 @@ struct FallingBlockEntityData {
   int fireTicks = 0;
   double fallDistance = 0.0;
   std::string blockId = "minecraft:sand";
+  std::map<std::string, std::string> blockProperties{};
   int time = 0;
   bool dropItem = true;
   bool cancelDrop = false;

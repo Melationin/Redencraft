@@ -27,7 +27,7 @@ std::string stateKey(const BlockState &s) {
   return out;
 }
 
-std::uint64_t fnvHashChunk(const ChunkAccess &chunk) {
+std::uint64_t fnvHashChunk(const BaseChunk &chunk) {
   std::uint64_t h = 0xcbf29ce484222325ULL;
   const int minX = chunk.pos().x << 4;
   const int minZ = chunk.pos().z << 4;
@@ -49,7 +49,7 @@ std::uint64_t fnvHashChunk(const ChunkAccess &chunk) {
   return h;
 }
 
-std::string dumpColumnRuns(const ChunkAccess &chunk, int lx, int lz) {
+std::string dumpColumnRuns(const BaseChunk &chunk, int lx, int lz) {
   const int bx = (chunk.pos().x << 4) + lx;
   const int bz = (chunk.pos().z << 4) + lz;
   const int minY = chunk.minY();
@@ -81,7 +81,7 @@ std::string dumpColumnRuns(const ChunkAccess &chunk, int lx, int lz) {
   return joined;
 }
 
-std::map<std::string, int> countChunkBlockNames(const ChunkAccess &chunk) {
+std::map<std::string, int> countChunkBlockNames(const BaseChunk &chunk) {
   std::map<std::string, int> counts;
   const int minX = chunk.pos().x << 4;
   const int minZ = chunk.pos().z << 4;
@@ -98,7 +98,7 @@ std::map<std::string, int> countChunkBlockNames(const ChunkAccess &chunk) {
   return counts;
 }
 
-void assertChunkHash(const ChunkAccess &chunk, std::uint64_t expectedHash,
+void assertChunkHash(const BaseChunk &chunk, std::uint64_t expectedHash,
                      std::string_view label) {
   const std::uint64_t got = fnvHashChunk(chunk);
   if (got != expectedHash) {
@@ -110,7 +110,7 @@ void assertChunkHash(const ChunkAccess &chunk, std::uint64_t expectedHash,
   }
 }
 
-void assertBlockHistogram(const ChunkAccess &chunk,
+void assertBlockHistogram(const BaseChunk &chunk,
                           const std::map<std::string, int> &expected,
                           std::string_view label) {
   const auto got = countChunkBlockNames(chunk);
@@ -126,14 +126,14 @@ void assertBlockHistogram(const ChunkAccess &chunk,
   }
 }
 
-void assertColumn(ChunkAccess &chunk, const NoiseBasedChunkGenerator &gen,
+void assertColumn(BaseChunk &chunk, const NoiseBasedChunkGenerator &gen,
                   std::int64_t seed, int lx, int lz, int expectedWs,
                   int expectedOf, int expectedBh, std::string_view expectedBiome,
                   std::string_view expectedRuns, std::string_view label) {
   const int bx = (chunk.pos().x << 4) + lx;
   const int bz = (chunk.pos().z << 4) + lz;
-  const int ws = chunk.getHeight(HeightmapType::WorldSurfaceWG, lx, lz);
-  const int of = chunk.getHeight(HeightmapType::OceanFloorWG, lx, lz);
+  const int ws = chunkHeight(chunk, HeightmapType::WorldSurfaceWG, lx, lz);
+  const int of = chunkHeight(chunk, HeightmapType::OceanFloorWG, lx, lz);
   const int bh = gen.getBaseHeight(bx, bz, HeightmapType::WorldSurfaceWG, seed);
   const std::string_view biome =
       chunk.getNoiseBiome(bx >> 2, ws >> 2, bz >> 2);
@@ -195,8 +195,8 @@ int main(int argc, char **argv) {
     ChunkGenerationPipeline pipe(gen, kSeed1);
 
     // River + caves + deepslate/stone transition
-    ChunkAccess &c00 = pipe.ensureStatus(ChunkTicketPos{0, 0}, ChunkStatusId::Surface);
-    assert(c00.persistedStatus() == ChunkStatusId::Surface);
+    BaseChunk &c00 = pipe.ensureStatus(ChunkTicketPos{0, 0}, ChunkStatusId::Surface);
+    assert(chunkPersistedStatus(c00) == ChunkStatusId::Surface);
     assertColumn(c00, gen, kSeed1, 0, 0, 62, 54, 63, "minecraft:river",
                  "-64..-61=minecraft:bedrock;-60..-28=minecraft:deepslate;"
                  "-24..-16=minecraft:deepslate;-11..5=minecraft:deepslate;"
@@ -224,7 +224,7 @@ int main(int argc, char **argv) {
     assertChunkHash(c00, 0x8ba53b098eafeb39ULL, "overworld(0,0)");
 
     // Forest
-    ChunkAccess &c3m2 =
+    BaseChunk &c3m2 =
         pipe.ensureStatus(ChunkTicketPos{3, -2}, ChunkStatusId::Surface);
     assertColumn(c3m2, gen, kSeed1, 0, 0, 64, 64, 65, "minecraft:forest",
                  "-64..-62=minecraft:bedrock;-61..-25=minecraft:deepslate;"
@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
     assertChunkHash(c3m2, 0x3aec8b4062bc3706ULL, "overworld(3,-2)");
 
     // Ore vein + lava aquifer (-6, 1)
-    ChunkAccess &cOreLava =
+    BaseChunk &cOreLava =
         pipe.ensureStatus(ChunkTicketPos{-6, 1}, ChunkStatusId::Surface);
     assertBlockHistogram(cOreLava,
                          {{"minecraft:air", 62550},
@@ -271,7 +271,7 @@ int main(int argc, char **argv) {
     assertChunkHash(cOreLava, 0x5455e4b63a19fa9aULL, "overworld(-6,1)");
 
     // Eroded badlands (-154, -138) terracotta bands + red sand
-    ChunkAccess &cBadlands =
+    BaseChunk &cBadlands =
         pipe.ensureStatus(ChunkTicketPos{-154, -138}, ChunkStatusId::Surface);
     assertColumn(cBadlands, gen, kSeed1, 8, 8, 58, 58, 59,
                  "minecraft:eroded_badlands",
@@ -285,17 +285,17 @@ int main(int argc, char **argv) {
     assertChunkHash(cBadlands, 0xe90b660058f37a78ULL, "overworld(-154,-138)");
 
     // Frozen ocean + iceberg with packed_ice
-    ChunkAccess &cFrozen =
+    BaseChunk &cFrozen =
         pipe.ensureStatus(ChunkTicketPos{146, -122}, ChunkStatusId::Surface);
     assertChunkHash(cFrozen, 0x397d100aeb1acea3ULL, "overworld(146,-122)");
 
-    ChunkAccess &cIceberg =
+    BaseChunk &cIceberg =
         pipe.ensureStatus(ChunkTicketPos{148, -122}, ChunkStatusId::Surface);
     assertChunkHash(cIceberg, 0xd462a89a8a94da37ULL, "overworld(148,-122)");
 
     // Second seed Overworld (-2, 5)
     ChunkGenerationPipeline pipe2(gen, kSeed2);
-    ChunkAccess &cSeed2 =
+    BaseChunk &cSeed2 =
         pipe2.ensureStatus(ChunkTicketPos{-2, 5}, ChunkStatusId::Surface);
     assertChunkHash(cSeed2, 0x7078a1e40a58c2cbULL, "overworld(-2,5) seed2");
 
@@ -316,7 +316,7 @@ int main(int argc, char **argv) {
         MultiNoiseBiomeSource::createNether());
     NoiseBasedChunkGenerator gen(reg, *neSettings, neBiomes, redstone::netherDimensionType().minY, redstone::netherDimensionType().height);
     ChunkGenerationPipeline pipe(gen, kSeed1);
-    ChunkAccess &c00 = pipe.ensureStatus(ChunkTicketPos{0, 0}, ChunkStatusId::Surface);
+    BaseChunk &c00 = pipe.ensureStatus(ChunkTicketPos{0, 0}, ChunkStatusId::Surface);
     assertColumn(c00, gen, kSeed1, 4, 11, 127, 127, 128, "minecraft:nether_wastes",
                  "0..1=minecraft:bedrock;2..51=minecraft:netherrack;"
                  "63..65=minecraft:netherrack;109..123=minecraft:netherrack;"
@@ -324,7 +324,7 @@ int main(int argc, char **argv) {
                  "nether(0,0)[4,11]");
     assertChunkHash(c00, 0xbc8347302940e598ULL, "nether(0,0)");
 
-    ChunkAccess &cBasalt =
+    BaseChunk &cBasalt =
         pipe.ensureStatus(ChunkTicketPos{0, 8}, ChunkStatusId::Surface);
     assertChunkHash(cBasalt, 0x05ed59abddd857fdULL, "nether(0,8) basalt_deltas");
   }
@@ -336,12 +336,12 @@ int main(int argc, char **argv) {
     auto enBiomes = std::make_shared<TheEndBiomeSource>();
     NoiseBasedChunkGenerator gen(reg, *enSettings, enBiomes, redstone::endDimensionType().minY, redstone::endDimensionType().height);
     ChunkGenerationPipeline pipe(gen, kSeed1);
-    ChunkAccess &c00 = pipe.ensureStatus(ChunkTicketPos{0, 0}, ChunkStatusId::Surface);
+    BaseChunk &c00 = pipe.ensureStatus(ChunkTicketPos{0, 0}, ChunkStatusId::Surface);
     assertColumn(c00, gen, kSeed1, 2, 3, 63, 63, 64, "minecraft:the_end",
                  "14..63=minecraft:end_stone", "end(0,0)[2,3]");
     assertChunkHash(c00, 0x2e1ba913b19f5c19ULL, "end(0,0)");
 
-    ChunkAccess &cOuter =
+    BaseChunk &cOuter =
         pipe.ensureStatus(ChunkTicketPos{70, 0}, ChunkStatusId::Surface);
     assertChunkHash(cOuter, 0x326b9ac2f7f62325ULL, "end(70,0)");
   }

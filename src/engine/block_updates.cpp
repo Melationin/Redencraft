@@ -252,7 +252,7 @@ bool World::setBlock(Pos p, BlockState state, int flags, int limit) {
   if (old == state)
     return false;
   targetSection.set(localIndex, state.id(), /*compact=*/true,
-                    directResizeMutex());
+                    directResizeMutex(*changedChunk));
   updateChunkRandomTickMask(*changedChunk, chunkKey(targetCx, targetCz),
                             targetSi, targetSection.isRandomlyTicking());
   if (poiStorage_ &&

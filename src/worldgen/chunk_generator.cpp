@@ -1,7 +1,9 @@
 #include "redstone/worldgen/chunk_generator.hpp"
 
+#include "redstone/chunk_map.hpp"
 #include "redstone/engine.hpp"
 #include "redstone/light/chunk_input.hpp"
+#include "redstone/light/initial_chunk_lighter.hpp"
 #include "redstone/light/service.hpp"
 
 #include <algorithm>
@@ -53,11 +55,13 @@ void copySnapshotLayerToOptional(const LightSectionSnapshot *secSnap,
 
 } // namespace
 
-WorldGenRegion::WorldGenRegion(const ChunkStep &step, ChunkAccess &center,
-                               std::vector<ChunkAccess *> squareCache,
-                               int radius, std::int64_t worldSeed)
+WorldGenRegion::WorldGenRegion(
+    const ChunkStep &step, ProtoChunk &center,
+    std::vector<BaseChunk *> squareCache, int radius, std::int64_t worldSeed,
+    std::vector<std::shared_ptr<BaseChunk>> pinnedChunks)
     : step_(step), center_(center), cache_(std::move(squareCache)),
-      radius_(radius), stride_(radius * 2 + 1), worldSeed_(worldSeed) {
+      pinned_(std::move(pinnedChunks)), radius_(radius),
+      stride_(radius * 2 + 1), worldSeed_(worldSeed) {
   const std::size_t expected = static_cast<std::size_t>(stride_) * stride_;
   if (cache_.size() != expected) {
     throw std::invalid_argument(
@@ -72,8 +76,8 @@ bool WorldGenRegion::hasChunk(int chunkX, int chunkZ) const noexcept {
   return static_cast<std::size_t>(dist) < step_.directDependencies().size();
 }
 
-ChunkAccess *WorldGenRegion::getChunkIfAllowed(int chunkX, int chunkZ,
-                                               ChunkStatusId minStatus) const {
+BaseChunk *WorldGenRegion::getChunkIfAllowed(int chunkX, int chunkZ,
+                                             ChunkStatusId minStatus) const {
   const int dx = chunkX - center_.pos().x;
   const int dz = chunkZ - center_.pos().z;
   const int dist = std::max(std::abs(dx), std::abs(dz));
@@ -94,20 +98,41 @@ ChunkAccess *WorldGenRegion::getChunkIfAllowed(int chunkX, int chunkZ,
   const std::size_t idx =
       static_cast<std::size_t>(dz + radius_) * stride_ +
       static_cast<std::size_t>(dx + radius_);
-  ChunkAccess *chunk = cache_[idx];
+  BaseChunk *chunk = cache_[idx];
   if (!chunk)
     return nullptr;
-  if (static_cast<int>(chunk->persistedStatus()) < static_cast<int>(minStatus))
+  if (static_cast<int>(chunkPersistedStatus(*chunk)) <
+      static_cast<int>(minStatus))
     return nullptr;
   return chunk;
 }
 
-ChunkAccess &WorldGenRegion::getChunk(int chunkX, int chunkZ,
-                                      ChunkStatusId minStatus) const {
-  ChunkAccess *chunk = getChunkIfAllowed(chunkX, chunkZ, minStatus);
+BaseChunk &WorldGenRegion::getChunk(int chunkX, int chunkZ,
+                                    ChunkStatusId minStatus) const {
+  BaseChunk *chunk = getChunkIfAllowed(chunkX, chunkZ, minStatus);
   if (!chunk) {
-    throw std::out_of_range(
-        "Requested chunk unavailable or outside direct dependency bounds");
+    const int dx = chunkX - center_.pos().x;
+    const int dz = chunkZ - center_.pos().z;
+    const int dist = std::max(std::abs(dx), std::abs(dz));
+    std::string detail = "Requested chunk (" + std::to_string(chunkX) + "," +
+                         std::to_string(chunkZ) + ") minStatus=" +
+                         std::to_string(static_cast<int>(minStatus)) +
+                         " center=(" + std::to_string(center_.pos().x) + "," +
+                         std::to_string(center_.pos().z) + ") stage=" +
+                         std::to_string(static_cast<int>(step_.targetStatus())) +
+                         " dist=" + std::to_string(dist) +
+                         " depSize=" +
+                         std::to_string(step_.directDependencies().size());
+    if (std::abs(dx) <= radius_ && std::abs(dz) <= radius_) {
+      const std::size_t idx =
+          static_cast<std::size_t>(dz + radius_) * stride_ +
+          static_cast<std::size_t>(dx + radius_);
+      BaseChunk *raw = cache_[idx];
+      detail += raw ? (" actualStatus=" +
+                       std::to_string(static_cast<int>(chunkPersistedStatus(*raw))))
+                    : " cache=null";
+    }
+    throw std::out_of_range(detail);
   }
   return *chunk;
 }
@@ -126,21 +151,34 @@ bool WorldGenRegion::ensureCanWrite(int x, int y, int z) const noexcept {
 }
 
 BlockState WorldGenRegion::getBlockState(int x, int y, int z) const {
-  return getChunk(x >> 4, z >> 4, ChunkStatusId::Empty).getBlockState(x, y, z);
+  BaseChunk &chunk = getChunk(x >> 4, z >> 4, ChunkStatusId::Empty);
+  if (chunk.isWorldChunk() && chunk.resizeMutex != nullptr) {
+    std::shared_lock<std::shared_mutex> lock(*chunk.resizeMutex);
+    return chunk.getBlockState(x, y, z);
+  }
+  return chunk.getBlockState(x, y, z);
 }
 
 FluidState WorldGenRegion::getFluidState(int x, int y, int z) const {
-  return getChunk(x >> 4, z >> 4, ChunkStatusId::Empty).getFluidState(x, y, z);
+  BaseChunk &chunk = getChunk(x >> 4, z >> 4, ChunkStatusId::Empty);
+  if (chunk.isWorldChunk() && chunk.resizeMutex != nullptr) {
+    std::shared_lock<std::shared_mutex> lock(*chunk.resizeMutex);
+    return chunk.getFluidState(x, y, z);
+  }
+  return chunk.getFluidState(x, y, z);
 }
 
 bool WorldGenRegion::setBlockState(int x, int y, int z, const BlockState &state,
                                    int flags) {
   if (!ensureCanWrite(x, y, z))
     return false;
-  ChunkAccess &chunk = getChunk(x >> 4, z >> 4, ChunkStatusId::Empty);
-  chunk.setBlockState(x, y, z, state, flags);
+  BaseChunk &chunk = getChunk(x >> 4, z >> 4, ChunkStatusId::Empty);
+  if (!chunk.isProtoChunk())
+    return false;
+  auto &proto = static_cast<ProtoChunk &>(chunk);
+  proto.setBlockState(x, y, z, state, flags);
   if ((flags & 16) == 0 && needsPostProcess(state))
-    chunk.markPosForPostprocessing(x, y, z);
+    proto.markPosForPostprocessing(x, y, z);
   return true;
 }
 
@@ -153,18 +191,19 @@ std::string_view WorldGenRegion::getNoiseBiome(int quartX, int quartY,
 }
 
 int WorldGenRegion::getHeight(HeightmapType type, int x, int z) const {
-  return getChunk(x >> 4, z >> 4, ChunkStatusId::Empty).getHeight(type, x, z);
+  return chunkHeight(getChunk(x >> 4, z >> 4, ChunkStatusId::Empty), type, x,
+                     z);
 }
 
 ChunkGenerationPipeline::ChunkGenerationPipeline(
     ChunkGenerator &generator, std::int64_t worldSeed, RawChunkStore *diskStore,
     World *residentWorld, std::shared_ptr<LightOpticalContext> lightContext,
-    GeneratedLightQueue *lightQueue)
+    GeneratedLightQueue *lightQueue, bool asyncWorldGenLight)
     : generator_(generator), worldSeed_(worldSeed), diskStore_(diskStore),
       residentWorld_(residentWorld), lightContext_(std::move(lightContext)),
-      lightQueue_(lightQueue) {}
+      lightQueue_(lightQueue), asyncWorldGenLight_(asyncWorldGenLight) {}
 
-ChunkAccess *ChunkGenerationPipeline::findChunk(ChunkTicketPos pos) const {
+BaseChunk *ChunkGenerationPipeline::findChunk(ChunkTicketPos pos) const {
   auto it = chunks_.find(pos);
   return it == chunks_.end() ? nullptr : it->second.get();
 }
@@ -174,27 +213,29 @@ ChunkGenerationPipeline::takeProtoChunk(ChunkTicketPos pos) {
   auto it = chunks_.find(pos);
   if (it == chunks_.end())
     return nullptr;
-  auto proto = std::dynamic_pointer_cast<ProtoChunk>(it->second);
-  if (!proto)
+  if (!it->second || !it->second->isProtoChunk())
     return nullptr;
+  auto proto = std::static_pointer_cast<ProtoChunk>(it->second);
   it->second.reset();
   chunks_.erase(it);
   startedLoadedFromStore_.erase(pos);
   return proto;
 }
 
-ChunkAccess &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
+BaseChunk &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
   if (auto it = chunks_.find(pos); it != chunks_.end())
     return *it->second;
 
   if (residentWorld_ != nullptr &&
       residentWorld_->isChunkLoaded(pos.x, pos.z)) {
-    auto imposter = std::make_shared<ImposterProtoChunk>(*residentWorld_, pos,
-                                                         false);
-    ChunkAccess &ref = *imposter;
-    chunks_.emplace(pos, std::move(imposter));
-    startedLoadedFromStore_[pos] = true;
-    return ref;
+    if (auto holder = residentWorld_->chunkMap().findHolder(pos)) {
+      if (auto shared = holder->worldShared()) {
+        BaseChunk &ref = *shared;
+        chunks_.emplace(pos, std::move(shared));
+        startedLoadedFromStore_[pos] = true;
+        return ref;
+      }
+    }
   }
 
   if (diskStore_ != nullptr) {
@@ -209,7 +250,7 @@ ChunkAccess &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
                                  std::to_string(pos.z) + "): " + err);
       }
       auto ptr = std::make_shared<ProtoChunk>(std::move(*loaded));
-      ChunkAccess &ref = *ptr;
+      BaseChunk &ref = *ptr;
       chunks_.emplace(pos, std::move(ptr));
       startedLoadedFromStore_[pos] = true;
       ++stats_.chunksLoadedFromStore;
@@ -222,17 +263,17 @@ ChunkAccess &ChunkGenerationPipeline::getOrLoadChunk(ChunkTicketPos pos) {
 
   auto proto = std::make_shared<ProtoChunk>(pos, generator_.chunkMinY(),
                                             generator_.chunkHeight());
-  ChunkAccess &ref = *proto;
+  BaseChunk &ref = *proto;
   chunks_.emplace(pos, std::move(proto));
   startedLoadedFromStore_[pos] = false;
   ++stats_.chunksCreated;
   return ref;
 }
 
-ChunkAccess &ChunkGenerationPipeline::ensureStatus(ChunkTicketPos pos,
-                                                   ChunkStatusId targetStatus) {
-  ChunkAccess &chunk = getOrLoadChunk(pos);
-  if (static_cast<int>(chunk.persistedStatus()) >=
+BaseChunk &ChunkGenerationPipeline::ensureStatus(ChunkTicketPos pos,
+                                                 ChunkStatusId targetStatus) {
+  BaseChunk &chunk = getOrLoadChunk(pos);
+  if (static_cast<int>(chunkPersistedStatus(chunk)) >=
       static_cast<int>(targetStatus)) {
     return chunk;
   }
@@ -240,15 +281,15 @@ ChunkAccess &ChunkGenerationPipeline::ensureStatus(ChunkTicketPos pos,
   const bool fromLoaded = startedLoadedFromStore_[pos];
   const ChunkPyramid &pyramid =
       fromLoaded &&
-              static_cast<int>(chunk.persistedStatus()) >=
+              static_cast<int>(chunkPersistedStatus(chunk)) >=
                   static_cast<int>(ChunkStatusId::Spawn)
           ? ChunkPyramid::loadingPyramid()
           : ChunkPyramid::generationPyramid();
 
-  while (static_cast<int>(chunk.persistedStatus()) <
+  while (static_cast<int>(chunkPersistedStatus(chunk)) <
          static_cast<int>(targetStatus)) {
     const ChunkStatusId nextStatus = static_cast<ChunkStatusId>(
-        static_cast<int>(chunk.persistedStatus()) + 1);
+        static_cast<int>(chunkPersistedStatus(chunk)) + 1);
     const ChunkStep &step = pyramid.getStepTo(nextStatus);
     advanceOneStep(pos, chunk, step, fromLoaded);
   }
@@ -256,18 +297,21 @@ ChunkAccess &ChunkGenerationPipeline::ensureStatus(ChunkTicketPos pos,
 }
 
 void ChunkGenerationPipeline::advanceOneStep(ChunkTicketPos pos,
-                                             ChunkAccess &chunk,
+                                             BaseChunk &chunk,
                                              const ChunkStep &step,
                                              bool) {
+  if (!chunk.isProtoChunk())
+    return;
+  auto &proto = static_cast<ProtoChunk &>(chunk);
   const int radius = step.directDependencies().getRadius();
   const int stride = radius * 2 + 1;
-  std::vector<ChunkAccess *> squareCache(static_cast<std::size_t>(stride) *
-                                             stride,
-                                         nullptr);
+  std::vector<BaseChunk *> squareCache(static_cast<std::size_t>(stride) *
+                                           stride,
+                                       nullptr);
   for (int dz = -radius; dz <= radius; ++dz) {
     for (int dx = -radius; dx <= radius; ++dx) {
       const int dist = std::max(std::abs(dx), std::abs(dz));
-      ChunkAccess *entry = nullptr;
+      BaseChunk *entry = nullptr;
       if (dx == 0 && dz == 0) {
         entry = &chunk;
       } else if (static_cast<std::size_t>(dist) <
@@ -282,16 +326,14 @@ void ChunkGenerationPipeline::advanceOneStep(ChunkTicketPos pos,
     }
   }
 
-  if (auto *proto = dynamic_cast<ProtoChunk *>(&chunk)) {
-    WorldGenRegion region(step, chunk, std::move(squareCache), radius,
-                          worldSeed_);
-    std::shared_ptr<const BaseChunk> handle;
-    if (auto it = chunks_.find(pos); it != chunks_.end())
-      handle = std::static_pointer_cast<const BaseChunk>(it->second);
-    executeChunkGenerationStep(generator_, region, *proto, step.targetStatus(),
-                               worldSeed_, lightContext_.get(), lightQueue_,
-                               std::move(handle));
-  }
+  WorldGenRegion region(step, proto, std::move(squareCache), radius,
+                        worldSeed_);
+  std::shared_ptr<const BaseChunk> handle;
+  if (auto it = chunks_.find(pos); it != chunks_.end())
+    handle = it->second;
+  executeChunkGenerationStep(generator_, region, proto, step.targetStatus(),
+                             worldSeed_, lightContext_.get(), lightQueue_,
+                             std::move(handle), asyncWorldGenLight_);
   ++stats_.stepsExecuted;
 }
 
@@ -300,7 +342,8 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
                                 std::int64_t worldSeed,
                                 LightOpticalContext *lightContext,
                                 GeneratedLightQueue *lightQueue,
-                                std::shared_ptr<const BaseChunk> chunkHandle) {
+                                std::shared_ptr<const BaseChunk> chunkHandle,
+                                bool asyncWorldGenLight) {
   const ChunkTicketPos pos = proto.pos();
   switch (targetStatus) {
   case ChunkStatusId::Empty:
@@ -323,7 +366,8 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
     break;
   case ChunkStatusId::Carvers:
     generator.applyCarvers(region, proto, worldSeed);
-    proto.setCachedNoiseChunkOpaque(nullptr);
+    proto.setCachedNoiseChunkRaw(
+        BaseChunk::OpaqueUniquePtr(nullptr, +[](void *) {}));
     proto.flushDirtyHeightmaps();
     break;
   case ChunkStatusId::Features: {
@@ -338,33 +382,117 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
   case ChunkStatusId::InitializeLight:
     proto.primeHeightmaps(ChunkStatus::initializeLight().heightmapsAfter());
     proto.flushDirtyHeightmaps();
-    if (lightQueue != nullptr && lightContext != nullptr) {
+    if (lightContext != nullptr) {
       if (const auto optical = lightContext->get()) {
-        // 生成 worker 只构造纯值输入；真正的 submitChunk 由主线程 pump 完成。
-        GeneratedLightWork work;
-        work.position = pos;
-        // 有句柄就零拷贝直读（worker 读这个 ProtoChunk 的区段），否则退回值快照。
-        work.input = buildLightChunkInput(
-            proto,
-            proto.isLightCorrect()
-                ? std::optional<PersistedChunkLight>(extractPersistedLight(proto))
-                : std::nullopt,
-            /*deferCompute=*/!proto.isLightCorrect(), std::move(chunkHandle));
-        lightQueue->push(std::move(work));
+        if (asyncWorldGenLight) {
+          if (lightQueue != nullptr && !proto.deferredLightSubmitted()) {
+            GeneratedLightWork work;
+            work.position = pos;
+            work.compute = false;
+            work.input = buildLightChunkInput(
+                proto,
+                proto.isLightCorrect()
+                    ? std::optional<PersistedChunkLight>(
+                          extractPersistedLight(proto))
+                    : std::nullopt,
+                /*deferCompute=*/!proto.isLightCorrect(),
+                std::move(chunkHandle));
+            lightQueue->push(std::move(work));
+            proto.setDeferredLightSubmitted(true);
+          }
+        } else if (!proto.isLightCorrect()) {
+          auto summary = computeProtoChunkLightSummary(
+              proto, *optical, lightContext->skyLightEnabled());
+          if (summary && summary->mutationSeq == proto.blockMutationSeq()) {
+            proto.setLightSummary(std::move(summary));
+          }
+        }
       }
     }
     break;
   case ChunkStatusId::Light:
-    // 不等待：只登记首次计算请求，区块带着“未计算”直接进入 Spawn/Full。
-    // 光照由引擎异步发布，需要数据的消费方（存档、协议、查询）自己按
-    // isChunkSettled()/latestLayerChunk() 取，绝不在生成流水线里做全局屏障。
-    if (lightQueue != nullptr) {
-      GeneratedLightWork work;
-      work.position = pos;
-      work.compute = true;
-      lightQueue->push(std::move(work));
+    if (lightContext != nullptr) {
+      if (const auto optical = lightContext->get()) {
+        if (asyncWorldGenLight) {
+          if (proto.isLightCorrect()) {
+            if (lightQueue != nullptr && !proto.deferredLightSubmitted()) {
+              GeneratedLightWork work;
+              work.position = pos;
+              work.compute = false;
+              work.input = buildLightChunkInput(
+                  proto,
+                  std::optional<PersistedChunkLight>(
+                      extractPersistedLight(proto)),
+                  /*deferCompute=*/false, std::move(chunkHandle));
+              lightQueue->push(std::move(work));
+              proto.setDeferredLightSubmitted(true);
+            }
+          } else {
+            proto.setLightCorrect(false);
+            if (lightQueue != nullptr) {
+              if (!proto.deferredLightSubmitted()) {
+                GeneratedLightWork initWork;
+                initWork.position = pos;
+                initWork.compute = false;
+                initWork.input = buildLightChunkInput(
+                    proto, std::nullopt, /*deferCompute=*/true,
+                    std::move(chunkHandle));
+                lightQueue->push(std::move(initWork));
+                proto.setDeferredLightSubmitted(true);
+              }
+              GeneratedLightWork computeWork;
+              computeWork.position = pos;
+              computeWork.compute = true;
+              lightQueue->push(std::move(computeWork));
+            }
+          }
+          break;
+        }
+        const bool skyEnabled = lightContext->skyLightEnabled();
+        std::shared_ptr<const PrecomputedChunkLight> precomputed =
+            proto.precomputedLight();
+        if (!proto.isLightCorrect()) {
+          std::array<const BaseChunk *, 9> chunks3x3{};
+          for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+              chunks3x3[static_cast<std::size_t>((dz + 1) * 3 + (dx + 1))] =
+                  region.getChunkIfAllowed(pos.x + dx, pos.z + dz,
+                                           ChunkStatusId::InitializeLight);
+            }
+          }
+          auto computed =
+              computeInitialChunkLight(chunks3x3, *optical, skyEnabled);
+          proto.setPrecomputedLight(computed);
+          proto.setLightCorrect(computed->isLightOn);
+          precomputed = std::move(computed);
+        }
+        if (lightQueue != nullptr) {
+          GeneratedLightWork work;
+          work.position = pos;
+          work.compute = false;
+          if (precomputed && precomputed->isLightOn) {
+            work.input = buildLightChunkInput(proto, std::nullopt,
+                                              /*deferCompute=*/false,
+                                              std::move(chunkHandle),
+                                              std::move(precomputed));
+          } else {
+            work.input = buildLightChunkInput(
+                proto,
+                proto.isLightCorrect()
+                    ? std::optional<PersistedChunkLight>(
+                          extractPersistedLight(proto))
+                    : std::nullopt,
+                /*deferCompute=*/!proto.isLightCorrect(),
+                std::move(chunkHandle));
+          }
+          lightQueue->push(std::move(work));
+        }
+      } else {
+        proto.setLightCorrect(false);
+      }
+    } else {
+      proto.setLightCorrect(false);
     }
-    proto.setLightCorrect(false);
     break;
   case ChunkStatusId::Spawn:
     generator.spawnOriginalMobs(region, proto, worldSeed);
@@ -377,8 +505,8 @@ void executeChunkGenerationStep(ChunkGenerator &generator, WorldGenRegion &regio
   proto.setPersistedStatus(targetStatus);
 }
 
-ChunkAccess *ChunkGenerationPipeline::ensureForLoadingLevel(ChunkTicketPos pos,
-                                                            int loadingLevel) {
+BaseChunk *ChunkGenerationPipeline::ensureForLoadingLevel(ChunkTicketPos pos,
+                                                          int loadingLevel) {
   const auto target = generationStatusForLevel(loadingLevel);
   if (!target)
     return nullptr;
@@ -418,65 +546,8 @@ void refreshProtoChunkLight(ProtoChunk &proto, LightService &lightService) {
 }
 
 bool installProtoChunkIntoWorld(std::shared_ptr<ProtoChunk> protoPtr,
-                              World &world) {
-  ProtoChunk &proto = *protoPtr;
-  const ChunkTicketPos pos = proto.pos();
-  // 备份待后处理坐标（用于晋升为 LevelChunk 后立即调度流体/形状刻）。
-  auto postProcessCopy = proto.postProcessing();
-  const int minSec = proto.minSectionY();
-
-  // 光照快照要在搬运区段之前取：`BlockSection` 会被整体 move 进 World。
-  std::optional<PersistedChunkLight> persistedLight;
-  if (proto.isLightCorrect()) {
-    if (LightService *light = world.lightService())
-      refreshProtoChunkLight(proto, *light);
-    persistedLight = extractPersistedLight(proto);
-  }
-
-  // 不在此时登记光照：方块还没导入，提交进去的会是“全空气”几何。
-  world.loadChunk(pos.x, pos.z, /*registerLight=*/false);
-  // `ProtoChunk::sections()` 掩盖了基类同名成员，显式走 BaseChunk 访问存储数组。
-  auto &protoBase = static_cast<BaseChunk &>(proto);
-  for (int secIndex = 0; secIndex < proto.sectionCount(); ++secIndex) {
-    BlockSection &sec = protoBase.sections[static_cast<std::size_t>(secIndex)];
-    const int sectionY = sec.sectionY();
-    auto secBiomes = proto.biomes(secIndex, proto.defaultBiome());
-    const bool uniformPlains =
-        secBiomes.palette().size() <= 1 &&
-        (secBiomes.palette().empty() ||
-         secBiomes.palette().front() == "minecraft:plains");
-    if (!uniformPlains) {
-      auto sb = std::make_shared<SectionBiomes>();
-      sb->palette = secBiomes.palette();
-      sb->indices = secBiomes.indices();
-      world.setSectionBiomes(pos.x, sectionY, pos.z, std::move(sb));
-    }
-    // 零拷贝：位宽/调色板/计数器/随机刻分桶原样移交（共享底层存储），不再按
-    // 调色板重建；原型本身保持可用，直到光照引擎在其安装后切换到 World 直读。
-    if (!world.adoptSectionStorage(pos.x, pos.z, sectionY, sec.share()))
-      throw std::runtime_error("generated section cannot be adopted by World");
-  }
-  // 只重建刚导入的这一个区块：整世界重扫会让 N 个区块的导入变成 O(N^2)。
-  world.primeHeightmaps(pos.x, pos.z);
-  if (persistedLight)
-    world.setChunkPersistedLight(pos.x, pos.z, std::move(*persistedLight));
-  // 生成期已经登记过（句柄或几何）：直接接管，不重算；只有引擎里没有该区块时
-  // （例如未挂载 LightService 的调用方）才重新提交。
-  if (!world.adoptChunkLightDirectGeometry(pos.x, pos.z))
-    world.reloadChunkLight(pos.x, pos.z);
-
-  // 执行原版 postLoadProtoChunk 对应的 postProcessing（例如唤醒特征放置的水源/岩浆源）。
-  for (std::size_t s = 0; s < postProcessCopy.size(); ++s) {
-    const int secY = minSec + static_cast<int>(s);
-    for (std::int16_t packedOffset : postProcessCopy[s]) {
-      const Pos p =
-          ProtoChunk::unpackOffsetCoordinates(packedOffset, pos, secY);
-      const FluidState fs = fluidStateOf(world.getBlock(p));
-      if (!fs.isEmpty())
-        world.scheduleFluidTick(p, fs.getType(), 1);
-    }
-  }
-  return true;
+                                World &world) {
+  return world.installGeneratedProtoChunk(std::move(protoPtr));
 }
 
 } // namespace redstone::worldgen

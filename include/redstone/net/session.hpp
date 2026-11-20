@@ -58,6 +58,10 @@ struct ServerOptions {
   // 可选开关：是否在 World::entities 中生成权威 ServerPlayer 实体。
   // 默认关闭，避免影响只关注离线区块编辑的测试对实体 ID 的占用预期。
   bool spawnPlayerEntity = false;
+  // 关闭发送队列字节/包数背压限制与区块分批吞吐上限（适合高视距本地联机调试）。
+  bool unlimitedNetwork = false;
+  // 区块就绪时立即下发客户端（即使光照尚未收敛），光照完成后再对仍可见区块补发 light_update。
+  bool sendChunksBeforeLightReady = true;
 };
 // 单条连接的确定性协议状态机，与底层 Socket I/O 完全解耦，便于独立单测与无锁主循环推进。
 // 所有成员调用以及 World::tick 均在服务端主线程上串行执行。
@@ -271,6 +275,7 @@ private:
   std::map<std::pair<int, int>, LightLayerVersion> sentChunkSkyLight_;
   std::optional<std::pair<int, int>> chunkCenter_;
   bool awaitingChunkBatch_ = false;
+  bool inSendChunkBatch_ = false;
   bool joinPositionPending_ = false;
   bool respawning_ = false;
   int pendingTeleportId_ = 1;

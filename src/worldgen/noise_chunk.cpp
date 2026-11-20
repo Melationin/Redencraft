@@ -311,7 +311,7 @@ void NoiseChunk::SliceContextProvider::fillAllDirectly(double *output,
 }
 
 std::unique_ptr<NoiseChunk>
-NoiseChunk::forChunk(const ChunkAccess &chunk, RandomState &randomState,
+NoiseChunk::forChunk(const BaseChunk &chunk, RandomState &randomState,
                      const NoiseGeneratorSettings &settings,
                      FluidPicker globalFluidPicker, DensityNodePtr beardifier) {
   const int newMinY = std::max(settings.minY, chunk.minY());
@@ -327,7 +327,7 @@ NoiseChunk::forChunk(const ChunkAccess &chunk, RandomState &randomState,
 }
 
 std::unique_ptr<NoiseChunk>
-NoiseChunk::forChunkBiomes(const ChunkAccess &chunk, RandomState &randomState,
+NoiseChunk::forChunkBiomes(const BaseChunk &chunk, RandomState &randomState,
                            const NoiseGeneratorSettings &settings) {
   const int newMinY = std::max(settings.minY, chunk.minY());
   const int rawTop = std::min(settings.minY + settings.height, chunk.maxY());
@@ -351,6 +351,9 @@ NoiseChunk::NoiseChunk(int cellCountXZ, RandomState &randomState,
       isColumn_(isColumn), sliceFillingContextProvider_(*this),
       beardifier_(beardifier ? std::move(beardifier)
                              : density_functions::beardifier()) {
+  wrapped_.reserve(512);
+  interpolators_.reserve(16);
+  cellCaches_.reserve(4);
   if (cellWidth_ == 4) {
     cellWidthShift_ = 2;
     cellWidthMask_ = 3;
@@ -446,23 +449,17 @@ void NoiseChunk::ensureTerrainInitialized(RandomState &randomState,
 }
 
 DensityNodePtr NoiseChunk::wrap(const DensityNodePtr &function) {
-  FlatHashMap<const DensityNode *, DensityNodePtr, NodePtrHash> localMemo;
-  return wrapRec(function, localMemo);
+  return wrapRec(function);
 }
 
-DensityNodePtr NoiseChunk::wrapRec(
-    const DensityNodePtr &node,
-    FlatHashMap<const DensityNode *, DensityNodePtr, NodePtrHash> &localMemo) {
+DensityNodePtr NoiseChunk::wrapRec(const DensityNodePtr &node) {
   if (!node)
     return nullptr;
+  // DAG 无环：递归前不会重复访问同一节点，因此只需一个跨 wrap() 调用的 memo。
   if (auto it = wrapped_.find(node.get()); it != wrapped_.end())
     return it->second;
-  if (auto it = localMemo.find(node.get()); it != localMemo.end())
-    return it->second;
 
-  auto rec = [&](const DensityNodePtr &child) {
-    return wrapRec(child, localMemo);
-  };
+  auto rec = [&](const DensityNodePtr &child) { return wrapRec(child); };
 
   DensityNodePtr result;
   if (node->kind == DensityNodeKind::Marker) {
@@ -604,7 +601,6 @@ DensityNodePtr NoiseChunk::wrapRec(
     }
   }
 
-  localMemo[node.get()] = result;
   wrapped_[node.get()] = result;
   return result;
 }
@@ -629,8 +625,7 @@ int NoiseChunk::preliminarySurfaceLevel(int sampleX, int sampleZ) {
   const int quantizedX = (sampleX >> 2) << 2;
   const int quantizedZ = (sampleZ >> 2) << 2;
   const std::int64_t key = packColumn(quantizedX, quantizedZ);
-  const auto &pred =
-      preliminarySurfaceLevelCache_.find(key);
+  const auto &pred = preliminarySurfaceLevelCache_.find(key);
   if (pred != preliminarySurfaceLevelCache_.end()) {
     return pred->second;
   }

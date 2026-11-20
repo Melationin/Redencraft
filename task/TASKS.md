@@ -4095,3 +4095,178 @@ Evidence（`/home/zhddsj/.local/state/redstone-cpp/wsl-w4c-verify-20261114/SHA25
 实现提交：`ab4ac75`（代码、测试、文档同一提交）。
 
 任务已完成
+
+
+## 2026-11-19 光照几何重定基（安装不再整块重算）
+
+**范围**
+
+`World::installGeneratedProtoChunk` 零拷贝晋升后，对已登记光照的区块不再调用 `reloadChunkLight()` 整块重算；改为把 LightService 的几何直读源从 ProtoChunk 句柄切换到 World/ChunkMap 直读，保留已发布光照层、协议基准和天空光列源。
+
+**源码依据**
+
+- `src/chunk_map.cpp` `ChunkHolder::promoteProtoToWorld`：非独占晋升用 `BlockSection::share()` 共享底层 `SectionStorage`，World 区块与 ProtoChunk 看到同一份方块数据。
+- `src/light/service.cpp`：`submitChunk`（整块 load：重置快照并重新播种）与 `requestChunkCompute`（首次计算）是两条不同路径。
+
+**改动文件**
+
+- `include/redstone/light/service.hpp`：新增 `rebindChunkGeometry()`、`Stats::rebindings`。
+- `src/light/common.hpp`、`src/light/common.cpp`：`PendingChunk::rebind`；`hasChunkGeometry` / `lookupDirectSectionCache` 对 invalidated 句柄回退 World 直读。
+- `src/light/service_impl.hpp`、`src/light/service.cpp`：worker 侧重定基命令（只清句柄、不动光照层）、`statsRebound` 计数、`readDirectSection` 的失效回退。
+- `src/engine/chunk_storage.cpp`：外部安装走重定基，失败才退回重提交；内部安装同样重定基。
+- `benchmarks/worldgen_throughput_benchmark.cpp`：`light_stats` 增加 `rebound=`。
+- `tests/light_tests.cpp`：新增 `installRebindsLightGeometryWithoutRecompute`。
+
+**测试与构建**
+
+- Release 构建通过；全量 CTest **64/64 通过（16.3 s）**。
+- 新测试断言：安装后 `rebindings` +1、`published` 不变、无 fallback、ProtoChunk 句柄释放（`use_count()==1`）、光照值不变、安装后编辑仍发布新 revision。
+
+**Benchmark（WSL，同机同命令、单次）**
+
+`worldgen_throughput_benchmark assets/worldgen26_1 --size 50 --seed 123456 --light --install`（默认 24 线程）：
+
+| 指标 | 修改前 | 修改后 |
+|---|---|---|
+| 进程端到端 | 80.23 s | 10.74–11.82 s（maxopt / 通用） |
+| 生成 wall | 8.39 s | 8.28–8.69 s |
+| 光照 worker CPU | 78.7 s | 9.39–10.23 s |
+| light_queue | 521 M | 62.6–66.0 M |
+| published | 16624 | 5811–6125 |
+| rebound | — | 2500 |
+| 结束 RSS | 5.4 GB | 0.81–0.83 GB |
+| light_correct / install_mismatch | 2500/2500 / 0/15000 | 2500/2500 / 0/15000 |
+
+**明确没有做**
+
+- 未改单 worker 光照模型，未做并行传播。
+- 未运行真实 26.1 服务端差分，不声称原版等价；`light_queue` 仍是 65M 量级，属于后续优化面。
+- 未提交 commit。
+
+
+
+## 2026-11-19 世界生成 P0/P1 性能优化
+
+**范围**
+
+按 @BT@docs/worldgen-perf-analysis.md@BT@ 的 P0/P1 清单优化 C++ 世界生成：结构拼装去拷贝、状态查表、调色板记忆、
+模板池字符串/锁路径。
+
+**改动文件**
+
+- @BT@src/worldgen/jigsaw.cpp@BT@、@BT@include/redstone/worldgen/jigsaw.hpp@BT@：候选池指针化、@BT@ShuffledJigsaw@BT@ 引用、
+  @BT@StructureTemplate::jigsawsFor@BT@、@BT@resolvePoolAlias@BT@ 返回 view、模板缓存 shared_mutex + 异质查找。
+- @BT@src/fluid.cpp@BT@：@BT@fluidStateOf@BT@ 线程本地缓存记录 kind。
+- @BT@include/redstone/chunk_section.hpp@BT@、@BT@src/chunk_section.cpp@BT@：调色板索引记忆。
+- @BT@docs/worldgen-perf-analysis.md@BT@：追加第 10 节实施结果。
+
+**测试与构建**
+
+- Release（@BT@build@BT@）全量构建通过；全量 CTest **64/64 通过（17.0 s）**。
+- 生成计数不变：created=3136 steps=31064 inline=14392 parallel=13968。
+- @BT@worldgen_differential_probe@BT@ 单线程重复一致；多线程探测存在既有的运行间不确定性（窗口/邻居可用性），
+  未据此声称原版等价。
+
+**Benchmark（同机同 seed，2500 区块，build-maxopt）**
+
+| | 基线 | 优化后 |
+|---|---|---|
+| t24 墙钟 | 6.84-6.91 s | 5.10-5.25 s |
+| t24 CPU | 146-150 s | 120.5-123.0 s |
+| CPU/区块 | 58-60 ms | 48-49 ms |
+| 吞吐 | 363 cps | 476-490 cps |
+| t8 墙钟 | 7.04-7.31 s | 6.69-7.11 s |
+
+**明确没有做**
+
+- 未做密度函数/噪声的指令化预编译（下一轮 P1 剩余项）。
+- 未跑真实 26.1 服务端逐区块差分。
+- 未提交 commit。
+
+
+## 2026-11-19 密度图平坦化预编译尝试（负结果，已回退）
+
+**范围**
+
+在 P0/P1 优化后尝试把 @BT@DensityNode@BT@ 图编译为后序指令表（复用 @BT@FlatDensityFunction@BT@），
+分别尝试全展开与 range_choice/mul 惰性分支两个版本，验证正确性与性能。
+
+**结果**
+
+- 正确性：惰性分支版本 64 区块单线程探测输出与启用前逐字节一致。
+- 性能（t24，2500 区块）：递归 5.02-5.14 s / 119-121 s CPU；全展开 9.60 s / 228 s；
+  惰性分支 7.70 s / 183 s。
+- 结论：C++ 端以 slots 数组求值的整树展平在本工作负载上是回退；已完整回退接入，
+  保留原有气候采样使用的 @BT@FlatDensityFunction@BT@。
+
+**测试与构建**
+
+- 回退后 @BT@build@BT@ 全量构建通过，全量 CTest **64/64 通过（17.0 s）**。
+- 探测输出与启用前一致（PARITY OK）。
+
+**明确没有做**
+
+- 未实现控制流感知的代码生成（基本块 + 跳转）或按子树实测收益的局部特化。
+- 未跑真实 26.1 服务端逐区块差分。
+- 未提交 commit。
+
+
+## 2026-11-19 噪声查找/容器微优化
+
+**范围**
+
+按 @BT@docs/worldgen-model.md@BT@ 的清单处理 NoiseChunk 每区块哈希与临时分配，并评估
+preliminary-surface 缓存与气候→生物群系缓存。
+
+**改动文件**
+
+- @BT@src/worldgen/noise_chunk.cpp@BT@、@BT@include/redstone/worldgen/noise_chunk.hpp@BT@：
+  去掉冗余 @BT@localMemo@BT@（DAG 无环），@BT@wrapped_@BT@/@BT@interpolators_@BT@/@BT@cellCaches_@BT@ 预分配；
+  preliminary surface 的固定数组缓存实验已回退。
+- @BT@docs/worldgen-perf-analysis.md@BT@：第 12 节记录本轮结果与负结果。
+
+**测试与构建**
+
+- 全量构建通过；完整 CTest 通过 64/64（该构建重试一次；@BT@chunk_generation@BT@ 用例存在既有时序竞态，
+  回退本轮改动后同样复现）。
+- 单线程探测：本轮前后区块内容一致（t1/x1 对比 0 差异）。
+
+**Benchmark（t24，2500 区块）**
+
+| | 本轮前 | 本轮后 |
+|---|---|---|
+| 墙钟 | 5.02-5.14 s | 4.90-4.92 s |
+| CPU | 119-121 s | 116.2-116.7 s |
+| ms/区块 | 2.01-2.05 | 1.96-1.97 |
+
+**明确没有做**
+
+- 未实施气候→生物群系 source 级缓存（命中率低 + 生命周期风险，见文档 12.3）。
+- 未修复 @BT@chunk_generation@BT@ 的既有时序竞态。
+- 未提交 commit。
+
+
+## 2026-11-19 StructureTemplateCache 换 phmap
+
+**范围**
+
+@BT@StructureTemplateCache@BT@ 的模板缓存由 @BT@std::map@BT@ 改为 @BT@phmap::flat_hash_map@BT@
+（@BT@TransparentStringHash@BT@ 异质查找，保留 @BT@std::shared_mutex@BT@，构造 @BT@reserve(256)@BT@）。
+同时核查 @BT@findTemplatePool@BT@：其查找早已使用 @BT@templatePoolIdx_@BT@ 哈希索引，
+存储 @BT@templatePools_@BT@ 若换扁平表会使索引中的裸指针在 rehash 时失效，故保持 @BT@std::map@BT@。
+
+**测试与构建**
+
+- 全量构建通过；CTest 64/64（第一次 63/64，重跑通过；仍是既有 @BT@chunk_generation@BT@ 时序竞态）。
+- 结构相关用例全部通过。
+
+**Benchmark**
+
+- 本时段机器漂移明显（同一路径 4.90-5.20 s ↔ 6.01-6.24 s），未取得有效的 std::map/phmap A/B；
+  不声称量化收益，确认无回退。
+
+**明确没有做**
+
+- 未把 @BT@templatePools_@BT@ 存储改为 node_hash_map（lookup 已走索引，无运行时收益）。
+- 未修复 @BT@chunk_generation@BT@ 的既有时序竞态。
+- 未提交 commit。

@@ -42,8 +42,47 @@ struct SkyPropagatorScratch {
   TaskQueue<IncreaseTask> currentIncreaseQueue;
   FlatMap<std::uint64_t, std::unique_ptr<WorkingLayers>, UInt64Hash>
       layersByChunk;
-  FlatSet<SectionPos3, SectionPos3Hash> dirtySections;
+  FlatMap<std::uint64_t, std::uint64_t, UInt64Hash> dirtySectionMasks;
+  FlatSet<SectionPos3, SectionPos3Hash> dirtySectionsOverflow;
   FlatSet<SectionPos3, SectionPos3Hash> storedEligible;
+  std::vector<std::unique_ptr<WorkingLayers>> freeWorkingLayers;
+  std::vector<std::unique_ptr<LightValues>> freeLightValues;
+
+  std::unique_ptr<WorkingLayers> acquireWorkingLayers(std::size_t count) {
+    if (!freeWorkingLayers.empty()) {
+      auto wl = std::move(freeWorkingLayers.back());
+      freeWorkingLayers.pop_back();
+      wl->sections.resize(count);
+      wl->inherited.assign(count, kUnknownInheritedSection);
+      return wl;
+    }
+    return std::make_unique<WorkingLayers>(count);
+  }
+  std::unique_ptr<LightValues> acquireLightValues(LightValues values) {
+    if (!freeLightValues.empty()) {
+      auto lv = std::move(freeLightValues.back());
+      freeLightValues.pop_back();
+      *lv = std::move(values);
+      return lv;
+    }
+    return std::make_unique<LightValues>(std::move(values));
+  }
+  void releaseLightValues(std::unique_ptr<LightValues> &slot) {
+    if (!slot)
+      return;
+    if (freeLightValues.size() < 512)
+      freeLightValues.push_back(std::move(slot));
+    else
+      slot.reset();
+  }
+  void releaseWorkingLayers(std::unique_ptr<WorkingLayers> wl) {
+    if (!wl)
+      return;
+    for (auto &sec : wl->sections)
+      releaseLightValues(sec);
+    if (freeWorkingLayers.size() < 64)
+      freeWorkingLayers.push_back(std::move(wl));
+  }
 
   void clear() {
     checks.clear();
@@ -52,8 +91,13 @@ struct SkyPropagatorScratch {
     increaseQueue.clear();
     currentDecreaseQueue.clear();
     currentIncreaseQueue.clear();
+    for (auto &[key, wl] : layersByChunk) {
+      (void)key;
+      releaseWorkingLayers(std::move(wl));
+    }
     layersByChunk.clear();
-    dirtySections.clear();
+    dirtySectionMasks.clear();
+    dirtySectionsOverflow.clear();
     storedEligible.clear();
   }
   bool anyQueueNeedsCompact() const noexcept {
@@ -174,13 +218,23 @@ private:
   const LightChunkSnapshot *stateFor(std::uint64_t key) const;
   WorkingChunk *ensureWorking(std::uint64_t key);
   const SectionCacheEntry &lookupSection(LightPos position) const;
+  const SectionCacheEntry &lookupNeighborSection(
+      const SectionCacheEntry &fromEntry, SectionPos3 fromSec,
+      LightPos to) const;
   const LightSectionSnapshot *sectionAt(LightPos position) const;
   const BlockLightProperties &stateAt(LightPos position) const;
   int storedLevel(LightPos position) const;
+  int storedLevelInEntry(const SectionCacheEntry &entry,
+                         LightPos position) const;
   bool isSectionStoredEligible(int sectionX, int sectionY, int sectionZ) const;
   bool eligibleHere(int sectionX, int sectionY, int sectionZ);
   LightValues *bulkValues(std::uint64_t chunkKeyValue, int sectionY);
+  void markSectionDirty(SectionPos3 section);
+  void unmarkSectionDirty(SectionPos3 section);
   bool setStoredLevel(LightPos position, int level);
+  bool setStoredLevelInEntry(const SectionCacheEntry &entry, LightPos position,
+                             int level, int knownCurrentLevel,
+                             bool &insertedSection);
   void allocateSection(std::uint64_t chunkKeyValue, int sectionY);
   const BlockLightProperties &sourcePropertyAt(std::uint64_t key, int x, int y,
                                                int z) const;
@@ -223,10 +277,15 @@ private:
   TaskQueue<IncreaseTask> &currentIncreaseQueue;
   std::optional<SectionPos3> activeDecreaseSection;
   std::optional<SectionPos3> activeIncreaseSection;
+  SkyPropagatorScratch &scratch_;
   FlatMap<std::uint64_t, std::unique_ptr<WorkingLayers>, UInt64Hash>
       &layersByChunk;
-  FlatSet<SectionPos3, SectionPos3Hash> &dirtySections;
+  FlatMap<std::uint64_t, std::uint64_t, UInt64Hash> &dirtySectionMasks;
+  FlatSet<SectionPos3, SectionPos3Hash> &dirtySectionsOverflow;
   FlatSet<SectionPos3, SectionPos3Hash> &storedEligible;
+  std::uint64_t lastDirtyKey_ = 0;
+  std::uint64_t lastDirtyEpoch_ = 0;
+  std::uint64_t *lastDirtyMask_ = nullptr;
   mutable std::array<ChunkCacheEntry, 64> chunkCache_{};
   mutable std::array<SectionCacheEntry, 64> sectionCache_{};
   mutable std::uint64_t sectionCacheGen_ = 1;

@@ -11,8 +11,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
+
+#include "redstone/hash.hpp"
 
 namespace redstone {
 
@@ -166,12 +167,12 @@ public:
   }
 
   bool hasModifier(std::string_view modifierId) const {
-    return modifiers_.contains(std::string(modifierId));
+    return modifiers_.contains(modifierId);
   }
 
   std::optional<AttributeModifier>
   getModifier(std::string_view modifierId) const {
-    auto it = modifiers_.find(std::string(modifierId));
+    auto it = modifiers_.find(modifierId);
     if (it == modifiers_.end())
       return std::nullopt;
     return it->second;
@@ -205,7 +206,7 @@ public:
   }
 
   bool removeModifier(std::string_view modifierId) {
-    const auto count = modifiers_.erase(std::string(modifierId));
+    const auto count = modifiers_.erase(modifierId);
     if (count > 0) {
       markDirty();
       return true;
@@ -266,7 +267,9 @@ private:
 
   AttributeId id_;
   double baseValue_;
-  std::unordered_map<std::string, AttributeModifier> modifiers_;
+  phmap::flat_hash_map<std::string, AttributeModifier, AnkerlStringHash,
+                       std::equal_to<>>
+      modifiers_;
   mutable double cachedValue_ = 0.0;
   mutable bool dirty_ = true;
   /// 标记需要向客户端发送属性更新包。
@@ -365,7 +368,7 @@ public:
   }
 
 private:
-  std::unordered_map<AttributeId, AttributeInstance> instances_;
+  phmap::flat_hash_map<AttributeId, AttributeInstance> instances_;
 };
 
 } // namespace redstone

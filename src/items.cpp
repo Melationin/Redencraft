@@ -5,14 +5,15 @@
 
 #include <algorithm>
 #include <cmath>
-#include <unordered_map>
 
 namespace redstone {
 namespace {
 
 struct ItemRegistryStorage {
   std::vector<const Item *> byId;
-  std::unordered_map<std::string, const Item *> byName;
+  phmap::flat_hash_map<std::string, const Item *, AnkerlStringHash,
+                       std::equal_to<>>
+      byName;
 };
 
 ItemRegistryStorage &registryStorage() {
@@ -234,9 +235,11 @@ const std::vector<const Item *> &allItems() {
 }
 
 const Item *itemForBlock(const Block &block) {
-  static const std::unordered_map<std::string_view, const Item *> byBlockName =
-      [] {
-        std::unordered_map<std::string_view, const Item *> m;
+  static const phmap::flat_hash_map<std::string_view, const Item *,
+                                    AnkerlStringHash>
+      byBlockName = [] {
+        phmap::flat_hash_map<std::string_view, const Item *, AnkerlStringHash>
+            m;
         m.reserve(std::size(kBlockToItemEntries));
         for (const auto &entry : kBlockToItemEntries)
           m.emplace(entry.block, entry.item);

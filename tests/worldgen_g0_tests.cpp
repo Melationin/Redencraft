@@ -250,9 +250,9 @@ void testProtoChunkPersistenceAndPipeline(
   {
     ChunkGenerationPipeline partial(generator, 123456789LL, &store);
     // Loading level 35 maps to ChunkStatusId::Carvers in 26.1.
-    ChunkAccess *carvedAccess = partial.ensureForLoadingLevel({0, 0}, 35);
+    BaseChunk *carvedAccess = partial.ensureForLoadingLevel({0, 0}, 35);
     require(carvedAccess != nullptr &&
-                carvedAccess->persistedStatus() == ChunkStatusId::Carvers,
+                chunkPersistedStatus(*carvedAccess) == ChunkStatusId::Carvers,
             "level 35 generates to Carvers");
     auto protoOpt = partial.takeProtoChunk({0, 0});
     require(protoOpt != nullptr, "take ProtoChunk at Carvers");
@@ -301,12 +301,12 @@ void testProtoChunkPersistenceAndPipeline(
   require(world.getBlock({16, 64, 5}) == defaultState("water"),
           "Features writeRadius=1 water landed in (1, 0)");
 
-  // ImposterProtoChunk wraps live World chunk and remaps *WG heightmaps.
-  ImposterProtoChunk imposter(world, {0, 0}, false);
-  require(imposter.persistedStatus() == ChunkStatusId::Full &&
-              imposter.getHeight(HeightmapType::WorldSurfaceWG, 0, 0) == 63 &&
-              !imposter.setBlockState(0, 65, 0, defaultState("stone")).has_value(),
-          "ImposterProtoChunk read-only & WG heightmap remap");
+  // WorldChunk remaps *WG heightmaps directly without ImposterProtoChunk.
+  WorldChunk *wc0 = world.chunkMap().findWorldChunk(0, 0);
+  require(wc0 != nullptr &&
+              chunkPersistedStatus(*wc0) == ChunkStatusId::Full &&
+              wc0->getHeight(HeightmapType::WorldSurfaceWG, 0, 0) == 63,
+          "WorldChunk & WG heightmap remap");
 
   std::filesystem::remove_all(scratchDir);
 }
@@ -319,14 +319,15 @@ void testPipelineWithLightService() {
 
   TestTerrainGenerator gen;
   auto lightContext = std::make_shared<LightOpticalContext>();
-  lightContext->set(world.lightService()->opticalTable());
+  lightContext->set(world.lightService()->opticalTable(),
+                    world.lightService()->skyLightEnabled());
   GeneratedLightQueue lightQueue;
   ChunkGenerationPipeline pipe(gen, 123456789LL, nullptr, &world, lightContext,
-                               &lightQueue);
-  ChunkAccess &litChunk = pipe.ensureStatus({0, 0}, ChunkStatusId::Light);
-  // Light 阶段不再等待：区块带着“未计算”返回，光照由引擎异步完成。
-  require(!litChunk.isLightCorrect(),
-          "ChunkStatusId::Light must not claim the light is complete");
+                               &lightQueue, /*asyncWorldGenLight=*/false);
+  BaseChunk &litChunk = pipe.ensureStatus({0, 0}, ChunkStatusId::Light);
+  // Light 阶段完成并行 3x3 初始光照计算并产出 PrecomputedChunkLight。
+  require(litChunk.isLightCorrect(),
+          "ChunkStatusId::Light completes parallel initial light computation");
 
   // 生成期只投递纯值输入；LightService 的提交在主线程 pump 里完成。
   require(lightQueue.size() > 0, "pipeline queued generation-time light work");
@@ -341,7 +342,8 @@ void testPipelineWithLightService() {
     }
   }
 
-  auto *proto = dynamic_cast<ProtoChunk *>(&litChunk);
+  auto *proto =
+      litChunk.isProtoChunk() ? static_cast<ProtoChunk *>(&litChunk) : nullptr;
   require(proto != nullptr, "chunk before Full must be ProtoChunk");
   const int topSecIdx = proto->sectionIndex(64);
   require(world.lightService() != nullptr, "light service is attached");

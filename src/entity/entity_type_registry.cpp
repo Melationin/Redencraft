@@ -1,6 +1,5 @@
 #include "engine/internal.hpp"
 #include <algorithm>
-#include <unordered_map>
 
 namespace redstone {
 const std::vector<EntityType> &entityRegistry() {
@@ -169,7 +168,9 @@ const std::vector<EntityType> &entityRegistry() {
 const EntityType *entityType(const std::string &name) {
   const auto n = canonical(name);
   static const auto byName = [] {
-    std::unordered_map<std::string, const EntityType *> m;
+    phmap::flat_hash_map<std::string, const EntityType *, AnkerlStringHash,
+                         std::equal_to<>>
+        m;
     for (const auto &entry : entityRegistry())
       m.emplace(entry.name, &entry);
     return m;

@@ -15,20 +15,26 @@ struct ChunkStructureData {
   std::map<std::string, std::vector<ChunkTicketPos>, std::less<>> references;
 };
 
-ChunkStructureData &ensureChunkStructureData(ChunkAccess &chunk) {
-  if (auto cached = chunk.structureStartsOpaque()) {
-    return *std::static_pointer_cast<ChunkStructureData>(cached);
-  }
-  auto data = std::make_shared<ChunkStructureData>();
-  ChunkStructureData &ref = *data;
-  chunk.setStructureStartsOpaque(std::move(data));
-  return ref;
+void deleteChunkStructureData(void *ptr) {
+  delete static_cast<ChunkStructureData *>(ptr);
 }
 
-const ChunkStructureData *findChunkStructureData(const ChunkAccess &chunk) {
-  auto cached = chunk.structureStartsOpaque();
-  return cached ? std::static_pointer_cast<const ChunkStructureData>(cached).get()
-                : nullptr;
+void deleteNoiseChunk(void *ptr) {
+  delete static_cast<NoiseChunk *>(ptr);
+}
+
+ChunkStructureData &ensureChunkStructureData(BaseChunk &chunk) {
+  if (void *cached = chunk.structureStartsRaw()) {
+    return *static_cast<ChunkStructureData *>(cached);
+  }
+  auto *data = new ChunkStructureData();
+  chunk.setStructureStartsRaw(
+      BaseChunk::OpaqueUniquePtr(data, &deleteChunkStructureData));
+  return *data;
+}
+
+const ChunkStructureData *findChunkStructureData(const BaseChunk &chunk) {
+  return static_cast<const ChunkStructureData *>(chunk.structureStartsRaw());
 }
 
 int floorDivInt(int a, int b) noexcept {
@@ -109,25 +115,24 @@ void NoiseBasedChunkGenerator::setConcentricRingsEnabled(bool enabled) {
   structureStates_.clear();
 }
 
-void NoiseBasedChunkGenerator::createStructures(ProtoChunk &chunk,
-                                                std::int64_t worldSeed) {
+std::shared_ptr<const NoiseBasedChunkGenerator::StructureStartsMap>
+NoiseBasedChunkGenerator::structureStartsAt(ChunkTicketPos chunkPos,
+                                            std::int64_t worldSeed) const {
+  const CarverBiomeKey key{worldSeed, chunkPos.x, chunkPos.z};
+  const std::size_t shardIdx = CarverBiomeKeyHash{}(key) & 31u;
+  auto &shard = structureStartsCache_[shardIdx];
+  {
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    auto found = shard.map.find(key);
+    if (found != shard.map.end())
+      return found->second;
+  }
+
   RandomState &rs = randomStateForSeed(worldSeed);
   ChunkGeneratorStructureState &structState = structureStateForSeed(worldSeed);
-  ChunkStructureData &chunkData = ensureChunkStructureData(chunk);
-  const ChunkTicketPos chunkPos = chunk.pos();
+  StructureStartsMap computed;
 
   for (const StructureSetDefinition *set : structState.possibleStructureSets()) {
-    bool alreadyHasValid = false;
-    for (const auto &entry : set->structures) {
-      if (auto it = chunkData.starts.find(entry.structureId);
-          it != chunkData.starts.end() && it->second.isValid()) {
-        alreadyHasValid = true;
-        break;
-      }
-    }
-    if (alreadyHasValid)
-      continue;
-
     if (!structState.isStructureChunk(*set, chunkPos.x, chunkPos.z))
       continue;
 
@@ -139,7 +144,7 @@ void NoiseBasedChunkGenerator::createStructures(ProtoChunk &chunk,
           *def, *this, rs, structState, worldSeed, chunkPos, settings_.minY,
           settings_.height);
       if (startOpt && startOpt->isValid()) {
-        chunkData.starts[structId] = std::move(*startOpt);
+        computed[structId] = std::move(*startOpt);
         return true;
       }
       return false;
@@ -173,6 +178,35 @@ void NoiseBasedChunkGenerator::createStructures(ProtoChunk &chunk,
       }
     }
   }
+
+  static const auto kEmptyStarts = std::make_shared<const StructureStartsMap>();
+  auto result = computed.empty()
+                    ? kEmptyStarts
+                    : std::make_shared<const StructureStartsMap>(
+                          std::move(computed));
+  {
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    auto [it, inserted] = shard.map.emplace(key, result);
+    if (!inserted)
+      return it->second;
+    shard.order.push_back(key);
+    constexpr std::size_t kMaxEntriesPerShard = 256;
+    while (shard.order.size() > kMaxEntriesPerShard) {
+      shard.map.erase(shard.order.front());
+      shard.order.pop_front();
+    }
+  }
+  return result;
+}
+
+void NoiseBasedChunkGenerator::createStructures(ProtoChunk &chunk,
+                                                std::int64_t worldSeed) {
+  ChunkStructureData &chunkData = ensureChunkStructureData(chunk);
+  const auto starts = structureStartsAt(chunk.pos(), worldSeed);
+  for (const auto &[structId, start] : *starts) {
+    if (start.isValid() && !chunkData.starts.contains(structId))
+      chunkData.starts[structId] = start;
+  }
 }
 
 void NoiseBasedChunkGenerator::createReferences(WorldGenRegion &region,
@@ -181,17 +215,12 @@ void NoiseBasedChunkGenerator::createReferences(WorldGenRegion &region,
   const int bx0 = center.x << 4;
   const int bz0 = center.z << 4;
   ChunkStructureData &targetData = ensureChunkStructureData(chunk);
+  const std::int64_t worldSeed = region.seed();
 
   for (int sx = center.x - 8; sx <= center.x + 8; ++sx) {
     for (int sz = center.z - 8; sz <= center.z + 8; ++sz) {
-      const ChunkAccess *srcChunk =
-          region.getChunkIfAllowed(sx, sz, ChunkStatusId::StructureStarts);
-      if (!srcChunk)
-        continue;
-      const ChunkStructureData *srcData = findChunkStructureData(*srcChunk);
-      if (!srcData)
-        continue;
-      for (const auto &[structId, start] : srcData->starts) {
+      const auto srcStarts = structureStartsAt({sx, sz}, worldSeed);
+      for (const auto &[structId, start] : *srcStarts) {
         if (!start.isValid())
           continue;
         const BoundingBox bb = start.calculateBoundingBox();
@@ -207,35 +236,32 @@ void NoiseBasedChunkGenerator::createReferences(WorldGenRegion &region,
   }
 }
 
-std::shared_ptr<NoiseChunk>
-NoiseBasedChunkGenerator::getOrCreateNoiseChunk(ChunkAccess &chunk,
+NoiseChunk &
+NoiseBasedChunkGenerator::getOrCreateNoiseChunk(ProtoChunk &chunk,
                                                 RandomState &rs,
+                                                std::int64_t worldSeed,
                                                 const WorldGenRegion *region,
                                                 bool requireTerrain) const {
-  std::shared_ptr<NoiseChunk> cached;
-  if (auto opaque = chunk.cachedNoiseChunkOpaque()) {
-    cached = std::static_pointer_cast<NoiseChunk>(opaque);
-    if (!requireTerrain || cached->isTerrainInitialized())
-      return cached;
+  auto *cached = static_cast<NoiseChunk *>(chunk.cachedNoiseChunkRaw());
+  if (cached != nullptr && (!requireTerrain || cached->isTerrainInitialized())) {
+    return *cached;
   }
 
   DensityNodePtr beardifierNode;
   if (requireTerrain && region != nullptr) {
+    std::vector<std::shared_ptr<const StructureStartsMap>> pinnedStarts;
     std::vector<const StructureStart *> starts;
     const ChunkTicketPos cpos = chunk.pos();
     for (int sx = cpos.x - 8; sx <= cpos.x + 8; ++sx) {
       for (int sz = cpos.z - 8; sz <= cpos.z + 8; ++sz) {
-        const ChunkAccess *src =
-            region->getChunkIfAllowed(sx, sz, ChunkStatusId::StructureStarts);
-        if (!src)
+        auto srcStarts = structureStartsAt({sx, sz}, worldSeed);
+        if (srcStarts->empty())
           continue;
-        const ChunkStructureData *sd = findChunkStructureData(*src);
-        if (!sd)
-          continue;
-        for (const auto &[_, start] : sd->starts) {
+        for (const auto &[_, start] : *srcStarts) {
           if (start.isValid())
             starts.push_back(&start);
         }
+        pinnedStarts.push_back(std::move(srcStarts));
       }
     }
     if (!starts.empty()) {
@@ -246,19 +272,21 @@ NoiseBasedChunkGenerator::getOrCreateNoiseChunk(ChunkAccess &chunk,
     }
   }
 
-  if (cached) {
+  if (cached != nullptr) {
     cached->ensureTerrainInitialized(rs, settings_, globalFluidPicker_,
                                      std::move(beardifierNode));
-    return cached;
+    return *cached;
   }
 
-  std::shared_ptr<NoiseChunk> created =
+  std::unique_ptr<NoiseChunk> created =
       requireTerrain
           ? NoiseChunk::forChunk(chunk, rs, settings_, globalFluidPicker_,
                                  std::move(beardifierNode))
           : NoiseChunk::forChunkBiomes(chunk, rs, settings_);
-  chunk.setCachedNoiseChunkOpaque(created);
-  return created;
+  NoiseChunk *raw = created.release();
+  chunk.setCachedNoiseChunkRaw(
+      BaseChunk::OpaqueUniquePtr(raw, &deleteNoiseChunk));
+  return *raw;
 }
 
 void NoiseBasedChunkGenerator::createBiomes(WorldGenRegion &region,
@@ -277,10 +305,10 @@ void NoiseBasedChunkGenerator::createBiomes(WorldGenRegion &region,
   }
 
   RandomState &rs = randomStateForSeed(worldSeed);
-  std::shared_ptr<NoiseChunk> nc =
-      getOrCreateNoiseChunk(chunk, rs, nullptr, /*requireTerrain=*/false);
+  NoiseChunk &nc = getOrCreateNoiseChunk(chunk, rs, worldSeed, nullptr,
+                                         /*requireTerrain=*/false);
   ClimateSampler sampler =
-      nc->cachedClimateSampler(rs.router(), settings_.spawnTarget);
+      nc.cachedClimateSampler(rs.router(), settings_.spawnTarget);
 
   const int quartMinX = chunk.pos().x << 2;
   const int quartMinZ = chunk.pos().z << 2;
@@ -569,30 +597,30 @@ void NoiseBasedChunkGenerator::fillFromNoise(WorldGenRegion &region,
                                              ProtoChunk &chunk,
                                              std::int64_t worldSeed) {
   RandomState &rs = randomStateForSeed(worldSeed);
-  std::shared_ptr<NoiseChunk> nc = getOrCreateNoiseChunk(chunk, rs, &region);
+  NoiseChunk &nc = getOrCreateNoiseChunk(chunk, rs, worldSeed, &region);
 
-  nc->initializeForFirstCellX();
-  const int cellWidth = nc->cellWidth();
-  const int cellHeight = nc->cellHeight();
+  nc.initializeForFirstCellX();
+  const int cellWidth = nc.cellWidth();
+  const int cellHeight = nc.cellHeight();
   const BlockState &defaultBlock = settings_.defaultBlockState;
 
   if (cellWidth == 4 && cellHeight == 8) {
-    fillFromNoiseCells<4, 8>(*nc, chunk, defaultBlock, 4, 8);
+    fillFromNoiseCells<4, 8>(nc, chunk, defaultBlock, 4, 8);
   } else if (cellWidth == 8 && cellHeight == 4) {
-    fillFromNoiseCells<8, 4>(*nc, chunk, defaultBlock, 8, 4);
+    fillFromNoiseCells<8, 4>(nc, chunk, defaultBlock, 8, 4);
   } else if (cellWidth == 4 && cellHeight == 4) {
-    fillFromNoiseCells<4, 4>(*nc, chunk, defaultBlock, 4, 4);
+    fillFromNoiseCells<4, 4>(nc, chunk, defaultBlock, 4, 4);
   } else {
-    fillFromNoiseCells<0, 0>(*nc, chunk, defaultBlock, cellWidth, cellHeight);
+    fillFromNoiseCells<0, 0>(nc, chunk, defaultBlock, cellWidth, cellHeight);
   }
-  nc->stopInterpolation();
+  nc.stopInterpolation();
 }
 
 void NoiseBasedChunkGenerator::buildSurface(WorldGenRegion &region,
                                             ProtoChunk &chunk,
                                             std::int64_t worldSeed) {
   RandomState &rs = randomStateForSeed(worldSeed);
-  std::shared_ptr<NoiseChunk> nc = getOrCreateNoiseChunk(chunk, rs, &region);
+  NoiseChunk &nc = getOrCreateNoiseChunk(chunk, rs, worldSeed, &region);
   BiomeManager biomeManager(BiomeManager::obfuscateSeed(worldSeed));
   BiomeManager::NoiseBiomeReader reader =
       [&region, &rs, this](int qx, int qy, int qz) -> std::string_view {
@@ -604,7 +632,7 @@ void NoiseBasedChunkGenerator::buildSurface(WorldGenRegion &region,
   };
   rs.surfaceSystem(settings_).buildSurface(
       rs, biomeManager, reader, registries_, settings_.legacyRandomSource,
-      settings_.minY, settings_.height, chunk, *nc, settings_.surfaceRule);
+      settings_.minY, settings_.height, chunk, nc, settings_.surfaceRule);
 }
 
 std::size_t NoiseBasedChunkGenerator::CarverBiomeKeyHash::operator()(
@@ -646,8 +674,8 @@ void NoiseBasedChunkGenerator::applyCarvers(WorldGenRegion &region,
                                             ProtoChunk &chunk,
                                             std::int64_t worldSeed) {
   RandomState &rs = randomStateForSeed(worldSeed);
-  std::shared_ptr<NoiseChunk> nc = getOrCreateNoiseChunk(chunk, rs, &region);
-  Aquifer &aquifer = nc->aquifer();
+  NoiseChunk &nc = getOrCreateNoiseChunk(chunk, rs, worldSeed, &region);
+  Aquifer &aquifer = nc.aquifer();
   BiomeManager correctBiomeManager(BiomeManager::obfuscateSeed(worldSeed));
   BiomeManager::NoiseBiomeReader sourceReader =
       [this, &rs](int qx, int qy, int qz) -> std::string_view {
@@ -676,7 +704,7 @@ void NoiseBasedChunkGenerator::applyCarvers(WorldGenRegion &region,
             sourcePos.x, sourcePos.z);
         if (carver->isStartChunk(carverRng)) {
           carver->carve(genCtx, settings_, rs, correctBiomeManager, sourceReader,
-                        registries_, chunk, *nc, carverRng, aquifer, sourcePos,
+                        registries_, chunk, nc, carverRng, aquifer, sourcePos,
                         mask);
         }
       }
@@ -712,7 +740,7 @@ void NoiseBasedChunkGenerator::applyBiomeDecoration(WorldGenRegion &region,
   std::vector<std::uint8_t> presentMask(registries_.biomeCount(), 0);
   for (int dx = -1; dx <= 1; ++dx) {
     for (int dz = -1; dz <= 1; ++dz) {
-      const ChunkAccess *nb = region.getChunkIfAllowed(
+      const BaseChunk *nb = region.getChunkIfAllowed(
           center.x + dx, center.z + dz, ChunkStatusId::Biomes);
       if (!nb)
         continue;
@@ -739,30 +767,46 @@ void NoiseBasedChunkGenerator::applyBiomeDecoration(WorldGenRegion &region,
   }
 
   const ChunkStructureData *refData = findChunkStructureData(chunk);
+  std::map<std::string, std::vector<ChunkTicketPos>, std::less<>> computedRefs;
+  if (!refData) {
+    const int bx0 = center.x << 4;
+    const int bz0 = center.z << 4;
+    for (int sx = center.x - 8; sx <= center.x + 8; ++sx) {
+      for (int sz = center.z - 8; sz <= center.z + 8; ++sz) {
+        const auto srcStarts = structureStartsAt({sx, sz}, worldSeed);
+        for (const auto &[structId, start] : *srcStarts) {
+          if (!start.isValid())
+            continue;
+          const BoundingBox bb = start.calculateBoundingBox();
+          if (bb.intersectsXZ(bx0, bz0, bx0 + 15, bz0 + 15)) {
+            auto &refs = computedRefs[structId];
+            const ChunkTicketPos srcPos{sx, sz};
+            if (std::find(refs.begin(), refs.end(), srcPos) == refs.end())
+              refs.push_back(srcPos);
+          }
+        }
+      }
+    }
+  }
+  const auto &refsMap = refData ? refData->references : computedRefs;
   const auto *templates = registries_.templateCache();
   const std::size_t genSteps =
       std::max(kDecorationStepCount, featuresPerStep_.size());
 
   for (std::size_t step = 0; step < genSteps; ++step) {
     int structFeatureIndex = 0;
-    if (refData && templates) {
+    if (templates) {
       for (const auto &[structId, def] : registries_.structures()) {
         if (static_cast<std::size_t>(def.step) != step)
           continue;
         worldgen_random::setFeatureSeed(rng, decorationSeed, structFeatureIndex,
                                         static_cast<int>(step));
-        auto refIt = refData->references.find(structId);
-        if (refIt != refData->references.end()) {
+        auto refIt = refsMap.find(structId);
+        if (refIt != refsMap.end()) {
           for (const ChunkTicketPos &startChunkPos : refIt->second) {
-            const ChunkAccess *startChunk = region.getChunkIfAllowed(
-                startChunkPos.x, startChunkPos.z, ChunkStatusId::StructureStarts);
-            if (!startChunk)
-              continue;
-            const ChunkStructureData *sd = findChunkStructureData(*startChunk);
-            if (!sd)
-              continue;
-            auto startIt = sd->starts.find(structId);
-            if (startIt == sd->starts.end() || !startIt->second.isValid())
+            const auto srcStarts = structureStartsAt(startChunkPos, worldSeed);
+            auto startIt = srcStarts->find(structId);
+            if (startIt == srcStarts->end() || !startIt->second.isValid())
               continue;
             for (const StructurePiece &piece : startIt->second.pieces) {
               if (!piece.templateId.empty() &&
@@ -866,6 +910,14 @@ int NoiseBasedChunkGenerator::getBaseHeight(int x, int z, HeightmapType type,
   }
   nc.stopInterpolation();
   return settings_.minY;
+}
+
+BaseChunk::OpaqueUniquePtr cloneChunkStructureDataRaw(const void *raw) {
+  if (!raw)
+    return BaseChunk::OpaqueUniquePtr(nullptr, +[](void *) {});
+  const auto *src = static_cast<const ChunkStructureData *>(raw);
+  return BaseChunk::OpaqueUniquePtr(new ChunkStructureData(*src),
+                                    &deleteChunkStructureData);
 }
 
 } // namespace redstone::worldgen

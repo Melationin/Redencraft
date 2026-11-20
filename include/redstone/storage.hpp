@@ -11,8 +11,9 @@
 #include <span>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
+
+#include "redstone/hash.hpp"
 namespace redstone {
 // 用于在磁盘存档 / Litematica 投影与引擎内部计划刻队列之间传递单条延迟刻记录。
 struct SavedTickData {
@@ -85,6 +86,13 @@ struct WorldMetadata {
 void setWorldMetadataTime(WorldMetadata &metadata, std::int64_t gameTime);
 void saveWorldMetadata(const std::filesystem::path &worldDir,
                        const WorldMetadata &metadata);
+// 若世界目录尚未包含 `level.dat`，初始化一份最小可用的 26.1 存档目录
+//（写入 `level.dat`、`data/minecraft/world_gen_settings.dat` 与各维度 `region/` 目录）。
+// 返回 true 表示新建，false 表示 `level.dat` 已存在（不覆盖已有存档）。
+bool ensureWorldDirectory(const std::filesystem::path &worldDir,
+                          std::int64_t seed);
+// 对齐原版 26.1 `BiomeManager.obfuscateSeed`：对小端 64 位种子做 SHA-256 后取前 8 字节（小端）发给客户端。
+std::int64_t obfuscateSeed(std::int64_t seed) noexcept;
 // 加载票数据文件路径固定为：<所选维度根目录>/data/minecraft/chunk_tickets.dat。
 std::filesystem::path ticketDataPath(const std::filesystem::path &regionDirectory);
 // 表示持久化在 chunk_tickets.dat 中的单条区块加载票（如 forced、portal），用于重启后恢复常加载需求。
@@ -111,7 +119,8 @@ struct LoadedWorld {
   std::vector<SavedTickData> ticks;
   std::vector<nbt::Tag> blockEntities;
   std::vector<nbt::Tag> entities;
-  std::unordered_map<std::uint64_t, PersistedChunkLight> persistedLights;
+  phmap::flat_hash_map<std::uint64_t, PersistedChunkLight, ChunkKeyHash>
+      persistedLights;
   std::int64_t seed = 0;
 };
 // 26.1 命名空间化的主世界路径（dimensions/minecraft/overworld/region）优先于旧版 world/region。

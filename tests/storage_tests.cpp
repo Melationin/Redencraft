@@ -127,8 +127,8 @@ static void entities(Bytes &b, const std::string &name,
   for (const auto &value : values)
     b.insert(b.end(), value.begin(), value.end());
 }
-static Bytes terrain(const std::vector<Bytes> &legacy = {},
-                      const std::vector<Bytes> &alias = {}) {
+static Bytes terrainNbt(const std::vector<Bytes> &legacy = {},
+                         const std::vector<Bytes> &alias = {}) {
   auto b = root();
   integer(b, "DataVersion", 4786);
   integer(b, "xPos", -1);
@@ -342,7 +342,7 @@ static void entityStorageFixtures(const std::filesystem::path &directory) {
   tag(seed, 10, "data"); longtag(seed, "seed", -123456789012345LL);
   seed.push_back(0); seed.push_back(0);
   write(settings / "world_gen_settings.dat", compressed(seed, 31));
-  regionFixture(dimension / "region", terrain({itemTag(1, 2)}, {itemTag(9, 9)}));
+  regionFixture(dimension / "region", terrainNbt({itemTag(1, 2)}, {itemTag(9, 9)}));
   Bytes unknown;
   stringtag(unknown, "id", "example:unknown_without_position");
   unknown.push_back(0);
@@ -1069,6 +1069,25 @@ int main() try {
     assert(streamedWorld.getBlock({0, 64, 0}).is(Blocks::CHEST));
     assert(streamedWorld.containerEntity({0, 64, 0}) != nullptr);
     assert(streamedWorld.allBlocks() == legacyWorld.allBlocks());
+  }
+
+  {
+    const auto freshDir = std::filesystem::temp_directory_path() /
+                          "redstone-fresh-seeded-world";
+    std::filesystem::remove_all(freshDir);
+    assert(ensureWorldDirectory(freshDir, -88273645123456789LL));
+    assert(!ensureWorldDirectory(freshDir, 999LL)); // Must not overwrite existing level.dat
+    const WorldMetadata meta = loadWorldMetadata(freshDir);
+    assert(meta.seed == -88273645123456789LL);
+    assert(meta.gameTime == 0);
+    assert(meta.dimensions.size() == 3);
+    assert(meta.findDimension("minecraft:overworld") != nullptr);
+    assert(std::filesystem::is_directory(
+        freshDir / "dimensions" / "minecraft" / "overworld" / "region"));
+    std::filesystem::remove_all(freshDir);
+    // Verify obfuscateSeed matches Guava Hashing.sha256().hashLong(0).asLong().
+    // SHA-256 of 8 zero bytes starts with af5570f5 a1810b7a -> LE int64 0x7a0b81a1f57055af.
+    assert(obfuscateSeed(0) == static_cast<std::int64_t>(0x7a0b81a1f57055afLL));
   }
   return 0;
 } catch (const std::exception &failure) {

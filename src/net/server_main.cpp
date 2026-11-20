@@ -14,6 +14,7 @@
 #include "redstone/command.hpp"
 #include "redstone/dimension.hpp"
 #include "redstone/entity.hpp"
+#include "redstone/fluid.hpp"
 #include "redstone/litematic.hpp"
 #include "redstone/net/session.hpp"
 #include "redstone/net/outbox.hpp"
@@ -35,6 +36,7 @@
 #include <cstdio>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <locale>
 #include <map>
 #include <memory>
@@ -309,6 +311,8 @@ struct Connection {
 // world thread. A slow connection owns its own bounded queue.
 class NetworkWriter {
 public:
+  explicit NetworkWriter(bool unlimitedNetwork = false)
+      : unlimitedNetwork_(unlimitedNetwork) {}
   ~NetworkWriter() { stop(); }
   void start() { thread_ = std::thread([this] { run(); }); }
   void stop() {
@@ -327,7 +331,7 @@ public:
   void submit(const std::shared_ptr<Connection> &connection,
               std::vector<OutPacket> packets) noexcept {
     if (packets.empty() || connection->dead.load(std::memory_order_acquire)) return;
-    if (!connection->outbox.tryPush(packets)) {
+    if (!connection->outbox.tryPush(packets, !unlimitedNetwork_)) {
       if (!connection->dead.exchange(true, std::memory_order_acq_rel))
         ++backpressureDisconnects_;
       return;
@@ -377,9 +381,11 @@ private:
         }
         // Netty-style writable watermark: retain ordered work rather than
         // repeatedly encoding more data for a socket that cannot drain.
-        if (connection.pending.size() - connection.sent >= 1024 * 1024) continue;
+        if (!unlimitedNetwork_ &&
+            connection.pending.size() - connection.sent >= 1024 * 1024)
+          continue;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
-        for (int count = 0; count < 64; ++count) {
+        for (int count = 0; unlimitedNetwork_ || count < 64; ++count) {
           if (connection.encoding.packets.empty()) {
             if (!connection.outbox.tryPop(connection.encoding)) break;
             connection.nextPacket = 0;
@@ -394,8 +400,10 @@ private:
             Bytes produced = packet.deferred ? packet.deferred()
                 : packet.packetId >= 0 ? frame(packet.packetId, packet.bytes)
                                        : std::move(packet.bytes);
-            if (produced.size() > maxQueuedOutputBytes ||
-                connection.pending.size() - connection.sent > maxQueuedOutputBytes - produced.size()) {
+            if (!unlimitedNetwork_ &&
+                (produced.size() > maxQueuedOutputBytes ||
+                 connection.pending.size() - connection.sent >
+                     maxQueuedOutputBytes - produced.size())) {
               connection.dead.store(true, std::memory_order_release);
               break;
             }
@@ -407,8 +415,10 @@ private:
           }
           if (++connection.nextPacket == connection.encoding.packets.size())
             connection.outbox.complete(connection.encoding);
-          if (connection.pending.size() - connection.sent >= 1024 * 1024 ||
-              std::chrono::steady_clock::now() >= deadline) break;
+          if (!unlimitedNetwork_ &&
+              (connection.pending.size() - connection.sent >= 1024 * 1024 ||
+               std::chrono::steady_clock::now() >= deadline))
+            break;
         }
       }
       fd_set writes;
@@ -452,10 +462,11 @@ private:
       std::unique_lock lock(mutex_);
       wake_.wait_for(lock, std::chrono::milliseconds(2), [&] {
         if (stopping_.load(std::memory_order_acquire) || !added_.empty()) return true;
-        return std::any_of(active.begin(), active.end(), [](const auto &connection) {
+        return std::any_of(active.begin(), active.end(), [this](const auto &connection) {
           return connection->dead.load() || connection->closing.load() ||
                  ((!connection->outbox.empty() || !connection->encoding.packets.empty()) &&
-                  connection->pending.size() - connection->sent < 1024 * 1024);
+                  (unlimitedNetwork_ ||
+                   connection->pending.size() - connection->sent < 1024 * 1024));
         });
       });
     }
@@ -464,6 +475,7 @@ private:
   std::condition_variable wake_;
   std::vector<std::shared_ptr<Connection>> added_;
   std::atomic<bool> stopping_{false};
+  bool unlimitedNetwork_ = false;
   std::size_t backpressureDisconnects_ = 0; // world-thread only
   std::thread thread_;
 };
@@ -569,13 +581,20 @@ int runServer(int argc, char **argv) {
   try {
     std::filesystem::path assets = REDSTONE_PROTOCOL_DIR, worldPath,
                           schematicPath, ticketedWorldPath, worldgenDirectory;
+    std::optional<std::int64_t> requestedSeed;
+    std::string bindHost = "127.0.0.1";
     bool worldgenDisabled = false;
+    bool lightingDisabled = false;
+    bool asyncWorldGenLight = true;
+    bool saveOnlyOnUnload = true;
     std::string requestedDimension;
     std::vector<std::filesystem::path> blockTagPacks;
     int port = 25565, maxTicks = 0, forceMargin = 2;
     int simulationDistance = 10;
+    int worldgenThreads = 0;
     int entityCramCount = 100;
     bool explicitSpawn = false, explicitOffset = false;
+    bool explicitViewDistance = false, explicitTicketViewDistance = false;
     bool consoleEnabled = true, fluidFixture = false, entityFixture = false,
          singlePlatform = false;
     LitematicOptions schematicOptions;
@@ -587,17 +606,21 @@ int runServer(int argc, char **argv) {
       const std::string arg = argv[i];
       if (arg == "--help") {
         std::cout
-            << "redstone_vanilla_server [--port 25565] [--assets directory] "
+            << "redstone_vanilla_server [--port 25565] [--bind 127.0.0.1] [--assets directory] "
                "[--world directory | --schematic file | "
                "--ticketed-world directory]\n"
-               "  [--dimension namespace:path] [--chunk x,z ...] [--ticks N] "
+               "  [--seed N] [--dimension namespace:path] [--chunk x,z ...] [--ticks N] "
                "[--spawn x,y,z] [--offset x,y,z] [--view-distance 3] "
                "[--force-margin 2]\n"
                "  [--allow-unsupported] [--skip-non-full-chunks]\n"
                "  [--fluid-basin] [--single-platform] [--no-console] "
+               "[--no-network-limit] "
                "[--light-workers 1] [--ticket-view-distance 3] "
                "[--simulation-distance 10] [--command-permission-level 0] "
-               "[--data-pack path ...] [--worldgen directory | --no-worldgen]\n"
+               "[--data-pack path ...] [--worldgen directory | --no-worldgen] "
+               "[--worldgen-threads N] "
+               "[--no-light] [--sync-worldgen-light] [--eager-autosave] "
+               "[--wait-light-before-send]\n"
                "Offline --world/--schematic modes do not save. "
                "--ticketed-world opens the overworld region and session.lock "
                "for writes; missing chunks are generated only when a "
@@ -608,8 +631,28 @@ int runServer(int argc, char **argv) {
         consoleEnabled = false;
         continue;
       }
+      if (arg == "--no-network-limit") {
+        options.unlimitedNetwork = true;
+        continue;
+      }
       if (arg == "--no-worldgen") {
         worldgenDisabled = true;
+        continue;
+      }
+      if (arg == "--no-light") {
+        lightingDisabled = true;
+        continue;
+      }
+      if (arg == "--sync-worldgen-light") {
+        asyncWorldGenLight = false;
+        continue;
+      }
+      if (arg == "--eager-autosave") {
+        saveOnlyOnUnload = false;
+        continue;
+      }
+      if (arg == "--wait-light-before-send") {
+        options.sendChunksBeforeLightReady = false;
         continue;
       }
       if (arg == "--allow-unsupported") {
@@ -657,19 +700,31 @@ int runServer(int argc, char **argv) {
         blockTagPacks.push_back(utf8Path(value));
       else if (arg == "--worldgen")
         worldgenDirectory = utf8Path(value);
+      else if (arg == "--worldgen-threads")
+        worldgenThreads = integer(value, 1, std::numeric_limits<int>::max());
       else if (arg == "--dimension")
         requestedDimension = normalizeDimensionId(value);
       else if (arg == "--world")
         worldPath = utf8Path(value);
       else if (arg == "--ticketed-world")
         ticketedWorldPath = utf8Path(value);
+      else if (arg == "--seed") {
+        std::size_t idx = 0;
+        const long long parsed = std::stoll(value, &idx, 10);
+        if (idx != value.size())
+          throw ProtocolError("seed must be a 64-bit signed integer");
+        requestedSeed = static_cast<std::int64_t>(parsed);
+      } else if (arg == "--bind")
+        bindHost = value;
       else if (arg == "--schematic")
         schematicPath = utf8Path(value);
-      else if (arg == "--view-distance")
+      else if (arg == "--view-distance") {
         options.viewDistance = integer(value, 2, maxViewDistance);
-      else if (arg == "--ticket-view-distance")
+        explicitViewDistance = true;
+      } else if (arg == "--ticket-view-distance") {
         options.ticketViewDistance = integer(value, 2, 32);
-      else if (arg == "--simulation-distance")
+        explicitTicketViewDistance = true;
+      } else if (arg == "--simulation-distance")
         simulationDistance = integer(value, 2, 32);
       else if (arg == "--force-margin")
         forceMargin = integer(value, 0, 16);
@@ -726,6 +781,14 @@ int runServer(int argc, char **argv) {
         throw ProtocolError(
             "--ticketed-world is incompatible with --chunk, --offset and "
             "--fluid-basin");
+    } else if (requestedSeed.has_value()) {
+      throw ProtocolError("--seed requires --ticketed-world");
+    }
+    if (requestedSeed.has_value()) {
+      if (!explicitViewDistance)
+        options.viewDistance = maxViewDistance;
+      if (!explicitTicketViewDistance)
+        options.ticketViewDistance = maxViewDistance;
     }
     if (schematicPath.empty() && explicitOffset)
       throw ProtocolError("--offset requires --schematic");
@@ -790,6 +853,12 @@ int runServer(int argc, char **argv) {
     std::unique_ptr<TicketedWorldLock> ticketedLock;
     DimensionLevel *primaryTicketedLevel = nullptr;
     if (!ticketedWorldPath.empty()) {
+      if (requestedSeed.has_value()) {
+        if (ensureWorldDirectory(ticketedWorldPath, *requestedSeed)) {
+          std::cout << "TICKETED_WORLD_CREATED seed=" << *requestedSeed
+                    << " path=" << ticketedWorldPath.string() << std::endl;
+        }
+      }
       ticketedLock = std::make_unique<TicketedWorldLock>(ticketedWorldPath);
       const std::string targetDim = requestedDimension.empty()
                                         ? std::string("minecraft:overworld")
@@ -800,11 +869,28 @@ int runServer(int argc, char **argv) {
       worldOpts.simulationDistance = simulationDistance;
       worldOpts.extraBlockTagPacks = explicitBlockTagPacks;
       worldOpts.worldgenDirectory = worldgenDirectory;
+      worldOpts.worldgenThreads = worldgenThreads;
+      worldOpts.asyncWorldGenLight = asyncWorldGenLight;
+      worldOpts.saveOnlyOnUnload = saveOnlyOnUnload;
       worldSet = ServerWorldSet::open(ticketedWorldPath, worldOpts);
+      if (requestedSeed.has_value() &&
+          worldSet->metadata().seed != *requestedSeed) {
+        throw ProtocolError(
+            "--seed (" + std::to_string(*requestedSeed) +
+            ") does not match existing world seed (" +
+            std::to_string(worldSet->metadata().seed) + ")");
+      }
+      if (!worldgenDirectory.empty()) {
+        options.isFlat = false;
+        options.hashedSeed = obfuscateSeed(worldSet->metadata().seed);
+      }
       std::cout << "TICKETED_WORLDGEN "
                 << (worldgenDirectory.empty()
                         ? std::string("disabled")
                         : worldgenDirectory.string())
+                << " worldgen_threads="
+                << (worldgenThreads > 0 ? std::to_string(worldgenThreads)
+                                        : std::string("auto"))
                 << std::endl;
       for (const auto &message : worldSet->dataPackSelection().diagnostics)
         std::cerr << "BLOCK_TAGS: " << message << std::endl;
@@ -1094,10 +1180,101 @@ int runServer(int argc, char **argv) {
     // The native protocol path uses published light rather than placeholder
     // brightness. Initial chunk sends wait asynchronously for the first complete
     // worker snapshot; no connection callback waits on the light worker.
-    if (worldSet)
+    if (lightingDisabled) {
+      // 无光世界：不创建 LightService，生成/存档/刻循环仍按无光照路径工作。
+      std::cout << "LIGHTING disabled" << std::endl;
+    } else if (worldSet) {
       worldSet->enableLighting(lightOptions);
-    else
+    } else {
       world.enableLighting(lightOptions);
+    }
+    std::vector<ChunkTicketPos> prewarmTickets;
+    if (worldSet && primaryTicketedLevel && primaryTicketedLevel->chunkManager &&
+        primaryTicketedLevel->generator != nullptr &&
+        (requestedSeed.has_value() ||
+         !std::filesystem::exists(primaryTicketedLevel->regionDirectory) ||
+         std::filesystem::is_empty(primaryTicketedLevel->regionDirectory))) {
+      auto &mgr = *primaryTicketedLevel->chunkManager;
+      World &pw = *primaryTicketedLevel->world;
+      const int scx = static_cast<int>(std::floor(options.spawn.x)) >> 4;
+      const int scz = static_cast<int>(std::floor(options.spawn.z)) >> 4;
+      for (int dx = -1; dx <= 1; ++dx) {
+        for (int dz = -1; dz <= 1; ++dz) {
+          const ChunkTicketPos cp{scx + dx, scz + dz};
+          if (!mgr.ticketSources().tickets().storage().hasForcedTicket(cp)) {
+            (void)mgr.setForced(cp, true);
+            prewarmTickets.push_back(cp);
+          }
+        }
+      }
+      const auto prewarmDeadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(30);
+      while (std::chrono::steady_clock::now() < prewarmDeadline) {
+        worldSet->pumpAll();
+        pw.drainLightPublications();
+        bool allLoaded = true;
+        for (int dx = -1; dx <= 1 && allLoaded; ++dx)
+          for (int dz = -1; dz <= 1 && allLoaded; ++dz)
+            if (!pw.isChunkLoaded(scx + dx, scz + dz))
+              allLoaded = false;
+        if (allLoaded) {
+          if (pw.lightService())
+            pw.lightService()->flushAndWait();
+          pw.drainLightPublications();
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      if (!explicitSpawn) {
+        const int originX = (scx << 4) + 8;
+        const int originZ = (scz << 4) + 8;
+        int bestX = originX, bestZ = originZ;
+        int bestY = 64;
+        bool foundDry = false;
+        for (int r = 0; r <= 7 && !foundDry; ++r) {
+          for (int ox = -r; ox <= r && !foundDry; ++ox) {
+            for (int oz = -r; oz <= r && !foundDry; ++oz) {
+              if (std::max(std::abs(ox), std::abs(oz)) != r)
+                continue;
+              const int tx = originX + ox;
+              const int tz = originZ + oz;
+              auto *wc = pw.chunkMap().findWorldChunk(tx >> 4, tz >> 4);
+              if (!wc)
+                continue;
+              const int topY =
+                  wc->getHeight(HeightmapType::MotionBlocking, tx & 15, tz & 15);
+              if (topY < pw.minY())
+                continue;
+              const BlockState ground = pw.getBlock({tx, topY, tz});
+              if (fluidStateOf(ground).isEmpty() && !ground.isAir()) {
+                int standY = topY + 1;
+                while (standY + 1 < pw.maxY() &&
+                       (!pw.getBlock({tx, standY, tz}).isAir() ||
+                        !pw.getBlock({tx, standY + 1, tz}).isAir())) {
+                  ++standY;
+                }
+                bestX = tx;
+                bestZ = tz;
+                bestY = standY;
+                foundDry = true;
+              }
+            }
+          }
+        }
+        if (foundDry) {
+          options.spawn = {bestX + 0.5, static_cast<double>(bestY),
+                           bestZ + 0.5};
+        } else if (auto *wc = pw.chunkMap().findWorldChunk(scx, scz)) {
+          const int topY = wc->getHeight(HeightmapType::WorldSurface, 8, 8);
+          options.spawn = {originX + 0.5,
+                           static_cast<double>(std::max(topY + 1, 64)),
+                           originZ + 0.5};
+        }
+      }
+      std::cout << "TICKETED_SPAWN x=" << options.spawn.x
+                << " y=" << options.spawn.y << " z=" << options.spawn.z
+                << " view_distance=" << options.viewDistance << std::endl;
+    }
     SocketSystem socketSystem;
     Socket listener(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     if (listener.get() == invalidSocket)
@@ -1105,7 +1282,8 @@ int runServer(int argc, char **argv) {
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(static_cast<std::uint16_t>(port));
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::inet_pton(AF_INET, bindHost.c_str(), &address.sin_addr) != 1)
+      throw ProtocolError("invalid --bind IPv4 address: " + bindHost);
     if (bind(listener.get(), reinterpret_cast<sockaddr *>(&address),
              sizeof(address)))
       throw ProtocolError("bind failed (port in use?)");
@@ -1121,7 +1299,7 @@ int runServer(int argc, char **argv) {
     getsockname(listener.get(), reinterpret_cast<sockaddr *>(&address),
                 &addressLength);
 #endif
-    std::cout << "LISTENING 127.0.0.1:" << ntohs(address.sin_port)
+    std::cout << "LISTENING " << bindHost << ":" << ntohs(address.sin_port)
               << " protocol=775 allocator=" << REDSTONE_ALLOCATOR_NAME
               << " workers=1" << std::endl;
     std::vector<std::shared_ptr<Connection>> connections;
@@ -1132,7 +1310,7 @@ int runServer(int argc, char **argv) {
         simulationDistance);
     // Payloads/snapshots are collected on the main thread; framing, chunk
     // encoding and socket writes happen on the writer thread.
-    NetworkWriter writer;
+    NetworkWriter writer(options.unlimitedNetwork);
     writer.start();
     NetworkTeardownGuard teardown;
     std::size_t ticketedInstalls = 0;
@@ -1144,8 +1322,10 @@ int runServer(int argc, char **argv) {
         manager->managedChunkInstalled = [&, wp](const ChunkTicketPos &p) {
           ++ticketedInstalls;
           for (auto &c : connections)
-            if (!c->dead && &c->session.world() == wp)
+            if (!c->dead && &c->session.world() == wp) {
               c->session.managedChunkResidency(p.x, p.z, true);
+              writer.submit(c, c->session.takeOutputItems());
+            }
         };
         manager->managedChunkRemoved = [&, wp](const ChunkTicketPos &p) {
           for (auto &c : connections)
@@ -1452,6 +1632,12 @@ int runServer(int argc, char **argv) {
             else
               (void)level->chunkManager->removePlayer(pid);
           }
+          if (present && !prewarmTickets.empty() && primaryTicketedLevel &&
+              primaryTicketedLevel->chunkManager) {
+            for (const ChunkTicketPos &cp : prewarmTickets)
+              (void)primaryTicketedLevel->chunkManager->setForced(cp, false);
+            prewarmTickets.clear();
+          }
         } else {
           (void)ticketSources.setPlayer(pid, present, center);
         }
@@ -1609,6 +1795,12 @@ int runServer(int argc, char **argv) {
       }
     }
     if (worldSet) {
+      if (!prewarmTickets.empty() && primaryTicketedLevel &&
+          primaryTicketedLevel->chunkManager) {
+        for (const ChunkTicketPos &cp : prewarmTickets)
+          (void)primaryTicketedLevel->chunkManager->setForced(cp, false);
+        prewarmTickets.clear();
+      }
       bool allComplete = true;
       bool allWorkersStopped = true;
       std::size_t totalSaved = 0;

@@ -218,8 +218,12 @@ Session::Session(World &world, const ProtocolData &data, ServerOptions options)
       position_(options_.spawn) {
   options_.viewDistance = std::clamp(options_.viewDistance, 2, maxViewDistance);
   availableChunks_.insert(options_.chunks.begin(), options_.chunks.end());
-  if (availableChunks_.size() > 64)
+  if (options_.unlimitedNetwork) {
+    chunksPerBatch_ = 64;
+    chunkBatchLimit_ = 4096;
+  } else if (availableChunks_.size() > 64) {
     chunksPerBatch_ = chunkBatchLimit_ = 2;
+  }
 }
 Session::~Session() { detachPlayerEntity(); }
 
@@ -330,9 +334,10 @@ void Session::enqueue(OutPacket item) {
   if (closed())
     return;
   const std::size_t charge = outPacketCharge(item);
-  if (output_.size() >= maxQueuedOutputPackets ||
-      charge > maxQueuedOutputBytes ||
-      outputBytes_ > maxQueuedOutputBytes - charge) {
+  if (!options_.unlimitedNetwork &&
+      (output_.size() >= maxQueuedOutputPackets ||
+       charge > maxQueuedOutputBytes ||
+       outputBytes_ > maxQueuedOutputBytes - charge)) {
     output_.clear();
     outputBytes_ = 0;
     error_ = "Connection output backlog exceeded";

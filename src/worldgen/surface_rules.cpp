@@ -121,7 +121,7 @@ struct PreparedRuleNode {
 struct RuleEvalContext {
   const SurfaceSystem &system;
   RandomState &randomState;
-  ChunkAccess &chunk;
+  ProtoChunk &chunk;
   NoiseChunk &noiseChunk;
   const BiomeManager &biomeManager;
   const BiomeManager::NoiseBiomeReader &noiseBiomeReader;
@@ -164,7 +164,7 @@ struct RuleEvalContext {
 
   std::vector<CondCacheEntry> condCache;
 
-  RuleEvalContext(const SurfaceSystem &sys, RandomState &rs, ChunkAccess &c,
+  RuleEvalContext(const SurfaceSystem &sys, RandomState &rs, ProtoChunk &c,
                   NoiseChunk &nc, const BiomeManager &bm,
                   const BiomeManager::NoiseBiomeReader &nbr,
                   const WorldgenRegistries &reg, int minY, int depth,
@@ -489,7 +489,7 @@ applyPreparedRule(const std::vector<PreparedRuleNode> &rules,
   return std::nullopt;
 }
 
-void setSurfaceColumnBlock(ChunkAccess &chunk, int x, int y, int z,
+void setSurfaceColumnBlock(ProtoChunk &chunk, int x, int y, int z,
                            const BlockState &state) {
   if (chunk.isOutsideBuildHeight(y))
     return;
@@ -757,7 +757,7 @@ BlockState SurfaceSystem::getBand(int worldX, int y, int worldZ) const {
   return clayBands_[static_cast<std::size_t>(mod < 0 ? mod + 192 : mod)];
 }
 
-void SurfaceSystem::erodedBadlandsExtension(ChunkAccess &chunk, int blockX,
+void SurfaceSystem::erodedBadlandsExtension(ProtoChunk &chunk, int blockX,
                                             int blockZ, int height) const {
   const double pillarBuffer = std::min(
       std::abs(badlandsSurfaceNoise_->getValue(static_cast<double>(blockX), 0.0,
@@ -796,7 +796,7 @@ void SurfaceSystem::erodedBadlandsExtension(ChunkAccess &chunk, int blockX,
 
 void SurfaceSystem::frozenOceanExtension(
     int minSurfaceLevel, const BiomeClimateProperties &biomeClimate,
-    ChunkAccess &chunk, int blockX, int blockZ, int height) const {
+    ProtoChunk &chunk, int blockX, int blockZ, int height) const {
   const double iceberg = std::min(
       std::abs(icebergSurfaceNoise_->getValue(static_cast<double>(blockX), 0.0,
                                               static_cast<double>(blockZ)) *
@@ -875,7 +875,7 @@ void SurfaceSystem::buildSurface(
     RandomState &randomState, const BiomeManager &biomeManager,
     const BiomeManager::NoiseBiomeReader &noiseBiomeReader,
     const WorldgenRegistries &registries, bool useLegacyRandom, int genMinY,
-    int genDepth, ChunkAccess &chunk, NoiseChunk &noiseChunk,
+    int genDepth, ProtoChunk &chunk, NoiseChunk &noiseChunk,
     const SurfaceRuleSourcePtr &ruleSource) const {
   if (!ruleSource)
     return;
@@ -980,7 +980,7 @@ std::optional<BlockState> SurfaceSystem::topMaterial(
     RandomState &randomState, const BiomeManager &biomeManager,
     const BiomeManager::NoiseBiomeReader &noiseBiomeReader,
     const WorldgenRegistries &registries, int genMinY, int genDepth,
-    ChunkAccess &chunk, NoiseChunk &noiseChunk,
+    ProtoChunk &chunk, NoiseChunk &noiseChunk,
     const SurfaceRuleSourcePtr &ruleSource, int blockX, int blockY, int blockZ,
     bool underFluid) const {
   if (!ruleSource)

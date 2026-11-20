@@ -1,4 +1,5 @@
 #include "redstone/chunk_lifecycle.hpp"
+#include "redstone/flat_hash_map.hpp"
 #include <atomic>
 
 #include <algorithm>
@@ -85,22 +86,239 @@ StoreWriteResult RegionFileStore::writeChunk(
   }
 }
 
+struct SerializedChunkStore::Impl {
+  struct CacheEntry {
+    std::vector<std::uint8_t> bytes;
+    int timestampSeconds = 0;
+    std::uint64_t generation = 0;
+    bool flushed = false;
+  };
+  struct PendingWrite {
+    ChunkTicketPos position;
+    std::uint64_t key = 0;
+    std::uint64_t generation = 0;
+  };
+  struct FlushedRef {
+    std::uint64_t key = 0;
+    std::uint64_t generation = 0;
+  };
+
+  Impl(std::shared_ptr<RawChunkStore> innerStore, std::size_t retained)
+      : inner(std::move(innerStore)), retainedChunks(retained) {
+    if (!inner)
+      throw std::invalid_argument("serialized chunk store requires inner store");
+    worker = std::thread([this] { runWriter(); });
+  }
+
+  ~Impl() {
+    {
+      std::lock_guard lock(mutex);
+      stopping = true;
+      cv.notify_all();
+    }
+    if (worker.joinable())
+      worker.join();
+  }
+
+  static std::uint64_t packKey(const ChunkTicketPos &position) noexcept {
+    return (static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(position.x))
+            << 32) |
+           static_cast<std::uint32_t>(position.z);
+  }
+
+  std::uint64_t putCacheLocked(std::uint64_t key,
+                               std::vector<std::uint8_t> bytes,
+                               int timestampSeconds) {
+    const std::uint64_t gen = ++nextGeneration;
+    auto [it, inserted] = cache.try_emplace(key);
+    if (!inserted && it->second.flushed)
+      --flushedCount;
+    it->second.bytes = std::move(bytes);
+    it->second.timestampSeconds = timestampSeconds;
+    it->second.generation = gen;
+    it->second.flushed = false;
+    return gen;
+  }
+
+  void markFlushedLocked(std::uint64_t key, std::uint64_t gen) {
+    auto it = cache.find(key);
+    if (it != cache.end() && it->second.generation == gen &&
+        !it->second.flushed) {
+      it->second.flushed = true;
+      flushedQueue.push_back({key, gen});
+      ++flushedCount;
+    }
+    while (!flushedQueue.empty()) {
+      const FlushedRef &front = flushedQueue.front();
+      auto fit = cache.find(front.key);
+      const bool live = fit != cache.end() &&
+                        fit->second.generation == front.generation &&
+                        fit->second.flushed;
+      if (!live) {
+        flushedQueue.pop_front();
+        continue;
+      }
+      if (flushedCount > retainedChunks) {
+        cache.erase(fit);
+        --flushedCount;
+        flushedQueue.pop_front();
+        continue;
+      }
+      break;
+    }
+  }
+
+  StoreReadResult readChunk(const ChunkTicketPos &position) {
+    const std::uint64_t key = packKey(position);
+    {
+      std::lock_guard lock(mutex);
+      if (auto it = cache.find(key); it != cache.end())
+        return {StoreReadStatus::Found, it->second.bytes, {}};
+    }
+    std::lock_guard ioLock(ioMutex);
+    return inner->readChunk(position);
+  }
+
+  StoreWriteResult writeChunk(const ChunkTicketPos &position,
+                              std::span<const std::uint8_t> bytes,
+                              int timestampSeconds) {
+    const std::uint64_t key = packKey(position);
+    std::uint64_t gen = 0;
+    {
+      std::lock_guard lock(mutex);
+      gen = putCacheLocked(
+          key, std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
+          timestampSeconds);
+    }
+    std::lock_guard ioLock(ioMutex);
+    std::vector<std::uint8_t> localBytes;
+    int localTs = timestampSeconds;
+    {
+      std::lock_guard lock(mutex);
+      auto it = cache.find(key);
+      if (it == cache.end() || it->second.generation != gen)
+        return {true, false, {}};
+      localBytes = it->second.bytes;
+      localTs = it->second.timestampSeconds;
+    }
+    StoreWriteResult result = inner->writeChunk(position, localBytes, localTs);
+    if (result.wrote) {
+      std::lock_guard lock(mutex);
+      markFlushedLocked(key, gen);
+    }
+    return result;
+  }
+
+  void writeChunkAsync(const ChunkTicketPos &position,
+                       std::vector<std::uint8_t> bytes,
+                       int timestampSeconds) {
+    const std::uint64_t key = packKey(position);
+    std::lock_guard lock(mutex);
+    if (stopping)
+      return;
+    const std::uint64_t gen =
+        putCacheLocked(key, std::move(bytes), timestampSeconds);
+    pendingWrites.push_back({position, key, gen});
+    cv.notify_one();
+  }
+
+  void flushPending() {
+    std::unique_lock lock(mutex);
+    cv.wait(lock, [this] {
+      return pendingWrites.empty() && activeWrites == 0;
+    });
+  }
+
+  void runWriter() {
+    for (;;) {
+      PendingWrite item;
+      {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] {
+          return stopping || !pendingWrites.empty();
+        });
+        if (pendingWrites.empty() && stopping)
+          break;
+        item = pendingWrites.front();
+        pendingWrites.pop_front();
+        ++activeWrites;
+      }
+
+      {
+        std::lock_guard ioLock(ioMutex);
+        std::vector<std::uint8_t> localBytes;
+        int localTs = 0;
+        bool shouldWrite = false;
+        {
+          std::lock_guard lock(mutex);
+          auto it = cache.find(item.key);
+          if (it != cache.end() && it->second.generation == item.generation) {
+            localBytes = it->second.bytes;
+            localTs = it->second.timestampSeconds;
+            shouldWrite = true;
+          }
+        }
+        if (shouldWrite) {
+          try {
+            StoreWriteResult result =
+                inner->writeChunk(item.position, localBytes, localTs);
+            if (result.wrote) {
+              std::lock_guard lock(mutex);
+              markFlushedLocked(item.key, item.generation);
+            }
+          } catch (...) {
+          }
+        }
+      }
+
+      {
+        std::lock_guard lock(mutex);
+        --activeWrites;
+        cv.notify_all();
+      }
+    }
+  }
+
+  std::shared_ptr<RawChunkStore> inner;
+  std::size_t retainedChunks = kDefaultRetainedChunks;
+  std::mutex ioMutex;
+  std::mutex mutex;
+  std::condition_variable cv;
+  FlatHashMap<std::uint64_t, CacheEntry> cache;
+  std::deque<FlushedRef> flushedQueue;
+  std::size_t flushedCount = 0;
+  std::deque<PendingWrite> pendingWrites;
+  std::uint64_t nextGeneration = 0;
+  std::size_t activeWrites = 0;
+  bool stopping = false;
+  std::thread worker;
+};
+
 SerializedChunkStore::SerializedChunkStore(
-    std::shared_ptr<RawChunkStore> inner)
-    : inner_(std::move(inner)) {}
+    std::shared_ptr<RawChunkStore> inner, std::size_t retainedChunks)
+    : impl_(std::make_unique<Impl>(std::move(inner), retainedChunks)) {}
+
+SerializedChunkStore::~SerializedChunkStore() = default;
 
 StoreReadResult SerializedChunkStore::readChunk(
     const ChunkTicketPos &position) {
-  std::lock_guard lock(mutex_);
-  return inner_->readChunk(position);
+  return impl_->readChunk(position);
 }
 
 StoreWriteResult SerializedChunkStore::writeChunk(
     const ChunkTicketPos &position, std::span<const std::uint8_t> bytes,
     int timestampSeconds) {
-  std::lock_guard lock(mutex_);
-  return inner_->writeChunk(position, bytes, timestampSeconds);
+  return impl_->writeChunk(position, bytes, timestampSeconds);
 }
+
+void SerializedChunkStore::writeChunkAsync(const ChunkTicketPos &position,
+                                           std::vector<std::uint8_t> bytes,
+                                           int timestampSeconds) {
+  impl_->writeChunkAsync(position, std::move(bytes), timestampSeconds);
+}
+
+void SerializedChunkStore::flushPending() { impl_->flushPending(); }
 
 RegionEntityStore::RegionEntityStore(
     std::filesystem::path entityDirectory)
@@ -163,7 +381,8 @@ public:
        std::shared_ptr<RawEntityStore> entityStore,
        ChunkResidentCallbacks callbacks)
       : store_(std::move(store)), entityStore_(std::move(entityStore)),
-        callbacks_(std::move(callbacks)) {
+        callbacks_(std::move(callbacks)),
+        hasGenerator_(static_cast<bool>(callbacks_.requestGeneration)) {
     if (!store_)
       throw std::invalid_argument("chunk lifecycle requires a raw store");
     worker_ = std::thread([this] { runWorker(); });
@@ -842,6 +1061,24 @@ private:
       return;
     }
     if (decoded.status != terrain::DecodeStatus::Ok) {
+      if (decoded.status == terrain::DecodeStatus::Unsupported &&
+          hasGenerator_) {
+        terrain::DecodeOptions partialOptions = decodeOptions;
+        partialOptions.requireFullStatus = false;
+        terrain::DecodedChunk partial =
+            terrain::decodeChunkNbt(raw.nbt, partialOptions);
+        if (partial.status == terrain::DecodeStatus::Ok &&
+            partial.chunkX == command.position.x &&
+            partial.chunkZ == command.position.z &&
+            partial.statusName != "minecraft:full") {
+          Result result;
+          result.kind = ResultKind::GenerationNeeded;
+          result.position = command.position;
+          result.epoch = command.epoch;
+          post(std::move(result));
+          return;
+        }
+      }
       Result result;
       result.kind = ResultKind::LoadFailed;
       result.position = command.position;
@@ -1318,6 +1555,7 @@ private:
   std::map<ChunkTicketPos, std::pair<std::uint64_t, std::uint64_t>>
       workerWrittenVersions_;
   std::uint64_t nextEpoch_ = 0;
+  bool hasGenerator_ = false;
 
   std::mutex sampleMutex_;
   std::condition_variable sampleReady_;

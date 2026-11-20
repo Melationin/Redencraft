@@ -4,7 +4,8 @@
 
 namespace redstone {
 World::World(int minY, int maxY, int maxNeighborUpdates)
-    : minY_(minY), maxY_(maxY), maxUpdates_(maxNeighborUpdates),
+    : chunkMap_(std::make_unique<ChunkMap>(this)), minY_(minY), maxY_(maxY),
+      maxUpdates_(maxNeighborUpdates),
       tickQueue_(std::make_unique<BlockTickQueue>()),
       fluidTickQueue_(std::make_unique<FluidTickQueue>()),
       poiStorage_(std::make_unique<PoiStorage>(minY, maxY)),
@@ -133,9 +134,139 @@ void World::setDimension(DimensionTypeSpec dimension,
 World::~World() {
   disableLighting();
   cleanup_.unregisterAll();
+  if (chunkMap_)
+    chunkMap_->disableWorldGen();
+  chunkMap_.reset();
 }
-World::World(World &&) noexcept = default;
-World &World::operator=(World &&) noexcept = default;
+World::World(World &&other) noexcept
+    : log(std::move(other.log)),
+      blockEntityTicker(std::move(other.blockEntityTicker)),
+      blockUpdateObserver(std::move(other.blockUpdateObserver)),
+      fallingBlockLandObserver(std::move(other.fallingBlockLandObserver)),
+      blockEventObserver(std::move(other.blockEventObserver)),
+      lightPublicationObserver(std::move(other.lightPublicationObserver)),
+      lightChunkLifecycleObserver(std::move(other.lightChunkLifecycleObserver)),
+      blockUpdatesBroadcastObserver(
+          std::move(other.blockUpdatesBroadcastObserver)),
+      entityTrackingBroadcastObserver(
+          std::move(other.entityTrackingBroadcastObserver)),
+      entityAddedObserver(std::move(other.entityAddedObserver)),
+      entityRemovedObserver(std::move(other.entityRemovedObserver)),
+      entityTakenObserver(std::move(other.entityTakenObserver)),
+      nightSkippedObserver(std::move(other.nightSkippedObserver)),
+      explosionObserver(std::move(other.explosionObserver)),
+      unsupportedRandomTickObserver(
+          std::move(other.unsupportedRandomTickObserver)),
+      managedBlockMutationObserver(
+          std::move(other.managedBlockMutationObserver)),
+      tickMutationObserver(std::move(other.tickMutationObserver)),
+      pistonEntityMutationObserver(
+          std::move(other.pistonEntityMutationObserver)),
+      managedEntityMutationObserver(
+          std::move(other.managedEntityMutationObserver)),
+      enderPearlTicketObserver(std::move(other.enderPearlTicketObserver)),
+      minecartImprovements(other.minecartImprovements),
+      blockTickPositionReady(std::move(other.blockTickPositionReady)),
+      entityTickPositionReady(std::move(other.entityTickPositionReady)),
+      heightmapScanStats(other.heightmapScanStats),
+      pistonEntities(std::move(other.pistonEntities)),
+      pistonTickerSlots(std::move(other.pistonTickerSlots)),
+      pistonTickers(std::move(other.pistonTickers)),
+      pendingPistonTickers(std::move(other.pendingPistonTickers)),
+      tickingPistonBlockEntities(other.tickingPistonBlockEntities),
+      containerTickStats(other.containerTickStats),
+      containerEntities(std::move(other.containerEntities)),
+      containerTickerSlots(std::move(other.containerTickerSlots)),
+      containerTickers(std::move(other.containerTickers)),
+      pendingContainerTickers(std::move(other.pendingContainerTickers)),
+      tickingContainerBlockEntities(other.tickingContainerBlockEntities),
+      currentContainerTickerIndex_(other.currentContainerTickerIndex_),
+      containerPositionsByChunk_(std::move(other.containerPositionsByChunk_)),
+      hopperItemWatchersBySection_(
+          std::move(other.hopperItemWatchersBySection_)),
+      hopperBlockWatchersByPos_(std::move(other.hopperBlockWatchersByPos_)),
+      entities(std::move(other.entities)),
+      nextEntityId(other.nextEntityId),
+      random(std::move(other.random)),
+      seed(other.seed),
+      explosionStats(other.explosionStats),
+      clipCalls(other.clipCalls),
+      clipCells(other.clipCells),
+      pistonNoClip(other.pistonNoClip),
+      pistonCompletionObserver(std::move(other.pistonCompletionObserver)),
+      tntExplodes(other.tntExplodes),
+      waterSourceConversion(other.waterSourceConversion),
+      lavaSourceConversion(other.lavaSourceConversion),
+      spreadVines(other.spreadVines),
+      fireSpreadRadiusAroundPlayer(other.fireSpreadRadiusAroundPlayer),
+      waterEvaporates(other.waterEvaporates),
+      fastLava(other.fastLava),
+      fireSpreadPlayerPositions(std::move(other.fireSpreadPlayerPositions)),
+      randomTickSpeed(other.randomTickSpeed),
+      traceUpdates(other.traceUpdates),
+      randomTickStats(other.randomTickStats),
+      blockTags_(std::move(other.blockTags_)),
+      blockTagRevision_(other.blockTagRevision_),
+      blockReadCache_(std::move(other.blockReadCache_)),
+      chunkMap_(std::move(other.chunkMap_)),
+      randomTickingChunks_(std::move(other.randomTickingChunks_)),
+      randomTickChunkScratch_(std::move(other.randomTickChunkScratch_)),
+      randomTickingDirty_(other.randomTickingDirty_),
+      randValue_(other.randValue_),
+      entitySections_(std::move(other.entitySections_)),
+      entityCountsByChunk_(std::move(other.entityCountsByChunk_)),
+      pistonPositionsByChunk_(std::move(other.pistonPositionsByChunk_)),
+      entityUuids_(std::move(other.entityUuids_)),
+      minY_(other.minY_),
+      maxY_(other.maxY_),
+      maxUpdates_(other.maxUpdates_),
+      updateCount_(other.updateCount_),
+      dimension_(std::move(other.dimension_)),
+      dimensionId_(std::move(other.dimensionId_)),
+      handlingTick_(other.handlingTick_),
+      insideFluidTick_(other.insideFluidTick_),
+      fluidDispatches_(other.fluidDispatches_),
+      fluidWrites_(other.fluidWrites_),
+      time_(other.time_),
+      subTickCount_(other.subTickCount_),
+      stack_(std::move(other.stack_)),
+      added_(std::move(other.added_)),
+      tickQueue_(std::move(other.tickQueue_)),
+      fluidTickQueue_(std::move(other.fluidTickQueue_)),
+      lightService_(std::move(other.lightService_)),
+      generatedLightAdoptions_(other.generatedLightAdoptions_),
+      cleanup_(std::move(other.cleanup_)),
+      pendingPortalTransferIds_(std::move(other.pendingPortalTransferIds_)),
+      poiStorage_(std::move(other.poiStorage_)),
+      lightOptical_(other.lightOptical_),
+      inWorldTick_(other.inWorldTick_),
+      wireShouldSignal_(other.wireShouldSignal_),
+      comparatorSignals_(std::move(other.comparatorSignals_)),
+      recentTorchToggles_(std::move(other.recentTorchToggles_)),
+      pendingLightCells_(std::move(other.pendingLightCells_)),
+      pendingLightChunkKeys_(std::move(other.pendingLightChunkKeys_)),
+      managedLightPublishedObserver(
+          std::move(other.managedLightPublishedObserver)),
+      blockEventQueue_(std::move(other.blockEventQueue_)),
+      blockEventsToReschedule_(std::move(other.blockEventsToReschedule_)),
+      explosionCache_(other.explosionCache_),
+      explosionGeneration_(other.explosionGeneration_),
+      explosionTargets_(std::move(other.explosionTargets_)) {
+  if (chunkMap_)
+    chunkMap_->rebindWorld(this);
+  blockReadCache_.reset();
+}
+World &World::operator=(World &&other) noexcept {
+  if (this == &other)
+    return *this;
+  disableLighting();
+  cleanup_.unregisterAll();
+  if (chunkMap_)
+    chunkMap_->disableWorldGen();
+  this->~World();
+  new (this) World(std::move(other));
+  return *this;
+}
 
 BlockTagRegistry::ReloadResult World::reloadBlockTags(const std::vector<std::filesystem::path> &packs) {
   auto next = std::make_shared<BlockTagRegistry>();
@@ -158,15 +289,33 @@ void World::setSeed(std::uint64_t value) {
       (value ^ (value >> 32)) * 0x9E3779B9u + 1013904223u);
 }
 
+void World::invalidateChunkCaches(std::uint64_t key,
+                                  WorldChunk *expected) noexcept {
+  ChunkCacheSlot &slot =
+      blockReadCache_.chunks[(key * 0x9E3779B97F4A7C15ull) >> 58];
+  if (slot.key == key && (expected == nullptr || slot.chunk == expected)) {
+    slot.key = ~std::uint64_t{0};
+    slot.chunk = nullptr;
+  }
+  if (blockReadCache_.sectionKey == key) {
+    blockReadCache_.sectionIndex = -1;
+    blockReadCache_.section = nullptr;
+  }
+  if (expected != nullptr)
+    removeRandomTickingChunk(*expected);
+}
+
 const World::Chunk *World::chunkAtCached(int x, int z) const {
   const auto key = chunkKey(x, z);
   ChunkCacheSlot &slot = blockReadCache_.chunks[(key * 0x9E3779B97F4A7C15ull) >> 58];
   if (slot.key == key)
-    return slot.chunk && slot.chunk->loaded ? slot.chunk : nullptr;
-  auto it = chunks_.find(key);
+    return (slot.chunk && slot.chunk->loaded && !slot.chunk->isInvalidated())
+               ? slot.chunk
+               : nullptr;
+  Chunk *found = chunkMap_ ? chunkMap_->findWorldChunk(key) : nullptr;
   slot.key = key;
-  slot.chunk = it == chunks_.end() ? nullptr : &it->second;
-  return slot.chunk && slot.chunk->loaded ? slot.chunk : nullptr;
+  slot.chunk = found;
+  return (found && found->loaded && !found->isInvalidated()) ? found : nullptr;
 }
 std::uint64_t World::chunkLoadEpochForTest(int x, int z) const {
   const Chunk *chunk = chunkAt(x, z);
@@ -189,50 +338,27 @@ World::Chunk *World::chunkAt(int x, int z) {
 const World::Chunk *World::chunkAt(int x, int z) const {
   return chunkAtCached(x, z);
 }
-void World::Chunk::refreshRandomTickMask(int count) {
-  std::uint32_t mask = 0;
-  for (int i = 0; i < count; ++i) {
-    if (sections[static_cast<std::size_t>(i)].isRandomlyTicking())
-      mask |= (std::uint32_t{1} << i);
-  }
-  randomTickingSectionMask = mask;
-}
-void World::Chunk::refreshPersistedLightIndex(int minSectionY,
-                                              int numSections) {
-  persistedLightSectionIndex.fill(-1);
-  if (!persistedLight || !persistedLight->isLightOn)
-    return;
-  for (std::size_t i = 0; i < persistedLight->sections.size(); ++i) {
-    const int rel = persistedLight->sections[i].sectionY - minSectionY;
-    if (rel >= 0 && rel < numSections &&
-        persistedLightSectionIndex[static_cast<std::size_t>(rel)] < 0) {
-      persistedLightSectionIndex[static_cast<std::size_t>(rel)] =
-          static_cast<std::int16_t>(i);
-    }
-  }
-}
 bool World::installManagedChunk(
-    int x, int z, Chunk &&chunk,
+    int x, int z, std::shared_ptr<Chunk> chunk,
     const std::vector<ScheduledTick> &blockTicks,
     const std::vector<std::pair<ScheduledTick, FluidRef>> &fluidTicks,
     std::span<const std::shared_ptr<PistonMovingBlockEntity>> pistons,
     std::span<const std::shared_ptr<Entity>> itemEntities,
     std::span<const std::shared_ptr<Entity>> tntEntities) {
-  const std::uint64_t key = chunkKey(x, z);
-  if (chunks_.contains(key))
+  if (!chunk)
     return false;
-  chunk.loaded = false;
-  chunk.randomTickIndex = Chunk::kInvalidRandomTickIndex;
-  chunk.initialize({x, z}, minY_, maxY_ - minY_);
-  const std::uint64_t loadEpoch = chunk.lightEpoch;
-  decltype(chunks_)::iterator insertedIt;
-  {
-    std::unique_lock<std::shared_mutex> resizeLock;
-    if (std::shared_mutex *mu = directResizeMutex())
-      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
-    insertedIt = chunks_.emplace(key, std::move(chunk)).first;
-  }
-  insertedIt->second.refreshPersistedLightIndex(minY_ >> 4, sectionCount());
+  const std::uint64_t key = chunkKey(x, z);
+  if (chunkMap_->findWorldChunk(key) != nullptr)
+    return false;
+  if (auto existing = chunkMap_->findHolder(key);
+      existing && existing->heldKind() == HeldChunkKind::World)
+    return false;
+  chunk->loaded = false;
+  chunk->randomTickIndex = Chunk::kInvalidRandomTickIndex;
+  chunk->initialize({x, z}, minY_, maxY_ - minY_);
+  const std::uint64_t loadEpoch = chunk->lightEpoch;
+  chunk->refreshPersistedLightIndex(minY_ >> 4, sectionCount());
+  chunkMap_->installWorldChunk(x, z, chunk);
   try {
     tickQueue_->addContainer(key);
     fluidTickQueue_->addContainer(key);
@@ -244,8 +370,6 @@ bool World::installManagedChunk(
       if (!fluidTickQueue_->restore(key, tick, fluid.fluid()))
         throw std::logic_error("failed to restore fluid tick");
     }
-    // Block entities and tickers are installed before loadChunk publishes the
-    // optical snapshot and lifecycle edge.
     for (const auto &piston : pistons) {
       if (!piston)
         throw std::logic_error("null moving piston entity");
@@ -271,20 +395,17 @@ bool World::installManagedChunk(
       entities.push_back(entity);
       entitySectionAdd(*entity);
     }
-    // 生成期已由主线程提交过光照几何与首次计算请求：直接接管，不再整份重传，
-    // 只把光照生命周期代次对齐到引擎那一代（与 installProtoChunkIntoWorld 同语义）。
+    // 生成期已通过 ChunkMap 提交过光照登记：直接接管同一 ChunkHolder 的直读源，只对齐代次。
     const bool lightAlreadySubmitted =
-        insertedIt->second.requiredLightGeneration != 0 && lightService_;
+        chunk->requiredLightGeneration != 0 && lightService_;
     loadChunk(x, z, /*registerLight=*/!lightAlreadySubmitted, loadEpoch);
     if (lightAlreadySubmitted) {
       ++generatedLightAdoptions_;
-      alignChunkLightLifecycle(x, z);
-      // 低内存模式：生成期登记的是 ProtoChunk 句柄，安装后 World 数据与它完全一致，
-      // 直接切成直读；非低内存模式没有直读源，退回值快照。
-      if (!adoptChunkLightDirectGeometry(x, z))
-        reloadChunkLight(x, z);
+      const LightService::ChunkStatus status = lightService_->chunkStatus(x, z);
+      if (status.loaded && status.lifecycleEpoch != 0)
+        chunk->lightLifecycleEpoch = status.lifecycleEpoch;
     }
-    reconcilePoiFromChunk(x, z, insertedIt->second);
+    reconcilePoiFromChunk(x, z, *chunk);
   } catch (...) {
     std::vector<std::shared_ptr<Entity>> insertedEntities;
     insertedEntities.reserve(itemEntities.size() + tntEntities.size());
@@ -306,15 +427,92 @@ bool World::installManagedChunk(
     sweepPistonTickers();
     tickQueue_->removeContainer(key);
     fluidTickQueue_->removeContainer(key);
-    removeRandomTickingChunk(insertedIt->second);
-    {
-      std::unique_lock<std::shared_mutex> resizeLock;
-      if (std::shared_mutex *mu = directResizeMutex())
-        resizeLock = std::unique_lock<std::shared_mutex>(*mu);
-      chunks_.erase(insertedIt);
-    }
+    removeRandomTickingChunk(*chunk);
+    chunkMap_->evictChunk(x, z);
     blockReadCache_.reset();
     throw;
+  }
+  return true;
+}
+
+bool World::installGeneratedProtoChunk(
+    std::shared_ptr<worldgen::ProtoChunk> protoPtr) {
+  if (!protoPtr)
+    return false;
+  const ChunkTicketPos pos = protoPtr->pos();
+  const std::uint64_t key = chunkKey(pos.x, pos.z);
+  auto holder = chunkMap_->getOrCreateHolder(key);
+  holder->clearEvicted();
+
+  const bool fromExternal =
+      (holder->heldKind() != HeldChunkKind::Proto ||
+       holder->protoShared() != protoPtr);
+  if (fromExternal)
+    holder->setProto(std::move(protoPtr));
+
+  std::vector<Pos> postProcessingPositions;
+  auto chunk = holder->promoteProtoToWorld(
+      minY_, maxY_, &postProcessingPositions);
+  if (!chunk)
+    return false;
+
+  chunk->loaded = true;
+  if (chunk->randomTickingSectionMask != 0)
+    addRandomTickingChunk(*chunk, key);
+  ChunkCacheSlot &slot =
+      blockReadCache_.chunks[(key * 0x9E3779B97F4A7C15ull) >> 58];
+  slot.key = key;
+  slot.chunk = chunk.get();
+  blockReadCache_.sectionIndex = -1;
+  tickQueue_->addContainer(key);
+  fluidTickQueue_->addContainer(key);
+
+  if (lightService_) {
+    flushPendingLightCells();
+    const LightService::ChunkStatus status =
+        lightService_->chunkStatus(pos.x, pos.z);
+    if (status.loaded) {
+      ++generatedLightAdoptions_;
+      if (status.lifecycleEpoch != 0)
+        chunk->lightLifecycleEpoch = status.lifecycleEpoch;
+      if (fromExternal) {
+        // 零拷贝晋升后区段内容与原 ProtoChunk 相同，已经算好的光照仍然有效：
+        // 只把 worker 的直读源从 ProtoChunk 句柄切到 ChunkMap 直读，保留各层与
+        // 协议基准。切换不可用（没有直读回调等）时才退回整块重提交。
+        const std::uint64_t rebound =
+            lightService_->rebindChunkGeometry(pos.x, pos.z);
+        if (rebound != 0)
+          chunk->requiredLightGeneration =
+              std::max(chunk->requiredLightGeneration, rebound);
+        else
+          reloadChunkLight(pos.x, pos.z);
+      } else {
+        // 引擎内部安装（调度器与 World 共用 ChunkMap）：同样把晋升后失效的
+        // ProtoChunk 句柄切到 World 直读；没有句柄时该请求是廉价空操作。
+        (void)lightService_->rebindChunkGeometry(pos.x, pos.z);
+      }
+      if (lightChunkLifecycleObserver)
+        lightChunkLifecycleObserver(pos.x, pos.z, true);
+    } else {
+      if (auto input = makeLightChunkInput(pos.x, pos.z)) {
+        const std::uint64_t seq = lightService_->submitChunk(std::move(*input));
+        if (seq > 0)
+          chunk->requiredLightGeneration =
+              std::max(chunk->requiredLightGeneration, seq);
+        chunk->persistedLight.reset();
+      }
+      if (lightChunkLifecycleObserver)
+        lightChunkLifecycleObserver(pos.x, pos.z, true);
+    }
+  }
+  reconcilePoiFromChunk(pos.x, pos.z, *chunk);
+
+  for (const Pos &post : postProcessingPositions) {
+    if (post.y < minY_ || post.y >= maxY_)
+      continue;
+    const FluidState fs = fluidStateOf(getBlock(post));
+    if (!fs.isEmpty())
+      scheduleFluidTick(post, fs.getType(), 1);
   }
   return true;
 }
@@ -326,6 +524,14 @@ bool World::managedChunkTransientUnloadState(
     return true;
   }
   const std::uint64_t key = chunkKey(x, z);
+  auto held = chunkMap_->findHolder(key);
+  Chunk *heldWorld = held ? held->worldChunkRawMainThread()
+                          : chunkMap_->findWorldChunk(key);
+  if ((heldWorld && heldWorld->generationUserCount() > 0) ||
+      (held && held->generationRefCount.load(std::memory_order_acquire) > 0)) {
+    reason = "chunk is pinned by active world generation";
+    return true;
+  }
   for (const BlockEvent &event : blockEventQueue_->order) {
     if (chunkKey(event.pos.x >> 4, event.pos.z >> 4) == key) {
       reason = "chunk has a transient pending block event";
@@ -371,9 +577,17 @@ bool World::removeManagedChunk(int x, int z, std::string &error,
        managedChunkTransientUnloadState(x, z, error)))
     return false;
   const std::uint64_t key = chunkKey(x, z);
-  auto found = chunks_.find(key);
-  if (found == chunks_.end()) {
+  auto holder = chunkMap_->findHolder(key);
+  Chunk *resident = chunkMap_->findWorldChunk(key);
+  if (!resident && holder)
+    resident = holder->worldChunkRawMainThread();
+  if (!resident) {
     error = "managed chunk is not resident in World";
+    return false;
+  }
+  if (resident->generationUserCount() > 0 ||
+      (holder && holder->generationRefCount.load(std::memory_order_acquire) > 0)) {
+    error = "chunk is pinned by active world generation";
     return false;
   }
   // Invalidate every direct chunk/section pointer before node destruction.
@@ -415,15 +629,10 @@ bool World::removeManagedChunk(int x, int z, std::string &error,
       return owned.get() == entity;
     });
   }
-  removeRandomTickingChunk(found->second);
+  removeRandomTickingChunk(*resident);
   if (poiStorage_)
     poiStorage_->removeChunk(x, z);
-  {
-    std::unique_lock<std::shared_mutex> resizeLock;
-    if (std::shared_mutex *mu = directResizeMutex())
-      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
-    chunks_.erase(found);
-  }
+  chunkMap_->evictChunk(x, z);
   blockReadCache_.reset();
   return true;
 }
@@ -478,24 +687,25 @@ void World::loadChunk(int x, int z, bool registerLight,
   const auto key = chunkKey(x, z);
   // 已经常驻：节点、高度图、刻容器、光照登记、生命周期代次全部就位，重复调用
   // 不该有任何副作用（尤其不该再向光照引擎提交一次）。
-  // chunks_ 是 unordered_map，节点地址稳定，读缓存里的 Chunk* 仍然有效。
-  const auto existing = chunks_.find(key);
-  if (existing != chunks_.end() && existing->second.loaded)
+  if (Chunk *existing = chunkMap_->findWorldChunk(key);
+      existing && existing->loaded)
     return;
   blockReadCache_.sectionIndex = -1;
-  auto it = existing;
-  if (it == chunks_.end()) {
-    std::unique_lock<std::shared_mutex> resizeLock;
-    if (std::shared_mutex *mu = directResizeMutex())
-      resizeLock = std::unique_lock<std::shared_mutex>(*mu);
-    it = chunks_.emplace(key, Chunk{}).first;
+  auto holder = chunkMap_->getOrCreateHolder(key);
+  holder->clearEvicted();
+  std::shared_ptr<Chunk> cPtr = holder->worldShared();
+  if (!cPtr) {
+    cPtr = std::make_shared<Chunk>();
+    cPtr->loaded = false;
+    cPtr->initialize({x, z}, minY_, maxY_ - minY_);
+    holder->setWorld(cPtr);
+  } else {
+    cPtr->initialize({x, z}, minY_, maxY_ - minY_);
   }
-  auto &c = it->second;
-  c.initialize({x, z}, minY_, maxY_ - minY_);
+  Chunk &c = *cPtr;
   const bool wasLoaded = c.loaded;
   c.loaded = true;
-  // 接管流水线登记时（registerLight=false）不动代次，由对齐函数决定；
-  // 受管安装会显式传入生成/读取请求的加载生命周期，保证 Proto -> World 不变。
+  chunkMap_->registerWorldIndex(key, &c);
   if (!wasLoaded && registerLight) {
     if (lightEpoch != 0)
       c.lightLifecycleEpoch = lightEpoch;
@@ -517,8 +727,8 @@ void World::loadChunk(int x, int z, bool registerLight,
   // LevelTicks.addContainer: every ticking chunk owns exactly one tick
   // container in each queue. Reloading a chunk keeps the pending ticks it
   // already had.
-  tickQueue_->addContainer(chunkKey(x, z));
-  fluidTickQueue_->addContainer(chunkKey(x, z));
+  tickQueue_->addContainer(key);
+  fluidTickQueue_->addContainer(key);
   if (lightService_) {
     flushPendingLightCells();
     if (registerLight) {
@@ -534,25 +744,10 @@ void World::loadChunk(int x, int z, bool registerLight,
   }
 }
 
-void World::alignChunkLightLifecycle(int x, int z) {
-  if (!lightService_)
-    return;
-  Chunk *chunk = chunkAt(x, z);
-  if (!chunk)
-    return;
-  const LightService::ChunkStatus status = lightService_->chunkStatus(x, z);
-  if (status.loaded && status.lifecycleEpoch != 0)
-    chunk->lightLifecycleEpoch = status.lifecycleEpoch;
-}
 void World::unloadChunk(int x, int z) {
   blockReadCache_.sectionIndex = -1;
-  const auto key = chunkKey(x, z);
-  auto it = chunks_.find(key);
-  const bool wasLoaded = it != chunks_.end() && it->second.loaded;
-  if (wasLoaded) {
-    it->second.loaded = false;
-    removeRandomTickingChunk(it->second);
-  }
+  bool wasLoaded = false;
+  chunkMap_->unloadWorldChunk(x, z, wasLoaded);
   if (lightService_) {
     flushPendingLightCells();
     // The lifecycle tombstone invalidates both full snapshots and queued owned
@@ -561,67 +756,6 @@ void World::unloadChunk(int x, int z) {
     if (wasLoaded && lightChunkLifecycleObserver)
       lightChunkLifecycleObserver(x, z, false);
   }
-}
-
-LightSectionView World::sectionToLightView(const Section &data,
-                                           bool atomicHeader) noexcept {
-  LightSectionView view;
-  const std::uint16_t nonEmpty =
-      atomicHeader
-          ? std::atomic_ref<std::uint16_t>(
-                const_cast<std::uint16_t &>(data.nonEmpty))
-                .load(std::memory_order_relaxed)
-          : data.nonEmpty;
-  view.empty = nonEmpty == 0;
-  const SectionStorage *base = data.storage.get();
-  if (!base) {
-    view.bits = 0;
-    view.single = data.single;
-    return view;
-  }
-  const std::uint16_t paletteSize =
-      atomicHeader
-          ? std::atomic_ref<std::uint16_t>(
-                const_cast<std::uint16_t &>(base->paletteSize))
-                .load(std::memory_order_acquire)
-          : base->paletteSize;
-  view.bits = base->bits;
-  if (atomicHeader)
-    view.storageOwner = data.storage;
-  visitSectionStorage(base, [&](const auto *block) {
-    view.palette =
-        std::span<const BlockState::Id>(block->palette.data(), paletteSize);
-    if constexpr (std::is_same_v<std::remove_cv_t<
-                                     std::remove_pointer_t<decltype(block)>>,
-                                 SectionStorage8>) {
-      view.cells8 = std::span<const std::uint8_t>(block->indices.data(),
-                                                  block->indices.size());
-    } else if constexpr (std::is_same_v<
-                             std::remove_cv_t<
-                                 std::remove_pointer_t<decltype(block)>>,
-                             SectionStorage16>) {
-      view.cells16 = std::span<const std::uint16_t>(block->indices.data(),
-                                                    block->indices.size());
-    } else {
-      view.packedWords = std::span<const std::uint64_t>(block->words.data(),
-                                                        block->words.size());
-    }
-  });
-  return view;
-}
-
-LightSectionView World::directReadSection(const void *context, int chunkX,
-                                          int chunkZ, int sectionY) noexcept {
-  const auto *self = static_cast<const World *>(context);
-  const int idx = sectionY - (self->minY_ >> 4);
-  if (idx < 0 || idx >= self->sectionCount())
-    return LightSectionView{};
-  std::shared_lock<std::shared_mutex> lock(*self->lightDirectMutex_);
-  const auto it = self->chunks_.find(chunkKey(chunkX, chunkZ));
-  if (it == self->chunks_.end())
-    return LightSectionView{};
-  return sectionToLightView(
-      it->second.sections[static_cast<std::size_t>(idx)], true);
 }
 
 std::unique_ptr<LightChunkInput> World::makeLightChunkInput(int x, int z) const {
@@ -660,15 +794,6 @@ int World::getBrightness(Pos pos, int skyDarken) const {
   return std::max(block, sky);
 }
 
-bool World::adoptChunkLightDirectGeometry(int x, int z) {
-  if (!lightService_)
-    return false;
-  if (!lightService_->adoptDirectGeometry(x, z))
-    return false;
-  alignChunkLightLifecycle(x, z);
-  return true;
-}
-
 void World::enableLighting(LightWorkerOptions options) {
   if (lightService_)
     return;
@@ -679,9 +804,8 @@ void World::enableLighting(LightWorkerOptions options) {
         "lighting requires minY aligned to a 16-block section");
   options.hasSkyLight = options.hasSkyLight && dimension_.hasSkyLight;
   if (!options.directWorld.context) {
-    options.directWorld.context = this;
-    options.directWorld.resizeMutex = lightDirectMutex_.get();
-    options.directWorld.readSection = &World::directReadSection;
+    options.directWorld.context = chunkMap_.get();
+    options.directWorld.readSection = &ChunkMap::directReadSectionCallback;
   }
   lightService_ = std::make_unique<LightService>(
       minY_ >> 4, sectionCount(), options);
@@ -703,11 +827,11 @@ void World::flushPendingLightCells() {
   const std::uint64_t seq =
       lightService_->reportBlockCells(pendingLightCells_);
   for (std::uint64_t key : pendingLightChunkKeys_) {
-    if (auto it = chunks_.find(key); it != chunks_.end()) {
-      it->second.hasPendingLightCell = false;
+    if (Chunk *c = chunkMap_->findWorldChunk(key)) {
+      c->hasPendingLightCell = false;
       if (seq > 0)
-        it->second.requiredLightGeneration =
-            std::max(it->second.requiredLightGeneration, seq);
+        c->requiredLightGeneration =
+            std::max(c->requiredLightGeneration, seq);
     }
   }
   pendingLightChunkKeys_.clear();
@@ -762,7 +886,7 @@ bool World::adoptSectionStorage(int x, int z, int sectionY,
   Section &destination = chunk->sections[index];
   {
     std::unique_lock<std::shared_mutex> resizeLock;
-    if (std::shared_mutex *mu = directResizeMutex())
+    if (std::shared_mutex *mu = directResizeMutex(*chunk))
       resizeLock = std::unique_lock<std::shared_mutex>(*mu);
     destination = std::move(section);
     destination.setSectionY(static_cast<std::int8_t>(sectionY));
@@ -797,9 +921,9 @@ void World::refreshLightSnapshots() {
     return;
   flushPendingLightCells();
   std::vector<std::uint64_t> keys;
-  keys.reserve(chunks_.size());
-  for (const auto &[key, chunk] : chunks_)
-    if (chunk.loaded)
+  keys.reserve(chunkMap_->worldChunkCount());
+  for (const auto &[key, chunk] : chunkMap_->worldIndex())
+    if (chunk && chunk->loaded)
       keys.push_back(key);
   std::sort(keys.begin(), keys.end());
   for (std::uint64_t key : keys) {
@@ -820,8 +944,8 @@ void World::refreshLightSnapshots() {
 void World::disableLighting() {
   unregisterLightCleanupTask();
   for (std::uint64_t key : pendingLightChunkKeys_) {
-    if (auto it = chunks_.find(key); it != chunks_.end())
-      it->second.hasPendingLightCell = false;
+    if (Chunk *c = chunkMap_->findWorldChunk(key))
+      c->hasPendingLightCell = false;
   }
   pendingLightChunkKeys_.clear();
   pendingLightCells_.clear();
@@ -844,8 +968,8 @@ int World::height(HeightmapType type, int blockX, int blockZ) const {
   return map ? map->height(blockX & 15, blockZ & 15) : minY_ - 1;
 }
 void World::primeHeightmaps() {
-  for (auto &[key, chunk] : chunks_) {
-    if (!chunk.loaded)
+  for (const auto &[key, chunk] : chunkMap_->worldIndex()) {
+    if (!chunk || !chunk->loaded)
       continue;
     primeHeightmaps(static_cast<int>(key >> 32),
                     static_cast<int>(static_cast<std::uint32_t>(key)));
@@ -853,10 +977,10 @@ void World::primeHeightmaps() {
 }
 
 void World::primeHeightmaps(int chunkX, int chunkZ) {
-  auto found = chunks_.find(chunkKey(chunkX, chunkZ));
-  if (found == chunks_.end() || !found->second.loaded)
+  Chunk *found = chunkMap_->findWorldChunk(chunkX, chunkZ);
+  if (!found || !found->loaded)
     return;
-  Chunk &chunk = found->second;
+  Chunk &chunk = *found;
   if (!chunk.heightmaps)
     chunk.heightmaps =
         std::make_unique<ChunkHeightmaps>(minY_, sectionCount() * 16);
@@ -1076,7 +1200,7 @@ void World::rawSetBlock(Pos p, BlockState state) {
   Section &section = c->sections[si];
   const int index = ((p.y & 15) << 8) | ((p.z & 15) << 4) | (p.x & 15);
   const BlockState::Id previous =
-      section.set(index, state.id(), /*compact=*/true, directResizeMutex());
+      section.set(index, state.id(), /*compact=*/true, directResizeMutex(*c));
   if (previous != state.id()) {
     updateChunkRandomTickMask(*c, chunkKey(cx, cz), si,
                               section.isRandomlyTicking());
@@ -1134,7 +1258,7 @@ void World::importSectionBlocks(
       return;
     }
     std::unique_lock<std::shared_mutex> resizeLock;
-    if (std::shared_mutex *mu = directResizeMutex())
+    if (std::shared_mutex *mu = directResizeMutex(*c))
       resizeLock = std::unique_lock<std::shared_mutex>(*mu);
     sec.storage.reset();
     sec.single = sid;
@@ -1193,7 +1317,7 @@ void World::importSectionBlocks(
       }
     });
     std::unique_lock<std::shared_mutex> resizeLock;
-    if (std::shared_mutex *mu = directResizeMutex())
+    if (std::shared_mutex *mu = directResizeMutex(*c))
       resizeLock = std::unique_lock<std::shared_mutex>(*mu);
     sec.nonEmpty = nonEmpty;
     sec.tickingBlockCount = tickingCount;
@@ -1216,9 +1340,10 @@ void World::importSectionBlocks(
 }
 std::map<Pos, BlockState> World::allBlocks() const {
   std::map<Pos, BlockState> result;
-  for (const auto &[key, c] : chunks_) {
-    if (!c.loaded)
+  for (const auto &[key, cPtr] : chunkMap_->worldIndex()) {
+    if (!cPtr || !cPtr->loaded)
       continue;
+    const Chunk &c = *cPtr;
     const int chunkX = static_cast<int>(key >> 32);
     const int chunkZ = static_cast<int>(key & 0xffffffffu);
     for (int si = 0; si < sectionCount(); ++si) {

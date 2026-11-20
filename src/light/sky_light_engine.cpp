@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <bit>
 #include <utility>
 
 namespace redstone::light_internal {
@@ -47,8 +48,10 @@ SkyLightPropagator::SkyLightPropagator(
       increaseQueue(scratchBuffers.increaseQueue),
       currentDecreaseQueue(scratchBuffers.currentDecreaseQueue),
       currentIncreaseQueue(scratchBuffers.currentIncreaseQueue),
+      scratch_(scratchBuffers),
       layersByChunk(scratchBuffers.layersByChunk),
-      dirtySections(scratchBuffers.dirtySections),
+      dirtySectionMasks(scratchBuffers.dirtySectionMasks),
+      dirtySectionsOverflow(scratchBuffers.dirtySectionsOverflow),
       storedEligible(scratchBuffers.storedEligible) {
   scratchBuffers.clear();
 }
@@ -106,9 +109,7 @@ void SkyLightPropagator::seedChunk(std::uint64_t key) {
             baseY + y >= litFrom[HeightmapColumnKey(x, z)] ? 15 : 0;
       }
     }
-    dirtySections.insert(
-        {static_cast<int>(key >> 32), sectionY,
-         static_cast<int>(static_cast<std::uint32_t>(key))});
+    markSectionDirty({chunkX, sectionY, chunkZ});
   }
   for (int z = 0; z < 16; ++z)
     for (int x = 0; x < 16; ++x)
@@ -124,6 +125,8 @@ void SkyLightPropagator::seedIncoming(std::uint64_t key,
   const LightChunkSnapshot *chunk = stateFor(key);
   if (!chunk)
     return;
+  const int minLightY = owner.minBlockSectionY - 1;
+  const int maxLightY = owner.minBlockSectionY + owner.blockSectionCount;
   for (int direction = 2; direction < 6; ++direction) {
     if ((directionMask & (1u << direction)) == 0)
       continue;
@@ -133,13 +136,102 @@ void SkyLightPropagator::seedIncoming(std::uint64_t key,
     const LightChunkSnapshot *neighbor = stateFor(neighborKey);
     if (!neighbor)
       continue;
-    forEachFaceCell(owner, neighbor, direction ^ 1, [&](LightPos position) {
-      const int level = storedLevel(position);
-      if (level > 1)
-        enqueueIncrease(position, static_cast<std::uint8_t>(level),
-                        static_cast<std::uint8_t>(1u << (direction ^ 1)),
-                        emptyShape(stateAt(position)), false);
-    });
+    const int nChunkX = neighbor->chunkX;
+    const int nChunkZ = neighbor->chunkZ;
+    const int nMinX = nChunkX * 16;
+    const int nMinZ = nChunkZ * 16;
+    const int faceDir = direction ^ 1;
+    const std::uint8_t outMask = static_cast<std::uint8_t>(1u << faceDir);
+    for (int sectionY = minLightY; sectionY <= maxLightY; ++sectionY) {
+      const LightSectionSnapshot *sec = neighbor->section(sectionY);
+      if (!sec)
+        continue;
+      const LightValues *wl = workingLayer(neighborKey, sectionY);
+      const auto &layer =
+          sec->layers[static_cast<std::size_t>(LightLayer::Sky)];
+      if (!wl && layer.isUniform() && layer.uniformValue() <= 1)
+        continue;
+
+      const LightValues *inheritedWl = nullptr;
+      const LightSectionSnapshot *inheritedRaw = nullptr;
+      bool missingAll15 = false;
+      if (!wl && layer.isMissing()) {
+        WorkingLayers &nLayers = workingLayers(neighborKey);
+        const int baseY = inheritedBase(nLayers, neighbor, sectionY);
+        if (baseY == kNoInheritedSection) {
+          const LightSectionSnapshot *ownSec = chunk->section(sectionY);
+          if (!workingLayer(key, sectionY) && ownSec &&
+              ownSec->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                  .isMissing() &&
+              inheritedBase(workingLayers(key), chunk, sectionY) ==
+                  kNoInheritedSection)
+            continue;
+          missingAll15 = true;
+        } else {
+          const int baseIndex = workingSectionIndex(baseY);
+          inheritedWl =
+              baseIndex < 0
+                  ? nullptr
+                  : nLayers.sections[static_cast<std::size_t>(baseIndex)].get();
+          inheritedRaw = neighbor->section(baseY);
+          if (inheritedWl) {
+            if (const auto u = inheritedWl->uniformValue(); u && *u <= 1)
+              continue;
+          } else if (inheritedRaw &&
+                     inheritedRaw->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                         .isUniform() &&
+                     inheritedRaw->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                             .uniformValue() <= 1) {
+            continue;
+          }
+        }
+      }
+
+      const int baseY = sectionY * 16;
+      const auto readFaceLevel = [&](int x, int y, int z) -> int {
+        if (wl)
+          return (*wl)[lightIndex(x, y, z)];
+        if (!layer.isMissing())
+          return layer.get(x, y, z);
+        if (missingAll15)
+          return 15;
+        if (inheritedWl)
+          return (*inheritedWl)[lightIndex(x, 0, z)];
+        return (inheritedRaw &&
+                !inheritedRaw->layers[static_cast<std::size_t>(LightLayer::Sky)]
+                     .isMissing())
+                   ? inheritedRaw->light(LightLayer::Sky, x, 0, z)
+                   : 15;
+      };
+
+      if (faceDir == 2 || faceDir == 3) {
+        const int localZ = (faceDir == 2) ? 0 : 15;
+        const int worldZ = nMinZ + localZ;
+        for (int y = 0; y < 16; ++y) {
+          for (int x = 0; x < 16; ++x) {
+            const int level = readFaceLevel(x, y, localZ);
+            if (level > 1) {
+              const LightPos pos{nMinX + x, baseY + y, worldZ};
+              enqueueIncrease(pos, static_cast<std::uint8_t>(level), outMask,
+                              emptyShape(stateAt(pos)), false);
+            }
+          }
+        }
+      } else {
+        const int localX = (faceDir == 4) ? 0 : 15;
+        const int worldX = nMinX + localX;
+        for (int y = 0; y < 16; ++y) {
+          for (int z = 0; z < 16; ++z) {
+            const int level = readFaceLevel(localX, y, z);
+            if (level > 1) {
+              const LightPos pos{worldX, baseY + y, nMinZ + z};
+              enqueueIncrease(pos, static_cast<std::uint8_t>(level), outMask,
+                              emptyShape(stateAt(pos)), false);
+            }
+          }
+        }
+      }
+    }
   }
 }
 
@@ -217,7 +309,7 @@ void SkyLightPropagator::syncStorageEligibility() {
       } else {
         dropWorkingLayer(key, y);
         invalidateInheritedBases(key);
-        dirtySections.erase(sectionKey);
+        unmarkSectionDirty(sectionKey);
         const auto *old = chunk.snapshot->section(y);
         if (old &&
             !old->layers[static_cast<std::size_t>(LightLayer::Sky)]
@@ -349,26 +441,16 @@ void SkyLightPropagator::run() {
 }
 
 void SkyLightPropagator::commitLayers() {
-  std::vector<SectionPos3> ordered(dirtySections.begin(), dirtySections.end());
-  std::sort(ordered.begin(), ordered.end(),
-            [](const auto &left, const auto &right) {
-              if (left.x != right.x)
-                return left.x < right.x;
-              if (left.z != right.z)
-                return left.z < right.z;
-              return left.y > right.y;
-            });
-  for (const SectionPos3 &position : ordered) {
-    WorkingChunk *chunk = ensureWorking(chunkKey(position.x, position.z));
+  const auto commitOne = [&](const SectionPos3 &position, std::uint64_t key) {
+    WorkingChunk *chunk = ensureWorking(key);
     if (!chunk)
-      continue;
+      return;
     const LightSectionSnapshot *current = chunk->snapshot->section(position.y);
     if (!current)
-      continue;
-    const LightValues *layer =
-        workingLayer(chunkKey(position.x, position.z), position.y);
+      return;
+    const LightValues *layer = workingLayer(key, position.y);
     if (!layer)
-      continue;
+      return;
     const auto uniform = layer->uniformValue();
     const LightLayerRef payload =
         uniform && layer->ref().isMixed()
@@ -382,6 +464,32 @@ void SkyLightPropagator::commitLayers() {
     chunk->dirtySections.push_back(position.y);
     chunk->dirty = true;
     chunk->propagated = true;
+  };
+  const int minLightY = owner.minBlockSectionY - 1;
+  for (const auto &[key, mask] : dirtySectionMasks) {
+    const int chunkX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+    std::uint64_t m = mask;
+    while (m != 0) {
+      // Iterate sections top-down (y descending) so inherited layers see upper sections first.
+      const int idx = 63 - std::countl_zero(m);
+      m &= ~(std::uint64_t{1} << idx);
+      commitOne({chunkX, minLightY + idx, chunkZ}, key);
+    }
+  }
+  if (!dirtySectionsOverflow.empty()) {
+    std::vector<SectionPos3> ordered(dirtySectionsOverflow.begin(),
+                                     dirtySectionsOverflow.end());
+    std::sort(ordered.begin(), ordered.end(),
+              [](const auto &left, const auto &right) {
+                if (left.x != right.x)
+                  return left.x < right.x;
+                if (left.z != right.z)
+                  return left.z < right.z;
+                return left.y > right.y;
+              });
+    for (const SectionPos3 &position : ordered)
+      commitOne(position, chunkKey(position.x, position.z));
   }
 }
 
@@ -424,7 +532,7 @@ SkyLightPropagator::workingLayers(std::uint64_t chunkKeyValue) const {
   } else {
     auto inserted = layersByChunk.try_emplace(
         chunkKeyValue,
-        std::make_unique<WorkingLayers>(
+        scratch_.acquireWorkingLayers(
             static_cast<std::size_t>(owner.blockSectionCount + 2)));
     ptr = inserted.first->second.get();
   }
@@ -474,7 +582,7 @@ LightValues *SkyLightPropagator::insertWorkingLayer(std::uint64_t chunkKeyValue,
       layers.sections[static_cast<std::size_t>(index)];
   if (slot)
     return slot.get();
-  slot = std::make_unique<LightValues>(std::move(values));
+  slot = scratch_.acquireLightValues(std::move(values));
   invalidateInheritedBases(chunkKeyValue);
   ++sectionCacheGen_;
   return slot.get();
@@ -491,7 +599,7 @@ void SkyLightPropagator::dropWorkingLayer(std::uint64_t chunkKeyValue,
   auto &slot = layers->sections[static_cast<std::size_t>(index)];
   if (!slot)
     return;
-  slot.reset();
+  scratch_.releaseLightValues(slot);
   invalidateInheritedBases(chunkKeyValue);
   ++sectionCacheGen_;
 }
@@ -503,7 +611,11 @@ void SkyLightPropagator::dropAllWorkingLayers(std::uint64_t chunkKeyValue) {
     entry.layersValid = false;
   }
   ++sectionCacheGen_;
-  layersByChunk.erase(chunkKeyValue);
+  if (const auto it = layersByChunk.find(chunkKeyValue);
+      it != layersByChunk.end()) {
+    scratch_.releaseWorkingLayers(std::move(it->second));
+    layersByChunk.erase(it);
+  }
 }
 
 int SkyLightPropagator::inheritedBase(WorkingLayers &layers,
@@ -669,6 +781,11 @@ WorkingChunk *SkyLightPropagator::ensureWorking(std::uint64_t key) {
 
 const SkyLightPropagator::SectionCacheEntry &
 SkyLightPropagator::lookupSection(LightPos position) const {
+  static const SectionCacheEntry kOutOfRange{};
+  if (position.y < (owner.minBlockSectionY - 1) * 16 ||
+      position.y >=
+          (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16)
+    return kOutOfRange;
   const SectionPos3 section{position.x >> 4, position.y >> 4,
                             position.z >> 4};
   SectionCacheEntry &entry = sectionCache_[sectionL1Slot(section)];
@@ -692,12 +809,18 @@ SkyLightPropagator::lookupSection(LightPos position) const {
   return entry;
 }
 
+const SkyLightPropagator::SectionCacheEntry &
+SkyLightPropagator::lookupNeighborSection(
+    const SectionCacheEntry &fromEntry, SectionPos3 fromSec,
+    LightPos to) const {
+  if ((to.x >> 4) == fromSec.x && (to.y >> 4) == fromSec.y &&
+      (to.z >> 4) == fromSec.z)
+    return fromEntry;
+  return lookupSection(to);
+}
+
 const LightSectionSnapshot *
 SkyLightPropagator::sectionAt(LightPos position) const {
-  if (position.y < (owner.minBlockSectionY - 1) * 16 ||
-      position.y >=
-          (owner.minBlockSectionY + owner.blockSectionCount + 1) * 16)
-    return nullptr;
   return lookupSection(position).snapshot;
 }
 
@@ -707,8 +830,8 @@ SkyLightPropagator::stateAt(LightPos position) const {
                                  incomplete);
 }
 
-int SkyLightPropagator::storedLevel(LightPos position) const {
-  const SectionCacheEntry &entry = lookupSection(position);
+int SkyLightPropagator::storedLevelInEntry(const SectionCacheEntry &entry,
+                                           LightPos position) const {
   if (entry.values)
     return (*entry.values)[lightIndex(position.x, position.y, position.z)];
   const LightChunkSnapshot *chunk = entry.chunk;
@@ -738,6 +861,10 @@ int SkyLightPropagator::storedLevel(LightPos position) const {
              ? above->light(LightLayer::Sky, position.x & 15, 0,
                             position.z & 15)
              : 15;
+}
+
+int SkyLightPropagator::storedLevel(LightPos position) const {
+  return storedLevelInEntry(lookupSection(position), position);
 }
 
 bool SkyLightPropagator::isSectionStoredEligible(int sectionX, int sectionY,
@@ -790,12 +917,47 @@ LightValues *SkyLightPropagator::bulkValues(std::uint64_t chunkKeyValue,
       initialWorkingLayer(chunkKeyValue, chunk, sectionY));
 }
 
-bool SkyLightPropagator::setStoredLevel(LightPos position, int level) {
-  const SectionCacheEntry &entry = lookupSection(position);
+void SkyLightPropagator::markSectionDirty(SectionPos3 section) {
+  const int idx = section.y - (owner.minBlockSectionY - 1);
+  if (idx >= 0 && idx < 64) {
+    const std::uint64_t cKey = chunkKey(section.x, section.z);
+    if (lastDirtyEpoch_ != dirtySectionMasks.rehashEpoch() ||
+        lastDirtyKey_ != cKey || !lastDirtyMask_) {
+      lastDirtyMask_ = &dirtySectionMasks[cKey];
+      lastDirtyKey_ = cKey;
+      lastDirtyEpoch_ = dirtySectionMasks.rehashEpoch();
+    }
+    *lastDirtyMask_ |= (std::uint64_t{1} << idx);
+  } else {
+    dirtySectionsOverflow.insert(section);
+  }
+}
+
+void SkyLightPropagator::unmarkSectionDirty(SectionPos3 section) {
+  const int idx = section.y - (owner.minBlockSectionY - 1);
+  if (idx >= 0 && idx < 64) {
+    const std::uint64_t cKey = chunkKey(section.x, section.z);
+    if (const auto it = dirtySectionMasks.find(cKey);
+        it != dirtySectionMasks.end()) {
+      it->second &= ~(std::uint64_t{1} << idx);
+      if (it->second == 0) {
+        dirtySectionMasks.erase(it);
+        lastDirtyMask_ = nullptr;
+      }
+    }
+  } else {
+    dirtySectionsOverflow.erase(section);
+  }
+}
+
+bool SkyLightPropagator::setStoredLevelInEntry(const SectionCacheEntry &entry,
+                                               LightPos position, int level,
+                                               int knownCurrentLevel,
+                                               bool &insertedSection) {
+  insertedSection = false;
   if (!entry.snapshot)
     return false;
-  const int current = storedLevel(position);
-  if (current == level)
+  if (knownCurrentLevel == level)
     return false;
   const SectionPos3 key{position.x >> 4, position.y >> 4, position.z >> 4};
   const std::uint64_t chunkKeyValue = chunkKey(key.x, key.z);
@@ -810,17 +972,28 @@ bool SkyLightPropagator::setStoredLevel(LightPos position, int level) {
         chunkKeyValue, key.y, initialWorkingLayer(chunkKeyValue, chunk, key.y));
     if (!layer)
       return false;
+    insertedSection = true;
   }
   const auto index = lightIndex(position.x, position.y, position.z);
   (*layer)[index] = static_cast<std::uint8_t>(level);
-  dirtySections.insert(key);
+  markSectionDirty(key);
   return true;
+}
+
+bool SkyLightPropagator::setStoredLevel(LightPos position, int level) {
+  const SectionCacheEntry &entry = lookupSection(position);
+  if (!entry.snapshot)
+    return false;
+  const int current = storedLevelInEntry(entry, position);
+  bool insertedSection = false;
+  return setStoredLevelInEntry(entry, position, level, current,
+                               insertedSection);
 }
 
 void SkyLightPropagator::allocateSection(std::uint64_t chunkKeyValue,
                                          int sectionY) {
   const SectionPos3 key{
-      static_cast<int>(chunkKeyValue >> 32), sectionY,
+      static_cast<int>(static_cast<std::int32_t>(chunkKeyValue >> 32)), sectionY,
       static_cast<int>(static_cast<std::uint32_t>(chunkKeyValue))};
   if (workingLayer(chunkKeyValue, sectionY))
     return;
@@ -833,7 +1006,7 @@ void SkyLightPropagator::allocateSection(std::uint64_t chunkKeyValue,
     return;
   insertWorkingLayer(chunkKeyValue, sectionY,
                      initialWorkingLayer(chunkKeyValue, chunk, sectionY));
-  dirtySections.insert(key);
+  markSectionDirty(key);
 }
 
 const BlockLightProperties &SkyLightPropagator::sourcePropertyAt(
@@ -928,10 +1101,138 @@ int SkyLightPropagator::computeSource(std::uint64_t key, int x, int z) const {
 
 SkyColumnSources
 SkyLightPropagator::computeSources(std::uint64_t key) const {
-  SkyColumnSources result{};
-  for (int z = 0; z < 16; ++z)
-    for (int x = 0; x < 16; ++x)
-      result[HeightmapColumnKey(x, z)] = computeSource(key, x, z);
+  const int minY = owner.minBlockSectionY * 16;
+  const int sentinel = minY - 1;
+  const int topSectionY = owner.minBlockSectionY + owner.blockSectionCount - 1;
+  const int bottomSectionY = owner.minBlockSectionY;
+  const auto &empty = emptyLightProperties();
+
+  SkyColumnSources result;
+  result.fill(sentinel);
+  std::array<const BlockLightProperties *, 256> tops;
+  tops.fill(&empty);
+  std::array<bool, 256> done{};
+  int remainingOpen = 256;
+  int nonEmptyTopCount = 0;
+
+  for (int sectionY = topSectionY;
+       sectionY >= bottomSectionY && remainingOpen > 0; --sectionY) {
+    const std::optional<LightSectionView> direct =
+        owner.directSectionView(key, sectionY);
+    const int baseY = sectionY * 16;
+    if (!direct) {
+      for (int col = 0; col < 256; ++col) {
+        if (!done[col]) {
+          result[col] = baseY + 16;
+          done[col] = true;
+        }
+      }
+      remainingOpen = 0;
+      break;
+    }
+
+    if (direct->bits == 0) {
+      const auto &props = owner.propertiesForState(direct->single);
+      const bool uniformEmpty =
+          direct->empty && props.supported && props.dampening == 0 &&
+          !hasLightFaceRect(props, 0) && !hasLightFaceRect(props, 1);
+      if (uniformEmpty) {
+        if (nonEmptyTopCount == 0)
+          continue;
+        for (int col = 0; col < 256; ++col) {
+          if (done[col])
+            continue;
+          if (tops[col] != &empty) {
+            if (isSourceEdgeOccluded(*tops[col], empty)) {
+              result[col] = baseY + 16;
+              done[col] = true;
+              --remainingOpen;
+            } else {
+              tops[col] = &empty;
+            }
+            --nonEmptyTopCount;
+          }
+        }
+        continue;
+      }
+      const bool selfOccludes = isSourceEdgeOccluded(props, props);
+      for (int col = 0; col < 256; ++col) {
+        if (done[col])
+          continue;
+        if (isSourceEdgeOccluded(*tops[col], props)) {
+          result[col] = baseY + 16;
+          done[col] = true;
+          --remainingOpen;
+          if (tops[col] != &empty)
+            --nonEmptyTopCount;
+        } else if (selfOccludes) {
+          result[col] = baseY + 15;
+          done[col] = true;
+          --remainingOpen;
+          if (tops[col] != &empty)
+            --nonEmptyTopCount;
+        } else {
+          if (tops[col] == &empty)
+            ++nonEmptyTopCount;
+          tops[col] = &props;
+        }
+      }
+      continue;
+    }
+
+    if (direct->empty) {
+      bool allUniformEmpty = true;
+      for (BlockState::Id sid : direct->palette) {
+        const auto &props = owner.propertiesForState(sid);
+        if (!props.supported || props.dampening != 0 ||
+            hasLightFaceRect(props, 0) || hasLightFaceRect(props, 1)) {
+          allUniformEmpty = false;
+          break;
+        }
+      }
+      if (allUniformEmpty) {
+        if (nonEmptyTopCount == 0)
+          continue;
+        for (int col = 0; col < 256; ++col) {
+          if (done[col])
+            continue;
+          if (tops[col] != &empty) {
+            if (isSourceEdgeOccluded(*tops[col], empty)) {
+              result[col] = baseY + 16;
+              done[col] = true;
+              --remainingOpen;
+            } else {
+              tops[col] = &empty;
+            }
+            --nonEmptyTopCount;
+          }
+        }
+        continue;
+      }
+    }
+
+    for (int localY = 15; localY >= 0 && remainingOpen > 0; --localY) {
+      const std::size_t planeBase = static_cast<std::size_t>(localY) << 8;
+      const int edgeResultY = baseY + localY + 1;
+      for (int col = 0; col < 256; ++col) {
+        if (done[col])
+          continue;
+        const BlockLightProperties &bottom = owner.propertiesForState(
+            direct->atomicStateAt(planeBase + static_cast<std::size_t>(col)));
+        if (isSourceEdgeOccluded(*tops[col], bottom)) {
+          result[col] = edgeResultY;
+          done[col] = true;
+          --remainingOpen;
+          if (tops[col] != &empty)
+            --nonEmptyTopCount;
+        } else {
+          if (tops[col] == &empty)
+            ++nonEmptyTopCount;
+          tops[col] = &bottom;
+        }
+      }
+    }
+  }
   return result;
 }
 
@@ -1022,10 +1323,16 @@ void SkyLightPropagator::checkNode(LightPos position) {
 }
 
 void SkyLightPropagator::propagateIncrease(const IncreaseTask &task) {
-  int fromLevel = storedLevel(task.position);
+  const SectionPos3 fromSec = sectionOf(task.position);
+  const SectionCacheEntry *fromEntry = &lookupSection(task.position);
+  int fromLevel = storedLevelInEntry(*fromEntry, task.position);
   if (task.fromEmission) {
     if (fromLevel < task.level) {
-      setStoredLevel(task.position, task.level);
+      bool insertedSection = false;
+      setStoredLevelInEntry(*fromEntry, task.position, task.level, fromLevel,
+                            insertedSection);
+      if (insertedSection)
+        fromEntry = &lookupSection(task.position);
       fromLevel = task.level;
     }
   }
@@ -1039,9 +1346,10 @@ void SkyLightPropagator::propagateIncrease(const IncreaseTask &task) {
     if ((task.directions & (1u << direction)) == 0)
       continue;
     const LightPos to = offset(task.position, direction);
-    if (!sectionAt(to)) {
-      if ((to.x >> 4) != (task.position.x >> 4) ||
-          (to.z >> 4) != (task.position.z >> 4)) {
+    const SectionCacheEntry &toEntry =
+        lookupNeighborSection(*fromEntry, fromSec, to);
+    if (!toEntry.snapshot) {
+      if ((to.x >> 4) != fromSec.x || (to.z >> 4) != fromSec.z) {
         // 目标区块“未计算”：记进收件箱，等它计算时再应用。
         const auto &toState = stateAt(to);
         const int incoming = fromLevel - lightOpacity(toState);
@@ -1053,15 +1361,18 @@ void SkyLightPropagator::propagateIncrease(const IncreaseTask &task) {
       }
       continue;
     }
-    const int toLevel = storedLevel(to);
+    const int toLevel = storedLevelInEntry(toEntry, to);
     if (fromLevel - 1 <= toLevel)
       continue;
     const auto &toState = stateAt(to);
     const int newLevel = fromLevel - lightOpacity(toState);
     if (newLevel <= toLevel || faceShapesOcclude(fromQueued, toState, direction))
       continue;
-    if (!setStoredLevel(to, newLevel))
+    bool insertedSection = false;
+    if (!setStoredLevelInEntry(toEntry, to, newLevel, toLevel, insertedSection))
       continue;
+    if (insertedSection)
+      fromEntry = &lookupSection(task.position);
     if (newLevel > 1)
       enqueueIncrease(to, static_cast<std::uint8_t>(newLevel),
                       static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))),
@@ -1074,13 +1385,16 @@ void SkyLightPropagator::propagateIncrease(const IncreaseTask &task) {
 void SkyLightPropagator::propagateDecrease(const DecreaseTask &task) {
   const int emptySectionsBelow =
       countEmptySectionsBelowIfAtBorder(task.position);
+  const SectionPos3 fromSec = sectionOf(task.position);
+  const SectionCacheEntry *fromEntry = &lookupSection(task.position);
   for (int direction = 0; direction < 6; ++direction) {
     if ((task.directions & (1u << direction)) == 0)
       continue;
     const LightPos to = offset(task.position, direction);
-    if (!sectionAt(to)) {
-      if ((to.x >> 4) != (task.position.x >> 4) ||
-          (to.z >> 4) != (task.position.z >> 4))
+    const SectionCacheEntry &toEntry =
+        lookupNeighborSection(*fromEntry, fromSec, to);
+    if (!toEntry.snapshot) {
+      if ((to.x >> 4) != fromSec.x || (to.z >> 4) != fromSec.z)
         ++owner.unloadedNeighborSkips;
       continue;
     }
@@ -1088,12 +1402,15 @@ void SkyLightPropagator::propagateDecrease(const DecreaseTask &task) {
       enqueueIncrease(to, 15, 63, false, true);
       continue;
     }
-    const int toLevel = storedLevel(to);
+    const int toLevel = storedLevelInEntry(toEntry, to);
     if (toLevel == 0)
       continue;
     if (toLevel <= int(task.level) - 1) {
-      if (!setStoredLevel(to, 0))
+      bool insertedSection = false;
+      if (!setStoredLevelInEntry(toEntry, to, 0, toLevel, insertedSection))
         continue;
+      if (insertedSection)
+        fromEntry = &lookupSection(task.position);
       enqueueDecrease(to, static_cast<std::uint8_t>(toLevel),
                       static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))));
       propagateFromEmptySections(to, direction, toLevel, false,

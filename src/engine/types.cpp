@@ -207,7 +207,9 @@ const ItemType *itemType(const std::string &name) {
   if (!item || item->id() == 0)
     return nullptr;
   static const auto byName = [] {
-    std::unordered_map<std::string, ItemType> map;
+    phmap::flat_hash_map<std::string, ItemType, AnkerlStringHash,
+                         std::equal_to<>>
+        map;
     for (const Item *it : allItems()) {
       if (it && it->id() > 0)
         map.emplace(it->name(), ItemType{it->name(), it->maxStackSize()});

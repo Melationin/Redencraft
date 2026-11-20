@@ -2,6 +2,7 @@
 
 #include "picojson.h"
 #include "redstone/block_tags.hpp"
+#include "redstone/chunk_map.hpp"
 #include "redstone/worldgen/chunk_generator.hpp"
 #include "redstone/worldgen/noise_chunk_generator.hpp"
 #include "redstone/worldgen/noise_router.hpp"
@@ -26,33 +27,33 @@ BlockState regionGetBlockState(const WorldGenRegion &region, int x, int y,
                                int z) noexcept {
   if (y < region.minY() || y >= region.maxY())
     return airState();
-  const ChunkAccess *chunk =
+  const BaseChunk *chunk =
       region.getChunkIfAllowed(x >> 4, z >> 4, ChunkStatusId::Empty);
   if (!chunk)
     return airState();
-  return chunk->getBlockState(x, y, z);
+  return region.getBlockState(x, y, z);
 }
 
 FluidState regionGetFluidState(const WorldGenRegion &region, int x, int y,
                                int z) noexcept {
   if (y < region.minY() || y >= region.maxY())
     return FluidState{};
-  const ChunkAccess *chunk =
+  const BaseChunk *chunk =
       region.getChunkIfAllowed(x >> 4, z >> 4, ChunkStatusId::Empty);
   if (!chunk)
     return FluidState{};
-  return chunk->getFluidState(x, y, z);
+  return region.getFluidState(x, y, z);
 }
 
 int regionGetHeight(const WorldGenRegion &region, HeightmapType type, int x,
                     int z) noexcept {
-  const ChunkAccess *chunk =
+  const BaseChunk *chunk =
       region.getChunkIfAllowed(x >> 4, z >> 4, ChunkStatusId::Empty);
   if (!chunk)
     return region.minY();
-  // `ChunkAccess::getHeight` 返回最高占用方块 Y（`firstAvailable - 1`），
+  // `chunkHeight` 返回最高占用方块 Y（`firstAvailable - 1`），
   // 而原版 `LevelReader::getHeight` / 高度图修饰器要求 `firstAvailable`（+1）。
-  return const_cast<ChunkAccess *>(chunk)->getHeight(type, x, z) + 1;
+  return chunkHeight(*const_cast<BaseChunk *>(chunk), type, x, z) + 1;
 }
 
 bool regionSetBlockState(WorldGenRegion &region, int x, int y, int z,
@@ -66,9 +67,10 @@ void regionMarkPosForPostprocessing(WorldGenRegion &region, int x, int y,
                                     int z) {
   if (!region.ensureCanWrite(x, y, z))
     return;
-  if (ChunkAccess *chunk =
+  if (BaseChunk *chunk =
           region.getChunkIfAllowed(x >> 4, z >> 4, ChunkStatusId::Empty)) {
-    chunk->markPosForPostprocessing(x, y, z);
+    if (chunk->isProtoChunk())
+      static_cast<ProtoChunk *>(chunk)->markPosForPostprocessing(x, y, z);
   }
 }
 
@@ -76,10 +78,10 @@ void regionScheduleFluidTick(WorldGenRegion &region, int x, int y, int z,
                              const Fluid &fluid, int delay) {
   if (!region.ensureCanWrite(x, y, z))
     return;
-  if (ChunkAccess *chunk =
+  if (BaseChunk *chunk =
           region.getChunkIfAllowed(x >> 4, z >> 4, ChunkStatusId::Empty)) {
-    if (auto *proto = dynamic_cast<ProtoChunk *>(chunk)) {
-      proto->fluidTicks().push_back(
+    if (chunk->isProtoChunk()) {
+      static_cast<ProtoChunk *>(chunk)->fluidTicks().push_back(
           terrain::SavedTick{std::string(fluid.name()), x, y, z, delay, 0});
     }
   }

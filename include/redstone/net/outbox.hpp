@@ -18,25 +18,28 @@ public:
     std::vector<OutPacket> packets;
     std::size_t charge = 0;
   };
-  bool tryPush(std::vector<OutPacket> &packets) noexcept {
+  bool tryPush(std::vector<OutPacket> &packets,
+               bool enforceLimits = true) noexcept {
     if (packets.empty())
       return true;
     const auto tail = tail_.load(std::memory_order_relaxed);
     if (tail - head_.load(std::memory_order_acquire) == Capacity)
       return false;
     std::size_t charge = 0;
-    for (const auto &packet : packets) {
-      const auto bytes = outPacketCharge(packet);
-      if (bytes > maxQueuedOutputBytes || charge > maxQueuedOutputBytes - bytes)
+    if (enforceLimits) {
+      for (const auto &packet : packets) {
+        const auto bytes = outPacketCharge(packet);
+        if (bytes > maxQueuedOutputBytes || charge > maxQueuedOutputBytes - bytes)
+          return false;
+        charge += bytes;
+      }
+      if (packets.size() > maxQueuedOutputPackets ||
+          bytes_.load(std::memory_order_acquire) >
+              maxQueuedOutputBytes - charge ||
+          packets_.load(std::memory_order_acquire) >
+              maxQueuedOutputPackets - packets.size())
         return false;
-      charge += bytes;
     }
-    if (packets.size() > maxQueuedOutputPackets ||
-        bytes_.load(std::memory_order_acquire) >
-            maxQueuedOutputBytes - charge ||
-        packets_.load(std::memory_order_acquire) >
-            maxQueuedOutputPackets - packets.size())
-      return false;
     bytes_.fetch_add(charge, std::memory_order_relaxed);
     packets_.fetch_add(packets.size(), std::memory_order_relaxed);
     auto &slot = slots_[tail & (Capacity - 1)];

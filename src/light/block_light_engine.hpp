@@ -21,7 +21,8 @@ struct BlockPropagatorScratch {
   TaskQueue<DecreaseTask> currentDecreaseQueue;
   TaskQueue<IncreaseTask> currentIncreaseQueue;
   FlatMap<SectionPos3, LightValues, SectionPos3Hash> lightValues;
-  FlatSet<SectionPos3, SectionPos3Hash> dirtySections;
+  FlatMap<std::uint64_t, std::uint64_t, UInt64Hash> dirtySectionMasks;
+  FlatSet<SectionPos3, SectionPos3Hash> dirtySectionsOverflow;
 
   void clear() {
     checks.clear();
@@ -31,7 +32,8 @@ struct BlockPropagatorScratch {
     currentDecreaseQueue.clear();
     currentIncreaseQueue.clear();
     lightValues.clear();
-    dirtySections.clear();
+    dirtySectionMasks.clear();
+    dirtySectionsOverflow.clear();
   }
   bool anyQueueNeedsCompact() const noexcept {
     return checkQueue.needsCompact() || decreaseQueue.needsCompact() ||
@@ -110,9 +112,17 @@ private:
   WorkingChunk *ensureWorking(std::uint64_t key);
   const LightSectionSnapshot *sectionAt(LightPos position) const;
   const SectionCacheEntry &lookupSection(LightPos position) const;
+  const SectionCacheEntry &lookupNeighborSection(
+      const SectionCacheEntry &fromEntry, SectionPos3 fromSec,
+      LightPos to) const;
   const BlockLightProperties &stateAt(LightPos position) const;
   int storedLevel(LightPos position) const;
+  int storedLevelInEntry(const SectionCacheEntry &entry,
+                         LightPos position) const;
   bool setStoredLevel(LightPos position, int level);
+  bool setStoredLevelInEntry(const SectionCacheEntry &entry, LightPos position,
+                             int level, bool &insertedSection);
+  void markSectionDirty(SectionPos3 section);
   void checkNode(LightPos position);
   void propagateIncrease(const IncreaseTask &task);
   void propagateDecrease(const DecreaseTask &task);
@@ -138,7 +148,11 @@ private:
   std::optional<SectionPos3> activeDecreaseSection;
   std::optional<SectionPos3> activeIncreaseSection;
   FlatMap<SectionPos3, LightValues, SectionPos3Hash> &lightValues;
-  FlatSet<SectionPos3, SectionPos3Hash> &dirtySections;
+  FlatMap<std::uint64_t, std::uint64_t, UInt64Hash> &dirtySectionMasks;
+  FlatSet<SectionPos3, SectionPos3Hash> &dirtySectionsOverflow;
+  std::uint64_t lastDirtyKey_ = 0;
+  std::uint64_t lastDirtyEpoch_ = 0;
+  std::uint64_t *lastDirtyMask_ = nullptr;
   mutable std::array<ChunkStateCacheEntry, 64> chunkStateCache_{};
   mutable std::array<SectionCacheEntry, 64> sectionCache_{};
   mutable std::uint64_t snapshotCacheEpoch_ = 1;

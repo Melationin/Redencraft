@@ -6,9 +6,9 @@
 /// 统一实现射线碰撞检测（方块与实体）、离开发射者判定、标靶方块红石脉冲时长差异
 /// 以及末影珍珠区块加载票据续期等原版 26.1 弹射物语义。
 #include "redstone/entity.hpp"
+#include "redstone/hash.hpp"
 #include <cstdint>
 #include <string>
-#include <unordered_set>
 
 namespace redstone {
 
@@ -114,7 +114,7 @@ private:
   std::optional<Pos> inBlockPos_;
   std::optional<BlockState> inBlockState_;
   /// 已穿透过的实体 ID 集合，防止带有穿透附魔的箭矢在连续游戏刻中重复伤害同一目标。
-  std::unordered_set<int> piercingIgnoreIds_;
+  phmap::flat_hash_set<int> piercingIgnoreIds_;
 };
 
 /// 普通箭与药水箭（`minecraft:arrow`），通过 `effectColor` 区分药水粒子颜色（-1 表示无药水）。

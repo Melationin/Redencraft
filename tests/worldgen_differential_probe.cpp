@@ -119,7 +119,7 @@ makeGenerator(const WorldgenRegistries &reg, const std::string &dim) {
 
 void writeChunkSnapshot(std::ostream &os, std::int64_t seed,
                         const std::string &dim, ChunkTicketPos pos,
-                        const std::string &stageName, ChunkAccess &chunk) {
+                        const std::string &stageName, BaseChunk &chunk) {
   const int minY = chunk.minY();
   const int height = chunk.height();
   const int baseX = pos.x << 4;
@@ -215,7 +215,7 @@ void writeChunkSnapshot(std::ostream &os, std::int64_t seed,
         if (!first)
           os << ',';
         first = false;
-        os << chunk.getHeight(hmTypes[t].type, lx, lz);
+        os << chunkHeight(chunk, hmTypes[t].type, lx, lz);
       }
     }
     os << ']';
@@ -370,7 +370,7 @@ int main(int argc, char **argv) {
         st.sched->ensureStatusBatch(batch, batch.front().pos);
         for (std::size_t k : reqIndices) {
           const ChunkTicketPos pos{requests[k].cx, requests[k].cz};
-          ChunkAccess *chunk = st.sched->findChunk(pos);
+          BaseChunk *chunk = st.sched->findChunk(pos);
           if (!chunk)
             throw std::runtime_error("missing scheduled chunk snapshot");
           writeChunkSnapshot(out, winSeed, winDim, pos, sName, *chunk);

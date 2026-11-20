@@ -114,7 +114,7 @@ public:
   void buildSurface(RandomState &randomState, const BiomeManager &biomeManager,
                     const BiomeManager::NoiseBiomeReader &noiseBiomeReader,
                     const WorldgenRegistries &registries, bool useLegacyRandom,
-                    int genMinY, int genDepth, ChunkAccess &chunk,
+                    int genMinY, int genDepth, ProtoChunk &chunk,
                     NoiseChunk &noiseChunk,
                     const SurfaceRuleSourcePtr &ruleSource) const;
 
@@ -122,7 +122,7 @@ public:
   topMaterial(RandomState &randomState, const BiomeManager &biomeManager,
               const BiomeManager::NoiseBiomeReader &noiseBiomeReader,
               const WorldgenRegistries &registries, int genMinY, int genDepth,
-              ChunkAccess &chunk, NoiseChunk &noiseChunk,
+              ProtoChunk &chunk, NoiseChunk &noiseChunk,
               const SurfaceRuleSourcePtr &ruleSource, int blockX, int blockY,
               int blockZ, bool underFluid) const;
 
@@ -152,11 +152,11 @@ private:
                       int genDepth,
                       const SurfaceRuleSourcePtr &ruleSource) const;
 
-  void erodedBadlandsExtension(ChunkAccess &chunk, int blockX, int blockZ,
+  void erodedBadlandsExtension(ProtoChunk &chunk, int blockX, int blockZ,
                                int height) const;
   void frozenOceanExtension(int minSurfaceLevel,
                             const BiomeClimateProperties &biomeClimate,
-                            ChunkAccess &chunk, int blockX, int blockZ,
+                            ProtoChunk &chunk, int blockX, int blockZ,
                             int height) const;
 
   BlockState defaultBlock_;

@@ -1,9 +1,8 @@
 #pragma once
-// 世界生成原型区块（`ProtoChunk`）、只读/可写适配包装器（`ImposterProtoChunk`）、
-// 区块公共访问基类（`ChunkAccess`）、4x4x4 生物群系调色板容器（`BiomePaletteContainer`）与雕刻掩码（`CarvingMask`）。
-// 之所以在 `World::Chunk` 之外单独设计 `ProtoChunk`，是因为世界生成期的 11 个原型阶段需要保存大量仅生成期使用的状态
+// 世界生成原型区块（`ProtoChunk`）、4x4x4 生物群系调色板容器（`BiomePaletteContainer`）与雕刻掩码（`CarvingMask`）。
+// 之所以在 `WorldChunk` 之外单独设计 `ProtoChunk`，是因为世界生成期的 11 个原型阶段需要保存大量仅生成期使用的状态
 // （`*WG` 高度图、`carving_mask`、`postProcessing` 坐标、生物群系 quart 网格、尚未激活的实体与方块实体 NBT 等）；
-// 等到达 `FULL` 后再零拷贝或紧凑移交给运行态 `World`，既对齐原版 26.1 架构，也不拖累主循环与红石热路径的内存布局。
+// 等到达 `FULL` 后再零拷贝或紧凑移交给运行态 `WorldChunk`，既对齐原版 26.1 架构，也不拖累主循环与红石热路径的内存布局。
 
 #include "redstone/block.hpp"
 #include "redstone/chunk_section.hpp"
@@ -11,6 +10,7 @@
 #include "redstone/engine_types.hpp"
 #include "redstone/fluid.hpp"
 #include "redstone/heightmap.hpp"
+#include "redstone/light/snapshot.hpp"
 #include "redstone/nbt.hpp"
 #include "redstone/terrain_codec.hpp"
 #include "redstone/tickets.hpp"
@@ -64,6 +64,24 @@ private:
 
 using ProtoChunkSection = redstone::BlockSection;
 
+// InitializeLight 阶段预计算的区块光学摘要：供 Light 阶段 3x3 并行初始光照直接汇总，
+// 避免每块重复扫描全部 98,304 格。
+struct ProtoChunkLightSummary {
+  struct EmissiveCell {
+    std::uint16_t packedLocal = 0; // (y & 15) << 8 | (z & 15) << 4 | (x & 15)
+    std::int16_t worldY = 0;
+    std::uint8_t emission = 0;
+  };
+  std::array<int, 256> skySources{}; // z * 16 + x, matching SkyLightEngine
+  int minSkySourceY = 0;
+  int maxSkySourceY = 0;
+  std::uint32_t nonEmptySectionMask = 0;
+  std::uint32_t unsupportedCells = 0;
+  std::uint64_t mutationSeq = 0;
+  bool skyLightEnabled = true;
+  std::vector<EmissiveCell> emissiveBlocks;
+};
+
 // 生成期 ProtoChunk 常驻堆内存的分项统计（仅诊断/基准使用）。
 // 把整批区块常驻内存拆成区段数组、方块调色板、生物群系调色板、高度图、
 // 结构引用与待激活实体等来源，用于定位 50x50 这类全量常驻场景的构成。
@@ -95,62 +113,8 @@ struct ProtoChunkMemoryUsage {
   }
 };
 
-// `ProtoChunk` 与 `ImposterProtoChunk` 共享的区块读写访问契约（对齐 26.1 `ChunkAccess`）。
-// 使 `WorldGenRegion` 无需区分邻域格里放的是正在生成的半成品区块还是已落盘完整的 `World` 区块。
-class ChunkAccess : public BaseChunk {
-public:
-  ChunkAccess() = default;
-  ChunkAccess(ChunkAccess &&) noexcept = default;
-  ChunkAccess &operator=(ChunkAccess &&) noexcept = default;
-  ChunkAccess(const ChunkAccess &) = delete;
-  ChunkAccess &operator=(const ChunkAccess &) = delete;
-  virtual ~ChunkAccess() = default;
-
-  int maxSectionY() const noexcept { return minSectionY() + sectionCount() - 1; }
-
-  virtual ChunkStatusId persistedStatus() const noexcept = 0;
-  virtual void setPersistedStatus(ChunkStatusId status) = 0;
-
-  virtual BlockState getBlockState(int x, int y, int z) const = 0;
-  virtual FluidState getFluidState(int x, int y, int z) const = 0;
-  virtual std::optional<BlockState> setBlockState(int x, int y, int z,
-                                                  const BlockState &state,
-                                                  int flags = 3) = 0;
-
-  virtual std::string_view getNoiseBiome(int quartX, int quartY,
-                                         int quartZ) const = 0;
-  virtual void setNoiseBiome(int quartX, int quartY, int quartZ,
-                             std::string_view biomeId) = 0;
-
-  virtual int getHeight(HeightmapType type, int x, int z) = 0;
-  virtual void markPosForPostprocessing(int x, int y, int z) = 0;
-
-
-  // Per-chunk cached `NoiseChunk` shared across `BIOMES` -> `NOISE` -> `SURFACE`
-  // (matching `ChunkAccess.getOrCreateNoiseChunk` in 26.1).
-  std::shared_ptr<void> cachedNoiseChunkOpaque() const noexcept {
-    return cachedNoiseChunk_;
-  }
-  void setCachedNoiseChunkOpaque(std::shared_ptr<void> nc) noexcept {
-    cachedNoiseChunk_ = std::move(nc);
-  }
-
-  // Per-chunk cached `StructureStart` map populated in `STRUCTURE_STARTS`
-  // and read in `STRUCTURE_REFERENCES` / `NOISE` (Beardifier) / `FEATURES`.
-  std::shared_ptr<void> structureStartsOpaque() const noexcept {
-    return structureStartsOpaque_;
-  }
-  void setStructureStartsOpaque(std::shared_ptr<void> starts) noexcept {
-    structureStartsOpaque_ = std::move(starts);
-  }
-
-private:
-  std::shared_ptr<void> cachedNoiseChunk_;
-  std::shared_ptr<void> structureStartsOpaque_;
-};
-
 // 生成期原型区块（对齐 26.1 `ProtoChunk.java`）：保存全部生成阶段中间态与待晋升计划数据。
-class ProtoChunk : public ChunkAccess {
+class ProtoChunk : public BaseChunk {
 public:
   ProtoChunk(ChunkTicketPos pos, int minY = -64, int height = 384,
              std::string defaultBiome = "minecraft:plains");
@@ -159,26 +123,39 @@ public:
   ProtoChunk(const ProtoChunk &) = delete;
   ProtoChunk &operator=(const ProtoChunk &) = delete;
 
-  ChunkStatusId persistedStatus() const noexcept override {
+  int maxSectionY() const noexcept { return minSectionY() + sectionCount() - 1; }
+
+  ChunkStatusId persistedStatus() const noexcept {
     return status_.value.load(std::memory_order_acquire);
   }
-  void setPersistedStatus(ChunkStatusId status) override;
+  void setPersistedStatus(ChunkStatusId status);
 
-  BlockState getBlockState(int x, int y, int z) const override;
-  FluidState getFluidState(int x, int y, int z) const override;
+  BlockState getBlockState(int x, int y, int z) const;
+  FluidState getFluidState(int x, int y, int z) const;
   std::optional<BlockState> setBlockState(int x, int y, int z,
                                           const BlockState &state,
-                                          int flags = 3) override;
+                                          int flags = 3);
 
-  std::string_view getNoiseBiome(int quartX, int quartY,
-                                 int quartZ) const override;
+  std::string_view getNoiseBiome(int quartX, int quartY, int quartZ) const {
+    return BaseChunk::getNoiseBiome(quartX, quartY, quartZ);
+  }
   void setNoiseBiome(int quartX, int quartY, int quartZ,
-                     std::string_view biomeId) override;
+                     std::string_view biomeId);
 
-  int getHeight(HeightmapType type, int x, int z) override;
-  void markPosForPostprocessing(int x, int y, int z) override;
+  int getHeight(HeightmapType type, int x, int z);
+  void markPosForPostprocessing(int x, int y, int z);
   void addPackedPostProcess(std::span<const std::int16_t> offsets,
                             int sectionIndex);
+
+  // Per-chunk cached `NoiseChunk` shared across `BIOMES` -> `NOISE` -> `SURFACE` -> `CARVERS`.
+  void *cachedNoiseChunkRaw() const noexcept { return cachedNoiseChunk_.get(); }
+  void setCachedNoiseChunkRaw(OpaqueUniquePtr nc) noexcept {
+    cachedNoiseChunk_ = std::move(nc);
+  }
+
+  // Extract the 4 final heightmaps (flushing dirty columns first) for zero-rescan
+  // promotion into WorldChunk.
+  std::optional<std::array<Heightmap, 4>> takeFinalHeightmaps();
 
   // InitializeLight 阶段提交给光照引擎的请求序号，供 Light 阶段按区块等待。
   void setLightSubmissionGeneration(std::uint64_t generation) noexcept {
@@ -186,6 +163,32 @@ public:
   }
   std::uint64_t lightSubmissionGeneration() const noexcept {
     return lightGeneration_;
+  }
+  bool deferredLightSubmitted() const noexcept {
+    return deferredLightSubmitted_;
+  }
+  void setDeferredLightSubmitted(bool submitted) noexcept {
+    deferredLightSubmitted_ = submitted;
+  }
+
+  std::shared_ptr<const ProtoChunkLightSummary> lightSummary() const noexcept {
+    return lightSummary_.load();
+  }
+  bool hasLightSummary() const noexcept { return lightSummary_.hasValue(); }
+  void setLightSummary(std::shared_ptr<const ProtoChunkLightSummary> summary) const noexcept {
+    lightSummary_.store(std::move(summary));
+  }
+  std::uint64_t blockMutationSeq() const noexcept {
+    return blockMutationSeq_.value.load(std::memory_order_acquire);
+  }
+  void bumpBlockMutationSeq() noexcept {
+    blockMutationSeq_.value.fetch_add(1, std::memory_order_acq_rel);
+  }
+  std::shared_ptr<const PrecomputedChunkLight> precomputedLight() const noexcept {
+    return precomputedLight_.load();
+  }
+  void setPrecomputedLight(std::shared_ptr<const PrecomputedChunkLight> light) noexcept {
+    precomputedLight_.store(std::move(light));
   }
 
   std::string_view defaultBiome() const noexcept { return defaultBiome_; }
@@ -305,10 +308,79 @@ protected:
     }
   };
 
+  struct AtomicU64 {
+    std::atomic<std::uint64_t> value{0};
+    AtomicU64() noexcept = default;
+    AtomicU64(const AtomicU64 &o) noexcept
+        : value(o.value.load(std::memory_order_acquire)) {}
+    AtomicU64 &operator=(const AtomicU64 &o) noexcept {
+      value.store(o.value.load(std::memory_order_acquire),
+                  std::memory_order_release);
+      return *this;
+    }
+    AtomicU64(AtomicU64 &&o) noexcept
+        : value(o.value.load(std::memory_order_acquire)) {}
+    AtomicU64 &operator=(AtomicU64 &&o) noexcept {
+      value.store(o.value.load(std::memory_order_acquire),
+                  std::memory_order_release);
+      return *this;
+    }
+  };
+
+  template <class T> struct AtomicSharedSlot {
+    mutable std::atomic_flag lock = ATOMIC_FLAG_INIT;
+    std::shared_ptr<const T> value;
+    AtomicSharedSlot() noexcept = default;
+    AtomicSharedSlot(const AtomicSharedSlot &) = delete;
+    AtomicSharedSlot &operator=(const AtomicSharedSlot &) = delete;
+    AtomicSharedSlot(AtomicSharedSlot &&o) noexcept {
+      while (o.lock.test_and_set(std::memory_order_acquire)) {
+      }
+      value = std::move(o.value);
+      o.lock.clear(std::memory_order_release);
+    }
+    AtomicSharedSlot &operator=(AtomicSharedSlot &&o) noexcept {
+      if (this == &o)
+        return *this;
+      while (lock.test_and_set(std::memory_order_acquire)) {
+      }
+      while (o.lock.test_and_set(std::memory_order_acquire)) {
+      }
+      value = std::move(o.value);
+      o.lock.clear(std::memory_order_release);
+      lock.clear(std::memory_order_release);
+      return *this;
+    }
+    std::shared_ptr<const T> load() const noexcept {
+      while (lock.test_and_set(std::memory_order_acquire)) {
+      }
+      auto copy = value;
+      lock.clear(std::memory_order_release);
+      return copy;
+    }
+    void store(std::shared_ptr<const T> next) noexcept {
+      while (lock.test_and_set(std::memory_order_acquire)) {
+      }
+      value = std::move(next);
+      lock.clear(std::memory_order_release);
+    }
+    bool hasValue() const noexcept {
+      while (lock.test_and_set(std::memory_order_acquire)) {
+      }
+      const bool present = static_cast<bool>(value);
+      lock.clear(std::memory_order_release);
+      return present;
+    }
+  };
+
   AtomicChunkStatus status_{};
   std::int64_t inhabitedTime_ = 0;
   std::uint64_t lightGeneration_ = 0;
-  std::string defaultBiome_ = "minecraft:plains";
+  bool deferredLightSubmitted_ = false;
+  mutable AtomicSharedSlot<ProtoChunkLightSummary> lightSummary_;
+  AtomicU64 blockMutationSeq_;
+  AtomicSharedSlot<PrecomputedChunkLight> precomputedLight_;
+  OpaqueUniquePtr cachedNoiseChunk_{nullptr, +[](void *) {}};
   mutable std::array<std::optional<Heightmap>, 6> heightmaps_{};
   std::uint8_t createdHeightmapMask_ = 0;
   mutable std::uint8_t dirtyHeightmapSummaryMask_ = 0;
@@ -322,49 +394,6 @@ protected:
   std::vector<terrain::MovingPistonEntity> movingPistons_;
   std::map<std::string, std::vector<std::int64_t>, std::less<>>
       structureReferences_;
-};
-
-// 已加载 `World` 完整区块的生成器视图包装器（对齐 26.1 `ImposterProtoChunk.java`）。
-// 当周围正在生成的区块经由 `WorldGenRegion` 读取邻域中一个已达 `FULL` 状态的 `World` 区块时，
-// 通过该适配器统一提供 `ChunkAccess` 接口，并把 `*WG` 高度图请求自动重定向到对应的终态高度图。
-class ImposterProtoChunk final : public ChunkAccess {
-public:
-  ImposterProtoChunk(World &world, ChunkTicketPos pos, bool allowWrites = false);
-
-  World &wrappedWorld() noexcept { return world_; }
-  const World &wrappedWorld() const noexcept { return world_; }
-  bool allowWrites() const noexcept { return allowWrites_; }
-
-  ChunkStatusId persistedStatus() const noexcept override {
-    return ChunkStatusId::Full;
-  }
-  void setPersistedStatus(ChunkStatusId) override {}
-
-  BlockState getBlockState(int x, int y, int z) const override;
-  FluidState getFluidState(int x, int y, int z) const override;
-  std::optional<BlockState> setBlockState(int x, int y, int z,
-                                          const BlockState &state,
-                                          int flags = 3) override;
-
-  std::string_view getNoiseBiome(int quartX, int quartY,
-                                 int quartZ) const override;
-  void setNoiseBiome(int quartX, int quartY, int quartZ,
-                     std::string_view biomeId) override;
-
-  int getHeight(HeightmapType type, int x, int z) override;
-  void markPosForPostprocessing(int, int, int) override {}
-
-private:
-  static constexpr HeightmapType fixType(HeightmapType type) noexcept {
-    if (type == HeightmapType::WorldSurfaceWG)
-      return HeightmapType::WorldSurface;
-    if (type == HeightmapType::OceanFloorWG)
-      return HeightmapType::OceanFloor;
-    return type;
-  }
-
-  World &world_;
-  bool allowWrites_;
 };
 
 // 按原版 26.1 `SerializableChunkData.write()` 格式将原型区块序列化为 Anvil 区块 NBT（DataVersion=4786）。

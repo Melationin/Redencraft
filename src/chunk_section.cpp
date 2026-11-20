@@ -294,6 +294,9 @@ BlockSection BlockSection::share() const {
   out.single = single;
   out.setSectionY(sectionY_);
   out.randomTickByMinisection = randomTickByMinisection;
+  out.lastPaletteState = lastPaletteState;
+  out.lastPaletteIndex = lastPaletteIndex;
+  out.lastPaletteValid = lastPaletteValid;
   out.storage = storage;
   return out;
 }
@@ -337,6 +340,15 @@ BlockState::Id BlockSection::set(int index, BlockState::Id state, bool compact,
   } else {
     visitSectionStorage(base, [&](auto *block) {
       using BlockT = std::remove_pointer_t<decltype(block)>;
+      if (lastPaletteValid && lastPaletteState == state &&
+          lastPaletteIndex < block->paletteSize &&
+          block->palette[lastPaletteIndex] == state) {
+        if (resizeMutex)
+          block->atomicSetIndexAt(cell, lastPaletteIndex);
+        else
+          block->setIndexAt(cell, lastPaletteIndex);
+        return;
+      }
       const auto end = block->palette.begin() + block->paletteSize;
       auto found = std::find(block->palette.begin(), end, state);
       std::uint16_t targetIdx = 0;
@@ -382,6 +394,9 @@ BlockState::Id BlockSection::set(int index, BlockState::Id state, bool compact,
       } else {
         targetIdx = static_cast<std::uint16_t>(found - block->palette.begin());
       }
+      lastPaletteState = state;
+      lastPaletteIndex = targetIdx;
+      lastPaletteValid = true;
       if (resizeMutex)
         block->atomicSetIndexAt(cell, targetIdx);
       else
@@ -397,8 +412,26 @@ BiomePaletteContainer BaseChunk::biomes(int sectionIndex,
                                        std::string_view defaultBiome) {
   const int index =
       sectionIndex >= 0 && sectionIndex < sectionCount() ? sectionIndex : 0;
-  return BiomePaletteContainer(biomeSections[static_cast<std::size_t>(index)],
-                               std::string(defaultBiome));
+  return BiomePaletteContainer(
+      biomeSections[static_cast<std::size_t>(index)],
+      defaultBiome.empty() ? defaultBiome_ : std::string(defaultBiome));
+}
+
+std::string_view BaseChunk::getNoiseBiome(int quartX, int quartY,
+                                          int quartZ) const {
+  const int minQuartY = minY_ >> 2;
+  const int maxQuartY = (maxY() >> 2) - 1;
+  const int clampedY = std::clamp(quartY, minQuartY, maxQuartY);
+  const int secIdx = (clampedY >> 2) - minSectionY();
+  if (secIdx < 0 || secIdx >= sectionCount())
+    return defaultBiome_;
+  const auto &storage = biomeSections[static_cast<std::size_t>(secIdx)];
+  if (!storage || storage->palette.empty())
+    return defaultBiome_;
+  const std::uint8_t pIdx =
+      storage->indices[BiomePaletteContainer::index(quartX & 3, clampedY & 3,
+                                                    quartZ & 3)];
+  return storage->palette[pIdx < storage->palette.size() ? pIdx : 0];
 }
 
 BlockState BaseChunk::getBlockState(int x, int y, int z) const {

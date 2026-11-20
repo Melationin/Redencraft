@@ -23,6 +23,10 @@
 
 namespace redstone {
 
+namespace worldgen {
+class ProtoChunk;
+} // namespace worldgen
+
 // 区块在内存中的驻留生命周期状态：
 // 驱动异步读取 -> 主线程安装 -> 脏写回磁盘 -> 无需求且干净后安全驱逐的状态转移。
 enum class ChunkResidencyState {
@@ -85,6 +89,12 @@ public:
   virtual StoreWriteResult writeChunk(const ChunkTicketPos &position,
                                       std::span<const std::uint8_t> nbt,
                                       int timestampSeconds) = 0;
+  virtual void writeChunkAsync(const ChunkTicketPos &position,
+                               std::vector<std::uint8_t> nbt,
+                               int timestampSeconds) {
+    (void)writeChunk(position, nbt, timestampSeconds);
+  }
+  virtual void flushPending() {}
 };
 
 // 控制器在同一条单 I/O worker 线程上串行执行地形（`region/`）与实体（`entities/`）读写。
@@ -126,15 +136,25 @@ private:
 // 存在原因：26.1 的 RegionFile 头部扇区分配不是并发的；生成线程只读也必须与写盘互斥。
 class SerializedChunkStore final : public RawChunkStore {
 public:
-  explicit SerializedChunkStore(std::shared_ptr<RawChunkStore> inner);
+  static constexpr std::size_t kDefaultRetainedChunks = 128;
+
+  explicit SerializedChunkStore(
+      std::shared_ptr<RawChunkStore> inner,
+      std::size_t retainedChunks = kDefaultRetainedChunks);
+  ~SerializedChunkStore() override;
+
   StoreReadResult readChunk(const ChunkTicketPos &position) override;
   StoreWriteResult writeChunk(const ChunkTicketPos &position,
                               std::span<const std::uint8_t> nbt,
                               int timestampSeconds) override;
+  void writeChunkAsync(const ChunkTicketPos &position,
+                       std::vector<std::uint8_t> nbt,
+                       int timestampSeconds) override;
+  void flushPending() override;
 
 private:
-  std::shared_ptr<RawChunkStore> inner_;
-  std::mutex mutex_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 // 将解码后的轻量视图移动给主线程接收方；原始解码出的 NBT 根节点仍由 I/O worker 持有作为保存模板，
@@ -175,6 +195,9 @@ struct LifecycleLoadedChunk {
   std::vector<Pos> postProcessingPositions;
   // 仅用于测试夹具的原始实体标签列表；受管在线加载使用 `entityRecords`。
   std::vector<nbt::Tag> entities;
+  // 与 World::ChunkMap 共享同一 ChunkHolder 的生成期直交入口；存在时安装直接从
+  // ProtoChunk 零重扫晋升，不必再经由 PackedBlockStates / heightmaps->prime。
+  std::shared_ptr<worldgen::ProtoChunk> generatedProto;
 
   LifecycleLoadedChunk() = default;
   LifecycleLoadedChunk(LifecycleLoadedChunk &&) = default;

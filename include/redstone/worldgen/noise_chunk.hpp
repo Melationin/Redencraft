@@ -21,12 +21,12 @@ namespace redstone::worldgen {
 class NoiseChunk final : public DensityContextProvider {
 public:
   static std::unique_ptr<NoiseChunk>
-  forChunk(const ChunkAccess &chunk, RandomState &randomState,
+  forChunk(const BaseChunk &chunk, RandomState &randomState,
            const NoiseGeneratorSettings &settings,
            FluidPicker globalFluidPicker, DensityNodePtr beardifier = {});
 
   static std::unique_ptr<NoiseChunk>
-  forChunkBiomes(const ChunkAccess &chunk, RandomState &randomState,
+  forChunkBiomes(const BaseChunk &chunk, RandomState &randomState,
                  const NoiseGeneratorSettings &settings);
 
   NoiseChunk(int cellCountXZ, RandomState &randomState, int firstBlockX,
@@ -143,9 +143,7 @@ private:
   };
 
   void fillSlice(bool slice0, int cellX);
-  DensityNodePtr wrapRec(
-      const DensityNodePtr &node,
-      FlatHashMap<const DensityNode *, DensityNodePtr, NodePtrHash> &localMemo);
+  DensityNodePtr wrapRec(const DensityNodePtr &node);
 
   int cellCountXZ_ = 0;
   int cellCountY_ = 0;
@@ -187,6 +185,8 @@ private:
   std::vector<std::shared_ptr<CacheAllInCellState>> cellCaches_;
   CacheAllInCellState *finalCellCache_ = nullptr;
   FlatHashMap<const DensityNode *, DensityNodePtr, NodePtrHash> wrapped_;
+  // 直读列缓存：键为量化列 (x,z)。不同调用方（含水层网格、地表四角）会查询到
+  // 区块外较远的列，键数量不可控，保留哈希表。
   FlatHashMap<std::int64_t, int, Int64Hash> preliminarySurfaceLevelCache_;
 
   DensityNodePtr preliminarySurfaceLevel_;

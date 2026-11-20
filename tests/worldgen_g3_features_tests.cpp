@@ -16,7 +16,7 @@ namespace {
 using namespace redstone;
 using namespace redstone::worldgen;
 
-std::map<std::string, int> countBlocks(const ChunkAccess &chunk) {
+std::map<std::string, int> countBlocks(const BaseChunk &chunk) {
   std::map<std::string, int> counts;
   const int x0 = chunk.pos().x << 4;
   const int z0 = chunk.pos().z << 4;
@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
 
   NoiseBasedChunkGenerator endGen(reg, *endSettings, endBiomes, redstone::endDimensionType().minY, redstone::endDimensionType().height);
   ChunkGenerationPipeline endPipe(endGen, kSeed);
-  ChunkAccess &endChunk =
+  BaseChunk &endChunk =
       endPipe.ensureStatus(ChunkTicketPos{2, 0}, ChunkStatusId::Features);
   const auto endCounts = countBlocks(endChunk);
   std::cerr << "C++ END(2,0) obsidian=" << endCounts.at("minecraft:obsidian")
@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
   // 3. Overworld Forest (3, -2) Features (trees, vegetation, ores)
   NoiseBasedChunkGenerator owGen(reg, *owSettings, owBiomes);
   ChunkGenerationPipeline owPipe(owGen, kSeed);
-  ChunkAccess &owForest =
+  BaseChunk &owForest =
       owPipe.ensureStatus(ChunkTicketPos{3, -2}, ChunkStatusId::Features);
   const auto owForestCounts = countBlocks(owForest);
   auto cnt = [](const std::map<std::string, int> &m, const char *k) {
@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
          owForestCounts.count("minecraft:copper_ore"));
 
   // 4. Overworld Village (-51, -62) full Features (Jigsaw structure blocks placed!)
-  ChunkAccess &owVillage =
+  BaseChunk &owVillage =
       owPipe.ensureStatus(ChunkTicketPos{-51, -62}, ChunkStatusId::Features);
   const auto owVillageCounts = countBlocks(owVillage);
   std::cerr << "C++ VILLAGE(-51,-62) cobblestone="
@@ -143,7 +143,7 @@ int main(int argc, char **argv) {
       MultiNoiseBiomeSource::createNether());
   NoiseBasedChunkGenerator neGen(reg, *neSettings, neBiomes, redstone::netherDimensionType().minY, redstone::netherDimensionType().height);
   ChunkGenerationPipeline nePipe(neGen, kSeed);
-  ChunkAccess &neChunk =
+  BaseChunk &neChunk =
       nePipe.ensureStatus(ChunkTicketPos{-1, 0}, ChunkStatusId::Features);
   const auto neCounts = countBlocks(neChunk);
   std::cerr << "C++ NETHER(-1,0) ancient_debris="
@@ -199,7 +199,7 @@ int main(int argc, char **argv) {
           chunks.push_back(std::move(pc));
         }
       }
-      std::vector<ChunkAccess *> grid(9, nullptr);
+      std::vector<BaseChunk *> grid(9, nullptr);
       for (std::size_t i = 0; i < 9; ++i)
         grid[i] = chunks[i].get();
       const auto &step =
@@ -218,24 +218,24 @@ int main(int argc, char **argv) {
     };
 
     testFeature("minecraft:cherry_bees_005", Blocks::GRASS_BLOCK.defaultState(),
-                Pos{8, 64, 8}, [](const auto &m, const ChunkAccess &) {
+                Pos{8, 64, 8}, [](const auto &m, const BaseChunk &) {
                   assert(m.count("minecraft:cherry_log") && m.at("minecraft:cherry_log") > 0);
                   assert(m.count("minecraft:cherry_leaves") && m.at("minecraft:cherry_leaves") > 0);
                 });
     testFeature("minecraft:mangrove", Blocks::MUD.defaultState(),
-                Pos{8, 64, 8}, [](const auto &m, const ChunkAccess &) {
+                Pos{8, 64, 8}, [](const auto &m, const BaseChunk &) {
                   assert(m.count("minecraft:mangrove_log") && m.at("minecraft:mangrove_log") > 0);
                   assert(m.count("minecraft:mangrove_leaves") && m.at("minecraft:mangrove_leaves") > 0);
                   assert(m.count("minecraft:mangrove_roots") +
                              (m.count("minecraft:muddy_mangrove_roots") ? m.at("minecraft:muddy_mangrove_roots") : 0) > 0);
                 });
     testFeature("minecraft:dark_oak", Blocks::GRASS_BLOCK.defaultState(),
-                Pos{8, 64, 8}, [](const auto &m, const ChunkAccess &) {
+                Pos{8, 64, 8}, [](const auto &m, const BaseChunk &) {
                   assert(m.count("minecraft:dark_oak_log") && m.at("minecraft:dark_oak_log") >= 4);
                   assert(m.count("minecraft:dark_oak_leaves") && m.at("minecraft:dark_oak_leaves") > 10);
                 });
     testFeature("minecraft:mega_pine", Blocks::GRASS_BLOCK.defaultState(),
-                Pos{8, 64, 8}, [](const auto &m, const ChunkAccess &) {
+                Pos{8, 64, 8}, [](const auto &m, const BaseChunk &) {
                   assert(m.count("minecraft:spruce_log") && m.at("minecraft:spruce_log") >= 10);
                   assert(m.count("minecraft:spruce_leaves") && m.at("minecraft:spruce_leaves") > 10);
                   assert(m.count("minecraft:podzol") && m.at("minecraft:podzol") > 0);
@@ -248,7 +248,7 @@ int main(int argc, char **argv) {
         runFeatureOnce(
             "minecraft:pale_oak_creaking", Blocks::GRASS_BLOCK.defaultState(),
             Pos{8, 64, 8}, kSeed + 100 + attempt,
-            [&](const auto &m, const ChunkAccess &) {
+            [&](const auto &m, const BaseChunk &) {
               assert(m.count("minecraft:pale_oak_log") &&
                      m.at("minecraft:pale_oak_log") >= 4);
               assert(m.count("minecraft:pale_oak_leaves") &&
@@ -265,16 +265,16 @@ int main(int argc, char **argv) {
       assert(sawHangingMoss);
     }
     testFeature("minecraft:fallen_oak_tree", Blocks::GRASS_BLOCK.defaultState(),
-                Pos{8, 64, 8}, [](const auto &m, const ChunkAccess &) {
+                Pos{8, 64, 8}, [](const auto &m, const BaseChunk &) {
                   assert(m.count("minecraft:oak_log") && m.at("minecraft:oak_log") >= 2);
                 });
     testFeature("minecraft:huge_red_mushroom", Blocks::MYCELIUM.defaultState(),
-                Pos{8, 64, 8}, [](const auto &m, const ChunkAccess &) {
+                Pos{8, 64, 8}, [](const auto &m, const BaseChunk &) {
                   assert(m.count("minecraft:red_mushroom_block") && m.at("minecraft:red_mushroom_block") > 5);
                   assert(m.count("minecraft:mushroom_stem") && m.at("minecraft:mushroom_stem") >= 3);
                 });
     testFeature("minecraft:crimson_fungus", Blocks::CRIMSON_NYLIUM.defaultState(),
-                Pos{8, 64, 8}, [](const auto &m, const ChunkAccess &) {
+                Pos{8, 64, 8}, [](const auto &m, const BaseChunk &) {
                   assert(m.count("minecraft:crimson_stem") && m.at("minecraft:crimson_stem") >= 4);
                   assert(m.count("minecraft:nether_wart_block") && m.at("minecraft:nether_wart_block") > 5);
                 });
@@ -330,7 +330,7 @@ int main(int argc, char **argv) {
           }
         }
         setupFn(chunks);
-        std::vector<ChunkAccess *> grid(9, nullptr);
+        std::vector<BaseChunk *> grid(9, nullptr);
         for (std::size_t i = 0; i < 9; ++i)
           grid[i] = chunks[i].get();
         const auto &step =
@@ -391,7 +391,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 45, 50, Blocks::SAND.defaultState());
           fillGridFloor(chunks, 51, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:seagrass") || m.count("minecraft:tall_seagrass"));
         });
     runExtraOnce(
@@ -400,7 +400,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 45, 50, Blocks::SAND.defaultState());
           fillGridFloor(chunks, 51, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:seagrass") || m.count("minecraft:tall_seagrass"));
         });
     runExtraOnce(
@@ -409,7 +409,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 45, 50, Blocks::SAND.defaultState());
           fillGridFloor(chunks, 51, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:seagrass") || m.count("minecraft:tall_seagrass"));
         });
     runExtraOnce(
@@ -418,7 +418,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 45, 50, Blocks::SAND.defaultState());
           fillGridFloor(chunks, 51, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:tall_seagrass") &&
                  m.at("minecraft:tall_seagrass") >= 2);
           bool sawLower = false, sawUpper = false;
@@ -447,7 +447,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 60, 63, Blocks::GRASS_BLOCK.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:bamboo") && m.at("minecraft:bamboo") >= 5);
           assert(c.getBlockState(8, 64, 8).is(Blocks::BAMBOO));
           assert(!m.count("minecraft:podzol"));
@@ -461,7 +461,7 @@ int main(int argc, char **argv) {
             [&](auto &chunks) {
               fillGridFloor(chunks, 60, 63, Blocks::GRASS_BLOCK.defaultState());
             },
-            [&](const auto &m, const ChunkAccess &c) {
+            [&](const auto &m, const BaseChunk &c) {
               assert(m.count("minecraft:bamboo") && m.at("minecraft:bamboo") >= 5);
               assert(c.getBlockState(8, 64, 8).is(Blocks::BAMBOO));
               if (m.count("minecraft:podzol") && m.at("minecraft:podzol") > 0)
@@ -477,7 +477,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 35, 39, Blocks::BASALT.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:basalt") &&
                  m.at("minecraft:basalt") > 5 * 256);
           assert(c.getBlockState(8, 40, 8).is(Blocks::BASALT));
@@ -487,7 +487,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 35, 39, Blocks::BASALT.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:basalt") &&
                  m.at("minecraft:basalt") > 5 * 256);
           assert(c.getBlockState(8, 40, 8).is(Blocks::BASALT));
@@ -500,7 +500,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 60, 65, Blocks::NETHERRACK.defaultState());
           fillGridFloor(chunks, 81, 85, Blocks::NETHERRACK.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:basalt") && m.at("minecraft:basalt") >= 15);
           assert(c.getBlockState(8, 80, 8).is(Blocks::BASALT));
           assert(c.getBlockState(8, 66, 8).is(Blocks::BASALT));
@@ -512,7 +512,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 60, 63, Blocks::DIRT.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:mossy_cobblestone") &&
                  m.at("minecraft:mossy_cobblestone") >= 1);
           assert(c.getBlockState(8, 64, 8).is(Blocks::MOSSY_COBBLESTONE));
@@ -525,7 +525,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 50, 62, Blocks::WATER.defaultState());
           setWorld(chunks, 8, 56, 8, Blocks::PACKED_ICE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(c.getBlockState(8, 55, 8).is(Blocks::BLUE_ICE));
           assert(m.count("minecraft:blue_ice") && m.at("minecraft:blue_ice") >= 1);
         });
@@ -536,7 +536,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 60, 63, Blocks::GRASS_BLOCK.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:chest") && m.at("minecraft:chest") == 1);
           assert(m.count("minecraft:torch") && m.at("minecraft:torch") == 4);
         });
@@ -547,7 +547,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 55, 63, Blocks::END_STONE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:chorus_plant") &&
                  m.at("minecraft:chorus_plant") >= 2);
           assert(m.count("minecraft:chorus_flower") &&
@@ -562,7 +562,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 35, 40, Blocks::BASALT.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:lava") && m.at("minecraft:lava") > 0);
         });
 
@@ -572,7 +572,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 60, 63, Blocks::SAND.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:sandstone") && m.at("minecraft:sandstone") > 20);
           assert(m.count("minecraft:sandstone_slab") &&
                  m.at("minecraft:sandstone_slab") == 12);
@@ -588,7 +588,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 40, 44, Blocks::STONE.defaultState());
           fillGridFloor(chunks, 55, 60, Blocks::STONE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:dripstone_block") &&
                  m.at("minecraft:dripstone_block") > 0);
           assert(m.count("minecraft:pointed_dripstone") &&
@@ -599,14 +599,14 @@ int main(int argc, char **argv) {
     runExtraOnce(
         "minecraft:end_gateway_delayed", endGen, Pos{8, 70, 8}, kSeed + 44,
         [&](auto &) {},
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(c.getBlockState(8, 70, 8).is(Blocks::END_GATEWAY));
           assert(m.count("minecraft:bedrock") && m.at("minecraft:bedrock") == 12);
         });
     runExtraOnce(
         "minecraft:end_gateway_return", endGen, Pos{8, 70, 8}, kSeed + 13,
         [&](auto &) {},
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(c.getBlockState(8, 70, 8).is(Blocks::END_GATEWAY));
           assert(m.count("minecraft:bedrock") && m.at("minecraft:bedrock") == 12);
         });
@@ -615,7 +615,7 @@ int main(int argc, char **argv) {
     runExtraOnce(
         "minecraft:end_platform", endGen, Pos{8, 50, 8}, kSeed + 14,
         [&](auto &) {},
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:obsidian") && m.at("minecraft:obsidian") == 25);
           assert(c.getBlockState(8, 49, 8).is(Blocks::OBSIDIAN));
           assert(c.getBlockState(8, 50, 8).isAir());
@@ -627,7 +627,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 0, 45, Blocks::STONE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert((m.count("minecraft:bone_block") ? m.at("minecraft:bone_block") : 0) +
                      (m.count("minecraft:coal_ore") ? m.at("minecraft:coal_ore") : 0) >
                  0);
@@ -637,7 +637,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, -20, 45, Blocks::DEEPSLATE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert((m.count("minecraft:bone_block") ? m.at("minecraft:bone_block") : 0) +
                      (m.count("minecraft:deepslate_diamond_ore")
                           ? m.at("minecraft:deepslate_diamond_ore")
@@ -651,7 +651,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 0, 50, Blocks::STONE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:smooth_basalt") &&
                  m.at("minecraft:smooth_basalt") > 10);
           assert(m.count("minecraft:calcite") && m.at("minecraft:calcite") > 10);
@@ -665,7 +665,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 40, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:blue_ice") &&
                  m.at("minecraft:blue_ice") > 20);
         });
@@ -674,7 +674,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 40, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:packed_ice") &&
                  m.at("minecraft:packed_ice") > 20);
         });
@@ -686,7 +686,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 40, 44, Blocks::SAND.defaultState());
           fillGridFloor(chunks, 45, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:kelp") && m.at("minecraft:kelp") >= 1);
         });
 
@@ -697,7 +697,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, -10, 15, Blocks::STONE.defaultState());
           fillGridFloor(chunks, 45, 70, Blocks::STONE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:dripstone_block") &&
                  m.at("minecraft:dripstone_block") > 5);
         });
@@ -713,7 +713,7 @@ int main(int argc, char **argv) {
             setWorld(chunks, 8 + dx, 31, 8, Blocks::AIR.defaultState());
           }
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(c.getBlockState(8, 30, 8).is(Blocks::SPAWNER));
           assert(m.count("minecraft:cobblestone") &&
                  m.at("minecraft:cobblestone") > 20);
@@ -727,7 +727,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 31, 35, Blocks::STONE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:glow_lichen") &&
                  m.at("minecraft:glow_lichen") >= 1);
           assert(c.getBlockState(8, 30, 8).is(Blocks::GLOW_LICHEN));
@@ -738,7 +738,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 25, 29, Blocks::DEEPSLATE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:sculk_vein") &&
                  m.at("minecraft:sculk_vein") >= 1);
           assert(c.getBlockState(8, 30, 8).is(Blocks::SCULK_VEIN));
@@ -754,7 +754,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 60, 62, Blocks::DIRT.defaultState());
           fillGridFloor(chunks, 63, 63, Blocks::GRASS_BLOCK.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:oak_log") && m.at("minecraft:oak_log") > 0);
           assert(m.count("minecraft:rooted_dirt") &&
                  m.at("minecraft:rooted_dirt") > 0);
@@ -768,7 +768,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 15, 19, Blocks::DEEPSLATE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:sculk") && m.at("minecraft:sculk") > 0);
         });
     runExtraOnce(
@@ -776,7 +776,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 15, 19, Blocks::DEEPSLATE.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:sculk") && m.at("minecraft:sculk") > 0);
         });
 
@@ -787,7 +787,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 40, 44, Blocks::SAND.defaultState());
           fillGridFloor(chunks, 45, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:sea_pickle") &&
                  m.at("minecraft:sea_pickle") >= 1);
         });
@@ -798,7 +798,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 60, 63, Blocks::SNOW_BLOCK.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:packed_ice") &&
                  m.at("minecraft:packed_ice") >= 7);
         });
@@ -809,7 +809,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 35, 39, Blocks::WARPED_NYLIUM.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert((m.count("minecraft:twisting_vines")
                       ? m.at("minecraft:twisting_vines")
                       : 0) > 0);
@@ -819,7 +819,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 35, 39, Blocks::WARPED_NYLIUM.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert((m.count("minecraft:twisting_vines")
                       ? m.at("minecraft:twisting_vines")
                       : 0) > 0);
@@ -832,7 +832,7 @@ int main(int argc, char **argv) {
           fillGridFloor(chunks, 40, 45, Blocks::STONE.defaultState());
           fillGridFloor(chunks, 46, 62, Blocks::WATER.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:magma_block") &&
                  m.at("minecraft:magma_block") >= 1);
         });
@@ -843,7 +843,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           setWorld(chunks, 8, 70, 7, Blocks::OAK_LOG.defaultState());
         },
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(m.count("minecraft:vine") && m.at("minecraft:vine") == 1);
           assert(c.getBlockState(8, 70, 8).getView("north") == "true");
         });
@@ -852,7 +852,7 @@ int main(int argc, char **argv) {
     runExtraOnce(
         "minecraft:void_start_platform", owGen, Pos{8, 60, 8}, kSeed + 31,
         [&](auto &) {},
-        [](const auto &m, const ChunkAccess &c) {
+        [](const auto &m, const BaseChunk &c) {
           assert(c.getBlockState(8, 63, 8).is(Blocks::COBBLESTONE));
           assert(m.count("minecraft:stone") && m.at("minecraft:stone") == 255);
           assert(m.count("minecraft:cobblestone") &&
@@ -865,7 +865,7 @@ int main(int argc, char **argv) {
         [&](auto &chunks) {
           fillGridFloor(chunks, 81, 85, Blocks::NETHERRACK.defaultState());
         },
-        [](const auto &m, const ChunkAccess &) {
+        [](const auto &m, const BaseChunk &) {
           assert(m.count("minecraft:nether_wart_block") &&
                  m.at("minecraft:nether_wart_block") >= 1);
           assert(m.count("minecraft:weeping_vines") &&

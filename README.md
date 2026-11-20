@@ -114,5 +114,5 @@ ctest --test-dir build-jemalloc -C Release --output-on-failure
 
 - **总体设计**：[项目约束与目标形态](AGENTS.md) · [开发路线图](PLAN.md) · [兼容性边界](docs/compatibility.md)
 - **专项详细实现规划**：[实体系统详细实现规划](docs/entity-implementation-plan.md) · [区块生成系统详细实现规划](docs/worldgen-implementation-plan.md)
-- **子系统文档**：[光照引擎](docs/light-engine.md) · [协议 775 说明](docs/protocol775.md) · [流体测试规格](docs/fluid-testing.md) · [简单实体、铁轨与物品](docs/entities.md) · [存档与投影](docs/storage.md) · [性能优化记录](docs/performance.md)
+- **子系统文档**：[光照引擎](docs/light-engine.md) · [协议 775 说明](docs/protocol775.md) · [流体测试规格](docs/fluid-testing.md) · [简单实体、铁轨与物品](docs/entities.md) · [存档与投影](docs/storage.md) · [性能优化记录](docs/performance.md) · [哈希表实现与使用清单](docs/hash-tables.md)
 - **调试客户端**：[Windows 调试客户端](docs/client.md)

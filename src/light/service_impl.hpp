@@ -15,8 +15,6 @@
 #include <span>
 #include <string>
 #include <thread>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "light/block_light_engine.hpp"
@@ -37,13 +35,14 @@ public:
   std::shared_ptr<const LightOpticalTable> opticalTablePtr() const {
     return opticalTable;
   }
+  bool skyLightEnabled() const noexcept { return options.hasSkyLight; }
 
   std::uint64_t submitChunk(LightChunkInput input);
   std::uint64_t requestChunkCompute(int chunkX, int chunkZ);
+  std::uint64_t rebindChunkGeometry(int chunkX, int chunkZ);
   std::uint64_t reportBlockCell(LightCellUpdate update);
   std::uint64_t reportBlockCells(std::span<const LightCellUpdate> updates);
   bool unloadChunk(int chunkX, int chunkZ);
-  bool adoptDirectGeometry(int chunkX, int chunkZ);
 
   void drainPublished();
   std::shared_ptr<const LightChunkSnapshot> latestLayerChunk(LightLayer layer,
@@ -110,7 +109,8 @@ private:
     bool inactive = false;
   };
 
-  bool enqueueControl(light_internal::PendingChunk state);
+  bool enqueueControl(light_internal::PendingChunk state,
+                      bool immediate = false);
   std::uint64_t nextRequestGeneration();
   const LightOpticalClass &opticalClass(std::uint16_t id) const {
     return (*opticalTable)[static_cast<std::uint8_t>(id)];
@@ -126,12 +126,18 @@ private:
     std::uint16_t unknown = 0;
   };
   SectionMetaSummary sectionMetaSummary(std::uint64_t key, int sectionY) const;
+  SectionMetaSummary cachedSectionMetaSummary(std::uint64_t key,
+                                              int sectionY) const;
   const std::shared_ptr<LightChunkSnapshot> &
   storedLayerSnapshot(LightLayer layer, std::uint64_t key) const;
   // 为新加载区块生成只含段元数据与空层槽的原始快照外壳。
   std::shared_ptr<LightChunkSnapshot>
   makeRawLayerShell(std::uint64_t key, int chunkX, int chunkZ,
                     std::uint64_t generation, std::uint64_t epoch) const;
+  std::shared_ptr<LightChunkSnapshot> makePrecomputedLayerShell(
+      std::uint64_t key, int chunkX, int chunkZ, std::uint64_t generation,
+      std::uint64_t epoch, const PrecomputedChunkLight &precomputed,
+      LightLayer layer) const;
   void syncRawLayerGeometry(std::shared_ptr<LightChunkSnapshot> &snapshot,
                             std::uint64_t key) const;
   // 将磁盘持久化读取到的半字节光照数据直接装填进区块原始快照外壳（仅在 `isLightOn == true` 时启用）。
@@ -180,9 +186,18 @@ private:
   light_internal::LayerOutcome
   executeSkyLayer(const light_internal::PreparedBatch &prepared);
   void publishResult(light_internal::LayerResult result);
+  void publishChunkLayerSnapshot(
+      LightLayer layer, std::uint64_t key,
+      std::shared_ptr<LightChunkSnapshot> &view, std::uint64_t generation,
+      std::uint64_t batchRevision, bool blockComplete, bool skyComplete,
+      bool propagationComplete, bool protocolReady,
+      std::uint32_t unsupportedCells, const std::vector<int> &dirtySections,
+      std::vector<light_internal::LayerResult> &ready);
   void publishIndependentLayer(const light_internal::PreparedBatch &prepared,
                                light_internal::LayerOutcome &outcome,
                                LightLayer layer);
+  void publishPrecomputedLayers(const light_internal::PreparedBatch &prepared,
+                                LightLayer layer);
   // 计算持久化加载区块需要与非持久化（或新重算）邻区执行边界衔接的方向掩码。
   std::uint8_t persistedBoundaryMask(
       std::uint64_t key,
@@ -208,7 +223,9 @@ private:
   std::condition_variable idle;
   std::condition_variable batchDone;
   std::condition_variable sleepState;
-  std::unordered_map<std::uint64_t, light_internal::PendingChunk> pending;
+  phmap::flat_hash_map<std::uint64_t, light_internal::PendingChunk,
+                       light_internal::UInt64Hash>
+      pending;
   // “未计算”的两个来源（工作线程在 `mutex` 下维护，主线程的状态查询走同一把锁）：
   //   needsCompute —— 几何已注册、从未算过（`Completion::Deferred`）；
   //   needsUpdate  —— 已完整，但邻居边界变了，等待一次边界重算。
@@ -272,6 +289,9 @@ private:
       protocolBaseSky;
   light_internal::BlockPropagatorScratch blockScratch;
   light_internal::SkyPropagatorScratch skyScratch;
+  mutable light_internal::FlatMap<std::uint64_t, std::vector<SectionMetaSummary>,
+                                  light_internal::UInt64Hash>
+      batchMetaCache_;
   std::uint64_t nextBlockLayerRevision = 0;
   std::uint64_t nextSkyLayerRevision = 0;
   std::function<void(std::shared_ptr<const LightChunkSnapshot>)> publishCallback;
@@ -283,11 +303,13 @@ private:
   // 工作在跑（对应原版按区块等待，而不是全局排空）。
   std::uint64_t busyMinGeneration = 0;
   // 每个区块最近一次被处理到的提交序号（工作线程写入，等待方在 mutex 下读取）。
-  std::unordered_map<std::uint64_t, std::uint64_t> processedGeneration;
+  phmap::flat_hash_map<std::uint64_t, std::uint64_t, light_internal::UInt64Hash>
+      processedGeneration;
   // 几何已经注册的区块（checkEdge 的等价状态）：跨区块边界传播只有在邻区块
   // 几何就绪后才有意义，否则先推迟本区块，等邻居就绪再处理。
-  std::unordered_set<std::uint64_t> readyChunks;
-  std::unordered_map<std::uint64_t, std::uint32_t> neighborDeferrals;
+  phmap::flat_hash_set<std::uint64_t, light_internal::UInt64Hash> readyChunks;
+  phmap::flat_hash_map<std::uint64_t, std::uint32_t, light_internal::UInt64Hash>
+      neighborDeferrals;
   bool neighborsReadyFor(std::uint64_t key) const;
   // 本批次新变为"几何就绪"的区块，用于在批次结束后唤醒邻居重传播。
   std::vector<std::uint64_t> justBecameReady;
@@ -305,6 +327,7 @@ private:
   // 将生产者写入与工作线程写入的原子变量隔离到不同缓存行（64 字节对齐），避免工作线程更新统计计数时使主线程的控制标志或提交计数器缓存行失效。
   alignas(64) std::atomic<std::uint64_t> nextGeneration{0};
   std::atomic<bool> acceptingCells{true};
+  std::atomic<bool> immediateBatchRequested{false};
   std::atomic<bool> compactRequested{false};
   std::atomic<bool> scratchCompactable{false};
   std::atomic<std::size_t> scratchQueueBytes{0};
@@ -327,6 +350,7 @@ private:
   mutable std::atomic<std::uint64_t> statsReceivedSkySections{0};
   mutable std::atomic<std::uint64_t> statsReceivedBlockSections{0};
   mutable std::atomic<std::uint64_t> statsUnloadedNeighborSkips{0};
+  mutable std::atomic<std::uint64_t> statsRebound{0};
   mutable std::atomic<double> statsWorkerCpuMs{0};
   mutable std::atomic<double> statsBlockWorkerCpuMs{0};
   mutable std::atomic<double> statsSkyWorkerCpuMs{0};

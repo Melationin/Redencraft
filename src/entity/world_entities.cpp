@@ -33,7 +33,7 @@ std::shared_ptr<Entity> World::addEntityWithId(std::shared_ptr<Entity> entity,
   entitySectionAdd(*entity);
   if (dynamic_cast<ItemEntity *>(entity.get()))
     wakeHopperItemWatchers(entity->position);
-  if (managedEntityMutationObserver)
+  if (managedEntityMutationObserver && !entity->isPlayer())
     managedEntityMutationObserver(entity->position, entity->position,
                                   entity->uuid, false);
   if (entityAddedObserver)
@@ -233,7 +233,7 @@ bool World::detachEntityForDimensionTransfer(
   auto it = std::find(entities.begin(), entities.end(), entity);
   if (it == entities.end())
     return false;
-  if (managedEntityMutationObserver)
+  if (managedEntityMutationObserver && !entity->isPlayer())
     managedEntityMutationObserver(entity->position, entity->position,
                                   entity->uuid, true);
   notifyEntityRemoved(*entity);
@@ -455,7 +455,7 @@ void World::synchronizeEntityAfterMove(Entity &entity, Vec3 previousPosition) {
   entitySectionUpdate(entity);
   if (dynamic_cast<ItemEntity *>(&entity))
     wakeHopperItemWatchers(entity.position);
-  if (managedEntityMutationObserver)
+  if (managedEntityMutationObserver && !entity.isPlayer())
     managedEntityMutationObserver(previousPosition, entity.position, entity.uuid,
                                   entity.isRemoved());
 }
@@ -471,7 +471,7 @@ void World::moveEntityForManagedTest(const Entity &entity, Vec3 to) {
     throw std::logic_error("fixture entity is not registered in World");
   (*mutableEntity)->setPos(to);
   entitySectionUpdate(**mutableEntity);
-  if (managedEntityMutationObserver)
+  if (managedEntityMutationObserver && !(*mutableEntity)->isPlayer())
     managedEntityMutationObserver(from, (*mutableEntity)->position,
                                   (*mutableEntity)->uuid, false);
 }
@@ -540,12 +540,15 @@ World::snapshotChunkItemEntities(int chunkX, int chunkZ) const {
     }
     if (const auto *falling =
             dynamic_cast<const FallingBlockEntity *>(entity)) {
+      const Block *fallingBlock = findBlockByName(falling->blockState.nameView());
       if (falling->uuid == entity_codec::EntityUuid{} ||
-          falling->blockState != defaultState("sand") ||
+          falling->blockData.has_value() ||
+          !falling->blockState.isSchemaState() || !fallingBlock ||
           falling->time < 0 ||
           falling->time >= std::numeric_limits<int>::max() ||
-          falling->hurtEntities || falling->fallDamagePerDistance != 0.0f ||
-          falling->fallDamageMax != 40) {
+          !std::isfinite(falling->fallDamagePerDistance) ||
+          falling->fallDamagePerDistance < 0.0f ||
+          falling->fallDamageMax < 0) {
         result.hasUnsupported = true;
         result.detail =
             "falling block has unsupported persisted state";
@@ -562,6 +565,8 @@ World::snapshotChunkItemEntities(int chunkX, int chunkZ) const {
       record.fireTicks = falling->remainingFireTicks;
       record.fallDistance = falling->fallDistance;
       record.blockId = falling->blockState.name();
+      if (falling->blockState != fallingBlock->defaultState())
+        record.blockProperties = falling->blockState.properties();
       record.time = falling->time;
       record.dropItem = falling->dropItem;
       record.cancelDrop = falling->cancelDrop;
@@ -667,7 +672,7 @@ void World::tickEntities() {
     // TransientEntitySectionManager: moved entities change their bucket.
     if (!entity->isRemoved()) {
       entitySectionUpdate(*entity);
-      if (managedEntityMutationObserver)
+      if (managedEntityMutationObserver && !entity->isPlayer())
         managedEntityMutationObserver(previousPosition, entity->position,
                                       entity->uuid, false);
     }
@@ -678,7 +683,7 @@ void World::tickEntities() {
           return false;
         if (entity) {
           entity->unRide();
-          if (managedEntityMutationObserver)
+          if (managedEntityMutationObserver && !entity->isPlayer())
             managedEntityMutationObserver(entity->position, entity->position,
                                           entity->uuid, true);
           notifyEntityRemoved(*entity);

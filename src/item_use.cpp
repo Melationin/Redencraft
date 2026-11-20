@@ -10,7 +10,6 @@
 #include <array>
 #include <cmath>
 #include <numbers>
-#include <unordered_map>
 
 namespace redstone {
 namespace {
@@ -231,9 +230,11 @@ RayHit povClip(World &world, Vec3 from, float yaw, float pitch, double reach,
   return {};
 }
 
-const std::unordered_map<std::string_view, const Block *> &
+const phmap::flat_hash_map<std::string_view, const Block *, AnkerlStringHash> &
 axeStrippablesTable() {
-  static const std::unordered_map<std::string_view, const Block *> m = {
+  static const phmap::flat_hash_map<std::string_view, const Block *,
+                                    AnkerlStringHash>
+      m = {
       {"minecraft:oak_wood", &Blocks::STRIPPED_OAK_WOOD},
       {"minecraft:oak_log", &Blocks::STRIPPED_OAK_LOG},
       {"minecraft:dark_oak_wood", &Blocks::STRIPPED_DARK_OAK_WOOD},

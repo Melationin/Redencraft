@@ -162,7 +162,7 @@ bool forEachBlockIntersectedBetween(Vec3 from, Vec3 to, const Aabb &aabbAtTarget
     return true;
   }
 
-  std::unordered_set<std::uint64_t> sweptVisited;
+  phmap::flat_hash_set<std::uint64_t> sweptVisited;
   bool stopped = false;
   forEachBetweenCornersInDirection(
       aabbAtTarget.move(-travel.x, -travel.y, -travel.z), travel,
@@ -436,7 +436,7 @@ void StepBasedInsideBlockEffectApplier::flushStep() {
 
 int Entity::checkInsideBlocksSegment(
     World &world, Vec3 from, Vec3 to, InsideBlockEffectApplier &collector,
-    std::unordered_set<std::uint64_t> &visitedBlocks, int maxIterations) {
+    phmap::flat_hash_set<std::uint64_t> &visitedBlocks, int maxIterations) {
   const Aabb deflated = dimensions_.makeBoundingBox(to).deflate(1.0e-5);
   const bool movedFar =
       (to - from).lengthSqr() > 0.9999900000002526 * 0.9999900000002526;
@@ -507,7 +507,7 @@ void Entity::applyEffectsFromBlocksList(
     }
   }
   const int prevFireTicks = remainingFireTicks;
-  std::unordered_set<std::uint64_t> visitedBlocks;
+  phmap::flat_hash_set<std::uint64_t> visitedBlocks;
   for (const auto &mv : movements) {
     Vec3 cur = mv.from;
     const Vec3 delta = mv.to - mv.from;

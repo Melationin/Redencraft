@@ -9,12 +9,30 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
-#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <utility>
 
 namespace redstone {
+namespace {
+
+ChunkGenerationStats
+readSchedulerStats(const worldgen::WorldGenScheduler &scheduler) {
+  ChunkGenerationStats stats;
+  const worldgen::StreamingDemandStats s = scheduler.streamingStats();
+  stats.requested = s.requested;
+  stats.completed = s.completed;
+  stats.failed = s.failed;
+  stats.bufferRequests = s.bufferRequests;
+  stats.bufferCompleted = s.bufferCompleted;
+  stats.cachedChunks = scheduler.heldChunkCount();
+  stats.evicted = s.evicted;
+  stats.dispatched = s.dispatched;
+  stats.cancelled = s.cancelled;
+  return stats;
+}
+
+} // namespace
 class WorldChunkManager::EntityReadStore final : public RawChunkStore {
 public:
   EntityReadStore(std::shared_ptr<RawChunkStore> inner,
@@ -79,7 +97,6 @@ WorldChunkManager::WorldChunkManager(
       },
       entityStore_);
   installWorldCallbacks();
-  startGenerationThread();
 }
 
 WorldChunkManager::WorldChunkManager(
@@ -124,7 +141,6 @@ WorldChunkManager::WorldChunkManager(
       },
       entityStore_);
   installWorldCallbacks();
-  startGenerationThread();
 }
 
 WorldChunkManager::~WorldChunkManager() noexcept {
@@ -295,15 +311,18 @@ void WorldChunkManager::applyTicketUpdate(const TicketSystemUpdate &update) {
     return;
   observeTickTime();
   controller_->applyLoadingChanges(update.loadingChanges);
+  if (world_.chunkMap().scheduler() != nullptr)
+    publishGenerationKeepCenters();
   // 加载等级不仅决定磁盘驻留，也决定缺失区块应生成到哪个 ChunkStatus：
   // 34..44 的缓冲需求只推进生成缓存，<= FULL 由生命周期控制器触发驻留生成。
   for (const ChunkLevelChange &change : update.loadingChanges) {
     if (change.newLevel <= ticket_levels::FullChunkLevel)
-      cancelGeneration(change.position);
-    else if (change.newLevel <= ticket_levels::MaxLevel)
+      cancelGeneration(change.position, false);
+    else if (change.newLevel <= ticket_levels::MaxLevel) {
+      cancelGeneration(change.position, true);
       requestBufferGeneration(change.position, change.newLevel);
-    else
-      cancelGeneration(change.position);
+    } else
+      cancelGeneration(change.position, true);
   }
   for (const ChunkLevelChange &change : update.loadingChanges) {
     auto managed = managed_.find(change.position);
@@ -340,7 +359,8 @@ void WorldChunkManager::pumpGeneratedLightWork() {
     return;
   LightService *light = world_.lightingEnabled() ? world_.lightService() : nullptr;
   if (generatedLightContext_)
-    generatedLightContext_->set(light ? light->opticalTable() : nullptr);
+    generatedLightContext_->set(light ? light->opticalTable() : nullptr,
+                                light ? light->skyLightEnabled() : true);
   std::vector<worldgen::GeneratedLightWork> works =
       generatedLightQueue_->drain();
   if (light == nullptr) {
@@ -355,22 +375,29 @@ void WorldChunkManager::pumpGeneratedLightWork() {
       if (generation != 0)
         generatedLightRequests_[work.position].compute = generation;
     } else {
+      const bool alreadyComplete =
+          (work.input.precomputedLight &&
+           work.input.precomputedLight->isLightOn) ||
+          (work.input.persistedLight && work.input.persistedLight->isLightOn);
       const std::uint64_t generation =
           world_.submitGeneratedChunkLight(std::move(work.input));
-      if (generation != 0)
-        generatedLightRequests_[work.position].submit = generation;
+      if (generation != 0) {
+        auto &req = generatedLightRequests_[work.position];
+        req.submit = generation;
+        if (alreadyComplete)
+          req.compute = generation;
+      }
     }
   }
 }
 
 void WorldChunkManager::unloadEvictedGeneratedLight() {
-  std::vector<ChunkTicketPos> evicted;
-  {
-    std::lock_guard lock(generationMutex_);
-    if (evictedGeneratedChunks_.empty())
-      return;
-    evicted.swap(evictedGeneratedChunks_);
-  }
+  auto *scheduler = world_.chunkMap().scheduler();
+  if (!scheduler)
+    return;
+  const std::vector<ChunkTicketPos> evicted = scheduler->drainEvictedChunks();
+  if (evicted.empty())
+    return;
   LightService *light = world_.lightService();
   for (const ChunkTicketPos &position : evicted) {
     generatedLightRequests_.erase(position);
@@ -632,6 +659,10 @@ void WorldChunkManager::enqueueAutosaveCandidate(
       savingInFlight_.contains(position))
     return;
   ManagedChunk &chunk = found->second;
+  if (saveOnlyOnUnload_ && chunk.generated &&
+      !entityMigrationTargets_.contains(position) &&
+      !entityMigrationSources_.contains(position))
+    return;
   if (chunk.cooldownScheduled)
     return;
   const auto now = std::chrono::steady_clock::now();
@@ -978,6 +1009,8 @@ ChunkShutdownResult WorldChunkManager::close() {
   // 先停生成线程：它可能与 I/O worker 共享 region store，且其完成的区块在关服时
   // 尚未安装到 World，没有需要写回的状态。
   stopGenerationThread();
+  if (generationStore_)
+    generationStore_->flushPending();
   observeTickTime();
 
   std::vector<ChunkTicketPos> initiallyManaged;
@@ -1073,6 +1106,24 @@ ChunkShutdownResult WorldChunkManager::close() {
           const auto refreshed = controller_->status(position);
           if (!refreshed)
             continue;
+          if (chunk.inFlightVersion != 0 &&
+              refreshed->savedDirtyVersion >= chunk.inFlightVersion) {
+            const auto completedVersion = chunk.inFlightVersion;
+            chunk.inFlightVersion = 0;
+            chunk.inFlightPatch.reset();
+            chunk.retainedPatch.reset();
+            chunk.failedVersion = 0;
+            entityMigrationSaveCompleted(position, completedVersion, true);
+          } else if (chunk.inFlightVersion != 0 &&
+                     refreshed->state == ChunkResidencyState::Resident &&
+                     refreshed->failure == ChunkLoadFailure::Io &&
+                     refreshed->savedDirtyVersion < chunk.inFlightVersion) {
+            const auto failedVersion = chunk.inFlightVersion;
+            chunk.failedVersion = failedVersion;
+            chunk.inFlightVersion = 0;
+            chunk.inFlightPatch.reset();
+            entityMigrationSaveCompleted(position, failedVersion, false);
+          }
           if (chunk.inFlightVersion != 0 ||
               (refreshed->state == ChunkResidencyState::Saving)) {
             waiting = true;
@@ -1101,9 +1152,14 @@ ChunkShutdownResult WorldChunkManager::close() {
         continue;
       std::string reason = chunk.blocker;
       if (reason.empty() &&
-          status->dirtyVersion > status->savedDirtyVersion)
-        reason = status->detail.empty() ? "dirty chunk was not saved"
-                                        : status->detail;
+          status->dirtyVersion > status->savedDirtyVersion) {
+        if (const auto err = errors_.find(position); err != errors_.end()) {
+          reason = err->second;
+        } else {
+          reason = status->detail.empty() ? "dirty chunk was not saved"
+                                          : status->detail;
+        }
+      }
       if (!reason.empty()) {
         unsaved.insert(position);
         ChunkShutdownIssue issue;
@@ -1176,6 +1232,8 @@ ChunkShutdownResult WorldChunkManager::close() {
     if (!unsaved.contains(position))
       result.savedChunks.push_back(position);
   }
+  if (generationStore_)
+    generationStore_->flushPending();
   result.complete = result.workerStopped && result.unsavedChunks.empty() &&
                     result.fatalError.empty();
   closed_ = true;
@@ -1187,302 +1245,219 @@ ChunkShutdownResult WorldChunkManager::close() {
 // 在线世界生成
 // ---------------------------------------------------------------------------
 
-void WorldChunkManager::startGenerationThread() {
-  if (!generator_ || generationThread_.joinable())
-    return;
+worldgen::WorldGenScheduler *WorldChunkManager::ensureWorldGenScheduler() {
+  if (!generator_ || !accepting())
+    return nullptr;
+  if (auto *existing = world_.chunkMap().scheduler())
+    return existing;
   if (!generatedLightQueue_)
     generatedLightQueue_ = std::make_shared<worldgen::GeneratedLightQueue>();
   if (!generatedLightContext_)
     generatedLightContext_ = std::make_shared<worldgen::LightOpticalContext>();
-  // 并行调度器惰性创建在生成线程上（首个批次），避免无生成需求时也起线程池。
-  {
-    std::lock_guard lock(generationMutex_);
-    generationStopping_ = false;
+  LightService *light =
+      world_.lightingEnabled() ? world_.lightService() : nullptr;
+  generatedLightContext_->set(light ? light->opticalTable() : nullptr,
+                              light ? light->skyLightEnabled() : true);
+
+  worldgen::WorldGenSchedulerConfig config;
+  int threads = generationThreads_.load(std::memory_order_relaxed);
+  if (threads <= 0) {
+    const unsigned hc = std::thread::hardware_concurrency();
+    threads = static_cast<int>(std::clamp<unsigned>(hc / 2u, 1u, 8u));
   }
-  generationStop_.store(false, std::memory_order_release);
-  generationThread_ = std::thread([this] { generationLoop(); });
+  config.threadCount = static_cast<std::size_t>(threads);
+  config.asyncWorldGenLight = asyncWorldGenLight_;
+  // 并行生成引擎：挂在 World::chunkMap() 内共享 ChunkHolder 表与光照直读视图，
+  // 其邻居生成视图仍只读磁盘 store；worker 只构造光照输入投递，主线程 pump 提交。
+  auto &scheduler = world_.chunkMap().enableWorldGen(
+      *generator_, static_cast<std::int64_t>(world_.seed),
+      generationStore_.get(), generatedLightContext_,
+      generatedLightQueue_.get(), config);
+  keepCentersSyncedWithScheduler_ = false;
+  publishGenerationKeepCenters();
+  return &scheduler;
 }
 
 void WorldChunkManager::stopGenerationThread() {
-  {
-    std::lock_guard lock(generationMutex_);
-    generationStopping_ = true;
-    generationStop_.store(true, std::memory_order_release);
+  if (auto *scheduler = world_.chunkMap().scheduler()) {
+    lastGenerationStats_ = readSchedulerStats(*scheduler);
+    scheduler->shutdownStreaming();
+    world_.chunkMap().disableWorldGen();
+    lastGenerationStats_.cachedChunks = 0;
   }
-  generationReady_.notify_all();
-  if (generationThread_.joinable())
-    generationThread_.join();
-  generationScheduler_.reset();
   if (generatedLightQueue_)
     generatedLightQueue_->clear();
   if (generatedLightContext_)
     generatedLightContext_->set(nullptr);
   generatedLightRequests_.clear();
-  std::lock_guard lock(generationMutex_);
-  residencyGenerationJobs_.clear();
-  bufferGenerationJobs_.clear();
-  residencyGenerationQueued_.clear();
-  completedGeneration_.clear();
-  evictedGeneratedChunks_.clear();
+  lastKeepCenters_.clear();
+  lastKeepRadius_ = 15;
+  keepCentersSyncedWithScheduler_ = false;
 }
 
 bool WorldChunkManager::requestChunkGeneration(
     const ChunkTicketPos &position, std::uint64_t epoch, int loadingLevel) {
-  if (!generator_)
+  (void)loadingLevel;
+  auto *scheduler = ensureWorldGenScheduler();
+  if (!scheduler)
     return false;
-  std::lock_guard lock(generationMutex_);
-  if (generationStopping_)
-    return false;
-  auto queued = residencyGenerationQueued_.find(position);
-  if (queued != residencyGenerationQueued_.end() && queued->second == epoch)
-    return true;
-  residencyGenerationQueued_[position] = epoch;
-  bufferGenerationJobs_.erase(position);
-  residencyGenerationJobs_.push_back(
-      {position, loadingLevel, epoch, true, world_.gameTime()});
-  ++generationStats_.requested;
-  generationReady_.notify_one();
+  worldgen::DemandRequest request;
+  request.pos = position;
+  request.targetStatus = worldgen::ChunkStatusId::Full;
+  request.residency = true;
+  request.knownMissingOnDisk = false;
+  request.epoch = epoch;
+  request.gameTime = world_.gameTime();
+  scheduler->submitDemand(request);
   return true;
 }
 
-void WorldChunkManager::requestBufferGeneration(
-    const ChunkTicketPos &position, int loadingLevel) {
-  if (!generator_ || managed_.contains(position))
+void WorldChunkManager::requestBufferGeneration(const ChunkTicketPos &position,
+                                                int loadingLevel) {
+  if (!generator_ || !accepting() || managed_.contains(position))
     return;
-  std::lock_guard lock(generationMutex_);
-  if (generationStopping_ || residencyGenerationQueued_.contains(position))
+  const auto status = worldgen::generationStatusForLevel(loadingLevel);
+  if (!status)
     return;
-  auto found = bufferGenerationJobs_.find(position);
-  if (found != bufferGenerationJobs_.end() && found->second == loadingLevel)
+  auto *scheduler = ensureWorldGenScheduler();
+  if (!scheduler)
     return;
-  bufferGenerationJobs_[position] = loadingLevel;
-  ++generationStats_.bufferRequests;
-  generationReady_.notify_one();
+  worldgen::DemandRequest request;
+  request.pos = position;
+  request.targetStatus = *status;
+  request.residency = false;
+  request.knownMissingOnDisk = false;
+  request.epoch = 0;
+  request.gameTime = 0;
+  scheduler->submitDemand(request);
 }
 
-void WorldChunkManager::cancelGeneration(const ChunkTicketPos &position) {
+void WorldChunkManager::cancelGeneration(const ChunkTicketPos &position,
+                                         bool cancelResidency) {
   if (!generator_)
     return;
-  std::lock_guard lock(generationMutex_);
-  bufferGenerationJobs_.erase(position);
+  if (auto *scheduler = world_.chunkMap().scheduler())
+    scheduler->cancelDemand(position, cancelResidency);
+}
+
+void WorldChunkManager::requestGenerationCacheTrimForTest() {
+  if (auto *scheduler = world_.chunkMap().scheduler())
+    scheduler->requestAsyncTrim();
 }
 
 void WorldChunkManager::publishGenerationKeepCenters() {
-  if (!generator_)
+  if (!generator_ || !accepting())
     return;
-  std::vector<ChunkTicketPos> centers;
-  centers.reserve(tickets_.players().size());
-  for (const auto &[id, player] : tickets_.players()) {
+  auto *scheduler = world_.chunkMap().scheduler();
+  if (!scheduler)
+    return;
+  const int keepRadius =
+      tickets_.viewDistance() + ticket_levels::RadiusAroundFullChunk + 2;
+  const auto &players = tickets_.players();
+  bool changed = !keepCentersSyncedWithScheduler_ ||
+                 keepRadius != lastKeepRadius_ ||
+                 players.size() != lastKeepCenters_.size();
+  if (!changed) {
+    std::size_t index = 0;
+    for (const auto &[id, player] : players) {
+      (void)id;
+      if (lastKeepCenters_[index] != player.center) {
+        changed = true;
+        break;
+      }
+      ++index;
+    }
+  }
+  if (!changed)
+    return;
+  lastKeepCenters_.clear();
+  lastKeepCenters_.reserve(players.size());
+  for (const auto &[id, player] : players) {
     (void)id;
-    centers.push_back(player.center);
+    lastKeepCenters_.push_back(player.center);
   }
-  std::lock_guard lock(generationMutex_);
-  generationKeepCenters_ = std::move(centers);
-  generationKeepRadius_ = tickets_.viewDistance() +
-                          ticket_levels::RadiusAroundFullChunk + 2;
-}
-
-void WorldChunkManager::generationLoop() {
-  std::size_t batchesSinceTrim = 0;
-  for (;;) {
-    std::vector<GenerationJob> residencyJobs;
-    std::vector<GenerationJob> bufferJobs;
-    std::vector<ChunkTicketPos> centers;
-    int keepRadius = 15;
-    {
-      std::unique_lock lock(generationMutex_);
-      generationReady_.wait(lock, [this] {
-        return generationStopping_ || !residencyGenerationJobs_.empty() ||
-               !bufferGenerationJobs_.empty();
-      });
-      if (generationStopping_)
-        return;
-      constexpr std::size_t kMaxResidencyBatch = 32;
-      constexpr std::size_t kMaxBufferBatch = 32;
-      while (residencyJobs.size() < kMaxResidencyBatch &&
-             !residencyGenerationJobs_.empty()) {
-        GenerationJob candidate = std::move(residencyGenerationJobs_.front());
-        residencyGenerationJobs_.pop_front();
-        auto latest = residencyGenerationQueued_.find(candidate.position);
-        if (latest == residencyGenerationQueued_.end() ||
-            latest->second != candidate.epoch)
-          continue;
-        residencyGenerationQueued_.erase(latest);
-        bufferGenerationJobs_.erase(candidate.position);
-        residencyJobs.push_back(std::move(candidate));
-      }
-      while (bufferJobs.size() < kMaxBufferBatch &&
-             !bufferGenerationJobs_.empty()) {
-        auto best = bufferGenerationJobs_.begin();
-        for (auto it = bufferGenerationJobs_.begin();
-             it != bufferGenerationJobs_.end(); ++it) {
-          if (it->second < best->second)
-            best = it;
-        }
-        GenerationJob job;
-        job.position = best->first;
-        job.loadingLevel = best->second;
-        job.residency = false;
-        bufferJobs.push_back(job);
-        bufferGenerationJobs_.erase(best);
-      }
-      centers = generationKeepCenters_;
-      keepRadius = generationKeepRadius_;
-    }
-    if (residencyJobs.empty() && bufferJobs.empty())
-      continue;
-
-    // 并行生成引擎：与 I/O worker 共享串行化 store，但不读取活 World。
-    if (!generationScheduler_) {
-      worldgen::WorldGenSchedulerConfig config;
-      int threads = generationThreads_.load(std::memory_order_relaxed);
-      if (threads <= 0) {
-        const unsigned hc = std::thread::hardware_concurrency();
-        threads = static_cast<int>(std::clamp<unsigned>(hc / 2u, 1u, 8u));
-      }
-      config.threadCount = static_cast<std::size_t>(threads);
-      // 生成期光照：worker 只构造输入投递，主线程 pump 负责真正提交。
-      generationScheduler_ = std::make_unique<worldgen::WorldGenScheduler>(
-          *generator_, static_cast<std::int64_t>(world_.seed),
-          generationStore_.get(), /*residentWorld=*/nullptr,
-          generatedLightContext_, generatedLightQueue_.get(), config);
-    }
-
-    std::map<ChunkTicketPos, worldgen::ChunkStatusId> targets;
-    for (const GenerationJob &job : residencyJobs)
-      targets[job.position] = worldgen::ChunkStatusId::Full;
-    for (const GenerationJob &job : bufferJobs) {
-      const auto status = worldgen::generationStatusForLevel(job.loadingLevel);
-      if (!status)
-        continue;
-      auto found = targets.find(job.position);
-      if (found == targets.end() ||
-          static_cast<int>(*status) > static_cast<int>(found->second))
-        targets[job.position] = *status;
-    }
-    std::vector<worldgen::ChunkBatchRequest> requests;
-    requests.reserve(targets.size());
-    for (const auto &[position, status] : targets)
-      requests.push_back({position, status});
-    if (requests.empty())
-      continue;
-    const ChunkTicketPos anchor = residencyJobs.empty()
-                                      ? requests.front().pos
-                                      : residencyJobs.front().position;
-    bool batchOk = true;
-    std::string failure;
-    try {
-      generationScheduler_->ensureStatusBatch(requests, anchor);
-    } catch (const std::exception &error) {
-      batchOk = false;
-      failure = error.what();
-    }
-
-    for (const GenerationJob &job : residencyJobs) {
-      CompletedGeneration result;
-      result.position = job.position;
-      result.epoch = job.epoch;
-      result.residency = true;
-      if (!batchOk) {
-        result.ok = false;
-        result.detail = failure;
-      } else {
-        try {
-          std::shared_ptr<worldgen::ProtoChunk> proto =
-              generationScheduler_->takeProtoChunk(job.position);
-          if (!proto)
-            throw std::runtime_error(
-                "generation scheduler did not retain the generated chunk");
-          // 加载生命周期跨 Proto -> World 保持不变。
-          proto->loadEpoch = job.epoch;
-          proto->lightEpoch = job.epoch;
-          // 在晋升前序列化完整 NBT：这是该区块之后所有增量存盘的模板。
-          result.root = worldgen::encodeProtoChunkToNbt(*proto, job.gameTime);
-          result.loaded = worldgen::promoteProtoChunkToLoaded(std::move(proto),
-                                                              job.epoch);
-          result.ok = true;
-        } catch (const std::exception &error) {
-          result.ok = false;
-          result.detail = error.what();
-        }
-      }
-      std::lock_guard lock(generationMutex_);
-      if (result.ok)
-        ++generationStats_.completed;
-      else
-        ++generationStats_.failed;
-      completedGeneration_.push_back(std::move(result));
-    }
-    {
-      std::lock_guard lock(generationMutex_);
-      if (batchOk)
-        generationStats_.bufferCompleted += bufferJobs.size();
-      else
-        generationStats_.failed += bufferJobs.size();
-      generationStats_.cachedChunks = generationScheduler_->heldChunkCount();
-    }
-    ++batchesSinceTrim;
-    if (batchesSinceTrim >= 4 ||
-        generationTrimRequested_.exchange(false, std::memory_order_acq_rel)) {
-      batchesSinceTrim = 0;
-      std::vector<ChunkTicketPos> evictedChunks;
-      const std::size_t evicted = generationScheduler_->evictIdleOutsideRadius(
-          centers, keepRadius, &evictedChunks);
-      {
-        std::lock_guard lock(generationMutex_);
-        evictedGeneratedChunks_.insert(evictedGeneratedChunks_.end(),
-                                       evictedChunks.begin(),
-                                       evictedChunks.end());
-      }
-      std::lock_guard lock(generationMutex_);
-      generationStats_.cachedChunks = generationScheduler_->heldChunkCount();
-      generationStats_.evicted += evicted;
-    }
-  }
+  lastKeepRadius_ = keepRadius;
+  keepCentersSyncedWithScheduler_ = true;
+  scheduler->updatePriorityCenters(lastKeepCenters_, lastKeepRadius_);
 }
 
 void WorldChunkManager::processCompletedGeneration() {
   if (!generator_)
     return;
-  std::deque<CompletedGeneration> completed;
-  {
-    std::lock_guard lock(generationMutex_);
-    completed.swap(completedGeneration_);
-  }
-  for (CompletedGeneration &result : completed) {
-    if (!result.residency)
-      continue;
+  auto *scheduler = world_.chunkMap().scheduler();
+  if (!scheduler)
+    return;
+  std::vector<worldgen::CompletedResidency> completed =
+      scheduler->drainCompletedResidency();
+  for (worldgen::CompletedResidency &item : completed) {
     if (!accepting())
       continue;
-    if (!result.ok) {
-      controller_->failGeneratedChunk(result.position, result.epoch,
-                                      result.detail);
+    if (!item.ok) {
+      controller_->failGeneratedChunk(item.pos, item.epoch, item.detail);
       continue;
     }
+    if (!item.proto) {
+      controller_->failGeneratedChunk(
+          item.pos, item.epoch,
+          "generation scheduler did not retain the generated chunk");
+      continue;
+    }
+    // 加载生命周期跨 Proto -> World 保持不变。
+    item.proto->loadEpoch = item.epoch;
+    item.proto->lightEpoch = item.epoch;
+
+    LifecycleLoadedChunk loaded;
+    loaded.position = item.pos;
+    loaded.epoch = item.epoch;
+    loaded.chunkX = item.pos.x;
+    loaded.chunkZ = item.pos.z;
+    loaded.statusName = "minecraft:full";
+    loaded.generated = true;
+    loaded.isLightOn = item.proto->isLightCorrect();
+    loaded.entityData = EntityChunkDataResult{
+        EntityChunkDataResult::Status::Empty, {}};
+    loaded.lightSubmissionGeneration =
+        item.proto->lightSubmissionGeneration();
+    loaded.blockTicks = item.proto->blockTicks();
+    loaded.fluidTicks = item.proto->fluidTicks();
+    loaded.movingPistons = item.proto->movingPistons();
+    loaded.entities = item.proto->entities();
+    const auto &pp = item.proto->postProcessing();
+    const int minSecY = item.proto->minSectionY();
+    for (std::size_t s = 0; s < pp.size(); ++s) {
+      const int secY = minSecY + static_cast<int>(s);
+      for (std::int16_t packed : pp[s]) {
+        loaded.postProcessingPositions.push_back(
+            worldgen::ProtoChunk::unpackOffsetCoordinates(
+                packed, item.pos, secY));
+      }
+    }
+    loaded.generatedProto = std::move(item.proto);
+
     // 生成期光照：把主线程 pump 得到的请求序号带进安装载荷，安装时据此跳过重传。
-    if (auto found = generatedLightRequests_.find(result.position);
+    if (auto found = generatedLightRequests_.find(item.pos);
         found != generatedLightRequests_.end()) {
-      result.loaded.lightSubmissionGeneration = found->second.submit;
-      result.loaded.lightComputeGeneration = found->second.compute;
+      loaded.lightSubmissionGeneration = found->second.submit;
+      loaded.lightComputeGeneration = found->second.compute;
     }
     if (!controller_->completeGeneratedChunk(
-            result.position, result.epoch, std::move(result.loaded),
-            std::move(result.root))) {
-      errors_[result.position] =
+            item.pos, item.epoch, std::move(loaded), std::move(item.root))) {
+      errors_[item.pos] =
           "generated chunk arrived after its demand was retired";
       // 迟到的结果不会再安装：撤销光照引擎里的生成期登记，避免无主区块常驻。
-      if (generatedLightRequests_.erase(result.position) != 0) {
+      if (generatedLightRequests_.erase(item.pos) != 0) {
         if (LightService *light = world_.lightService())
-          light->unloadChunk(result.position.x, result.position.z);
+          light->unloadChunk(item.pos.x, item.pos.z);
       }
       continue;
     }
-    generatedLightRequests_.erase(result.position);
+    generatedLightRequests_.erase(item.pos);
   }
 }
 
 ChunkGenerationStats WorldChunkManager::generationStats() const {
-  std::lock_guard lock(generationMutex_);
-  return generationStats_;
+  if (const auto *scheduler = world_.chunkMap().scheduler())
+    return readSchedulerStats(*scheduler);
+  return lastGenerationStats_;
 }
 } // namespace redstone

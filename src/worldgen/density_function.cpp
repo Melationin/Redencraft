@@ -590,8 +590,8 @@ constexpr std::uint32_t kFlatInvalid = 0xFFFFFFFFu;
 // 编译器需要访问 FlatDensityFunction 的私有指令表。
 struct FlatDensityCompiler {
   FlatDensityFunction &fn;
-  std::unordered_map<const DensityNode *, std::uint32_t> memo;
-  std::unordered_map<const CubicSpline *, std::uint32_t> splineMemo;
+  phmap::flat_hash_map<const DensityNode *, std::uint32_t> memo;
+  phmap::flat_hash_map<const CubicSpline *, std::uint32_t> splineMemo;
   bool ok = true;
 
   template <class F>

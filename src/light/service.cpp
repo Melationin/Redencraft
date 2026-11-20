@@ -14,7 +14,7 @@
 
 #include "light/block_light_engine.hpp"
 
-#include <unordered_set>
+#include "redstone/chunk_section.hpp"
 
 namespace redstone {
 
@@ -72,12 +72,19 @@ LightService::Impl::Impl(int minSection, int sectionCount,
 
 LightService::Impl::~Impl() { close(); }
 
-bool LightService::Impl::enqueueControl(PendingChunk state) {
+bool LightService::Impl::enqueueControl(PendingChunk state, bool immediate) {
   if (!controlQueue->push(std::move(state))) {
     ++statsRejected;
     return false;
   }
   ++statsSubmitted;
+  if (immediate) {
+    immediateBatchRequested.store(true, std::memory_order_release);
+    if (options.batchWindowMs > 0) {
+      std::lock_guard lock(mutex);
+      wake.notify_all();
+    }
+  }
   signalWorkerLocked(true);
   return true;
 }
@@ -91,6 +98,8 @@ std::uint64_t LightService::Impl::submitChunk(LightChunkInput input) {
     ++statsRejected;
     return 0;
   }
+  const bool immediate =
+      input.precomputedLight && input.precomputedLight->isLightOn;
   const auto key = chunkKey(input.chunkX, input.chunkZ);
   auto &active = versions[key];
   const bool newLifetime = active.inactive || active.requestRevision == 0;
@@ -119,7 +128,7 @@ std::uint64_t LightService::Impl::submitChunk(LightChunkInput input) {
   state.lifecycleEpoch = active.epoch;
   state.revision = active.requestRevision;
   state.load = std::make_unique<LightChunkInput>(std::move(input));
-  return enqueueControl(std::move(state)) ? generation : 0;
+  return enqueueControl(std::move(state), immediate) ? generation : 0;
 }
 
 std::uint64_t LightService::Impl::requestChunkCompute(int chunkX, int chunkZ) {
@@ -144,28 +153,39 @@ std::uint64_t LightService::Impl::requestChunkCompute(int chunkX, int chunkZ) {
   command.lifecycleEpoch = active->second.epoch;
   command.revision = active->second.requestRevision;
   command.compute = true;
-  return enqueueControl(std::move(command)) ? generation : 0;
+  return enqueueControl(std::move(command), true) ? generation : 0;
 }
 
-bool LightService::Impl::adoptDirectGeometry(int chunkX, int chunkZ) {
-  if (!accepting || options.directWorld.context == nullptr)
-    return false;
+std::uint64_t LightService::Impl::rebindChunkGeometry(int chunkX, int chunkZ) {
+  if (!accepting) {
+    ++statsRejected;
+    return 0;
+  }
+  // 没有 World/ChunkMap 直读回调时句柄是唯一几何来源，不能清掉。
+  if (options.directWorld.readSection == nullptr) {
+    ++statsRejected;
+    return 0;
+  }
   const std::uint64_t key = chunkKey(chunkX, chunkZ);
-  const auto active = versions.find(key);
-  if (active == versions.end() || active->second.inactive)
-    return false;
+  auto active = versions.find(key);
+  if (active == versions.end() || active->second.inactive) {
+    ++statsRejected;
+    return 0;
+  }
+  const std::uint64_t generation = nextRequestGeneration();
+  ++active->second.requestRevision;
+  active->second.submittedGeneration = generation;
+  mainVersions[key] = active->second;
   PendingChunk command;
   command.key = key;
-  command.chunkX = chunkX;
-  command.chunkZ = chunkZ;
-  // 刻意复用当前提交代次：切换不产生新的光照结果，若推进代次会让区块永远
-  // 停在“已提交未发布”（pending）状态。
-  command.generation = active->second.submittedGeneration;
-  command.inputSequence = command.generation;
+  command.generation = generation;
+  command.inputSequence = generation;
   command.lifecycleEpoch = active->second.epoch;
   command.revision = active->second.requestRevision;
-  command.adoptDirectGeometry = true;
-  return enqueueControl(std::move(command));
+  command.chunkX = chunkX;
+  command.chunkZ = chunkZ;
+  command.rebind = true;
+  return enqueueControl(std::move(command)) ? generation : 0;
 }
 
 std::uint64_t LightService::Impl::nextRequestGeneration() {
@@ -173,6 +193,7 @@ std::uint64_t LightService::Impl::nextRequestGeneration() {
 }
 
 void LightService::Impl::loadGeometry(std::uint64_t key, LightChunkInput &input) {
+  batchMetaCache_.erase(key);
   if (readyChunks.insert(key).second)
     justBecameReady.push_back(key);
   // 只有直读一种来源：句柄（生成期 ProtoChunk）或 World 回调。
@@ -189,7 +210,10 @@ LightService::Impl::readDirectSection(std::uint64_t key, int sectionY) const {
   const auto metaIt = directChunks.find(key);
   if (metaIt == directChunks.end())
     return std::nullopt;
-  if (metaIt->second.chunk)
+  // 句柄在晋升后会被标记 invalidated；此时必须改用 World/ChunkMap 直读，否则
+  // 重定向命令生效前的窗口会读到空几何。ChunkMap 读区段持 holder 锁，会与晋升
+  // 互斥，因此这个回退对“晋升进行中”的窗口也是安全的。
+  if (metaIt->second.chunk && !metaIt->second.chunk->isInvalidated())
     return light_internal::sectionViewOfLiveChunk(
         *metaIt->second.chunk, sectionY, minBlockSectionY, blockSectionCount);
   if (!options.directWorld.context)
@@ -227,6 +251,22 @@ LightService::Impl::sectionMetaSummary(std::uint64_t key, int sectionY) const {
   return {view->empty, unknown};
 }
 
+LightService::Impl::SectionMetaSummary
+LightService::Impl::cachedSectionMetaSummary(std::uint64_t key,
+                                             int sectionY) const {
+  const int index = sectionY - minBlockSectionY;
+  if (index < 0 || index >= blockSectionCount)
+    return {};
+  auto &vec = batchMetaCache_[key];
+  if (vec.empty())
+    vec.resize(static_cast<std::size_t>(blockSectionCount),
+               {true, std::numeric_limits<std::uint16_t>::max()});
+  auto &slot = vec[static_cast<std::size_t>(index)];
+  if (slot.unknown == std::numeric_limits<std::uint16_t>::max())
+    slot = sectionMetaSummary(key, sectionY);
+  return slot;
+}
+
 const std::shared_ptr<LightChunkSnapshot> &
 LightService::Impl::storedLayerSnapshot(LightLayer layer,
                                         std::uint64_t key) const {
@@ -253,10 +293,61 @@ std::shared_ptr<LightChunkSnapshot> LightService::Impl::makeRawLayerShell(
       static_cast<std::size_t>(blockSectionCount + 2));
   for (int sectionY = minBlockSectionY - 1;
        sectionY <= minBlockSectionY + blockSectionCount; ++sectionY) {
-    const SectionMetaSummary summary = sectionMetaSummary(key, sectionY);
+    const SectionMetaSummary summary =
+        cachedSectionMetaSummary(key, sectionY);
     snapshot->sections.push_back(std::make_shared<LightSectionSnapshot>(
         sectionY, summary.empty, std::array<LightLayerRef, kLightLayerCount>{},
         summary.unknown));
+  }
+  return snapshot;
+}
+
+std::shared_ptr<LightChunkSnapshot>
+LightService::Impl::makePrecomputedLayerShell(
+    std::uint64_t key, int chunkX, int chunkZ, std::uint64_t generation,
+    std::uint64_t epoch, const PrecomputedChunkLight &precomputed,
+    LightLayer layer) const {
+  auto snapshot = std::make_shared<LightChunkSnapshot>();
+  snapshot->chunkX = chunkX;
+  snapshot->chunkZ = chunkZ;
+  snapshot->minBlockSectionY = minBlockSectionY;
+  snapshot->blockSectionCount = blockSectionCount;
+  snapshot->skyLightEnabled = options.hasSkyLight;
+  snapshot->generation = generation;
+  snapshot->lifecycleEpoch = epoch;
+  snapshot->revision = 0;
+  snapshot->unsupportedCells = precomputed.unsupportedCells;
+  const std::size_t count = static_cast<std::size_t>(blockSectionCount + 2);
+  snapshot->sections.reserve(count);
+  const auto &srcLayers = layer == LightLayer::Block ? precomputed.blockLayers
+                                                     : precomputed.skyLayers;
+  const std::size_t layerIdx = static_cast<std::size_t>(layer);
+  const bool trustMask =
+      precomputed.hasSkySources || precomputed.nonEmptySectionMask != 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    const int sectionY = minBlockSectionY - 1 + static_cast<int>(i);
+    const bool inBlockRange =
+        i >= 1 && i <= static_cast<std::size_t>(blockSectionCount);
+    bool isEmpty = true;
+    std::uint16_t unknown = 0;
+    if (inBlockRange) {
+      const std::size_t blockIdx = i - 1;
+      if (trustMask && blockIdx < 32) {
+        isEmpty = ((precomputed.nonEmptySectionMask >> blockIdx) & 1u) == 0;
+        if (precomputed.unsupportedCells != 0)
+          unknown = cachedSectionMetaSummary(key, sectionY).unknown;
+      } else {
+        const SectionMetaSummary summary =
+            cachedSectionMetaSummary(key, sectionY);
+        isEmpty = summary.empty;
+        unknown = summary.unknown;
+      }
+    }
+    std::array<LightLayerRef, kLightLayerCount> layers{};
+    if (i < srcLayers.size())
+      layers[layerIdx] = LightLayerRef(srcLayers[i]);
+    snapshot->sections.push_back(std::make_shared<LightSectionSnapshot>(
+        sectionY, isEmpty, std::move(layers), unknown));
   }
   return snapshot;
 }
@@ -363,7 +454,7 @@ void LightService::Impl::syncRawLayerGeometry(
         cur->sectionY <
             snapshot->minBlockSectionY + snapshot->blockSectionCount;
     const SectionMetaSummary summary =
-        inBlockRange ? sectionMetaSummary(key, cur->sectionY)
+        inBlockRange ? cachedSectionMetaSummary(key, cur->sectionY)
                      : SectionMetaSummary{};
     const bool targetEmpty = summary.empty;
     const std::uint16_t targetUnknown = summary.unknown;
@@ -476,7 +567,7 @@ void LightService::Impl::drainPublished() {
   if (resultQueue->empty())
     return;
   std::vector<LayerResult> coalesced;
-  std::unordered_map<DrainResultKey, std::size_t, DrainResultKeyHash>
+  phmap::flat_hash_map<DrainResultKey, std::size_t, DrainResultKeyHash>
       latestResult;
   LayerResult incoming;
   while (resultQueue->pop(incoming)) {
@@ -602,6 +693,7 @@ LightService::Stats LightService::Impl::stats() const {
       statsReceivedBlockSections.load(std::memory_order_relaxed);
   result.unloadedNeighborSkips =
       statsUnloadedNeighborSkips.load(std::memory_order_relaxed);
+  result.rebindings = statsRebound.load(std::memory_order_relaxed);
   result.workerCpuMs = statsWorkerCpuMs.load(std::memory_order_relaxed);
   result.blockWorkerCpuMs =
       statsBlockWorkerCpuMs.load(std::memory_order_relaxed);
@@ -645,6 +737,7 @@ void LightService::Impl::resetMeasurementStats() {
   statsReceivedSkySections.store(0, std::memory_order_relaxed);
   statsReceivedBlockSections.store(0, std::memory_order_relaxed);
   statsUnloadedNeighborSkips.store(0, std::memory_order_relaxed);
+  statsRebound.store(0, std::memory_order_relaxed);
 }
 
 std::string LightService::Impl::workerError() const {
@@ -897,7 +990,7 @@ bool LightService::Impl::validInput(const LightChunkInput &input) const {
       (!options.directWorld.context || !options.directWorld.readSection))
     return false;
   if (input.persistedLight) {
-    std::unordered_set<int> seenYs;
+    phmap::flat_hash_set<int> seenYs;
     const int minLightY = input.minLightSectionY();
     const int maxLightY = input.minBlockSectionY + input.blockSectionCount;
     for (const PersistedLightSection &sec : input.persistedLight->sections) {
@@ -905,6 +998,15 @@ bool LightService::Impl::validInput(const LightChunkInput &input) const {
           !seenYs.insert(sec.sectionY).second)
         return false;
     }
+  }
+  if (input.precomputedLight && input.precomputedLight->isLightOn) {
+    const auto expectedLayers =
+        static_cast<std::size_t>(blockSectionCount + 2);
+    if (input.precomputedLight->blockLayers.size() != expectedLayers)
+      return false;
+    if (options.hasSkyLight && input.precomputedLight->skyLightEnabled &&
+        input.precomputedLight->skyLayers.size() != expectedLayers)
+      return false;
   }
   return true;
 }
@@ -955,7 +1057,22 @@ bool LightService::Impl::orderedInputEmptyLocked() const {
 
 void LightService::Impl::applyOrderedControlLocked(PendingChunk control) {
   workerVersions[control.key] = {control.lifecycleEpoch, control.revision,
-                                 control.unload};
+                                 control.generation, control.unload};
+  if (control.rebind && !control.load && !control.unload) {
+    // 重定向只换直读句柄，不影响已算好的层；与同区块排队的 cell 命令合并，
+    // 由 prepareBatch 在应用 cell 之前完成切换。
+    auto inserted = pending.try_emplace(control.key, PendingChunk{});
+    PendingChunk &state = inserted.first->second;
+    if (control.generation > state.inputSequence) {
+      state.key = control.key;
+      state.generation = control.generation;
+      state.inputSequence = control.generation;
+      state.lifecycleEpoch = control.lifecycleEpoch;
+      state.revision = control.revision;
+    }
+    state.rebind = true;
+    return;
+  }
   if (control.compute && !control.load && !control.unload) {
     // 计算请求是“状态提升”而不是一条独立命令：它绝不能覆盖同区块已排队的
     // load/cell 命令，只能与它们合并。
@@ -1098,14 +1215,16 @@ void LightService::Impl::run() {
       continue;
     }
     if (options.batchWindowMs > 0 && !closing && !flushRequested &&
-        !forcedChunk) {
+        !forcedChunk &&
+        !immediateBatchRequested.load(std::memory_order_acquire)) {
       const auto window = std::chrono::milliseconds(options.batchWindowMs);
       const auto now = std::chrono::steady_clock::now();
       if (nextBatchCollectAt == std::chrono::steady_clock::time_point{})
         nextBatchCollectAt = now + window;
       if (now < nextBatchCollectAt) {
         wake.wait_until(lock, nextBatchCollectAt, [&] {
-          return closing || paused || flushRequested || forcedChunk;
+          return closing || paused || flushRequested || forcedChunk ||
+                 immediateBatchRequested.load(std::memory_order_acquire);
         });
         if (closing && pending.empty() && orderedInputEmptyLocked())
           break;
@@ -1113,6 +1232,7 @@ void LightService::Impl::run() {
           continue;
       }
     }
+    immediateBatchRequested.store(false, std::memory_order_release);
     if (options.batchWindowMs > 0)
       nextBatchCollectAt = std::chrono::steady_clock::now() +
                            std::chrono::milliseconds(options.batchWindowMs);
@@ -1164,8 +1284,8 @@ void LightService::Impl::run() {
     for (auto it = needsUpdate.begin();
          it != needsUpdate.end() && batch.size() < options.maxQueuedCommands;) {
       const std::uint64_t key = *it;
-      const auto version = versions.find(key);
-      if (version == versions.end() || version->second.inactive) {
+      const auto version = workerVersions.find(key);
+      if (version == workerVersions.end() || version->second.inactive) {
         it = needsUpdate.erase(it);
         continue;
       }
@@ -1218,6 +1338,14 @@ void LightService::Impl::run() {
     // 整块重新加载会覆盖掉此前登记的“待首次计算”。
     for (std::uint64_t key : summary.loaded)
       needsCompute.erase(key);
+    for (std::uint64_t key : summary.precomputedBlockLoaded) {
+      needsCompute.erase(key);
+      needsUpdate.erase(key);
+    }
+    for (std::uint64_t key : summary.precomputedSkyLoaded) {
+      needsCompute.erase(key);
+      needsUpdate.erase(key);
+    }
     for (std::uint64_t key : summary.touched)
       needsUpdate.erase(key);
     for (std::uint64_t key : summary.removed) {
@@ -1241,8 +1369,8 @@ void LightService::Impl::run() {
             if (!readyChunks.contains(neighborKey) ||
                 !processedGeneration.contains(neighborKey))
               continue;
-            const auto version = versions.find(neighborKey);
-            if (version == versions.end() || version->second.inactive)
+            const auto version = workerVersions.find(neighborKey);
+            if (version == workerVersions.end() || version->second.inactive)
               continue;
             needsUpdate.insert(neighborKey);
           }
@@ -1289,6 +1417,8 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
     bool anyDirty = false;
     if (!directChunks.contains(key))
       return false;
+    if (!command.ownedCells.empty())
+      batchMetaCache_.erase(key);
     // 直读模式不维护几何副本：单元格变化一律按脏点送给传播器，由它去读实时状态。
     for (const auto &[slot, value] : command.ownedCells) {
       (void)value;
@@ -1310,20 +1440,28 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
     const auto key = command.key;
     prepared.maxGeneration =
         std::max(prepared.maxGeneration, command.generation);
-    if (command.adoptDirectGeometry) {
-      // 把生成期句柄换成 World 直读登记，光照值与“完整”状态原样保留。
-      directChunks[key] = light_internal::DirectChunkMeta{
-          command.chunkX, command.chunkZ, command.lifecycleEpoch};
-      continue;
-    }
     if (command.unload) {
       prepared.removed.insert(key);
       readyChunks.erase(key);
       neighborDeferrals.erase(key);
       prepared.loaded.erase(key);
+      prepared.precomputedBlockLoaded.erase(key);
+      prepared.precomputedSkyLoaded.erase(key);
+      prepared.skyOnlyCompute.erase(key);
       prepared.touched.erase(key);
       prepared.dirty.erase(key);
       persistedLightChunks.erase(key);
+      continue;
+    }
+
+    if (command.rebind && !command.load) {
+      // 零拷贝晋升：区段内容未变，只把直读源从 ProtoChunk 句柄切到
+      // World/ChunkMap 直读。已发布的层、协议基准、天空光列源与 readyChunks
+      // 全部保留，因此本批不产生任何光照工作，也不需要重新发布。
+      if (auto it = directChunks.find(key); it != directChunks.end()) {
+        it->second.chunk.reset();
+        statsRebound.fetch_add(1, std::memory_order_relaxed);
+      }
       continue;
     }
 
@@ -1358,12 +1496,54 @@ LightService::Impl::prepareBatch(std::vector<PendingChunk> &batch) {
         protocolBaseSky.erase(key);
         skyColumnSources.erase(key);
       }
+      const bool hasPrecomputed = command.load->precomputedLight &&
+                                  command.load->precomputedLight->isLightOn;
       if (command.load->completion == LightChunkInput::Completion::Deferred &&
-          !command.compute && !command.load->persistedLight) {
+          !command.compute && !command.load->persistedLight && !hasPrecomputed) {
         // 生成区块：只注册几何，停在“未计算”。这里刻意不建光照壳——壳存在
         // 意味着邻居的边界传播可以写进来，那就是“算过一半”了。首次计算由
         // requestChunkCompute() 触发（对应原版 InitializeLight → Light 的分界）。
         prepared.registered.insert(key);
+        continue;
+      }
+      if (hasPrecomputed) {
+        const auto &pre = *command.load->precomputedLight;
+        persistedLightChunks.erase(key);
+        deferredBlockCells.erase(key);
+        deferredSkyCells.erase(key);
+        lastReadyBlock[key] = makePrecomputedLayerShell(
+            key, command.load->chunkX, command.load->chunkZ, command.generation,
+            command.lifecycleEpoch, pre, LightLayer::Block);
+        if (options.hasSkyLight) {
+          if (pre.skyLightEnabled) {
+            lastReadySky[key] = makePrecomputedLayerShell(
+                key, command.load->chunkX, command.load->chunkZ,
+                command.generation, command.lifecycleEpoch, pre,
+                LightLayer::Sky);
+            if (pre.hasSkySources)
+              skyColumnSources[key] = pre.skySources;
+          } else {
+            lastReadySky[key] = makeRawLayerShell(
+                key, command.load->chunkX, command.load->chunkZ,
+                command.generation, command.lifecycleEpoch);
+          }
+        } else {
+          lastReadySky.erase(key);
+        }
+        const bool cellsChanged =
+            !command.ownedCells.empty() &&
+            applyCells(key, command.load->chunkX, command.load->chunkZ,
+                       command);
+        if (cellsChanged) {
+          touchKey(key, true);
+        } else if (options.hasSkyLight && !pre.skyLightEnabled) {
+          prepared.precomputedBlockLoaded.insert(key);
+          prepared.skyOnlyCompute.insert(key);
+        } else {
+          prepared.precomputedBlockLoaded.insert(key);
+          if (options.hasSkyLight)
+            prepared.precomputedSkyLoaded.insert(key);
+        }
         continue;
       }
       auto &blockShell = lastReadyBlock[key];
@@ -1470,12 +1650,12 @@ LayerWorkspace LightService::Impl::layerWorkspace(const PreparedBatch &prepared,
   LayerWorkspace result;
   result.removed = prepared.removed;
   auto &last = layer == LightLayer::Block ? lastReadyBlock : lastReadySky;
-  for (std::uint64_t key : prepared.touched) {
+  const auto addWorking = [&](std::uint64_t key, bool isLoaded, bool isDirty) {
     if (prepared.removed.contains(key))
-      continue;
+      return;
     const auto it = last.find(key);
     if (it == last.end() || !it->second)
-      continue;
+      return;
     syncRawLayerGeometry(it->second, key);
     const auto &ownView = it->second;
     WorkingChunk chunk;
@@ -1485,14 +1665,23 @@ LayerWorkspace LightService::Impl::layerWorkspace(const PreparedBatch &prepared,
     chunk.chunkZ = ownView->chunkZ;
     chunk.snapshot = ownView;
     chunk.inPlace = true;
-    chunk.dirty = prepared.dirty.contains(key);
-    if (prepared.loaded.contains(key)) {
+    chunk.dirty = isDirty;
+    if (isLoaded) {
       for (int sectionY = ownView->minLightSectionY();
            sectionY <= ownView->minBlockSectionY + ownView->blockSectionCount;
            ++sectionY)
         chunk.dirtySections.push_back(sectionY);
     }
     result.chunks.emplace(key, std::move(chunk));
+  };
+  for (std::uint64_t key : prepared.touched)
+    addWorking(key, prepared.loaded.contains(key),
+               prepared.dirty.contains(key));
+  if (layer == LightLayer::Sky) {
+    for (std::uint64_t key : prepared.skyOnlyCompute) {
+      if (!result.chunks.contains(key))
+        addWorking(key, true, true);
+    }
   }
   return result;
 }
@@ -1659,8 +1848,15 @@ LayerOutcome LightService::Impl::executeSkyLayer(const PreparedBatch &prepared) 
     sky.seedChunk(key);
     sky.seedIncoming(key);
   }
-  for (std::uint64_t key : prepared.touched) {
+  for (std::uint64_t key : prepared.skyOnlyCompute) {
     if (prepared.loaded.contains(key) || prepared.computed.contains(key))
+      continue;
+    sky.seedChunk(key);
+    sky.seedIncoming(key);
+  }
+  for (std::uint64_t key : prepared.touched) {
+    if (prepared.loaded.contains(key) || prepared.computed.contains(key) ||
+        prepared.skyOnlyCompute.contains(key))
       continue;
     sky.seedIncoming(key);
   }
@@ -1746,6 +1942,7 @@ LayerOutcome LightService::Impl::executeSkyLayer(const PreparedBatch &prepared) 
       sky.hasPendingWork() || !prepared.changedPositions.empty() ||
       !prepared.removed.empty() || !prepared.replaced.empty() ||
       !prepared.computed.empty() || !prepared.touched.empty() ||
+      !prepared.skyOnlyCompute.empty() ||
       prepared.persistedLoaded.size() != prepared.loaded.size();
   if (needsSkyWork) {
     // 只有几何/方块分布变化时才需要重扫 3x3x3 的存储资格。纯边界重算不重扫，
@@ -1753,6 +1950,7 @@ LayerOutcome LightService::Impl::executeSkyLayer(const PreparedBatch &prepared) 
     // 即可存储），绝不能用一个空的 storedEligible 把写入全部拒掉。
     if (!prepared.loaded.empty() || !prepared.removed.empty() ||
         !prepared.replaced.empty() || !prepared.computed.empty() ||
+        !prepared.skyOnlyCompute.empty() ||
         !prepared.changedPositions.empty())
       sky.syncStorageEligibility();
     sky.run();
@@ -1778,6 +1976,69 @@ void LightService::Impl::publishResult(LayerResult result) {
   }
 }
 
+void LightService::Impl::publishChunkLayerSnapshot(
+    LightLayer layer, std::uint64_t key,
+    std::shared_ptr<LightChunkSnapshot> &view, std::uint64_t generation,
+    std::uint64_t batchRevision, bool blockComplete, bool skyComplete,
+    bool propagationComplete, bool protocolReady,
+    std::uint32_t unsupportedCells, const std::vector<int> &dirtySections,
+    std::vector<LayerResult> &ready) {
+  auto &last = layer == LightLayer::Block ? lastReadyBlock : lastReadySky;
+  auto &protocolBase =
+      layer == LightLayer::Block ? protocolBaseBlock : protocolBaseSky;
+  light_internal::mutableLayerSnapshot(view);
+  view->layer = layer;
+  view->generation = generation;
+  view->revision = batchRevision;
+  view->blockLightComplete = blockComplete;
+  view->skyLightComplete = skyComplete;
+  view->propagationComplete = propagationComplete;
+  view->protocolReady = protocolReady;
+  view->unsupportedCells = unsupportedCells;
+  view->changedSections.clear();
+  view->deltaBaseRevision = 0;
+
+  std::vector<int> changed = dirtySections;
+  auto &meta = protocolBase[key];
+  if (protocolReady) {
+    if (meta.hasBase && meta.epoch == view->lifecycleEpoch &&
+        meta.minBlockSectionY == view->minBlockSectionY &&
+        meta.blockSectionCount == view->blockSectionCount)
+      view->deltaBaseRevision = meta.revision;
+    if (!meta.pendingDirty.empty() &&
+        meta.pendingEpoch == view->lifecycleEpoch) {
+      changed.insert(changed.end(), meta.pendingDirty.begin(),
+                     meta.pendingDirty.end());
+      meta.pendingDirty.clear();
+      meta.pendingEpoch = 0;
+    }
+    meta.hasBase = true;
+    meta.epoch = view->lifecycleEpoch;
+    meta.revision = view->revision;
+    meta.minBlockSectionY = view->minBlockSectionY;
+    meta.blockSectionCount = view->blockSectionCount;
+  } else {
+    meta.pendingDirty.insert(meta.pendingDirty.end(), changed.begin(),
+                             changed.end());
+    meta.pendingEpoch = view->lifecycleEpoch;
+  }
+  std::sort(changed.begin(), changed.end());
+  changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
+  view->changedSections.reserve(changed.size());
+  for (int sectionY : changed)
+    view->changedSections.push_back(
+        {sectionY, layer == LightLayer::Sky, layer == LightLayer::Block});
+  if (options.collectDiagnostics) {
+    const auto count = static_cast<std::uint64_t>(changed.size());
+    if (layer == LightLayer::Block)
+      statsBlockChanges.fetch_add(count, std::memory_order_relaxed);
+    else
+      statsSkyChanges.fetch_add(count, std::memory_order_relaxed);
+  }
+  last[key] = view;
+  ready.push_back({layer, key, view});
+}
+
 void LightService::Impl::publishIndependentLayer(const PreparedBatch &prepared,
                                                  LayerOutcome &outcome,
                                                  LightLayer layer) {
@@ -1785,11 +2046,7 @@ void LightService::Impl::publishIndependentLayer(const PreparedBatch &prepared,
     return;
   auto &nextRevision =
       layer == LightLayer::Block ? nextBlockLayerRevision : nextSkyLayerRevision;
-  auto &last = layer == LightLayer::Block ? lastReadyBlock : lastReadySky;
-  auto &protocolBase =
-      layer == LightLayer::Block ? protocolBaseBlock : protocolBaseSky;
   std::vector<LayerResult> ready;
-  std::vector<int> changed;
   std::uint64_t batchRevision = 0;
   for (auto &[key, chunk] : outcome.layers.chunks) {
     if (chunk.propagated)
@@ -1798,69 +2055,68 @@ void LightService::Impl::publishIndependentLayer(const PreparedBatch &prepared,
       continue;
     if (batchRevision == 0)
       batchRevision = ++nextRevision;
-    light_internal::mutableLayerSnapshot(chunk.snapshot);
-    auto &view = chunk.snapshot;
-    view->layer = layer;
-    view->generation = prepared.maxGeneration;
-    view->revision = batchRevision;
-    view->lifecycleEpoch = chunk.lifecycleEpoch;
-    view->blockLightComplete =
-        layer == LightLayer::Block ? outcome.complete : false;
-    view->skyLightComplete =
-        layer == LightLayer::Sky
-            ? outcome.complete
-            : (!options.hasSkyLight && layer == LightLayer::Block);
-    view->propagationComplete = outcome.complete;
-    view->protocolReady = outcome.complete;
+    chunk.snapshot->lifecycleEpoch = chunk.lifecycleEpoch;
     std::uint32_t unsupported = 0;
     if (directChunks.contains(key)) {
       for (int sectionY = minBlockSectionY;
            sectionY < minBlockSectionY + blockSectionCount; ++sectionY)
-        unsupported += sectionMetaSummary(key, sectionY).unknown;
+        unsupported += cachedSectionMetaSummary(key, sectionY).unknown;
     }
-    view->unsupportedCells = unsupported;
-    view->changedSections.clear();
-    view->deltaBaseRevision = 0;
+    const bool blockComplete =
+        layer == LightLayer::Block ? outcome.complete : false;
+    const bool skyComplete =
+        layer == LightLayer::Sky
+            ? outcome.complete
+            : (!options.hasSkyLight && layer == LightLayer::Block);
+    publishChunkLayerSnapshot(
+        layer, key, chunk.snapshot, prepared.maxGeneration, batchRevision,
+        blockComplete, skyComplete, outcome.complete, outcome.complete,
+        unsupported, chunk.dirtySections, ready);
+  }
+  std::sort(ready.begin(), ready.end(),
+            [](const LayerResult &left, const LayerResult &right) {
+              return left.key < right.key;
+            });
+  for (LayerResult &result : ready)
+    publishResult(std::move(result));
+  statsPublished.fetch_add(ready.size(), std::memory_order_relaxed);
+}
 
-    changed.assign(chunk.dirtySections.begin(), chunk.dirtySections.end());
-    auto &meta = protocolBase[key];
-    if (outcome.complete) {
-      if (meta.hasBase && meta.epoch == view->lifecycleEpoch &&
-          meta.minBlockSectionY == view->minBlockSectionY &&
-          meta.blockSectionCount == view->blockSectionCount)
-        view->deltaBaseRevision = meta.revision;
-      if (!meta.pendingDirty.empty() &&
-          meta.pendingEpoch == view->lifecycleEpoch) {
-        changed.insert(changed.end(), meta.pendingDirty.begin(),
-                       meta.pendingDirty.end());
-        meta.pendingDirty.clear();
-        meta.pendingEpoch = 0;
-      }
-      meta.hasBase = true;
-      meta.epoch = view->lifecycleEpoch;
-      meta.revision = view->revision;
-      meta.minBlockSectionY = view->minBlockSectionY;
-      meta.blockSectionCount = view->blockSectionCount;
-    } else {
-      meta.pendingDirty.insert(meta.pendingDirty.end(), changed.begin(),
-                               changed.end());
-      meta.pendingEpoch = view->lifecycleEpoch;
-    }
-    std::sort(changed.begin(), changed.end());
-    changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
-    for (int sectionY : changed)
-      view->changedSections.push_back(
-          {sectionY, layer == LightLayer::Sky, layer == LightLayer::Block});
-    if (options.collectDiagnostics) {
-      const auto count = static_cast<std::uint64_t>(changed.size());
-      if (layer == LightLayer::Block)
-        statsBlockChanges.fetch_add(count, std::memory_order_relaxed);
-      else
-        statsSkyChanges.fetch_add(count, std::memory_order_relaxed);
-    }
-
-    last[key] = view;
-    ready.push_back({layer, key, view});
+void LightService::Impl::publishPrecomputedLayers(const PreparedBatch &prepared,
+                                                  LightLayer layer) {
+  if (layer == LightLayer::Sky && !options.hasSkyLight)
+    return;
+  const auto &keys = layer == LightLayer::Block ? prepared.precomputedBlockLoaded
+                                                : prepared.precomputedSkyLoaded;
+  if (keys.empty())
+    return;
+  auto &nextRevision =
+      layer == LightLayer::Block ? nextBlockLayerRevision : nextSkyLayerRevision;
+  auto &last = layer == LightLayer::Block ? lastReadyBlock : lastReadySky;
+  std::vector<int> allSections;
+  allSections.reserve(static_cast<std::size_t>(blockSectionCount + 2));
+  for (int sectionY = minBlockSectionY - 1;
+       sectionY <= minBlockSectionY + blockSectionCount; ++sectionY)
+    allSections.push_back(sectionY);
+  std::vector<LayerResult> ready;
+  ready.reserve(keys.size());
+  const std::uint64_t batchRevision = ++nextRevision;
+  for (std::uint64_t key : keys) {
+    if (prepared.removed.contains(key))
+      continue;
+    const auto it = last.find(key);
+    if (it == last.end() || !it->second)
+      continue;
+    auto view = it->second;
+    const std::uint32_t unsupported = view->unsupportedCells;
+    const bool protocolReady = (unsupported == 0);
+    const bool blockComplete = (layer == LightLayer::Block);
+    const bool skyComplete =
+        (layer == LightLayer::Sky) ||
+        (!options.hasSkyLight && layer == LightLayer::Block);
+    publishChunkLayerSnapshot(
+        layer, key, view, prepared.maxGeneration, batchRevision, blockComplete,
+        skyComplete, true, protocolReady, unsupported, allSections, ready);
   }
   std::sort(ready.begin(), ready.end(),
             [](const LayerResult &left, const LayerResult &right) {
@@ -1872,16 +2128,29 @@ void LightService::Impl::publishIndependentLayer(const PreparedBatch &prepared,
 }
 
 void LightService::Impl::executeLayers(const PreparedBatch &prepared) {
-  LayerOutcome block = executeBlockLayer(prepared);
-  publishIndependentLayer(prepared, block, LightLayer::Block);
+  const bool needBlockPropagation = !prepared.touched.empty() ||
+                                    !prepared.removed.empty() ||
+                                    !prepared.replaced.empty() ||
+                                    !prepared.changedPositions.empty();
+  if (needBlockPropagation) {
+    LayerOutcome block = executeBlockLayer(prepared);
+    publishIndependentLayer(prepared, block, LightLayer::Block);
+  }
+  publishPrecomputedLayers(prepared, LightLayer::Block);
   if (options.hasSkyLight) {
-    LayerOutcome sky = executeSkyLayer(prepared);
-    publishIndependentLayer(prepared, sky, LightLayer::Sky);
+    const bool needSkyPropagation =
+        needBlockPropagation || !prepared.skyOnlyCompute.empty();
+    if (needSkyPropagation) {
+      LayerOutcome sky = executeSkyLayer(prepared);
+      publishIndependentLayer(prepared, sky, LightLayer::Sky);
+    }
+    publishPrecomputedLayers(prepared, LightLayer::Sky);
   }
 }
 
 PreparedBatch
 LightService::Impl::processBatch(std::vector<PendingChunk> &batch) {
+  batchMetaCache_.clear();
   PreparedBatch prepared = prepareBatch(batch);
   executeLayers(prepared);
   refreshScratchMetrics();
@@ -1924,12 +2193,20 @@ std::shared_ptr<const LightOpticalTable> LightService::opticalTable() const {
   return impl_->opticalTablePtr();
 }
 
+bool LightService::skyLightEnabled() const noexcept {
+  return impl_->skyLightEnabled();
+}
+
 std::uint64_t LightService::submitChunk(LightChunkInput input) {
   return impl_->submitChunk(std::move(input));
 }
 
 std::uint64_t LightService::requestChunkCompute(int chunkX, int chunkZ) {
   return impl_->requestChunkCompute(chunkX, chunkZ);
+}
+
+std::uint64_t LightService::rebindChunkGeometry(int chunkX, int chunkZ) {
+  return impl_->rebindChunkGeometry(chunkX, chunkZ);
 }
 
 std::uint64_t LightService::reportBlockCell(LightCellUpdate update) {
@@ -1943,10 +2220,6 @@ std::uint64_t LightService::reportBlockCells(
 
 bool LightService::unloadChunk(int chunkX, int chunkZ) {
   return impl_->unloadChunk(chunkX, chunkZ);
-}
-
-bool LightService::adoptDirectGeometry(int chunkX, int chunkZ) {
-  return impl_->adoptDirectGeometry(chunkX, chunkZ);
 }
 
 void LightService::drainPublished() { impl_->drainPublished(); }

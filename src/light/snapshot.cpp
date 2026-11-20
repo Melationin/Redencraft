@@ -66,22 +66,42 @@ LightLayerSnapshot LightLayerSnapshot::mixedEmpty() {
   return result;
 }
 
+LightLayerSnapshot LightLayerSnapshot::mixedFilled(std::uint8_t value) {
+  if (!light_internal::validLightValue(value))
+    throw std::invalid_argument("light value must be in 0..15");
+  const std::uint8_t packed =
+      static_cast<std::uint8_t>((value << 4) | (value & 15));
+  LightLayerSnapshot result;
+  result.packed_ = std::make_shared<PackedPage>();
+  for (auto &byte : result.packed_->bytes)
+    byte.store(packed, std::memory_order_relaxed);
+  return result;
+}
+
 LightLayerSnapshot LightLayerSnapshot::mixed(
     const std::array<std::uint8_t, kLightVolume> &values) {
-  LightLayerSnapshot result = mixedEmpty();
-  for (std::size_t i = 0; i < values.size(); ++i) {
-    if (!light_internal::validLightValue(values[i]))
+  auto page = std::make_shared<PackedPage>();
+  for (std::size_t byte = 0; byte < kLightLayerBytes; ++byte) {
+    const std::uint8_t lo = values[byte * 2];
+    const std::uint8_t hi = values[byte * 2 + 1];
+    if (!light_internal::validLightValue(lo) ||
+        !light_internal::validLightValue(hi))
       throw std::invalid_argument("light value must be in 0..15");
-    result.writeCell(i, values[i]);
+    page->bytes[byte].store(static_cast<std::uint8_t>(lo | (hi << 4)),
+                            std::memory_order_relaxed);
   }
+  LightLayerSnapshot result;
+  result.packed_ = std::move(page);
   return result;
 }
 
 LightLayerSnapshot LightLayerSnapshot::mixedPacked(
     const std::array<std::uint8_t, kLightLayerBytes> &packed) {
-  LightLayerSnapshot result = mixedEmpty();
-  for (std::size_t i = 0; i < packed.size(); ++i)
-    result.writePackedByte(i, packed[i]);
+  auto page = std::make_shared<PackedPage>();
+  for (std::size_t i = 0; i < kLightLayerBytes; ++i)
+    page->bytes[i].store(packed[i], std::memory_order_relaxed);
+  LightLayerSnapshot result;
+  result.packed_ = std::move(page);
   return result;
 }
 

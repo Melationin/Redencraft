@@ -2,6 +2,7 @@
 
 // 光照光学属性与几何抽象层：将庞大的方块状态表压缩为 8 位光学类别，并为工作线程提供标准快照和低内存直读两种区块段几何视图。
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +14,15 @@
 
 namespace redstone {
 
+namespace detail {
+inline constexpr std::size_t kLightOcclusionShapeTableSize = 54;
+extern const std::array<std::array<std::uint8_t, kLightOcclusionShapeTableSize>,
+                        kLightOcclusionShapeTableSize>
+    kLightFaceOcclusionTable;
+extern const std::array<std::uint8_t, kLightOcclusionShapeTableSize>
+    kLightFaceRectMask;
+} // namespace detail
+
 // 判断两个方块状态或光学属性变化后是否会影响光照（用于过滤不改变光学行为的方块状态更新，避免无效重算）。
 bool hasDifferentLightProperties(const BlockState &oldState,
                                  const BlockState &newState);
@@ -20,10 +30,28 @@ bool hasDifferentLightProperties(const BlockLightProperties &oldProperties,
                                  const BlockLightProperties &newProperties);
 // 判断区块段在“全空气/非全空气”状态间切换时是否影响光照存储资格。
 bool hasDifferentSectionLightProperties(bool wasEmpty, bool isEmpty);
+// 快速查表判断两个已知形状 ID 沿 `direction` 相接时面遮挡形状并集是否完全封堵接触面。
+inline bool lightFaceShapeIdsOcclude(std::uint8_t fromShapeId,
+                                     std::uint8_t toShapeId,
+                                     LightDirection direction) noexcept {
+  const std::uint8_t a =
+      fromShapeId < detail::kLightOcclusionShapeTableSize ? fromShapeId : 0;
+  const std::uint8_t b =
+      toShapeId < detail::kLightOcclusionShapeTableSize ? toShapeId : 0;
+  return (detail::kLightFaceOcclusionTable[a][b] &
+          (1u << static_cast<std::uint8_t>(direction))) != 0;
+}
 // 判断光从 `from` 方块沿 `direction` 射向 `to` 方块时，双方的面遮挡形状并集是否完全封堵该接触面。
-bool lightFaceShapesOcclude(const BlockLightProperties &from,
-                            const BlockLightProperties &to,
-                            LightDirection direction);
+inline bool lightFaceShapesOcclude(const BlockLightProperties &from,
+                                   const BlockLightProperties &to,
+                                   LightDirection direction) noexcept {
+  if (!from.supported || !to.supported)
+    return true;
+  if (from.occlusionShapeId == 0 && to.occlusionShapeId == 0)
+    return false;
+  return lightFaceShapeIdsOcclude(from.occlusionShapeId, to.occlusionShapeId,
+                                  direction);
+}
 
 // 光学等价类条目：将具有相同 `BlockLightProperties` 与空气标记的方块归为一类，便于用 1 字节类 ID 代替完整方块状态 ID。
 struct LightOpticalClass {

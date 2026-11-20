@@ -1078,6 +1078,153 @@ void testGeneratedChunkHandoffAndTemplate() {
   require(installs.count == 1, "stale generation never installs");
   controller.close();
 }
+
+void testSerializedChunkStoreRetainedQueueAndPartialLoad() {
+  struct CountingStore final : RawChunkStore {
+    StoreReadResult readChunk(const ChunkTicketPos &position) override {
+      std::lock_guard lock(mutex);
+      ++readCalls;
+      auto it = data.find(position);
+      if (it == data.end())
+        return {StoreReadStatus::Missing, {}, "missing"};
+      return {StoreReadStatus::Found, it->second, {}};
+    }
+    StoreWriteResult writeChunk(const ChunkTicketPos &position,
+                                std::span<const std::uint8_t> bytes,
+                                int) override {
+      std::unique_lock lock(mutex);
+      ++writeCalls;
+      if (blockWrites) {
+        writingWaiters.wait(lock, [this] { return !blockWrites; });
+      }
+      data[position].assign(bytes.begin(), bytes.end());
+      ++flushedCalls;
+      return {true, false, {}};
+    }
+    void releaseWrites() {
+      std::lock_guard lock(mutex);
+      blockWrites = false;
+      writingWaiters.notify_all();
+    }
+    std::mutex mutex;
+    std::condition_variable writingWaiters;
+    bool blockWrites = true;
+    int readCalls = 0;
+    int writeCalls = 0;
+    int flushedCalls = 0;
+    std::map<ChunkTicketPos, std::vector<std::uint8_t>> data;
+  };
+
+  // Part 1: 128-chunk in-memory write-behind queue & read-first behavior.
+  auto raw = std::make_shared<CountingStore>();
+  {
+    SerializedChunkStore cached(raw);
+    static_assert(SerializedChunkStore::kDefaultRetainedChunks == 128);
+    for (int i = 0; i < 128; ++i) {
+      cached.writeChunkAsync({i, 0}, makeChunkNbt({i, 0}), 100 + i);
+    }
+    // Unflushed in-memory queue hits before disk write completes.
+    for (int i = 0; i < 128; ++i) {
+      StoreReadResult res = cached.readChunk({i, 0});
+      require(res.status == StoreReadStatus::Found,
+              "in-memory queue serves queued chunk before disk flush");
+      require(res.nbt == makeChunkNbt({i, 0}),
+              "queued chunk bytes match written payload");
+    }
+    {
+      std::lock_guard lock(raw->mutex);
+      require(raw->readCalls == 0,
+              "readChunk hits memory queue without calling inner readChunk");
+    }
+
+    raw->releaseWrites();
+    cached.flushPending();
+    {
+      std::lock_guard lock(raw->mutex);
+      require(raw->flushedCalls == 128,
+              "flushPending writes all 128 queued chunks to inner store");
+    }
+
+    // All 128 flushed chunks remain retained until queue exceeds 128.
+    for (int i = 0; i < 128; ++i) {
+      StoreReadResult res = cached.readChunk({i, 0});
+      require(res.status == StoreReadStatus::Found,
+              "retained flushed chunk stays readable from memory");
+    }
+    {
+      std::lock_guard lock(raw->mutex);
+      require(raw->readCalls == 0,
+              "all 128 flushed chunks still hit memory without disk read");
+    }
+
+    // Writing and flushing the 129th chunk evicts the oldest ({0, 0}) only.
+    cached.writeChunkAsync({128, 0}, makeChunkNbt({128, 0}), 228);
+    cached.flushPending();
+    for (int i = 1; i <= 128; ++i) {
+      StoreReadResult res = cached.readChunk({i, 0});
+      require(res.status == StoreReadStatus::Found &&
+                  res.nbt == makeChunkNbt({i, 0}),
+              "newest 128 chunks remain in memory queue");
+    }
+    {
+      std::lock_guard lock(raw->mutex);
+      require(raw->readCalls == 0, "newest 128 chunks still skip inner read");
+    }
+    StoreReadResult evictedRes = cached.readChunk({0, 0});
+    require(evictedRes.status == StoreReadStatus::Found &&
+                evictedRes.nbt == makeChunkNbt({0, 0}),
+            "evicted oldest chunk falls back to inner store read");
+    {
+      std::lock_guard lock(raw->mutex);
+      require(raw->readCalls == 1,
+              "evicted oldest chunk triggers inner readChunk once");
+    }
+  }
+
+  // Part 2: Non-FULL disk chunk triggers GenerationNeeded when generator exists,
+  // and Unsupported when no generator callback is configured.
+  worldgen::ProtoChunk partialProto({3, 4}, -64, 384);
+  partialProto.setPersistedStatus(worldgen::ChunkStatusId::Carvers);
+  partialProto.setBlockState(0, -64, 0, BlockState("minecraft:stone"));
+  const std::vector<std::uint8_t> partialBytes =
+      terrain::encodeChunkNbt(worldgen::encodeProtoChunkToNbt(partialProto));
+
+  auto partialRaw = std::make_shared<CountingStore>();
+  partialRaw->blockWrites = false;
+  partialRaw->data[{3, 4}] = partialBytes;
+
+  {
+    Installs installs;
+    ChunkLifecycleController controllerNoGen(partialRaw, callbacksFor(installs));
+    require(controllerNoGen.updateDemand({3, 4}, LoadLevel),
+            "demand non-full without generator");
+    require(waitUntil(controllerNoGen, [&] {
+              auto st = controllerNoGen.status({3, 4});
+              return st && st->state == ChunkResidencyState::Failed &&
+                     st->failure == ChunkLoadFailure::Unsupported;
+            }),
+            "without generator, non-full disk chunk stays Unsupported");
+    controllerNoGen.close();
+  }
+
+  {
+    Installs installs;
+    std::vector<ChunkTicketPos> genRequested;
+    ChunkResidentCallbacks callbacks = callbacksFor(installs);
+    callbacks.requestGeneration = [&](const ChunkTicketPos &p, std::uint64_t,
+                                      int) {
+      genRequested.push_back(p);
+      return true;
+    };
+    ChunkLifecycleController controllerWithGen(partialRaw,
+                                               std::move(callbacks));
+    require(controllerWithGen.updateDemand({3, 4}, LoadLevel),
+            "demand non-full with generator");
+    require(waitUntil(controllerWithGen, [&] { return !genRequested.empty(); }),
+            "with generator, non-full disk chunk requests generation");
+    controllerWithGen.close();
+  }
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1103,6 +1250,7 @@ int main(int argc, char **argv) {
     testCloseDrainsAndRejects();
     testLightPatchRoundTrip();
     testGeneratedChunkHandoffAndTemplate();
+    testSerializedChunkStoreRetainedQueueAndPartialLoad();
     if (argc == 3)
       testRealDiskFixture(argv[2], scratch);
     std::cout << "chunk lifecycle tests passed"

@@ -288,6 +288,11 @@ public:
   void setSectionY(std::int8_t y) noexcept { sectionY_ = y; }
   std::array<std::uint8_t, kRandomTickMinisectionCount>
       randomTickByMinisection{};
+  // 最近一次成功写入的 (状态 id, 调色板索引) 记忆：地形填充连续写同一状态时
+  // 跳过调色板线性查找。只在索引仍指向同一状态时使用，扩容/追加都不会移动已有索引。
+  std::uint32_t lastPaletteState = 0;
+  std::uint16_t lastPaletteIndex = 0;
+  bool lastPaletteValid = false;
   std::shared_ptr<SectionStorage> storage;
   LightLayerStorage blockLight;
   LightLayerStorage skyLight;
@@ -333,16 +338,48 @@ public:
   }
 };
 
-// ProtoChunk 与 World::Chunk 共用的非虚基类。方块区段与生物群系都放在这里，
-// 加载/光照生命周期代次也由这里承载；两种 chunk 只追加各自阶段/模拟字段。
+enum class ChunkKind : std::uint8_t {
+  Proto = 0,
+  World = 1,
+};
+
+// ProtoChunk 与 WorldChunk 共用的非虚基类。方块区段、生物群系、结构缓存、
+// 失效标志与加载/光照生命周期代次都放在这里；两种 chunk 只追加各自阶段/模拟字段。
 class BaseChunk {
 public:
+  using OpaqueUniquePtr = std::unique_ptr<void, void (*)(void *)>;
+
   BaseChunk() = default;
+  explicit BaseChunk(ChunkKind kind) noexcept : kind_(kind) {}
   BaseChunk(const BaseChunk &) = delete;
   BaseChunk &operator=(const BaseChunk &) = delete;
   BaseChunk(BaseChunk &&) noexcept = default;
   BaseChunk &operator=(BaseChunk &&) noexcept = default;
   ~BaseChunk() = default;
+
+  ChunkKind kind() const noexcept { return kind_; }
+  bool isProtoChunk() const noexcept { return kind_ == ChunkKind::Proto; }
+  bool isWorldChunk() const noexcept { return kind_ == ChunkKind::World; }
+
+  bool isInvalidated() const noexcept {
+    return invalidated_.value.load(std::memory_order_acquire);
+  }
+  void markInvalidated() noexcept {
+    invalidated_.value.store(true, std::memory_order_release);
+  }
+  void clearInvalidated() noexcept {
+    invalidated_.value.store(false, std::memory_order_release);
+  }
+
+  int generationUserCount() const noexcept {
+    return generationUsers_.value.load(std::memory_order_acquire);
+  }
+  void addGenerationUser() noexcept {
+    generationUsers_.value.fetch_add(1, std::memory_order_acq_rel);
+  }
+  void releaseGenerationUser() noexcept {
+    generationUsers_.value.fetch_sub(1, std::memory_order_acq_rel);
+  }
 
   ChunkTicketPos pos() const noexcept { return pos_; }
   int minY() const noexcept { return minY_; }
@@ -381,6 +418,12 @@ public:
         sections.data(), static_cast<std::size_t>(sectionCount()));
   }
 
+  std::string_view defaultBiome() const noexcept { return defaultBiome_; }
+  void setDefaultBiome(std::string biome) {
+    defaultBiome_ = biome.empty() ? std::string("minecraft:plains")
+                                  : std::move(biome);
+  }
+
   BiomePaletteContainer biomes(int sectionIndex,
                                std::string_view defaultBiome = {});
   BiomePaletteContainer biomes(int sectionIndex,
@@ -390,8 +433,10 @@ public:
     return BiomePaletteContainer(
         const_cast<std::shared_ptr<SectionBiomes> &>(
             biomeSections[static_cast<std::size_t>(index)]),
-        std::string(defaultBiome));
+        defaultBiome.empty() ? defaultBiome_ : std::string(defaultBiome));
   }
+
+  std::string_view getNoiseBiome(int quartX, int quartY, int quartZ) const;
 
   bool isLightCorrect() const noexcept { return lightCorrect_; }
   void setLightCorrect(bool correct) noexcept { lightCorrect_ = correct; }
@@ -399,11 +444,45 @@ public:
   BlockState getBlockState(int x, int y, int z) const;
   FluidState getFluidState(int x, int y, int z) const;
 
+  // 独占结构缓存（替代原本每格原子拷贝的 shared_ptr<void>），Proto 与 WorldChunk 共用。
+  void *structureStartsRaw() const noexcept { return structureData_.get(); }
+  void setStructureStartsRaw(OpaqueUniquePtr data) noexcept {
+    structureData_ = std::move(data);
+  }
+  OpaqueUniquePtr takeStructureStartsRaw() noexcept {
+    return std::move(structureData_);
+  }
+
 protected:
+  template <typename T> struct MovableAtomic {
+    std::atomic<T> value{};
+    MovableAtomic() noexcept = default;
+    explicit MovableAtomic(T init) noexcept : value(init) {}
+    MovableAtomic(const MovableAtomic &o) noexcept
+        : value(o.value.load(std::memory_order_acquire)) {}
+    MovableAtomic &operator=(const MovableAtomic &o) noexcept {
+      value.store(o.value.load(std::memory_order_acquire),
+                  std::memory_order_release);
+      return *this;
+    }
+    MovableAtomic(MovableAtomic &&o) noexcept
+        : value(o.value.load(std::memory_order_acquire)) {}
+    MovableAtomic &operator=(MovableAtomic &&o) noexcept {
+      value.store(o.value.load(std::memory_order_acquire),
+                  std::memory_order_release);
+      return *this;
+    }
+  };
+
+  ChunkKind kind_ = ChunkKind::World;
+  MovableAtomic<bool> invalidated_{false};
+  MovableAtomic<int> generationUsers_{0};
   ChunkTicketPos pos_{};
   int minY_ = -64;
   int height_ = 384;
   bool lightCorrect_ = false;
+  std::string defaultBiome_ = "minecraft:plains";
+  OpaqueUniquePtr structureData_{nullptr, +[](void *) {}};
 
 public:
   std::array<BlockSection, kSectionCapacity> sections;
@@ -411,6 +490,8 @@ public:
   // 由 ChunkLifecycleController 分配的加载生命周期；Proto -> World 晋升时保持不变。
   std::uint64_t loadEpoch = 0;
   std::uint64_t lightEpoch = 0;
+  // 指向所属 ChunkHolder 的数据护栏锁（非空时区段扩容加写锁、并发直读加共享锁）。
+  std::shared_mutex *resizeMutex = nullptr;
 };
 
 } // namespace redstone

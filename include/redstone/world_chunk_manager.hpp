@@ -10,7 +10,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <cstdint>
@@ -18,12 +17,10 @@
 #include <map>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -47,6 +44,8 @@ struct ChunkGenerationStats {
   std::size_t bufferCompleted = 0;
   std::size_t cachedChunks = 0;
   std::size_t evicted = 0;
+  std::size_t dispatched = 0;
+  std::size_t cancelled = 0;
 };
 
 // 单个受管区块的聚合观测视图，汇总生命周期状态、光照状态、保存阻塞原因与错误文本。
@@ -236,14 +235,23 @@ public:
   // 世界生成是否挂载、累计统计与当前生成缓存大小（测试与诊断用）。
   bool chunkGenerationEnabled() const { return generator_ != nullptr; }
   ChunkGenerationStats generationStats() const;
-  // 生成缓存回收：只在生成线程处理任务后按玩家中心裁剪，主线程不触碰调度器。
-  void requestGenerationCacheTrimForTest() {
-    generationTrimRequested_.store(true, std::memory_order_release);
-  }
+  // 生成缓存回收：向流式调度器发起异步裁剪请求，主线程不阻塞等待。
+  void requestGenerationCacheTrimForTest();
   // 并行生成线程数；0 = 自动（hardware_concurrency/2 夹在 1..8）。
-  void setGenerationThreadsForTest(int threads) {
+  void setGenerationThreads(int threads) noexcept {
     generationThreads_.store(threads, std::memory_order_relaxed);
   }
+  void setGenerationThreadsForTest(int threads) {
+    setGenerationThreads(threads);
+  }
+  void setAsyncWorldGenLight(bool enabled) noexcept {
+    asyncWorldGenLight_ = enabled;
+  }
+  bool asyncWorldGenLight() const noexcept { return asyncWorldGenLight_; }
+  void setSaveOnlyOnUnload(bool enabled) noexcept {
+    saveOnlyOnUnload_ = enabled;
+  }
+  bool saveOnlyOnUnload() const noexcept { return saveOnlyOnUnload_; }
 
   // 显式关服流程可等待已接收的 I/O 完成。会先拒绝新需求与迟到的加载安装，随后
   // 保存所有脏的受管区块（包括仍持有加载票的区块）。存在保存失败或阻塞的区块会
@@ -305,6 +313,7 @@ private:
     bool initialLightComplete = false;
     bool initialLightBaselineRecorded = false;
     bool needsLightSave = false;
+    bool generated = false;
     std::uint64_t savedBlockLightRevision = 0;
     std::uint64_t savedSkyLightRevision = 0;
   };
@@ -388,33 +397,16 @@ private:
   void refreshReadinessForChanges(std::span<const ChunkLevelChange> loading,
                                   std::span<const ChunkLevelChange> simulation);
 
-  // 在线世界生成：专用生成线程消费加载票需求，主线程只排空完成结果并通过
-  // ChunkLifecycleController 的普通安装路径落地。
-  struct GenerationJob {
-    ChunkTicketPos position;
-    int loadingLevel = ticket_levels::NoTicketSource;
-    std::uint64_t epoch = 0;
-    bool residency = false;
-    std::int64_t gameTime = 0;
-  };
-  struct CompletedGeneration {
-    ChunkTicketPos position;
-    std::uint64_t epoch = 0;
-    bool residency = false;
-    bool ok = false;
-    std::string detail;
-    LifecycleLoadedChunk loaded;
-    nbt::RootTag root;
-  };
-
-  void startGenerationThread();
+  // 在线世界生成：主线程非阻塞向 WorldGenScheduler 提交/取消需求与优先中心，
+  // 并在 pump() 阶段排空完成结果后经 ChunkLifecycleController 安装。
+  worldgen::WorldGenScheduler *ensureWorldGenScheduler();
   void stopGenerationThread();
-  void generationLoop();
   bool requestChunkGeneration(const ChunkTicketPos &position,
                               std::uint64_t epoch, int loadingLevel);
   void requestBufferGeneration(const ChunkTicketPos &position,
                                int loadingLevel);
-  void cancelGeneration(const ChunkTicketPos &position);
+  void cancelGeneration(const ChunkTicketPos &position,
+                        bool cancelResidency = false);
   void processCompletedGeneration();
   void publishGenerationKeepCenters();
   // 生成期光照：worker 只投递纯值工作，这里在主线程真正提交给 LightService
@@ -474,10 +466,9 @@ private:
   std::atomic<bool> closed_{false};
   ChunkShutdownResult lastShutdownResult_;
 
-  // ---- 世界生成（生成线程是管线唯一所有者）----
+  // ---- 世界生成（统一由 World::chunkMap() 持有调度器与 ChunkHolder）----
   std::shared_ptr<worldgen::ChunkGenerator> generator_;
   std::shared_ptr<RawChunkStore> generationStore_;
-  std::unique_ptr<worldgen::WorldGenScheduler> generationScheduler_;
   // ---- 生成期光照交接（worker 构造输入，主线程提交）----
   struct GeneratedLightRequest {
     std::uint64_t submit = 0;
@@ -486,21 +477,13 @@ private:
   std::shared_ptr<worldgen::GeneratedLightQueue> generatedLightQueue_;
   std::shared_ptr<worldgen::LightOpticalContext> generatedLightContext_;
   std::map<ChunkTicketPos, GeneratedLightRequest> generatedLightRequests_;
-  std::vector<ChunkTicketPos> evictedGeneratedChunks_;
-  std::thread generationThread_;
-  mutable std::mutex generationMutex_;
-  std::condition_variable generationReady_;
-  std::deque<GenerationJob> residencyGenerationJobs_;
-  std::map<ChunkTicketPos, int> bufferGenerationJobs_;
-  std::map<ChunkTicketPos, std::uint64_t> residencyGenerationQueued_;
-  std::deque<CompletedGeneration> completedGeneration_;
-  std::vector<ChunkTicketPos> generationKeepCenters_;
-  int generationKeepRadius_ = 15;
-  bool generationStopping_ = false;
-  std::atomic<bool> generationStop_{false};
-  std::atomic<bool> generationTrimRequested_{false};
+  std::vector<ChunkTicketPos> lastKeepCenters_;
+  int lastKeepRadius_ = 15;
+  bool keepCentersSyncedWithScheduler_ = false;
   std::atomic<int> generationThreads_{0};
-  ChunkGenerationStats generationStats_;
+  bool asyncWorldGenLight_ = true;
+  bool saveOnlyOnUnload_ = true;
+  ChunkGenerationStats lastGenerationStats_;
 };
 
 } // namespace redstone

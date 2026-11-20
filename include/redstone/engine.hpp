@@ -2,6 +2,7 @@
 // 核心世界模拟引擎（`World`）与实体区段空间索引桶（`EntitySectionBucket`）。
 // 承载调色板压缩区段存储、按原版 26.1 顺序分离派发的更新链（形状更新、邻居通知、方块/流体计划刻、
 // 方块事件、活塞与容器方块实体、随机刻）、实体空间查询与按轴滑移碰撞/单遍推挤，以及光照和托管生命周期观测钩子。
+#include "redstone/chunk_map.hpp"
 #include "redstone/chunk_section.hpp"
 #include "redstone/engine_types.hpp"
 #include "redstone/light/chunk_input.hpp"
@@ -121,19 +122,17 @@ public:
   World &operator=(World &&) noexcept;
   World(const World &) = delete;
   World &operator=(const World &) = delete;
+  ChunkMap &chunkMap() noexcept { return *chunkMap_; }
+  const ChunkMap &chunkMap() const noexcept { return *chunkMap_; }
+
   // ~registerLight=false~ 只建立区块节点、不向光照引擎提交登记，用于“生成后再
   // 统一登记”的晋升路径（此时方块还没导入，提交进去的会是空几何）。
   // `lightEpoch` 非 0 时沿用调用方提供的加载/光照生命周期（ProtoChunk 晋升路径），
   // 否则按新的加载生命周期递增。
   void loadChunk(int x, int z, bool registerLight = true,
                  std::uint64_t lightEpoch = 0);
-  // 让本地区块的生命周期代次对齐引擎里已有的登记。生成路径接管流水线先前的
-  // 登记时需要它，否则存档/网络侧会认为光照属于上一个生命周期而永远不就绪。
-  void alignChunkLightLifecycle(int x, int z);
-  // 安装完成后把该区块的光照登记切换成直读 World 几何（释放生成期句柄/镜像），
-  // 并对齐光照生命周期代次。返回 false 表示引擎里没有该区块或当前模式没有
-  // World 直读源，调用方需要自行重新提交。
-  bool adoptChunkLightDirectGeometry(int x, int z);
+  // 从 `ProtoChunk` 就地/零拷贝晋升安装为运行态 `WorldChunk`，同步后处理流体刻与 POI。
+  bool installGeneratedProtoChunk(std::shared_ptr<worldgen::ProtoChunk> protoPtr);
   void unloadChunk(int x, int z);
   bool isChunkLoaded(int x, int z) const;
   // 测试可见：区块当前的加载生命周期与光照生命周期代次。
@@ -415,8 +414,11 @@ public:
   std::vector<std::unique_ptr<ContainerTickerSlot>> pendingContainerTickers;
   bool tickingContainerBlockEntities = false;
   std::size_t currentContainerTickerIndex_ = 0;
-  std::unordered_map<std::uint64_t, std::vector<Pos>> containerPositionsByChunk_;
-  std::unordered_map<std::uint64_t, std::vector<std::weak_ptr<HopperBlockEntity>>>
+  phmap::flat_hash_map<std::uint64_t, std::vector<Pos>, ChunkKeyHash>
+      containerPositionsByChunk_;
+  phmap::flat_hash_map<std::uint64_t,
+                       std::vector<std::weak_ptr<HopperBlockEntity>>,
+                       ChunkKeyHash>
       hopperItemWatchersBySection_;
   PosMap<std::vector<std::weak_ptr<HopperBlockEntity>>> hopperBlockWatchersByPos_;
   // 实体阶段：对应原版 `EntityTickList` 按插入序遍历活跃映射表的语义。
@@ -652,28 +654,8 @@ private:
           return blk->palette[blk->indexAt(c)];
         });
   }
-  // World 区块：方块区段与生物群系来自共享 BaseChunk，模拟状态只追加在派生部分。
-  struct Chunk : public BaseChunk {
-    static constexpr std::uint32_t kInvalidRandomTickIndex =
-        std::numeric_limits<std::uint32_t>::max();
-    bool loaded = true;
-    bool hasPendingLightCell = false;
-    std::uint32_t randomTickingSectionMask = 0;
-    std::uint32_t randomTickIndex = kInvalidRandomTickIndex;
-    // 当前已加载生命周期的 `LightService` 代数令牌；同一地址重载区块会递增它，从而安全丢弃队列中旧生命周期的单元更新。
-    std::uint64_t lightLifecycleEpoch = 1;
-    // 主线程在该区块上执行光学方块写入后产生的最新 `LightService` 序列号。
-    // 持久化检查要求已发布的光照快照代次 >= `requiredLightGeneration` 才允许将区块标记为 `isLightOn=1`。
-    std::uint64_t requiredLightGeneration = 0;
-    std::optional<PersistedChunkLight> persistedLight;
-    std::array<std::int16_t, kSectionCapacity> persistedLightSectionIndex{};
-    // 区段数组直接内联在 `Chunk` 中：从区块到区段头只需一次指针解引用，消除逐区段堆分配且所有区段头内存连续。
-    // 默认构造的 `Section` 即为空存储的单值空气区段，因此无需额外维护“是否存在”标记；
-    // 首次写入非空气方块时 `Section::set` 才会按需物化调色板。
-    std::unique_ptr<ChunkHeightmaps> heightmaps;
-    void refreshRandomTickMask(int count);
-    void refreshPersistedLightIndex(int minSectionY, int numSections);
-  };
+  // World 区块别名：真实定义位于 chunk_map.hpp 的 WorldChunk。
+  using Chunk = WorldChunk;
   static int chunkIndex(int v) {
     // C++20 中有符号算术右移对负坐标执行向下取整。
     return v >> 4;
@@ -719,7 +701,9 @@ private:
     int z = 0;
   };
   mutable BlockReadCache blockReadCache_;
-  std::unordered_map<std::uint64_t, Chunk> chunks_;
+  std::unique_ptr<ChunkMap> chunkMap_;
+  void invalidateChunkCaches(std::uint64_t key,
+                             WorldChunk *expected = nullptr) noexcept;
   // 维护所有 `randomTickingSectionMask != 0` 的已加载区块：按 `key` 懒排序以保证随机刻迭代顺序确定，
   // 同时借助 `Chunk::randomTickIndex` 支持 O(1) swap-and-pop 增删。
   std::vector<TickingChunkEntry> randomTickingChunks_;
@@ -750,8 +734,10 @@ private:
                             void *ctx, bool (*callback)(void *, Entity &)) const;
   // 托管存档的区块卸载阻塞索引（按区块统计实体数、记录活塞与容器坐标）：
   // 将原本每次卸载/持久化判定时的全维度遍历转化为 O(1) 局部查询，并与主表增删路径同步维护。
-  std::unordered_map<std::uint64_t, std::size_t> entityCountsByChunk_;
-  std::unordered_map<std::uint64_t, std::vector<Pos>> pistonPositionsByChunk_;
+  phmap::flat_hash_map<std::uint64_t, std::size_t, ChunkKeyHash>
+      entityCountsByChunk_;
+  phmap::flat_hash_map<std::uint64_t, std::vector<Pos>, ChunkKeyHash>
+      pistonPositionsByChunk_;
   std::set<std::array<std::int32_t, 4>> entityUuids_;
   void entitySectionAdd(Entity &entity);
   void entitySectionRemove(Entity &entity);
@@ -800,16 +786,11 @@ private:
   std::unique_ptr<PoiStorage> poiStorage_;
   const LightOpticalTable *lightOptical_ = nullptr;
 
-  mutable std::unique_ptr<std::shared_mutex> lightDirectMutex_ =
-      std::make_unique<std::shared_mutex>();
-  // 区段写入与光照工作线程直读共用的扩容锁：只要光照引擎在运行就必须持锁/原子写。
-  std::shared_mutex *directResizeMutex() const noexcept {
-    return lightService_ ? lightDirectMutex_.get() : nullptr;
+  std::shared_mutex *directResizeMutex(const Chunk &chunk) const noexcept {
+    return (lightService_ || (chunkMap_ && chunkMap_->worldGenEnabled()))
+               ? chunk.resizeMutex
+               : nullptr;
   }
-  static LightSectionView sectionToLightView(const Section &section,
-                                             bool atomicHeader) noexcept;
-  static LightSectionView directReadSection(const void *context, int chunkX,
-                                            int chunkZ, int sectionY) noexcept;
   bool inWorldTick_ = false;
   mutable bool wireShouldSignal_ = true;
   PosMap<int> comparatorSignals_;
@@ -818,16 +799,28 @@ private:
   std::vector<std::uint64_t> pendingLightChunkKeys_;
   void flushPendingLightCells();
 
+  friend class ChunkMap;
   friend class WorldChunkManager;
   friend struct detail::WorldBehaviours;
   friend void pistonForgetWorld(World &);
+  bool installManagedChunk(
+      int x, int z, std::shared_ptr<Chunk> chunk,
+      const std::vector<ScheduledTick> &blockTicks,
+      const std::vector<std::pair<ScheduledTick, FluidRef>> &fluidTicks,
+      std::span<const std::shared_ptr<PistonMovingBlockEntity>> pistons = {},
+      std::span<const std::shared_ptr<Entity>> itemEntities = {},
+      std::span<const std::shared_ptr<Entity>> tntEntities = {});
   bool installManagedChunk(
       int x, int z, Chunk &&chunk,
       const std::vector<ScheduledTick> &blockTicks,
       const std::vector<std::pair<ScheduledTick, FluidRef>> &fluidTicks,
       std::span<const std::shared_ptr<PistonMovingBlockEntity>> pistons = {},
       std::span<const std::shared_ptr<Entity>> itemEntities = {},
-      std::span<const std::shared_ptr<Entity>> tntEntities = {});
+      std::span<const std::shared_ptr<Entity>> tntEntities = {}) {
+    return installManagedChunk(
+        x, z, std::make_shared<Chunk>(std::move(chunk)), blockTicks, fluidTicks,
+        pistons, itemEntities, tntEntities);
+  }
   bool removeManagedChunk(int x, int z, std::string &error,
                           bool allowTransientDrop = false);
   bool managedChunkPersistenceState(int x, int z, std::string &reason) const;

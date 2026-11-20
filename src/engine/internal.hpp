@@ -85,209 +85,69 @@ inline bool tickKeyEquals(const TickKey<Target> &a, const TickKey<Target> &b) {
 // 基于开放寻址与墓碑删除（tombstone）的 (packedPos, target) 去重集合，支持保留容量的 clear 与周期性/空表缩容。
 // 存在原因：高频计划刻调度与弹出过程中会反复插入和删除大量条目，开放寻址扁平数组可避免 std::unordered_set 的逐节点堆分配开销。
 template <class Target> class TickKeySet {
-public:
-  std::size_t size() const { return count_; }
-  std::size_t capacity() const { return slots_.size(); }
-  bool contains(const TickKey<Target> &key) const { return slotOf(key) != kNone; }
-  bool insert(const TickKey<Target> &key) {
-    if (slots_.empty())
-      rehash(16);
-    if (slotOf(key) != kNone)
-      return false;
-    if ((used_ + 1) * 3 >= slots_.size() * 2)
-      rehash(roundUp(std::max<std::size_t>(16, (count_ + 1) * 2)));
-    std::size_t index = tickKeyHash(key) & mask_;
-    std::size_t empty = kNone;
-    for (;;) {
-      if (state_[index] == kEmpty) {
-        const auto target = empty == kNone ? index : empty;
-        slots_[target] = key;
-        state_[target] = kUsed;
-        ++count_;
-        if (empty == kNone)
-          ++used_;
-        return true;
-      }
-      if (state_[index] == kDeleted && empty == kNone)
-        empty = index;
-      index = (index + 1) & mask_;
+  struct Hasher {
+    std::size_t operator()(const TickKey<Target> &key) const noexcept {
+      return tickKeyHash(key);
     }
+  };
+  struct Eq {
+    bool operator()(const TickKey<Target> &a,
+                    const TickKey<Target> &b) const noexcept {
+      return tickKeyEquals(a, b);
+    }
+  };
+  using Set = phmap::flat_hash_set<TickKey<Target>, Hasher, Eq>;
+
+public:
+  std::size_t size() const { return set_.size(); }
+  std::size_t capacity() const { return set_.bucket_count(); }
+  bool contains(const TickKey<Target> &key) const {
+    return set_.contains(key);
   }
-  void erase(const TickKey<Target> &key) {
-    const auto index = slotOf(key);
-    if (index == kNone)
-      return;
-    state_[index] = kDeleted;
-    --count_;
-  }
-  void clear() {
-    std::fill(state_.begin(), state_.end(), static_cast<std::uint8_t>(kEmpty));
-    count_ = used_ = 0;
-  }
-  void release() {
-    std::vector<TickKey<Target>>{}.swap(slots_);
-    std::vector<std::uint8_t>{}.swap(state_);
-    mask_ = count_ = used_ = 0;
-  }
+  bool insert(const TickKey<Target> &key) { return set_.insert(key).second; }
+  void erase(const TickKey<Target> &key) { set_.erase(key); }
+  void clear() { set_.clear(); }
+  void release() { Set{}.swap(set_); }
   void compactIfNeeded() {
-    if (count_ == 0) {
-      if (!slots_.empty())
+    if (set_.empty()) {
+      if (set_.bucket_count() > 0)
         release();
       return;
     }
-    const std::size_t cap = slots_.size();
-    const std::size_t tombstones = used_ - count_;
-    if ((cap > 32 && count_ * 6 <= cap) || (cap > 32 && tombstones * 2 >= cap))
-      rehash(roundUp(std::max<std::size_t>(16, (count_ + 1) * 2)));
+    const std::size_t cap = set_.bucket_count();
+    if (cap > 32 && set_.size() * 6 <= cap)
+      set_.rehash(0);
   }
 
 private:
-  static constexpr std::uint8_t kEmpty = 0, kUsed = 1, kDeleted = 2;
-  static constexpr std::size_t kNone = static_cast<std::size_t>(-1);
-  static std::size_t roundUp(std::size_t value) {
-    std::size_t power = 16;
-    while (power < value)
-      power <<= 1;
-    return power;
-  }
-  std::size_t slotOf(const TickKey<Target> &key) const {
-    if (slots_.empty())
-      return kNone;
-    std::size_t index = tickKeyHash(key) & mask_;
-    for (;;) {
-      if (state_[index] == kEmpty)
-        return kNone;
-      if (state_[index] == kUsed && tickKeyEquals(slots_[index], key))
-        return index;
-      index = (index + 1) & mask_;
-    }
-  }
-  void rehash(std::size_t capacity) {
-    std::vector<TickKey<Target>> oldSlots = std::move(slots_);
-    std::vector<std::uint8_t> oldState = std::move(state_);
-    slots_.assign(capacity, TickKey<Target>{});
-    state_.assign(capacity, static_cast<std::uint8_t>(kEmpty));
-    mask_ = capacity - 1;
-    count_ = used_ = 0;
-    for (std::size_t i = 0; i < oldState.size(); ++i)
-      if (oldState[i] == kUsed)
-        insert(oldSlots[i]);
-  }
-  std::vector<TickKey<Target>> slots_;
-  std::vector<std::uint8_t> state_;
-  std::size_t mask_ = 0;
-  std::size_t count_ = 0, used_ = 0;
+  Set set_;
 };
 
-inline std::size_t chunkKeyHash(std::uint64_t key) {
-  key ^= key >> 33;
-  key *= 0xff51afd7ed558ccdull;
-  key ^= key >> 33;
-  key *= 0xc4ceb9fe1a85ec53ull;
-  key ^= key >> 33;
-  return static_cast<std::size_t>(key);
-}
-// 基于 64 位打包区块坐标的开放寻址哈希表，对应原版 LevelTicks 中使用的 fastutil Long2ObjectOpenHashMap / Long2LongOpenHashMap。
-// 存在原因：引擎每刻都要按区块键检索计划刻容器和下次触发时间，扁平数组布局可显著降低内存占用并提高缓存局部性。
 template <class V> class FlatChunkMap {
+  using Map = phmap::flat_hash_map<std::uint64_t, V, ChunkKeyHash>;
+
 public:
-  std::size_t size() const { return count_; }
-  V *find(std::uint64_t key) { return const_cast<V *>(std::as_const(*this).find(key)); }
+  std::size_t size() const { return map_.size(); }
+  V *find(std::uint64_t key) {
+    auto it = map_.find(key);
+    return it == map_.end() ? nullptr : &it->second;
+  }
   const V *find(std::uint64_t key) const {
-    if (keys_.empty())
-      return nullptr;
-    std::size_t index = chunkKeyHash(key) & mask_;
-    for (;;) {
-      if (state_[index] == kEmpty)
-        return nullptr;
-      if (state_[index] == kUsed && keys_[index] == key)
-        return &values_[index];
-      index = (index + 1) & mask_;
-    }
+    auto it = map_.find(key);
+    return it == map_.end() ? nullptr : &it->second;
   }
   void set(std::uint64_t key, const V &value) {
-    if (keys_.empty())
-      rehash(64);
-    (void)assign(key, value, true);
+    map_.insert_or_assign(key, value);
   }
-  bool erase(std::uint64_t key) {
-    if (keys_.empty())
-      return false;
-    std::size_t index = chunkKeyHash(key) & mask_;
-    for (;;) {
-      if (state_[index] == kEmpty)
-        return false;
-      if (state_[index] == kUsed && keys_[index] == key) {
-        state_[index] = kDeleted;
-        --count_;
-        return true;
-      }
-      index = (index + 1) & mask_;
-    }
-  }
+  bool erase(std::uint64_t key) { return map_.erase(key) > 0; }
   template <class F> void forEach(F &&visitor) const {
-    for (std::size_t i = 0; i < keys_.size(); ++i)
-      if (state_[i] == kUsed)
-        visitor(keys_[i], values_[i]);
+    for (const auto &[k, v] : map_)
+      visitor(k, v);
   }
-  void clear() {
-    std::fill(state_.begin(), state_.end(), static_cast<std::uint8_t>(kEmpty));
-    count_ = used_ = 0;
-  }
+  void clear() { map_.clear(); }
 
 private:
-  static constexpr std::uint8_t kEmpty = 0, kUsed = 1, kDeleted = 2;
-  static std::size_t roundUp(std::size_t value) {
-    std::size_t power = 64;
-    while (power < value)
-      power <<= 1;
-    return power;
-  }
-  bool assign(std::uint64_t key, const V &value, bool allowGrow) {
-    if ((used_ + 1) * 3 >= keys_.size() * 2 && allowGrow) {
-      rehash(roundUp(std::max<std::size_t>(64, (count_ + 1) * 4)));
-      return assign(key, value, false);
-    }
-    std::size_t index = chunkKeyHash(key) & mask_;
-    std::size_t empty = static_cast<std::size_t>(-1);
-    for (;;) {
-      if (state_[index] == kEmpty) {
-        const auto target = empty == static_cast<std::size_t>(-1) ? index : empty;
-        keys_[target] = key;
-        values_[target] = value;
-        state_[target] = kUsed;
-        ++count_;
-        if (empty == static_cast<std::size_t>(-1))
-          ++used_;
-        return true;
-      }
-      if (state_[index] == kDeleted && empty == static_cast<std::size_t>(-1))
-        empty = index;
-      if (state_[index] == kUsed && keys_[index] == key) {
-        values_[index] = value;
-        return false;
-      }
-      index = (index + 1) & mask_;
-    }
-  }
-  void rehash(std::size_t capacity) {
-    std::vector<std::uint64_t> oldKeys = std::move(keys_);
-    std::vector<V> oldValues = std::move(values_);
-    std::vector<std::uint8_t> oldState = std::move(state_);
-    keys_.assign(capacity, 0);
-    values_.assign(capacity, V{});
-    state_.assign(capacity, static_cast<std::uint8_t>(kEmpty));
-    mask_ = capacity - 1;
-    count_ = used_ = 0;
-    for (std::size_t i = 0; i < oldState.size(); ++i)
-      if (oldState[i] == kUsed)
-        assign(oldKeys[i], oldValues[i], false);
-  }
-  std::vector<std::uint64_t> keys_;
-  std::vector<V> values_;
-  std::vector<std::uint8_t> state_;
-  std::size_t mask_ = 0;
-  std::size_t count_ = 0, used_ = 0;
+  Map map_;
 };
 } // namespace engine_internal
 using namespace engine_internal;
@@ -665,7 +525,7 @@ template <class Target> struct TickQueueOf {
 // ---------------------------------------------------------------------------
 struct World::BlockEventQueue {
   std::deque<BlockEvent> order;
-  std::unordered_set<BlockEvent, BlockEventHash> index;
+  phmap::flat_hash_set<BlockEvent, BlockEventHash> index;
   bool add(const BlockEvent &event) {
     if (!index.insert(event).second)
       return false;

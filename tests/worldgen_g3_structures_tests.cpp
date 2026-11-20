@@ -22,7 +22,8 @@ std::string stateHashKey(const redstone::BlockState &s) {
   return key;
 }
 
-std::uint64_t fnvHashChunk(const ChunkAccess &chunk, int minY, int height) {
+std::uint64_t fnvHashChunk(const redstone::BaseChunk &chunk, int minY,
+                           int height) {
   std::uint64_t h = 0xcbf29ce484222325ULL;
   const int baseX = chunk.pos().x << 4;
   const int baseZ = chunk.pos().z << 4;
@@ -163,7 +164,8 @@ int main(int argc, char **argv) {
 
   // Check Noise chunk hash via ChunkGenerationPipeline WITH StructureStarts / Beardifier
   ChunkGenerationPipeline pipeline(owGen, kSeed);
-  ChunkAccess &generated = pipeline.ensureStatus(vPos, ChunkStatusId::Noise);
+  redstone::BaseChunk &generated =
+      pipeline.ensureStatus(vPos, ChunkStatusId::Noise);
   const std::uint64_t hash =
       fnvHashChunk(generated, owGen.minY(), owGen.height());
   std::cout << "C++ VILLAGE_NOISE_HASH=0x" << std::hex << hash << std::dec

@@ -256,6 +256,8 @@ namespace {
 // table; ordinary dry blocks take the allocation-free path in fluidStateOf.
 struct FluidStateCacheEntry {
   FluidState fluid;
+  // 0 = 该状态不携带流体（热路径直接返回空），1 = 携带流体（fluid 已解码）。
+  std::uint8_t kind = 0;
   bool ready = false;
 };
 
@@ -302,21 +304,21 @@ FluidState decodeFluidState(const BlockState &state) {
 // (Math.min(level, 8)), so levels 8..15 all read the falling full state while
 // the block state keeps its own property value.
 FluidState fluidStateOf(const BlockState &state) {
-  // Preserve the pre-cache fast path and avoid a thread-local vector allocation
-  // for the overwhelmingly common air/ordinary dry-block query.
-  if (!isLiquidBlock(state) && !waterloggedOf(state) &&
-      !isInherentWaterSourceBlock(state))
-    return FluidState();
   const auto id = static_cast<std::size_t>(state.id());
   auto &cache = fluidStateCache();
   if (id >= cache.size())
     cache.resize(id + 1);
   FluidStateCacheEntry &entry = cache[id];
   if (!entry.ready) {
-    entry.fluid = decodeFluidState(state);
+    entry.kind = (isLiquidBlock(state) || waterloggedOf(state) ||
+                  isInherentWaterSourceBlock(state))
+                     ? 1
+                     : 0;
+    if (entry.kind != 0)
+      entry.fluid = decodeFluidState(state);
     entry.ready = true;
   }
-  return entry.fluid;
+  return entry.kind != 0 ? entry.fluid : FluidState();
 }
 
 // ---------------------------------------------------------------------------

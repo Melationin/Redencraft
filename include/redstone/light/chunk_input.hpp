@@ -16,6 +16,7 @@ namespace redstone {
 // 调用方负责设置 lifecycleEpoch（加载生命周期与光照生命周期现在是同一个令牌）。
 LightChunkInput buildLightChunkInput(
     const BaseChunk &chunk, std::optional<PersistedChunkLight> persistedLight,
-    bool deferCompute, std::shared_ptr<const BaseChunk> chunkHandle = {});
+    bool deferCompute, std::shared_ptr<const BaseChunk> chunkHandle = {},
+    std::shared_ptr<const PrecomputedChunkLight> precomputedLight = {});
 
 } // namespace redstone

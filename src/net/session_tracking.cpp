@@ -207,14 +207,22 @@ void Session::refreshChunkView() {
   // this fixed square is only the visualization view, not simulation loading.
 }
 void Session::sendChunkBatch() {
+  if (inSendChunkBatch_ || closed())
+    return;
+  inSendChunkBatch_ = true;
+  struct Guard {
+    bool &flag;
+    ~Guard() { flag = false; }
+  } guard{inSendChunkBatch_};
   // A chunk can join after the worker completed but before the next world tick
   // drains publications. This is a nonblocking ownership handoff, never a wait
   // for propagation, and keeps the join packet order chunk-before-position.
   if (world_->lightingEnabled() && world_->lightService())
     world_->lightService()->drainPublished();
-  if (awaitingChunkBatch_ || pendingChunks_.empty() || closed())
+  if ((!options_.unlimitedNetwork && awaitingChunkBatch_) ||
+      pendingChunks_.empty() || closed())
     return;
-  if (world_->lightingEnabled()) {
+  if (world_->lightingEnabled() && !options_.sendChunksBeforeLightReady) {
     const auto *service = world_->lightService();
     bool ready = false;
     for (const auto chunk : pendingChunks_) {
@@ -241,8 +249,9 @@ void Session::sendChunkBatch() {
       data_.packet(phaseName(phase_), "clientbound", "level_chunk_with_light");
   int count = 0;
   std::size_t bytes = 0;
-  while (!pendingChunks_.empty() && count < chunksPerBatch_ &&
-         bytes < 2 * 1024 * 1024) {
+  while (!pendingChunks_.empty() &&
+         (options_.unlimitedNetwork ||
+          (count < chunksPerBatch_ && bytes < 2 * 1024 * 1024))) {
     const auto [x, z] = pendingChunks_.front();
     pendingChunks_.erase(pendingChunks_.begin());
     if (!world_->isChunkLoaded(x, z))
@@ -251,13 +260,23 @@ void Session::sendChunkBatch() {
     std::shared_ptr<const LightChunkSnapshot> skyLight;
     if (world_->lightingEnabled()) {
       const auto *service = world_->lightService();
-      blockLight = service->latestLayerChunk(LightLayer::Block, x, z);
-      skyLight = service->latestLayerChunk(LightLayer::Sky, x, z);
-      if (!blockLight || !blockLight->protocolReady ||
-          (blockLight->skyLightEnabled &&
-           (!skyLight || !skyLight->protocolReady))) {
-        awaitingLightChunks_.insert({x, z});
-        continue;
+      auto candidateBlock =
+          service->latestLayerChunk(LightLayer::Block, x, z);
+      auto candidateSky = service->latestLayerChunk(LightLayer::Sky, x, z);
+      if (options_.sendChunksBeforeLightReady) {
+        if (candidateBlock && candidateBlock->protocolReady)
+          blockLight = std::move(candidateBlock);
+        if (candidateSky && candidateSky->protocolReady)
+          skyLight = std::move(candidateSky);
+      } else {
+        if (!candidateBlock || !candidateBlock->protocolReady ||
+            (candidateBlock->skyLightEnabled &&
+             (!candidateSky || !candidateSky->protocolReady))) {
+          awaitingLightChunks_.insert({x, z});
+          continue;
+        }
+        blockLight = std::move(candidateBlock);
+        skyLight = std::move(candidateSky);
       }
     }
     // Snapshot on the tick thread (the world is not thread safe), then let the
@@ -325,19 +344,25 @@ void Session::lightPublished(
                         ? sentChunkBlockLight_
                         : sentChunkSkyLight_;
     auto previous = byLayer.find(key);
-    if (previous == byLayer.end())
-      return;
-    if (snapshot->revision <= previous->second.revision)
-      return;
-    if (snapshot->lifecycleEpoch != previous->second.lifecycleEpoch ||
-        snapshot->chunkX != previous->second.chunkX ||
-        snapshot->chunkZ != previous->second.chunkZ)
-      throw ProtocolError("stale light layer lifecycle reached the session");
-    auto update = snapshot->deltaBaseRevision == previous->second.revision
-                      ? prepareLayerLightUpdate(snapshot, *snapshot->layer,
-                                               &previous->second)
-                      : prepareLayerLightUpdate(snapshot, *snapshot->layer);
-    previous->second = lightLayerVersion(*snapshot);
+    ProtocolLightUpdate update;
+    if (previous == byLayer.end()) {
+      if (!options_.sendChunksBeforeLightReady)
+        return;
+      update = prepareLayerLightUpdate(snapshot, *snapshot->layer, nullptr);
+      byLayer.emplace(key, lightLayerVersion(*snapshot));
+    } else {
+      if (snapshot->revision <= previous->second.revision)
+        return;
+      if (snapshot->lifecycleEpoch != previous->second.lifecycleEpoch ||
+          snapshot->chunkX != previous->second.chunkX ||
+          snapshot->chunkZ != previous->second.chunkZ)
+        throw ProtocolError("stale light layer lifecycle reached the session");
+      update = snapshot->deltaBaseRevision == previous->second.revision
+                   ? prepareLayerLightUpdate(snapshot, *snapshot->layer,
+                                             &previous->second)
+                   : prepareLayerLightUpdate(snapshot, *snapshot->layer);
+      previous->second = lightLayerVersion(*snapshot);
+    }
     if (update.sky.dataSections.empty() &&
         update.sky.emptySections.empty() &&
         update.block.dataSections.empty() &&
@@ -396,10 +421,13 @@ void Session::lightChunkLifecycle(int chunkX, int chunkZ, bool loaded) {
                        ? service->latestLayerChunk(LightLayer::Sky, chunkX,
                                                    chunkZ)
                        : nullptr;
-  if (block && block->protocolReady &&
-      (!block->skyLightEnabled || (sky && sky->protocolReady)))
+  if (options_.sendChunksBeforeLightReady ||
+      (block && block->protocolReady &&
+       (!block->skyLightEnabled || (sky && sky->protocolReady)))) {
     queuePendingChunk(key);
-  else
+    if (options_.unlimitedNetwork)
+      sendChunkBatch();
+  } else
     awaitingLightChunks_.insert(key);
 }
 
@@ -447,8 +475,11 @@ void Session::managedChunkResidency(int chunkX, int chunkZ, bool resident) {
   if (resident) {
     availableChunks_.insert(key);
     if (chunkCenter_ && chunkVisible(key) &&
-        world_->isChunkLoaded(chunkX, chunkZ))
+        world_->isChunkLoaded(chunkX, chunkZ)) {
       queuePendingChunk(key);
+      if (options_.unlimitedNetwork)
+        sendChunkBatch();
+    }
     return;
   }
   availableChunks_.erase(key);

@@ -9,9 +9,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
+#include "redstone/hash.hpp"
 #include "redstone/property.hpp"
 
 namespace redstone {
@@ -154,15 +154,10 @@ public:
   }
 
 private:
-  struct ValueHash {
-    using is_transparent = void;
-    std::size_t operator()(std::string_view value) const {
-      return std::hash<std::string_view>{}(value);
-    }
-  };
   std::string name_;
   std::vector<std::string> values_;
-  std::unordered_map<std::string, std::uint32_t, ValueHash, std::equal_to<>>
+  phmap::flat_hash_map<std::string, std::uint32_t, AnkerlStringHash,
+                       std::equal_to<>>
       valueIndex_;
   std::uint32_t defaultIndex_ = 0;
   PropertyKind kind_ = PropertyKind::Count;

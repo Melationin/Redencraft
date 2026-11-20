@@ -46,6 +46,10 @@ struct ServerWorldOptions {
   // 26.1 worldgen 参数目录（含 noise/、density_function/、noise_settings/ 等）。
   // 为空表示不启用世界生成；缺失区块保持原来的 Missing 语义。
   std::filesystem::path worldgenDirectory;
+  // 世界生成工作线程数；0 = 自动（hardware_concurrency/2 夹在 1..8）。
+  int worldgenThreads = 0;
+  bool asyncWorldGenLight = true;
+  bool saveOnlyOnUnload = true;
 };
 
 // 统一持有共享的服务端元数据（level.dat 中的 Time、GameRules、WorldClocks）以及多维度 26.1 世界目录下的所有活跃 DimensionLevel。

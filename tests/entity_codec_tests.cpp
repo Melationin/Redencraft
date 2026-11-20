@@ -321,18 +321,40 @@ void testFallingBlockRoundTrip() {
           "falling block TileEntityData is rejected atomically");
   nbt::RootTag unsupported = root;
   unsupported.value.compound["Entities"].list[0]
-      .compound["BlockState"].compound["Name"].text = "minecraft:gravel";
+      .compound["BlockState"].compound["Name"].text =
+      "minecraft:unregistered_falling_block";
   require(decodeEntityChunk(encodeEntityChunk(unsupported)).status ==
               DecodeStatus::Unsupported,
           "unsupported falling block state is rejected atomically");
-  nbt::RootTag hurt = root;
-  hurt.value.compound["Entities"].list[0]
+
+  nbt::RootTag gravel = root;
+  gravel.value.compound["Entities"].list[0]
+      .compound["BlockState"].compound["Name"].text = "minecraft:gravel";
+  gravel.value.compound["Entities"].list[0]
       .compound["HurtEntities"].number = 1;
-  require(decodeEntityChunk(encodeEntityChunk(hurt)).status ==
+  gravel.value.compound["Entities"].list[0]
+      .compound["FallHurtAmount"].real = 6.0;
+  gravel.value.compound["Entities"].list[0]
+      .compound["FallHurtMax"].number = 40;
+  const DecodedEntityChunk decodedGravel =
+      decodeEntityChunk(encodeEntityChunk(gravel));
+  const auto gravelValues = project<FallingBlockEntityData>(decodedGravel);
+  require(decodedGravel.status == DecodeStatus::Ok &&
+              gravelValues.size() == 1 &&
+              gravelValues[0].blockId == "minecraft:gravel" &&
+              gravelValues[0].hurtEntities &&
+              gravelValues[0].fallDamagePerDistance == 6.0f &&
+              gravelValues[0].fallDamageMax == 40,
+          "registered falling block state and damage settings round-trip");
+
+  nbt::RootTag badHurt = gravel;
+  badHurt.value.compound["Entities"].list[0]
+      .compound["FallHurtAmount"].real = -1.0;
+  require(decodeEntityChunk(encodeEntityChunk(badHurt)).status ==
               DecodeStatus::Unsupported,
-          "falling block damage state is rejected");
+          "negative falling block damage state is rejected");
   std::cout << "entity_codec falling_stock=1 tile_data=unsupported "
-               "unsupported_state=rejected damage=rejected\n";
+               "unsupported_state=rejected gravel_damage=1\n";
 }
 
 void testMixedEntitySequenceWithFalling() {

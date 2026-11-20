@@ -23,7 +23,7 @@ namespace redstone::worldgen {
 class Aquifer;
 class BiomeManager;
 class CarvingMask;
-class ChunkAccess;
+class ProtoChunk;
 class NoiseChunk;
 class RandomState;
 struct NoiseGeneratorSettings;
@@ -70,7 +70,7 @@ struct ConfiguredCarver {
              const NoiseGeneratorSettings &settings, RandomState &rs,
              const BiomeManager &biomeManager,
              const CarverNoiseBiomeReader &noiseBiomeReader,
-             const WorldgenRegistries &registries, ChunkAccess &chunk,
+             const WorldgenRegistries &registries, ProtoChunk &chunk,
              NoiseChunk &noiseChunk, RandomSource &rng, Aquifer &aquifer,
              ChunkTicketPos sourceChunkPos, CarvingMask &mask) const;
 };

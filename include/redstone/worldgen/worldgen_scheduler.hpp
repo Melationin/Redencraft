@@ -1,34 +1,32 @@
 #pragma once
-// 基于单槽位状态机（`ChunkHolder`）、传递依赖剪枝、O(1) Bitset 分桶队列与
-// 3×3 空间九色无锁波前的多线程区块生成调度器（`WorldGenScheduler`）。
-// 仅保留必要的跨区块同步屏障（`StructureReferences`/`Noise`/`Features`/`Light`），
-// 其余 `waitRadius=0` 阶段在同一工作线程内联连续推进，同时在进入 `WorldGenRegion`
-// 时保留完整的 17×17 结构只读视野契约。
+// High-throughput, low-latency multi-threaded chunk generation scheduler.
+// Features:
+// - Unified single PriorityBucketQueue (64 distance/priority buckets x 12 stages)
+// - Fine-grained 3x3 spatial lock (`spatialMutex_`) for writeRadius > 0 stages
+// - 4-dispatch inline chaining across compatible dependency pins
+// - Parallel lock-free holder initialization (`InitState::Initializing`)
+// - Non-blocking streaming demand control plane with bounded WIP, true in-flight
+//   cancellation, and parallel worker NBT finalization
 
+#include "redstone/chunk_map.hpp"
 #include "redstone/worldgen/chunk_generator.hpp"
 #include "redstone/worldgen/chunk_status.hpp"
 #include "redstone/worldgen/proto_chunk.hpp"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
 #include <thread>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace redstone::worldgen {
-
-struct WorldGenSchedulerConfig {
-  std::size_t threadCount = 0; // 0 = auto hardware_concurrency()
-  int colorTurnDispatchLimit = 64; // 每轮颜色波前最大连续派发数，防止高密度区饥饿
-};
 
 struct WorldGenSchedulerStats {
   std::size_t chunksCreated = 0;
@@ -36,8 +34,15 @@ struct WorldGenSchedulerStats {
   std::size_t stepsExecuted = 0;
   std::size_t inlineSteps = 0;
   std::size_t parallelDispatches = 0;
-  std::size_t coloredDispatches = 0;
+  std::size_t coloredDispatches = 0; // counts writeRadius>0 (Features) executions
   std::size_t holdersEvicted = 0;
+  std::size_t spatialConflicts = 0;
+  std::size_t completedTargets = 0;
+  std::uint64_t targetLatencySumUs = 0;
+  std::uint64_t targetLatencyMaxUs = 0;
+  std::array<std::uint64_t, 32> targetLatencyHistUs{};
+
+  double latencyPercentileMs(double p) const noexcept;
 };
 
 struct ChunkBatchRequest {
@@ -45,8 +50,47 @@ struct ChunkBatchRequest {
   ChunkStatusId targetStatus = ChunkStatusId::Full;
 };
 
+struct DemandRequest {
+  ChunkTicketPos pos;
+  ChunkStatusId targetStatus = ChunkStatusId::Full;
+  bool residency = false;
+  bool knownMissingOnDisk = false;
+  std::uint64_t epoch = 0;
+  std::int64_t gameTime = 0;
+};
+
+struct CompletedResidency {
+  ChunkTicketPos pos;
+  std::uint64_t epoch = 0;
+  bool ok = false;
+  std::string detail;
+  std::shared_ptr<ProtoChunk> proto;
+  std::shared_ptr<void> holderPin; // RAII pin keeping holder->generationRefCount > 0 until consumed
+  nbt::RootTag root;               // encoded in parallel on worker thread
+  std::uint64_t latencyUs = 0;
+};
+
+struct StreamingDemandStats {
+  std::size_t requested = 0;
+  std::size_t dispatched = 0;
+  std::size_t completed = 0;
+  std::size_t failed = 0;
+  std::size_t cancelled = 0;
+  std::size_t bufferRequests = 0;
+  std::size_t bufferCompleted = 0;
+  std::size_t evicted = 0;
+};
+
 class WorldGenScheduler {
 public:
+  // Embedded construction inside `ChunkMap`.
+  WorldGenScheduler(ChunkMap &chunkMap, ChunkGenerator &generator,
+                    std::int64_t worldSeed, RawChunkStore *diskStore = nullptr,
+                    std::shared_ptr<LightOpticalContext> lightContext = {},
+                    GeneratedLightQueue *lightQueue = nullptr,
+                    WorldGenSchedulerConfig config = {});
+
+  // Standalone construction (tests/benchmarks; shares `residentWorld->chunkMap()` if non-null).
   WorldGenScheduler(ChunkGenerator &generator, std::int64_t worldSeed,
                     RawChunkStore *diskStore = nullptr,
                     World *residentWorld = nullptr,
@@ -58,90 +102,194 @@ public:
   WorldGenScheduler(const WorldGenScheduler &) = delete;
   WorldGenScheduler &operator=(const WorldGenScheduler &) = delete;
 
-  // 将单个目标区块多线程推进至至少 `targetStatus`，完成后返回只读/已就绪访问指针。
-  ChunkAccess &ensureStatus(ChunkTicketPos pos, ChunkStatusId targetStatus);
+  ChunkMap &chunkMap() noexcept { return *chunkMap_; }
+  const ChunkMap &chunkMap() const noexcept { return *chunkMap_; }
 
-  // 批量提交多个目标区块并合并依赖包络，等待该批次全部到达各自 `targetStatus`。
+  // Blocking APIs (for tests, probes, benchmarks, and standalone installs).
+  BaseChunk &ensureStatus(ChunkTicketPos pos, ChunkStatusId targetStatus);
   void ensureStatusBatch(std::span<const ChunkBatchRequest> requests,
                          ChunkTicketPos priorityAnchor = {0, 0});
 
-  ChunkAccess *findChunk(ChunkTicketPos pos) const;
+  std::shared_ptr<BaseChunk> findChunkShared(ChunkTicketPos pos) const;
+  BaseChunk *findChunk(ChunkTicketPos pos) const;
 
-  // 诊断用：统计/遍历当前仍持有区块的槽位（包含目标区块与它们依赖的邻域区块）。
-  // 整批生成结束后这些槽位不会被自动回收，因此它们构成常驻内存的主体。
   std::size_t heldChunkCount() const;
   void forEachHeldChunk(
-      const std::function<void(const ChunkAccess &)> &visitor) const;
-  // 取走区块的所有权（不移动对象本身，光照引擎可能仍持有它的 shared_ptr）。
-  std::shared_ptr<ProtoChunk> takeProtoChunk(ChunkTicketPos pos);
+      const std::function<void(const BaseChunk &)> &visitor) const;
 
-  // 生成至 `Full` 并通过共享安装路径写入运行态 `World`。
+  std::shared_ptr<ProtoChunk> takeProtoChunk(ChunkTicketPos pos);
   bool generateAndInstallIntoWorld(ChunkTicketPos pos, World &world);
 
-  // 清理已完成且不再处于保留坐标 `keepRadius` 邻域内的空闲槽位与外围半成品，控制内存水位。
-  // `evictedOut` 非空时追加被裁掉的坐标，供主线程同步注销光照引擎里的生成期登记。
-  std::size_t evictIdleOutsideRadius(std::span<const ChunkTicketPos> keepCenters,
-                                     int keepRadius = 12,
-                                     std::vector<ChunkTicketPos> *evictedOut = nullptr);
+  std::size_t evictIdleOutsideRadius(
+      std::span<const ChunkTicketPos> keepCenters, int keepRadius = 12,
+      std::vector<ChunkTicketPos> *evictedOut = nullptr);
 
   WorldGenSchedulerStats stats() const;
-
-  // 最近一次批次中第一个生成阶段异常（生成器抛错）的描述；空表示没有失败。
-  // 异常不再逃出 worker 线程终止进程，而是在本批次结束时由 ensureStatusBatch 抛出。
   std::string lastError() const;
 
+  // Non-blocking streaming control plane APIs (for WorldChunkManager).
+  void submitDemand(const DemandRequest &request);
+  void cancelDemand(ChunkTicketPos pos, bool cancelResidency,
+                    std::uint64_t onlyIfEpoch = 0);
+  void updatePriorityCenters(std::span<const ChunkTicketPos> centers,
+                             int keepRadius);
+  void requestAsyncTrim();
+  std::vector<CompletedResidency> drainCompletedResidency();
+  std::vector<ChunkTicketPos> drainEvictedChunks();
+  StreamingDemandStats streamingStats() const;
+  void shutdownStreaming();
+
 private:
-  struct ChunkHolder;
-  struct HolderShard;
   class PriorityBucketQueue;
   struct ReadyEntry;
+  struct ControlCommand;
+  struct DemandEntry;
+  struct CancelAction;
+  struct AdmitAction;
+  struct WaitOutcome;
+  class SpatialRegionGuard;
+
+  WaitOutcome resolveWaitingLocked(ChunkHolder::GenTaskState &gen,
+                                   std::uint8_t nextStage) noexcept;
+  void dispatchWaitingOutcome(
+      const std::shared_ptr<ChunkHolder> &holder, const WaitOutcome &outcome,
+      std::vector<ChunkHolder::GenTaskState::WaiterRef> *cascadeFailedOut =
+          nullptr);
+  bool tryAcquireSpatial3x3OrDefer(
+      const std::shared_ptr<ChunkHolder> &holder, ChunkHolder::GenTaskState &gen,
+      std::array<std::shared_ptr<ChunkHolder>, 9> &regionHolders,
+      std::size_t regionCount, std::uint8_t nextStage,
+      SpatialRegionGuard &spatialGuard);
 
   std::shared_ptr<ChunkHolder> getOrCreateHolder(ChunkTicketPos pos,
-                                                 std::uint8_t distBucket);
+                                                 std::uint8_t distBucket,
+                                                 bool knownMissingOnDisk = false);
+  void ensureHolderInitialized(const std::shared_ptr<ChunkHolder> &holder,
+                               std::uint8_t distBucket,
+                               bool knownMissingOnDisk);
   std::shared_ptr<ChunkHolder> findHolder(ChunkTicketPos pos) const;
 
+  void markActiveLocked(ChunkHolder::GenTaskState &gen) noexcept;
+  void markInactiveLocked(ChunkHolder::GenTaskState &gen) noexcept;
+
   void armHoldersIterative(std::vector<std::shared_ptr<ChunkHolder>> workStack);
+  bool armExplicitTarget(const std::shared_ptr<ChunkHolder> &holder,
+                         std::uint8_t distBucket, std::uint8_t targetStatus,
+                         bool residency, bool registerBatchTarget,
+                         std::vector<std::shared_ptr<ChunkHolder>> &workStack);
+  void unregisterPinnedDeps(
+      const ChunkHolder *waiter, std::uint32_t armSeq,
+      std::vector<ChunkHolder::GenTaskState::PinnedDep> &pinned,
+      std::vector<std::shared_ptr<ChunkHolder>> &cascadeWork);
+  void cancelHolderWorklist(std::vector<std::shared_ptr<ChunkHolder>> worklist,
+                            bool applyExplicitToFirst,
+                            std::uint8_t newExplicitTarget,
+                            bool clearResidencyPath);
+  void pushControlCommand(ControlCommand cmd);
+
   void enqueueReady(const std::shared_ptr<ChunkHolder> &holder,
-                    std::uint8_t nextStage, std::uint8_t writeRadius,
-                    std::uint8_t distBucket, std::uint32_t genId);
+                    std::uint8_t nextStage, std::uint8_t distBucket,
+                    bool residencyPath, std::uint32_t genId,
+                    bool isFinalize = false);
   void executeHolder(const std::shared_ptr<ChunkHolder> &holder,
-                     std::uint32_t expectedGenId, bool wasColored);
+                     std::uint32_t expectedGenId);
   void runSingleStage(ChunkHolder &holder, ChunkStatusId nextStage,
-                      const ChunkPyramid &pyramid);
-  void notifyWaiters(std::vector<std::shared_ptr<ChunkHolder>> &waiters);
+                      const ChunkPyramid &pyramid, bool loadingPath,
+                      int waitRadius, std::uint8_t writeRadius);
+  void notifyWaiters(
+      std::vector<ChunkHolder::GenTaskState::WaiterRef> &waiters);
   void releaseActiveHolder();
   void waitUntilIdle();
+  void waitUntilStreamingIdle();
+  void decrementFinalizeTasks() noexcept;
   void workerLoop();
-  // 生成阶段抛错时释放该 holder 的等待者并记录错误，使批次可以失败返回而不是死锁。
-  std::vector<std::shared_ptr<ChunkHolder>>
-  recordStageFailure(ChunkHolder &holder, std::string detail);
+  void startWorkers();
 
+  std::vector<ChunkHolder::GenTaskState::WaiterRef>
+  recordStageFailure(ChunkHolder &holder, std::string detail);
+  void recordTargetLatencyUs(std::uint64_t latencyUs) noexcept;
+
+  // Streaming control plane & finalization helpers.
+  void tryDrainControl();
+  void applyControlCommandLocked(ControlCommand cmd,
+                                 std::vector<CancelAction> &toCancel);
+  void selectAdmissionsLocked(std::vector<AdmitAction> &toAdmit);
+  void retireResidencyLocked(DemandEntry &entry, bool isComplete, bool isFail,
+                             bool isCancel);
+  void retireBufferLocked(DemandEntry &entry, bool isComplete, bool isFail);
+  void executeAdmissions(const std::vector<AdmitAction> &toAdmit);
+
+  void onHolderProgressedOrIdle(const std::shared_ptr<ChunkHolder> &holder,
+                                std::uint8_t reachedStage,
+                                std::uint64_t armedNs = 0);
+  void onHolderFailed(ChunkTicketPos pos, const std::string &detail,
+                      std::uint64_t onlyIfEpoch = 0);
+  void finalizeResidencyHolder(const std::shared_ptr<ChunkHolder> &holder);
+  void wakeSpatialWaiters(std::vector<ChunkHolder::SpatialWaiter> &woken);
+
+  std::unique_ptr<ChunkMap> ownedChunkMap_;
+  ChunkMap *chunkMap_ = nullptr;
   ChunkGenerator &generator_;
   std::int64_t worldSeed_ = 0;
   RawChunkStore *diskStore_ = nullptr;
-  World *residentWorld_ = nullptr;
   std::shared_ptr<LightOpticalContext> lightContext_;
   GeneratedLightQueue *lightQueue_ = nullptr;
   WorldGenSchedulerConfig config_;
 
-  static constexpr std::size_t kShardCount = 64;
-  std::unique_ptr<HolderShard[]> shards_;
+  // Parallel holder init CV (waits under holder->gen.mtx).
+  std::condition_variable initCv_;
 
-  mutable std::mutex storeMutex_;
+  // Control plane queue (strictly before demandMutex_).
+  std::mutex ctrlMutex_;
+  std::vector<ControlCommand> ctrlQueue_;
+  std::atomic<bool> controlPending_{false};
+  std::atomic<bool> controlDrainActive_{false};
+  std::atomic<bool> streamingShuttingDownAtomic_{false};
 
+  // Unified demand state (NEVER hold across gen.mtx or I/O!).
+  mutable std::mutex demandMutex_;
+  phmap::flat_hash_map<std::uint64_t, DemandEntry, ChunkKeyHash> demands_;
+  std::vector<ChunkTicketPos> priorityCenters_;
+  int keepRadius_ = 15;
+  std::size_t residencyInFlight_ = 0;
+  std::size_t bufferInFlight_ = 0;
+  std::size_t completedSinceTrim_ = 0;
+  bool trimRequested_ = false;
+  bool streamingShuttingDown_ = false;
+  StreamingDemandStats streamingStats_{};
+
+  // Spatial 3x3 / 1x1 lock for Features and parallel NBT encode.
+  std::mutex spatialMutex_;
+
+  // Unified ready queue (64 distance/priority buckets x 12 stages).
   std::mutex queueMutex_;
   std::condition_variable queueCv_;
-  std::unique_ptr<PriorityBucketQueue> parallelQueue_;
-  std::unique_ptr<PriorityBucketQueue[]> coloredQueues_; // 9 colors (3x3)
-  std::uint8_t activeColor_ = 0;
-  std::size_t activeColorInFlight_ = 0;
-  int activeColorDispatched_ = 0;
+  std::unique_ptr<PriorityBucketQueue> readyQueue_;
   bool stop_ = false;
+
+  // Leaf locks (never acquire other locks under these).
+  std::mutex completedMutex_;
+  std::vector<CompletedResidency> completedResidency_;
+
+  std::mutex evictedMutex_;
+  std::vector<ChunkTicketPos> evictedChunks_;
+
+  std::mutex batchMutex_;
+  std::condition_variable batchCv_;
+  phmap::flat_hash_map<std::uint64_t, std::uint8_t, ChunkKeyHash>
+      activeBatchTargets_;
+  std::size_t batchInFlight_ = 0;
+  bool batchFailed_ = false;
 
   std::mutex idleMutex_;
   std::condition_variable idleCv_;
   std::atomic<std::size_t> activeHolders_{0};
+  std::atomic<std::size_t> activeFinalizeTasks_{0};
 
+  mutable std::mutex errorMutex_;
+  std::string lastError_;
+
+  // Lock-free telemetry counters.
   std::atomic<std::size_t> chunksCreated_{0};
   std::atomic<std::size_t> chunksLoadedFromStore_{0};
   std::atomic<std::size_t> stepsExecuted_{0};
@@ -149,9 +297,11 @@ private:
   std::atomic<std::size_t> parallelDispatches_{0};
   std::atomic<std::size_t> coloredDispatches_{0};
   std::atomic<std::size_t> holdersEvicted_{0};
-
-  mutable std::mutex errorMutex_;
-  std::string lastError_;
+  std::atomic<std::size_t> spatialConflicts_{0};
+  std::atomic<std::size_t> completedTargets_{0};
+  std::atomic<std::uint64_t> targetLatencySumUs_{0};
+  std::atomic<std::uint64_t> targetLatencyMaxUs_{0};
+  std::array<std::atomic<std::uint64_t>, 32> targetLatencyHistUs_{};
 
   std::vector<std::thread> workers_;
 };

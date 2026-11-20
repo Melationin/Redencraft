@@ -24,11 +24,9 @@ struct LightSectionView;
 
 // 异步光照工作线程的配置选项（批处理窗口、环形队列初始容量、直读世界回调及测试钩子）。
 struct LightWorkerOptions {
-  // 直读低内存模式下的世界几何回调源：允许工作线程在需要时直接从实时 `World` 区块段借用只读视图，避免维护整份区块几何镜像。
+  // 直读低内存模式下的世界几何回调源：通过 `ChunkMap::directReadSection` 直接从实时 `ChunkHolder` 读取区块区段，无需维护二级几何镜像。
   struct DirectWorldGeometrySource {
     const void *context = nullptr;
-    // 仅在 `readSection` 获取区块段指针并增加引用计数的极短窗口内以共享模式加锁；`World` 仅在底层 `chunks_` 或存储区扩容时获取独占锁。
-    std::shared_mutex *resizeMutex = nullptr;
     LightSectionView (*readSection)(const void *context, int chunkX, int chunkZ,
                                     int sectionY) = nullptr;
   };
@@ -102,6 +100,8 @@ public:
     std::uint64_t skyWorkerAffinityRequested = 0;
     std::uint64_t skyWorkerAffinityMask = 0;
     std::uint32_t skyWorkerAffinityError = 0;
+    // 几何直读源重定向次数（ProtoChunk 句柄 -> World/ChunkMap 直读，不重算光照）。
+    std::uint64_t rebindings = 0;
   };
 
   explicit LightService(int minBlockSectionY, int blockSectionCount,
@@ -112,21 +112,23 @@ public:
 
   // 返回用于直读模式 `World` 区块段转换的不可变 `stateId -> opticalClass` 查找表；在服务启动工作线程前即已构建完毕。
   std::shared_ptr<const LightOpticalTable> opticalTable() const;
+  bool skyLightEnabled() const noexcept;
   // 提交区块加载或重载输入；有效更新会按区块合并，不会因队列容量受限而拒收，仅在服务正在关闭或输入非法时返回 0。
   std::uint64_t submitChunk(LightChunkInput input);
   // 把已注册几何、停在“未计算”的区块推进到“完整”：登记一次首次计算请求，
   // 返回请求序号（0 表示区块未注册或服务正在关闭）。与 `submitChunk` 一样只在
   // 主线程调用；真正的播种与传播由工作线程在下一批执行。
   std::uint64_t requestChunkCompute(int chunkX, int chunkZ);
+  // 把已注册区块的几何直读源从生成期的 ProtoChunk 句柄切换为 directWorld
+  // （World/ChunkMap 直读），保留已发布的各光照层、协议基准与天空光列源。用于
+  // 零拷贝晋升：区段内容不变，因此不需要重算；返回请求序号（0 表示区块未注册、
+  // 没有可用的直读回调或服务正在关闭，此时调用方应退回整块重提交）。
+  std::uint64_t rebindChunkGeometry(int chunkX, int chunkZ);
   // 热路径上的无锁方块单元变更投递入口，记录内仅含坐标与原始状态 ID，工作线程负责一切光学解析；环形缓冲区满时会自动扩容并合并到待处理工作中而不会静默丢弃。返回分配的单调请求序号（被拒绝时返回 0）。
   std::uint64_t reportBlockCell(LightCellUpdate update);
   std::uint64_t reportBlockCells(std::span<const LightCellUpdate> updates);
   // 通知工作线程卸载指定区块并推进其生命周期代次，丢弃该区块遗留的过期光照状态。
   bool unloadChunk(int chunkX, int chunkZ);
-  // 低内存模式：把已注册几何的区块切换为“直读 World 几何”。调用方负责保证此刻
-  // World 区块的方块内容与提交时的几何完全一致（安装完成后的第一次调用即满足）；
-  // 不推进代次、不改光照值、不触发重算，只释放工作线程持有的整份几何镜像。
-  bool adoptDirectGeometry(int chunkX, int chunkZ);
 
   // 主线程结果排空与发布交接。排空时仅复制区块快照头部并触发回调，层描述符与 2048 字节原子页仍与工作线程共享；因此混合区块段中的半字节可能在发布后继续原地更新，并发读取方可能观察到新旧半字节的混合状态（但单字节内无撕裂风险）。
   void drainPublished();

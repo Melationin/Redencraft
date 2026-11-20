@@ -1479,7 +1479,7 @@ PatchResult patchBlockStatesImpl(nbt::RootTag &root,
       result.error = "unknown block state id";
       return result;
     }
-    if (!isSupportedBlock(state.name()) || !state.isSchemaState()) {
+    if (!state.isSchemaState() || findBlockByName(state.name()) == nullptr) {
       result.error = "unknown or unsupported block state";
       return result;
     }

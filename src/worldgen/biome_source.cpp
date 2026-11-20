@@ -1,9 +1,9 @@
 #include "redstone/worldgen/biome_source.hpp"
+#include "redstone/hash.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstring>
-#include <unordered_set>
 
 namespace redstone::worldgen {
 namespace {
@@ -724,7 +724,7 @@ MultiNoiseBiomeSource MultiNoiseBiomeSource::createFromList(
 
 std::vector<std::string> MultiNoiseBiomeSource::possibleBiomes() const {
   std::vector<std::string> out;
-  std::unordered_set<std::string> seen;
+  phmap::flat_hash_set<std::string, AnkerlStringHash, std::equal_to<>> seen;
   for (const auto &entry : parameters_.entries()) {
     if (seen.insert(entry.second).second)
       out.push_back(entry.second);

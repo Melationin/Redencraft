@@ -50,6 +50,8 @@ public:
       const std::array<std::uint8_t, kLightLayerBytes> &packed);
   // 为工作线程自有的混合层分配唯一一份 2048 字节清零光照页。
   static LightLayerSnapshot mixedEmpty();
+  // 为工作线程自有的混合层分配并用相同半字节值 `value` 填充全部 4096 格。
+  static LightLayerSnapshot mixedFilled(std::uint8_t value);
 
   Storage storage() const {
     const std::uint8_t state =
@@ -209,6 +211,21 @@ struct PersistedChunkLight {
   std::vector<PersistedLightSection> sections;
 };
 
+// 生成期 3x3 并行初始光照直接算出的整区块光照载荷；`LightService` 收到后零拷贝采纳其 `PackedPagePtr`，不再跑 BFS。
+struct PrecomputedChunkLight {
+  bool isLightOn = false;
+  bool skyLightEnabled = true;
+  std::uint32_t unsupportedCells = 0;
+  // Length = blockSectionCount + 2, indexed by sectionY - (minBlockSectionY - 1)
+  std::vector<LightLayerSnapshot> blockLayers;
+  std::vector<LightLayerSnapshot> skyLayers;
+  // 256-column sky entry heights matching SkyLightEngine (z * 16 + x), valid when hasSkySources == true
+  std::array<int, 256> skySources{};
+  bool hasSkySources = false;
+  // Bit i (0..blockSectionCount-1) = blockSection i has nonEmpty > 0
+  std::uint32_t nonEmptySectionMask = 0;
+};
+
 // 主线程向 `LightService::submitChunk` 提交区块加载/重载时使用的输入载荷。
 // 只登记元数据：`chunkHandle`（生成期 ProtoChunk）或 `(chunkX, chunkZ)` 经 `World` 直读回调取几何。
 struct LightChunkInput {
@@ -222,6 +239,7 @@ struct LightChunkInput {
   // 为空时按 `(chunkX, chunkZ)` 通过 `World` 直读回调取几何。
   std::shared_ptr<const BaseChunk> chunkHandle;
   std::optional<PersistedChunkLight> persistedLight;
+  std::shared_ptr<const PrecomputedChunkLight> precomputedLight;
   // 本次提交如何推进到“完整区块”：
   //   Immediate —— 立即在工作线程计算（默认）。
   //   Deferred  —— 只注册几何与空壳，区块停在“未计算”，由

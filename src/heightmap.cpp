@@ -194,6 +194,18 @@ ChunkHeightmaps::ChunkHeightmaps(int minY, int height)
   minFirstAvailable_.fill(minY);
 }
 
+ChunkHeightmaps::ChunkHeightmaps(std::array<Heightmap, 4> &&maps)
+    : maps_(std::move(maps)) {
+  for (int x = 0; x < 16; ++x) {
+    for (int z = 0; z < 16; ++z) {
+      int minFirst = std::numeric_limits<int>::max();
+      for (const Heightmap &map : maps_)
+        minFirst = std::min(minFirst, map.firstAvailable(x, z));
+      minFirstAvailable_[Heightmap::index(x, z)] = minFirst;
+    }
+  }
+}
+
 Heightmap *ChunkHeightmaps::find(HeightmapType type) {
   for (Heightmap &map : maps_)
     if (map.type() == type)

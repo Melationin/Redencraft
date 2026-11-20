@@ -6,18 +6,24 @@
 #include "redstone/engine.hpp"
 #include "redstone/worldgen.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <sys/resource.h>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -127,6 +133,527 @@ void printMemLine(const char *label, std::size_t bytes, double rssBytes) {
                              : 0.0);
 }
 
+struct FlyRunResult {
+  double speedBlocksPerSec = 0.0;
+  double speedChunksPerSec = 0.0;
+  double durationSec = 0.0;
+  double playerChunkReadyPct = 0.0;
+  double avgViewReadyPct = 0.0;
+  std::size_t backlogMid = 0;
+  std::size_t backlogEnd = 0;
+  std::size_t submitted = 0;
+  std::size_t completed = 0;
+  std::size_t cancelled = 0;
+  std::size_t failed = 0;
+  double arrivalCps = 0.0;
+  double completedCps = 0.0;
+  double latP50Ms = 0.0;
+  double latP95Ms = 0.0;
+  double latP99Ms = 0.0;
+  double latMaxMs = 0.0;
+  double rssMb = 0.0;
+  bool cleanHorizonPass = false;
+  bool throughputPass = false;
+};
+
+DimensionTypeSpec dimensionSpecForName(const std::string &dim) {
+  if (dim == "nether")
+    return netherDimensionType();
+  if (dim == "end")
+    return endDimensionType();
+  return overworldDimensionType();
+}
+
+double percentileFromSorted(const std::vector<double> &sorted, double p) {
+  if (sorted.empty())
+    return 0.0;
+  const double idx = p * static_cast<double>(sorted.size() - 1);
+  const auto lo = static_cast<std::size_t>(std::floor(idx));
+  const auto hi = static_cast<std::size_t>(std::ceil(idx));
+  if (lo == hi)
+    return sorted[lo];
+  const double frac = idx - static_cast<double>(lo);
+  return sorted[lo] * (1.0 - frac) + sorted[hi] * frac;
+}
+
+FlyRunResult runFlySpeedTrial(const WorldgenRegistries &registries,
+                              const std::string &dim, std::int64_t seed,
+                              int threads, bool strongholds, int viewDistance,
+                              double flyDurationSec, double speedBlocksPerSec,
+                              bool withLight) {
+  auto generator = makeGenerator(registries, dim);
+  if (!strongholds)
+    generator->setConcentricRingsEnabled(false);
+
+  const DimensionTypeSpec dimSpec = dimensionSpecForName(dim);
+  std::unique_ptr<World> world;
+  std::shared_ptr<LightOpticalContext> lightContext;
+  GeneratedLightQueue lightQueue;
+  if (withLight) {
+    world = std::make_unique<World>(dimSpec.minY, dimSpec.minY + dimSpec.height);
+    LightWorkerOptions lightOptions;
+    lightOptions.batchWindowMs = 0;
+    lightOptions.hasSkyLight = dimSpec.hasSkyLight;
+    world->enableLighting(lightOptions);
+    lightContext = std::make_shared<LightOpticalContext>();
+    lightContext->set(world->lightService()->opticalTable(),
+                      world->lightService()->skyLightEnabled());
+  }
+
+  WorldGenSchedulerConfig config;
+  if (threads > 0)
+    config.threadCount = static_cast<std::size_t>(threads);
+
+  WorldGenScheduler scheduler(*generator, seed, nullptr, nullptr, lightContext,
+                              withLight ? &lightQueue : nullptr, config);
+
+  const int side = 2 * viewDistance + 1;
+  const std::size_t viewSquareCount =
+      static_cast<std::size_t>(side) * static_cast<std::size_t>(side);
+
+  std::unordered_set<std::uint64_t> readyChunks;
+  readyChunks.reserve(viewSquareCount * 2);
+  std::unordered_map<std::uint64_t, std::chrono::steady_clock::time_point>
+      activeSubmitted;
+  activeSubmitted.reserve(viewSquareCount * 2);
+  std::unordered_map<std::uint64_t, ChunkTicketPos> pendingLightReady;
+  pendingLightReady.reserve(viewSquareCount * 2);
+
+  auto pumpLight = [&]() {
+    if (!withLight || !world)
+      return;
+    for (GeneratedLightWork &work : lightQueue.drain()) {
+      if (work.compute) {
+        (void)world->requestGeneratedChunkLightCompute(work.position.x,
+                                                       work.position.z);
+      } else {
+        (void)world->submitGeneratedChunkLight(std::move(work.input));
+      }
+    }
+    world->drainLightPublications();
+  };
+
+  std::uint64_t nextEpoch = 1;
+  {
+    const std::array<ChunkTicketPos, 1> initCenter{{{0, 0}}};
+    scheduler.updatePriorityCenters(initCenter, viewDistance + 13);
+    // Pre-warm initial (2*VD+1)x(2*VD+1) square around (0, 0).
+    for (int r = 0; r <= viewDistance; ++r) {
+      for (int dx = -r; dx <= r; ++dx) {
+        for (int dz = -r; dz <= r; ++dz) {
+          if (std::max(std::abs(dx), std::abs(dz)) != r)
+            continue;
+          const ChunkTicketPos pos{dx, dz};
+          const std::uint64_t key = packChunkKey(dx, dz);
+          if (activeSubmitted.contains(key))
+            continue;
+          scheduler.submitDemand(DemandRequest{
+              pos, ChunkStatusId::Full, true, true, nextEpoch++, 0});
+          activeSubmitted.emplace(key, std::chrono::steady_clock::now());
+        }
+      }
+    }
+    const auto prewarmDeadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while (readyChunks.size() < viewSquareCount) {
+      pumpLight();
+      for (CompletedResidency &item : scheduler.drainCompletedResidency()) {
+        if (item.ok) {
+          const std::uint64_t key = packChunkKey(item.pos.x, item.pos.z);
+          if (!withLight ||
+              world->lightService()->isChunkSettled(item.pos.x, item.pos.z)) {
+            activeSubmitted.erase(key);
+            pendingLightReady.erase(key);
+            readyChunks.insert(key);
+          } else {
+            pendingLightReady.emplace(key, item.pos);
+          }
+        }
+      }
+      if (withLight) {
+        for (auto it = pendingLightReady.begin();
+             it != pendingLightReady.end();) {
+          if (world->lightService()->isChunkSettled(it->second.x,
+                                                    it->second.z)) {
+            activeSubmitted.erase(it->first);
+            readyChunks.insert(it->first);
+            it = pendingLightReady.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
+      (void)scheduler.drainEvictedChunks();
+      if (readyChunks.size() >= viewSquareCount)
+        break;
+      if (std::chrono::steady_clock::now() >= prewarmDeadline)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
+  activeSubmitted.clear();
+  pendingLightReady.clear();
+  std::vector<double> flightLatenciesMs;
+  flightLatenciesMs.reserve(4096);
+
+  const StreamingDemandStats baselineStream = scheduler.streamingStats();
+  int lastPlayerCx = 0;
+  std::size_t totalTicks = 0;
+  std::size_t playerChunkReadyTicks = 0;
+  double viewReadyPctSum = 0.0;
+  bool midSampled = false;
+  std::size_t backlogMid = 0;
+  std::size_t backlogEnd = 0;
+  std::size_t flightSubmitted = 0;
+  std::size_t flightCompleted = 0;
+
+  constexpr auto kTickInterval = std::chrono::milliseconds(25);
+  constexpr auto kDrainPoll = std::chrono::milliseconds(2);
+  const auto flightStart = std::chrono::steady_clock::now();
+  auto nextTickTime = flightStart + kTickInterval;
+
+  auto drainFlightCompletions = [&](int minKeepCx) {
+    pumpLight();
+    const auto now = std::chrono::steady_clock::now();
+    auto finishReady = [&](std::uint64_t key, int posX) {
+      const auto subIt = activeSubmitted.find(key);
+      if (subIt != activeSubmitted.end()) {
+        const double latMs =
+            std::chrono::duration<double, std::milli>(now - subIt->second)
+                .count();
+        flightLatenciesMs.push_back(latMs);
+        ++flightCompleted;
+        activeSubmitted.erase(subIt);
+      } else {
+        ++flightCompleted;
+      }
+      if (posX >= minKeepCx)
+        readyChunks.insert(key);
+    };
+    for (CompletedResidency &item : scheduler.drainCompletedResidency()) {
+      const std::uint64_t key = packChunkKey(item.pos.x, item.pos.z);
+      if (!item.ok) {
+        activeSubmitted.erase(key);
+        pendingLightReady.erase(key);
+        continue;
+      }
+      if (!withLight ||
+          world->lightService()->isChunkSettled(item.pos.x, item.pos.z)) {
+        pendingLightReady.erase(key);
+        finishReady(key, item.pos.x);
+      } else if (item.pos.x >= minKeepCx) {
+        pendingLightReady.emplace(key, item.pos);
+      } else {
+        activeSubmitted.erase(key);
+      }
+    }
+    if (withLight) {
+      for (auto it = pendingLightReady.begin(); it != pendingLightReady.end();) {
+        if (it->second.x < minKeepCx) {
+          activeSubmitted.erase(it->first);
+          it = pendingLightReady.erase(it);
+        } else if (world->lightService()->isChunkSettled(it->second.x,
+                                                         it->second.z)) {
+          finishReady(it->first, it->second.x);
+          it = pendingLightReady.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    (void)scheduler.drainEvictedChunks();
+  };
+
+  for (;;) {
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsedSec =
+        std::chrono::duration<double>(now - flightStart).count();
+    if (elapsedSec >= flyDurationSec)
+      break;
+
+    const int minKeepCx = lastPlayerCx - viewDistance;
+    drainFlightCompletions(minKeepCx);
+
+    if (now < nextTickTime) {
+      const auto sleepFor = std::min<std::chrono::steady_clock::duration>(
+          kDrainPoll, nextTickTime - now);
+      if (sleepFor > std::chrono::microseconds(100))
+        std::this_thread::sleep_for(sleepFor);
+      continue;
+    }
+
+    while (nextTickTime <= now)
+      nextTickTime += kTickInterval;
+
+    const double playerX = speedBlocksPerSec * elapsedSec;
+    const int cx = static_cast<int>(std::floor(playerX / 16.0));
+    const ChunkTicketPos playerChunk{cx, 0};
+
+    if (cx != lastPlayerCx) {
+      const std::array<ChunkTicketPos, 1> centers{playerChunk};
+      scheduler.updatePriorityCenters(centers, viewDistance + 13);
+
+      // Cancel pending demands that slid behind the view square.
+      for (int ox = lastPlayerCx - viewDistance; ox < cx - viewDistance; ++ox) {
+        for (int oz = -viewDistance; oz <= viewDistance; ++oz) {
+          const std::uint64_t key = packChunkKey(ox, oz);
+          if (activeSubmitted.erase(key) > 0) {
+            scheduler.cancelDemand(ChunkTicketPos{ox, oz}, true);
+          }
+          pendingLightReady.erase(key);
+          readyChunks.erase(key);
+        }
+      }
+
+      // Submit newly entered columns in [cx - VD .. cx + VD, -VD .. VD].
+      const auto submitNow = std::chrono::steady_clock::now();
+      for (int nx = cx - viewDistance; nx <= cx + viewDistance; ++nx) {
+        for (int nz = -viewDistance; nz <= viewDistance; ++nz) {
+          const std::uint64_t key = packChunkKey(nx, nz);
+          if (readyChunks.contains(key) || activeSubmitted.contains(key))
+            continue;
+          scheduler.submitDemand(DemandRequest{
+              ChunkTicketPos{nx, nz}, ChunkStatusId::Full, true, true,
+              nextEpoch++, 0});
+          activeSubmitted.emplace(key, submitNow);
+          ++flightSubmitted;
+        }
+      }
+
+      scheduler.requestAsyncTrim();
+      (void)scheduler.drainEvictedChunks();
+      lastPlayerCx = cx;
+    }
+
+    drainFlightCompletions(cx - viewDistance);
+
+    // Sample view readiness & pending backlog at this tick.
+    ++totalTicks;
+    if (readyChunks.contains(packChunkKey(cx, 0)))
+      ++playerChunkReadyTicks;
+
+    std::size_t inViewReady = 0;
+    std::size_t inViewPending = 0;
+    for (int vx = cx - viewDistance; vx <= cx + viewDistance; ++vx) {
+      for (int vz = -viewDistance; vz <= viewDistance; ++vz) {
+        if (readyChunks.contains(packChunkKey(vx, vz))) {
+          ++inViewReady;
+        } else {
+          ++inViewPending;
+        }
+      }
+    }
+
+    viewReadyPctSum +=
+        100.0 * static_cast<double>(inViewReady) / static_cast<double>(viewSquareCount);
+    if (!midSampled && elapsedSec >= 0.5 * flyDurationSec) {
+      backlogMid = inViewPending;
+      midSampled = true;
+    }
+    backlogEnd = inViewPending;
+  }
+
+  const StreamingDemandStats endStream = scheduler.streamingStats();
+  const long rssKbAtEnd = currentRssKb();
+  scheduler.shutdownStreaming();
+  if (withLight && world && world->lightService() != nullptr) {
+    pumpLight();
+    world->lightService()->flushAndWait();
+    world->drainLightPublications();
+  }
+
+  std::sort(flightLatenciesMs.begin(), flightLatenciesMs.end());
+
+  FlyRunResult result;
+  result.speedBlocksPerSec = speedBlocksPerSec;
+  result.speedChunksPerSec = speedBlocksPerSec / 16.0;
+  result.durationSec = flyDurationSec;
+  result.playerChunkReadyPct =
+      totalTicks > 0
+          ? 100.0 * static_cast<double>(playerChunkReadyTicks) /
+                static_cast<double>(totalTicks)
+          : 0.0;
+  result.avgViewReadyPct =
+      totalTicks > 0 ? viewReadyPctSum / static_cast<double>(totalTicks) : 0.0;
+  result.backlogMid = midSampled ? backlogMid : backlogEnd;
+  result.backlogEnd = backlogEnd;
+  result.submitted = flightSubmitted;
+  result.completed = flightCompleted;
+  result.cancelled = endStream.cancelled - baselineStream.cancelled;
+  result.failed = endStream.failed - baselineStream.failed;
+  result.arrivalCps =
+      flyDurationSec > 0.0
+          ? static_cast<double>(flightSubmitted) / flyDurationSec
+          : 0.0;
+  result.completedCps =
+      flyDurationSec > 0.0
+          ? static_cast<double>(flightCompleted) / flyDurationSec
+          : 0.0;
+  result.latP50Ms = percentileFromSorted(flightLatenciesMs, 0.50);
+  result.latP95Ms = percentileFromSorted(flightLatenciesMs, 0.95);
+  result.latP99Ms = percentileFromSorted(flightLatenciesMs, 0.99);
+  result.latMaxMs =
+      !flightLatenciesMs.empty() ? flightLatenciesMs.back() : 0.0;
+  result.rssMb =
+      rssKbAtEnd > 0 ? static_cast<double>(rssKbAtEnd) / 1024.0 : 0.0;
+
+  const std::size_t maxThroughputGrowth =
+      static_cast<std::size_t>(2) * static_cast<std::size_t>(side);
+  result.cleanHorizonPass = (result.playerChunkReadyPct >= 99.5) &&
+                            (result.avgViewReadyPct >= 95.0) &&
+                            (result.cancelled == 0) && (result.failed == 0);
+  result.throughputPass =
+      (result.playerChunkReadyPct >= 99.5) && (result.cancelled == 0) &&
+      (result.failed == 0) &&
+      (result.completedCps >= 0.92 * result.arrivalCps) &&
+      (result.backlogEnd <= result.backlogMid + maxThroughputGrowth);
+  return result;
+}
+
+std::vector<double> parseSpeedList(std::string_view spec) {
+  std::vector<double> out;
+  std::stringstream ss{std::string(spec)};
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    if (item.empty())
+      continue;
+    const double val = std::stod(item);
+    if (val <= 0.0)
+      throw std::invalid_argument("fly speed must be positive");
+    out.push_back(val);
+  }
+  return out;
+}
+
+void printFlyResultRow(const FlyRunResult &r) {
+  std::printf(
+      "%6.1f | %5.2f | %7.2f%% | %7.2f%% | %6zu | %6zu | %7.1f | %7.1f | "
+      "%5zu | %7.1f | %7.1f | %7.1f | %7.1f | %6.1f | %5s | %4s\n",
+      r.speedBlocksPerSec, r.speedChunksPerSec, r.playerChunkReadyPct,
+      r.avgViewReadyPct, r.backlogMid, r.backlogEnd, r.arrivalCps,
+      r.completedCps, r.cancelled, r.latP50Ms, r.latP95Ms, r.latP99Ms,
+      r.latMaxMs, r.rssMb, r.cleanHorizonPass ? "PASS" : "FAIL",
+      r.throughputPass ? "PASS" : "FAIL");
+  std::fflush(stdout);
+}
+
+int runFlyBench(const WorldgenRegistries &registries, const std::string &dim,
+                std::int64_t seed, int threads, bool strongholds,
+                int viewDistance, double flyDurationSec,
+                const std::vector<double> &explicitSpeeds, bool refine,
+                bool withLight) {
+  const int side = 2 * viewDistance + 1;
+  const std::size_t maxGrowth =
+      static_cast<std::size_t>(2) * static_cast<std::size_t>(side);
+  std::printf(
+      "fly_bench dim=%s seed=%lld threads=%d strongholds=%d light=%d "
+      "view_distance=%d square=%dx%d duration=%.2fs\n",
+      dim.c_str(), static_cast<long long>(seed), threads,
+      strongholds ? 1 : 0, withLight ? 1 : 0, viewDistance, side, side,
+      flyDurationSec);
+  std::printf(
+      "clean_horizon:          plyr_rdy >= 99.5%% AND view_rdy >= 95.0%% AND "
+      "canc == 0\n");
+  std::printf(
+      "throughput_sustainable: plyr_rdy >= 99.5%% AND canc == 0 AND cmp_cps >= "
+      "0.92 * arr_cps AND bl_end <= bl_mid + %zu\n",
+      maxGrowth);
+  std::printf(
+      " blk/s | chk/s | plyr_rdy | view_rdy | bl_mid | bl_end | arr_cps | "
+      "cmp_cps |  canc |  p50_ms |  p95_ms |  p99_ms |  max_ms | rss_mb | "
+      "clean | thru\n");
+  std::printf(
+      "-------+-------+----------+----------+--------+--------+---------+------"
+      "---+-------+---------+---------+---------+---------+--------+-------+-----\n");
+
+  double bestCleanPass = 0.0;
+  double bestThruPass = 0.0;
+  double firstThruFail = 0.0;
+  int consecutiveThruFails = 0;
+
+  std::vector<double> sweep = explicitSpeeds;
+  const bool autoMode = sweep.empty();
+  if (autoMode) {
+    sweep = {40.0,  80.0,  120.0, 160.0, 200.0, 240.0,
+             280.0, 320.0, 380.0, 440.0, 520.0, 600.0};
+  }
+
+  for (double speed : sweep) {
+    FlyRunResult r = runFlySpeedTrial(registries, dim, seed, threads,
+                                      strongholds, viewDistance, flyDurationSec,
+                                      speed, withLight);
+    printFlyResultRow(r);
+    if (r.cleanHorizonPass)
+      bestCleanPass = std::max(bestCleanPass, r.speedBlocksPerSec);
+    if (r.throughputPass) {
+      bestThruPass = std::max(bestThruPass, r.speedBlocksPerSec);
+      consecutiveThruFails = 0;
+    } else {
+      if (firstThruFail == 0.0 && r.speedBlocksPerSec > bestThruPass)
+        firstThruFail = r.speedBlocksPerSec;
+      ++consecutiveThruFails;
+      const bool clearlyOverloaded =
+          r.playerChunkReadyPct < 99.5 || r.completedCps < 0.85 * r.arrivalCps ||
+          consecutiveThruFails >= 2;
+      if (autoMode && clearlyOverloaded)
+        break;
+    }
+  }
+
+  if (autoMode && firstThruFail == 0.0 && bestThruPass > 0.0) {
+    for (double extra : {700.0, 820.0, 960.0}) {
+      FlyRunResult r = runFlySpeedTrial(registries, dim, seed, threads,
+                                        strongholds, viewDistance,
+                                        flyDurationSec, extra, withLight);
+      printFlyResultRow(r);
+      if (r.cleanHorizonPass)
+        bestCleanPass = std::max(bestCleanPass, r.speedBlocksPerSec);
+      if (r.throughputPass) {
+        bestThruPass = std::max(bestThruPass, r.speedBlocksPerSec);
+      } else {
+        firstThruFail = r.speedBlocksPerSec;
+        break;
+      }
+    }
+  }
+
+  if (refine && bestThruPass > 0.0 && firstThruFail > bestThruPass) {
+    double lo = bestThruPass;
+    double hi = firstThruFail;
+    for (int step = 0; step < 4 && (hi - lo) > 5.0; ++step) {
+      const double mid = std::round((lo + hi) * 0.5);
+      if (mid <= lo || mid >= hi)
+        break;
+      FlyRunResult r = runFlySpeedTrial(registries, dim, seed, threads,
+                                        strongholds, viewDistance,
+                                        flyDurationSec, mid, withLight);
+      printFlyResultRow(r);
+      if (r.cleanHorizonPass)
+        bestCleanPass = std::max(bestCleanPass, mid);
+      if (r.throughputPass) {
+        lo = mid;
+        bestThruPass = std::max(bestThruPass, mid);
+      } else {
+        hi = mid;
+      }
+    }
+  }
+
+  std::printf(
+      "\nclean_horizon_max_speed:          %.1f blocks/s (%.2f player_chunks/s, "
+      "%.1f resident_chunks/s)\n",
+      bestCleanPass, bestCleanPass / 16.0,
+      (bestCleanPass / 16.0) * static_cast<double>(side));
+  std::printf(
+      "throughput_sustainable_max_speed: %.1f blocks/s (%.2f player_chunks/s, "
+      "%.1f resident_chunks/s)\n",
+      bestThruPass, bestThruPass / 16.0,
+      (bestThruPass / 16.0) * static_cast<double>(side));
+  std::fflush(stdout);
+  return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -136,6 +663,8 @@ int main(int argc, char **argv) {
                  "[--seed N] [--size N] [--threads N] [--repeat N] "
                  "[--no-strongholds] [--dim overworld|nether|end]\n"
                  "       [--light] [--serialize] [--install]\n"
+                 "       [--fly-bench] [--view-distance N] [--fly-duration S] "
+                 "[--fly-speeds \"40,80,...\"] [--no-refine]\n"
                  "       [--mem-report] [--jemalloc-dump FILE] "
                  "[--heap-profile FILE]\n");
     return 2;
@@ -150,6 +679,11 @@ int main(int argc, char **argv) {
   bool withLight = false;
   bool withSerialize = false;
   bool withInstall = false;
+  bool flyBench = false;
+  int viewDistance = 10;
+  double flyDurationSec = 4.0;
+  bool refineFlySpeed = true;
+  std::vector<double> flySpeeds;
   const char *jemallocDumpPath = nullptr;
   const char *heapProfilePath = nullptr;
   std::string dim = "overworld";
@@ -173,6 +707,16 @@ int main(int argc, char **argv) {
       withSerialize = true;
     } else if (arg == "--install") {
       withInstall = true;
+    } else if (arg == "--fly-bench") {
+      flyBench = true;
+    } else if (arg == "--view-distance" && i + 1 < argc) {
+      viewDistance = std::stoi(argv[++i]);
+    } else if (arg == "--fly-duration" && i + 1 < argc) {
+      flyDurationSec = std::stod(argv[++i]);
+    } else if (arg == "--fly-speeds" && i + 1 < argc) {
+      flySpeeds = parseSpeedList(argv[++i]);
+    } else if (arg == "--no-refine") {
+      refineFlySpeed = false;
     } else if (arg == "--jemalloc-dump" && i + 1 < argc) {
       jemallocDumpPath = argv[++i];
     } else if (arg == "--heap-profile" && i + 1 < argc) {
@@ -184,11 +728,17 @@ int main(int argc, char **argv) {
       return 2;
     }
   }
-  if (size <= 0 || repeat <= 0)
+  if (size <= 0 || repeat <= 0 || viewDistance < 0 || flyDurationSec <= 0.0)
     return 2;
 
   const WorldgenRegistries registries =
       WorldgenRegistries::loadFromDirectory(assetsDir);
+
+  if (flyBench) {
+    return runFlyBench(registries, dim, seed, threads, strongholds,
+                       viewDistance, flyDurationSec, flySpeeds,
+                       refineFlySpeed, withLight);
+  }
 
   for (int run = 0; run < repeat; ++run) {
     auto generator = makeGenerator(registries, dim);
@@ -215,7 +765,8 @@ int main(int argc, char **argv) {
     std::shared_ptr<LightOpticalContext> lightContext;
     if (withLight) {
       lightContext = std::make_shared<LightOpticalContext>();
-      lightContext->set(world->lightService()->opticalTable());
+      lightContext->set(world->lightService()->opticalTable(),
+                        world->lightService()->skyLightEnabled());
     }
     GeneratedLightQueue lightQueue;
     WorldGenScheduler scheduler(*generator, seed, nullptr, nullptr, lightContext,
@@ -273,20 +824,49 @@ int main(int argc, char **argv) {
     const double cpuMs = (cpuEnd - cpuStart) * 1000.0;
     const std::size_t chunkCount = requests.size();
 
+    const double cps =
+        wallMs > 0.0 ? (static_cast<double>(chunkCount) * 1000.0 / wallMs) : 0.0;
+    const double latAvgMs =
+        stats.completedTargets > 0
+            ? (static_cast<double>(stats.targetLatencySumUs) / 1000.0) /
+                  static_cast<double>(stats.completedTargets)
+            : 0.0;
+    const double latP50Ms = stats.latencyPercentileMs(0.50);
+    const double latP95Ms = stats.latencyPercentileMs(0.95);
+    const double latP99Ms = stats.latencyPercentileMs(0.99);
+    const double latMaxMs =
+        static_cast<double>(stats.targetLatencyMaxUs) / 1000.0;
+
     std::printf(
         "run=%d chunks=%zu wall_ms=%.1f cpu_ms=%.1f ms_per_chunk=%.2f "
         "created=%zu steps=%zu inline=%zu parallel=%zu resident=%zu "
-        "strongholds=%d rss_peak_kb=%ld\n",
+        "strongholds=%d rss_peak_kb=%ld "
+        "lat_avg_ms=%.2f lat_p50_ms=%.2f lat_p95_ms=%.2f lat_p99_ms=%.2f "
+        "lat_max_ms=%.2f cps=%.2f spatial_conflicts=%zu\n",
         run, chunkCount, wallMs, cpuMs, wallMs / static_cast<double>(chunkCount),
         stats.chunksCreated, stats.stepsExecuted, stats.inlineSteps,
-        stats.parallelDispatches, resident, strongholds ? 1 : 0, peakRssKb());
+        stats.parallelDispatches, resident, strongholds ? 1 : 0, peakRssKb(),
+        latAvgMs, latP50Ms, latP95Ms, latP99Ms, latMaxMs, cps,
+        stats.spatialConflicts);
     std::fflush(stdout);
 
     if (world) {
       // 批处理场景的收敛点：全部区块到 Full 后让光照队列排空一次，之后逐块
       // 刷新快照就是同一不动点的稳定值（流式场景由邻居到达时的增量更新保证）。
-      if (world->lightService() != nullptr)
+      double lightFlushMs = 0.0;
+      if (world->lightService() != nullptr) {
+        const auto flushStart = std::chrono::steady_clock::now();
         world->lightService()->flushAndWait();
+        lightFlushMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - flushStart)
+                .count();
+      }
+      const double totalLitWallMs = wallMs + lightFlushMs;
+      const double litCps =
+          totalLitWallMs > 0.0
+              ? (static_cast<double>(chunkCount) * 1000.0 / totalLitWallMs)
+              : 0.0;
       const auto serStart = std::chrono::steady_clock::now();
       double serializeMs = 0.0;
       double installMs = 0.0;
@@ -432,14 +1012,18 @@ int main(int argc, char **argv) {
                   lightIncompleteBorder, installMismatch, installSamples);
       if (withLight) {
         const LightService::Stats ls = world->lightService()->stats();
-        std::printf("light_stats batches=%llu published=%llu "
+        std::printf("light_stats gen_wall_ms=%.1f light_flush_ms=%.1f "
+                    "total_lit_wall_ms=%.1f lit_cps=%.2f "
+                    "batches=%llu published=%llu "
                     "worker_cpu_ms=%.1f block_cpu_ms=%.1f sky_cpu_ms=%.1f "
-                    "light_queue=%llu unloaded_skips=%llu\n",
+                    "light_queue=%llu unloaded_skips=%llu rebound=%llu\n",
+                    wallMs, lightFlushMs, totalLitWallMs, litCps,
                     static_cast<unsigned long long>(ls.processedBatches),
                     static_cast<unsigned long long>(ls.published),
                     ls.workerCpuMs, ls.blockWorkerCpuMs, ls.skyWorkerCpuMs,
                     static_cast<unsigned long long>(ls.lightQueueEntries),
-                    static_cast<unsigned long long>(ls.unloadedNeighborSkips));
+                    static_cast<unsigned long long>(ls.unloadedNeighborSkips),
+                    static_cast<unsigned long long>(ls.rebindings));
         std::fflush(stdout);
       }
     }
@@ -451,8 +1035,10 @@ int main(int argc, char **argv) {
       std::size_t otherChunks = 0;
       std::size_t targetChunks = 0;
       std::array<std::size_t, 16> statusHistogram{};
-      scheduler.forEachHeldChunk([&](const ChunkAccess &access) {
-        const auto *proto = dynamic_cast<const ProtoChunk *>(&access);
+      scheduler.forEachHeldChunk([&](const BaseChunk &access) {
+        const auto *proto = access.isProtoChunk()
+                                ? static_cast<const ProtoChunk *>(&access)
+                                : nullptr;
         if (proto == nullptr) {
           ++otherChunks;
           return;
@@ -461,13 +1047,16 @@ int main(int argc, char **argv) {
         usage.add(one);
         ++protoChunks;
         const std::size_t statusIndex =
-            static_cast<std::size_t>(access.persistedStatus());
+            static_cast<std::size_t>(chunkPersistedStatus(access));
         if (statusIndex < statusHistogram.size())
           ++statusHistogram[statusIndex];
       });
       for (const ChunkBatchRequest &request : requests) {
+        const BaseChunk *found = scheduler.findChunk(request.pos);
         const auto *proto =
-            dynamic_cast<const ProtoChunk *>(scheduler.findChunk(request.pos));
+            (found != nullptr && found->isProtoChunk())
+                ? static_cast<const ProtoChunk *>(found)
+                : nullptr;
         if (proto != nullptr) {
           targetUsage.add(proto->memoryUsage());
           ++targetChunks;

@@ -4,6 +4,7 @@
 // 从 `assets/worldgen26_1/` 实时解析并放置村庄、掠夺者前哨站、古代城市、试炼密室、古迹废墟等 Jigsaw 结构。
 
 #include "redstone/block.hpp"
+#include "redstone/flat_hash_map.hpp"
 #include "redstone/nbt.hpp"
 #include "redstone/worldgen/proto_chunk.hpp"
 #include "redstone/worldgen/random_source.hpp"
@@ -70,6 +71,10 @@ struct StructureTemplate {
   BoundingBox boundingBox(Pos anchor, Rotation rotation, Pos pivot,
                           Mirror mirror) const noexcept;
   std::vector<JigsawBlockInfo> getJigsaws(Pos pos, Rotation rotation) const;
+  // 返回指定旋转下 jigsaw 列表的稳定引用（palette 选择规则与 getJigsaws 一致），
+  // 调用方按 offset=pos 自行平移；用于避免逐次放置时复制整份 JigsawBlockInfo。
+  const std::vector<JigsawBlockInfo> &jigsawsFor(Pos pos,
+                                                 Rotation rotation) const;
 
   static Pos transformPos(Pos p, Mirror mirror, Rotation rotation,
                           Pos pivot) noexcept;
@@ -154,14 +159,19 @@ struct StructureTemplatePool {
 class StructureTemplateCache {
 public:
   explicit StructureTemplateCache(std::filesystem::path nbtRoot)
-      : nbtRoot_(std::move(nbtRoot)) {}
+      : nbtRoot_(std::move(nbtRoot)) {
+    cache_.reserve(256);
+  }
 
   const StructureTemplate *getOrLoad(std::string_view templateId) const;
 
 private:
   std::filesystem::path nbtRoot_;
-  mutable std::mutex mutex_;
-  mutable std::map<std::string, std::shared_ptr<StructureTemplate>, std::less<>>
+  // 读多写少：命中路径只取共享锁；phmap 扁平哈希 + wyhash 异质查找，
+  // 避免 std::map 的逐层字符串比较与每次 normId 分配。
+  mutable std::shared_mutex mutex_;
+  mutable FlatHashMap<std::string, std::shared_ptr<StructureTemplate>,
+                      TransparentStringHash, std::equal_to<>>
       cache_;
 };
 

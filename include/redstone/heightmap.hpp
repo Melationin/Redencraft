@@ -94,6 +94,7 @@ private:
 class ChunkHeightmaps {
 public:
   ChunkHeightmaps(int minY, int height);
+  explicit ChunkHeightmaps(std::array<Heightmap, 4> &&maps);
 
   Heightmap *find(HeightmapType type);
   const Heightmap *find(HeightmapType type) const;

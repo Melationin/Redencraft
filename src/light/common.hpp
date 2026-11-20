@@ -14,11 +14,10 @@
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "redstone/hash.hpp"
 #include "redstone/light/service.hpp"
 #include "redstone/light/snapshot.hpp"
 #include "redstone/light/types.hpp"
@@ -88,300 +87,90 @@ struct UInt64Hash {
   }
 };
 
-template <class Key> struct FlatSetSlot {
-  Key key{};
-  static const Key &slotKey(const FlatSetSlot &s) { return s.key; }
-  static Key &valueRef(FlatSetSlot &s) { return s.key; }
-  static const Key &constValueRef(const FlatSetSlot &s) { return s.key; }
-};
+// 光照引擎内部扁平哈希容器：基于 `phmap::flat_hash_set`/`phmap::flat_hash_map`，
+// 并为 `FlatMap` 维护 `rehashEpoch_` 供 `BlockLightPropagator` 的 L1 段指针缓存 O(1) 失效。
+template <class Key, class Hash = std::hash<Key>>
+using FlatSet = phmap::flat_hash_set<Key, Hash>;
 
-template <class Key, class Value> struct FlatMapSlot {
-  Key first{};
-  Value second{};
-  static const Key &slotKey(const FlatMapSlot &s) { return s.first; }
-  static FlatMapSlot &valueRef(FlatMapSlot &s) { return s; }
-  static const FlatMapSlot &constValueRef(const FlatMapSlot &s) { return s; }
-};
-
-// 紧凑型开放寻址哈希表，采用类似 SwissTable 的 1 字节 H2 标签。
-// 存在原因：替代 `std::unordered_map`/`std::unordered_set`，将探测局限在连续字节缓存行中并彻底消除每个节点一次堆分配与指针追踪，是热路径（区块/区块段/去重集合）降低延迟的关键容器；同时通过 `rehashEpoch_` 让外部 L1 指针缓存能 O(1) 感知重哈希。
-template <class Slot, class Key, class Hash> class FlatTable {
-  static constexpr std::uint8_t kEmpty = 0;
-  static constexpr std::uint8_t kTombstone = 1;
-  static constexpr std::size_t kNpos = static_cast<std::size_t>(-1);
-
-  // 取哈希高 7 位并置位最高位（`>= 0x80`）作为占用槽位的 H2 指纹标签，从而与 `kEmpty(0)`/`kTombstone(1)` 区分。
-  static std::uint8_t tagOf(std::size_t hash) {
-    return static_cast<std::uint8_t>(0x80u | ((hash >> 57) & 0x7Fu));
-  }
-
-  template <bool IsConst> class Iter {
-  public:
-    using TablePtr = std::conditional_t<IsConst, const FlatTable *, FlatTable *>;
-    using value_type =
-        std::conditional_t<IsConst,
-                           const decltype(Slot::constValueRef(
-                               std::declval<const Slot &>())),
-                           decltype(Slot::valueRef(std::declval<Slot &>()))>;
-    using difference_type = std::ptrdiff_t;
-    using pointer = std::remove_reference_t<value_type> *;
-    using reference = value_type &;
-    using iterator_category = std::forward_iterator_tag;
-
-    Iter() = default;
-    Iter(TablePtr table, std::size_t idx) : table_(table), idx_(idx) {
-      skipEmpty();
-    }
-    template <bool OtherConst, class = std::enable_if_t<IsConst && !OtherConst>>
-    Iter(const Iter<OtherConst> &other)
-        : table_(other.table_), idx_(other.idx_) {}
-
-    reference operator*() const {
-      if constexpr (IsConst)
-        return Slot::constValueRef(table_->slots_[idx_]);
-      else
-        return Slot::valueRef(table_->slots_[idx_]);
-    }
-    pointer operator->() const { return &(**this); }
-    Iter &operator++() {
-      ++idx_;
-      skipEmpty();
-      return *this;
-    }
-    Iter operator++(int) {
-      Iter copy = *this;
-      ++(*this);
-      return copy;
-    }
-    bool operator==(const Iter &other) const {
-      return table_ == other.table_ && idx_ == other.idx_;
-    }
-
-  private:
-    friend class FlatTable;
-    void skipEmpty() {
-      if (!table_)
-        return;
-      const std::size_t limit = table_->states_.size();
-      while (idx_ < limit && table_->states_[idx_] < 0x80u)
-        ++idx_;
-    }
-    TablePtr table_ = nullptr;
-    std::size_t idx_ = 0;
-  };
+template <class Key, class Value, class Hash = std::hash<Key>>
+class FlatMap : public phmap::flat_hash_map<Key, Value, Hash> {
+  using Base = phmap::flat_hash_map<Key, Value, Hash>;
 
 public:
-  using iterator = Iter<false>;
-  using const_iterator = Iter<true>;
+  using Base::Base;
 
-  bool empty() const { return size_ == 0; }
-  std::size_t size() const { return size_; }
-  std::uint64_t rehashEpoch() const { return rehashEpoch_; }
+  std::uint64_t rehashEpoch() const noexcept { return rehashEpoch_; }
 
-  iterator begin() { return iterator(this, 0); }
-  iterator end() { return iterator(this, states_.size()); }
-  const_iterator begin() const { return const_iterator(this, 0); }
-  const_iterator end() const { return const_iterator(this, states_.size()); }
-
-  void reserve(std::size_t minElements) {
-    const std::size_t needed =
-        std::bit_ceil(std::max<std::size_t>((minElements * 10) / 7 + 2, 16));
-    if (needed > states_.size())
-      rehash(needed);
+  void reserve(std::size_t n) {
+    const std::size_t before = this->bucket_count();
+    Base::reserve(n);
+    if (this->bucket_count() != before || erasedSinceRehash_) {
+      ++rehashEpoch_;
+      erasedSinceRehash_ = false;
+    }
   }
 
   void clear() {
-    if (size_ > 0) {
-      if constexpr (!std::is_trivially_destructible_v<Slot>) {
-        for (std::size_t i = 0; i < states_.size(); ++i) {
-          if (states_[i] >= 0x80u)
-            slots_[i] = Slot{};
-        }
-      }
-    }
-    if (!states_.empty())
-      std::memset(states_.data(), kEmpty, states_.size());
-    size_ = 0;
-    tombstones_ = 0;
+    Base::clear();
+    ++rehashEpoch_;
+    erasedSinceRehash_ = false;
   }
-
-  iterator find(const Key &key) {
-    const std::size_t idx = findIndex(key);
-    return idx == kNpos ? end() : iterator(this, idx);
-  }
-  const_iterator find(const Key &key) const {
-    const std::size_t idx = findIndex(key);
-    return idx == kNpos ? end() : const_iterator(this, idx);
-  }
-  bool contains(const Key &key) const { return findIndex(key) != kNpos; }
 
   std::size_t erase(const Key &key) {
-    const std::size_t idx = findIndex(key);
-    if (idx == kNpos)
-      return 0;
-    eraseIndex(idx);
-    return 1;
-  }
-  iterator erase(iterator pos) {
-    if (pos == end())
-      return end();
-    const std::size_t idx = pos.idx_;
-    eraseIndex(idx);
-    return iterator(this, idx + 1);
+    const std::size_t n = Base::erase(key);
+    if (n > 0)
+      erasedSinceRehash_ = true;
+    return n;
   }
 
-protected:
-  std::pair<std::size_t, bool> prepareInsert(const Key &key) {
-    if (states_.empty())
-      rehash(16);
-    else if ((size_ + tombstones_ + 1) * 10 >= states_.size() * 7)
-      rehash(size_ * 2 < states_.size() ? states_.size() : states_.size() * 2);
-
-    const std::size_t mask = states_.size() - 1;
-    const std::size_t h = Hash{}(key);
-    const std::uint8_t tag = tagOf(h);
-    std::size_t firstTombstone = kNpos;
-    for (std::size_t idx = h & mask;; idx = (idx + 1) & mask) {
-      const std::uint8_t st = states_[idx];
-      if (st == kEmpty) {
-        const std::size_t target =
-            firstTombstone != kNpos ? firstTombstone : idx;
-        if (states_[target] == kTombstone)
-          --tombstones_;
-        states_[target] = tag;
-        ++size_;
-        return {target, true};
-      }
-      if (st == kTombstone) {
-        if (firstTombstone == kNpos)
-          firstTombstone = idx;
-      } else if (st == tag && Slot::slotKey(slots_[idx]) == key) {
-        return {idx, false};
-      }
-    }
+  typename Base::iterator erase(typename Base::iterator pos) {
+    erasedSinceRehash_ = true;
+    return Base::erase(pos);
   }
 
-  Slot &slotAt(std::size_t idx) { return slots_[idx]; }
-  const Slot &slotAt(std::size_t idx) const { return slots_[idx]; }
-  std::size_t findIndex(const Key &key) const {
-    if (size_ == 0)
-      return kNpos;
-    const std::size_t mask = states_.size() - 1;
-    const std::size_t h = Hash{}(key);
-    const std::uint8_t tag = tagOf(h);
-    for (std::size_t idx = h & mask;; idx = (idx + 1) & mask) {
-      const std::uint8_t st = states_[idx];
-      if (st == kEmpty)
-        return kNpos;
-      if (st == tag && Slot::slotKey(slots_[idx]) == key)
-        return idx;
-    }
+  typename Base::iterator erase(typename Base::const_iterator pos) {
+    erasedSinceRehash_ = true;
+    return Base::erase(pos);
   }
-
-private:
-  void eraseIndex(std::size_t idx) {
-    states_[idx] = kTombstone;
-    if constexpr (!std::is_trivially_destructible_v<Slot>)
-      slots_[idx] = Slot{};
-    --size_;
-    ++tombstones_;
-  }
-
-  void rehash(std::size_t newCapacity) {
-    std::vector<std::uint8_t> newStates(newCapacity, kEmpty);
-    std::vector<Slot> newSlots(newCapacity);
-    const std::size_t mask = newCapacity - 1;
-    for (std::size_t i = 0; i < states_.size(); ++i) {
-      if (states_[i] < 0x80u)
-        continue;
-      const std::size_t h = Hash{}(Slot::slotKey(slots_[i]));
-      const std::uint8_t tag = tagOf(h);
-      std::size_t dst = h & mask;
-      while (newStates[dst] != kEmpty)
-        dst = (dst + 1) & mask;
-      newStates[dst] = tag;
-      newSlots[dst] = std::move(slots_[i]);
-    }
-    states_ = std::move(newStates);
-    slots_ = std::move(newSlots);
-    tombstones_ = 0;
-    ++rehashEpoch_;
-  }
-
-  std::vector<std::uint8_t> states_;
-  std::vector<Slot> slots_;
-  std::size_t size_ = 0;
-  std::size_t tombstones_ = 0;
-  std::uint64_t rehashEpoch_ = 1;
-};
-
-template <class Key, class Hash = std::hash<Key>>
-class FlatSet : public FlatTable<FlatSetSlot<Key>, Key, Hash> {
-  using Base = FlatTable<FlatSetSlot<Key>, Key, Hash>;
-
-public:
-  using iterator = typename Base::iterator;
-  using const_iterator = typename Base::const_iterator;
-
-  std::pair<iterator, bool> insert(const Key &key) {
-    auto [idx, inserted] = Base::prepareInsert(key);
-    if (inserted)
-      Base::slotAt(idx).key = key;
-    return {iterator(this, idx), inserted};
-  }
-};
-
-template <class Key, class Value, class Hash = std::hash<Key>>
-class FlatMap : public FlatTable<FlatMapSlot<Key, Value>, Key, Hash> {
-  using Base = FlatTable<FlatMapSlot<Key, Value>, Key, Hash>;
-  using Slot = FlatMapSlot<Key, Value>;
-
-public:
-  using iterator = typename Base::iterator;
-  using const_iterator = typename Base::const_iterator;
 
   template <class... Args>
-  std::pair<iterator, bool> try_emplace(const Key &key, Args &&...args) {
-    auto [idx, inserted] = Base::prepareInsert(key);
-    if (inserted) {
-      Slot &slot = Base::slotAt(idx);
-      slot.first = key;
-      slot.second = Value(std::forward<Args>(args)...);
+  std::pair<typename Base::iterator, bool> try_emplace(const Key &key,
+                                                       Args &&...args) {
+    const std::size_t before = this->bucket_count();
+    auto res = Base::try_emplace(key, std::forward<Args>(args)...);
+    if (this->bucket_count() != before || (erasedSinceRehash_ && res.second)) {
+      ++rehashEpoch_;
+      erasedSinceRehash_ = false;
     }
-    return {iterator(this, idx), inserted};
+    return res;
   }
 
-  std::pair<iterator, bool> emplace(const Key &key, Value value) {
-    auto [idx, inserted] = Base::prepareInsert(key);
-    if (inserted) {
-      Slot &slot = Base::slotAt(idx);
-      slot.first = key;
-      slot.second = std::move(value);
+  template <class... Args>
+  std::pair<typename Base::iterator, bool> emplace(Args &&...args) {
+    const std::size_t before = this->bucket_count();
+    auto res = Base::emplace(std::forward<Args>(args)...);
+    if (this->bucket_count() != before || (erasedSinceRehash_ && res.second)) {
+      ++rehashEpoch_;
+      erasedSinceRehash_ = false;
     }
-    return {iterator(this, idx), inserted};
+    return res;
   }
 
   Value &operator[](const Key &key) {
-    auto [idx, inserted] = Base::prepareInsert(key);
-    Slot &slot = Base::slotAt(idx);
-    if (inserted)
-      slot.first = key;
-    return slot.second;
+    const std::size_t before = this->bucket_count();
+    const std::size_t oldSize = this->size();
+    Value &ref = Base::operator[](key);
+    if (this->bucket_count() != before ||
+        (erasedSinceRehash_ && this->size() != oldSize)) {
+      ++rehashEpoch_;
+      erasedSinceRehash_ = false;
+    }
+    return ref;
   }
 
-  const Value &at(const Key &key) const {
-    const auto it = this->find(key);
-    if (it == this->end())
-      throw std::out_of_range("FlatMap::at missing key");
-    return it->second;
-  }
-
-  Value &at(const Key &key) {
-    const auto it = this->find(key);
-    if (it == this->end())
-      throw std::out_of_range("FlatMap::at missing key");
-    return it->second;
-  }
+private:
+  std::uint64_t rehashEpoch_ = 1;
+  bool erasedSinceRehash_ = false;
 };
 
 inline bool validLightValue(std::uint8_t value) { return value <= 15; }
@@ -399,9 +188,20 @@ inline int lightOpacity(const BlockLightProperties &properties) {
 
 // 返回空气/虚空等无阻挡方块的默认光学属性常量。
 const BlockLightProperties &emptyLightProperties();
-bool hasLightFaceRect(const BlockLightProperties &properties, int direction);
-bool faceShapesOcclude(const BlockLightProperties &from,
-                       const BlockLightProperties &to, int direction);
+inline bool hasLightFaceRect(const BlockLightProperties &properties,
+                             int direction) noexcept {
+  const std::uint8_t id =
+      properties.occlusionShapeId < detail::kLightOcclusionShapeTableSize
+          ? properties.occlusionShapeId
+          : 0;
+  return (detail::kLightFaceRectMask[id] & (1u << direction)) != 0;
+}
+inline bool faceShapesOcclude(const BlockLightProperties &from,
+                              const BlockLightProperties &to,
+                              int direction) noexcept {
+  return lightFaceShapesOcclude(from, to,
+                                static_cast<LightDirection>(direction));
+}
 
 // 世界空间方块坐标。
 struct LightPos {
@@ -525,12 +325,12 @@ struct PendingChunk {
   // 首次计算请求（`LightService::requestChunkCompute`）：几何已注册、空壳已存在，
   // 本批对其实施一次完整播种（seedChunk + seedIncoming）并置为需要发布。
   bool compute = false;
-  // 低内存模式：把“自有几何镜像”切换成“直读 World 几何”。切换时 World 区块的
-  // 方块内容与镜像完全一致，因此不改光照值、不推进代次、不触发重算，只释放镜像。
-  bool adoptDirectGeometry = false;
+  // 几何直读源重定向（LightService::rebindChunkGeometry）：保留已算好的光照层，
+  // 只把 worker 侧的直读句柄切到 World/ChunkMap 直读，不重算、不发布。
+  bool rebind = false;
   int chunkX = 0;
   int chunkZ = 0;
-  std::unordered_map<std::uint32_t, OwnedCell> ownedCells;
+  phmap::flat_hash_map<std::uint32_t, OwnedCell> ownedCells;
 };
 
 // 写时复制（COW）辅助：若快照已被赋予非 0 发布版本号（可能已入队或被主线程持有），则克隆一份新头部供当前批次修改并清零 `revision`。
@@ -566,10 +366,13 @@ struct PreparedBatch {
   FlatSet<std::uint64_t, UInt64Hash> replaced;
   FlatSet<std::uint64_t, UInt64Hash> loaded;
   FlatSet<std::uint64_t, UInt64Hash> persistedLoaded;
+  FlatSet<std::uint64_t, UInt64Hash> precomputedBlockLoaded;
+  FlatSet<std::uint64_t, UInt64Hash> precomputedSkyLoaded;
   // 只注册了几何、停在“未计算”的区块（`Completion::Deferred`）。
   FlatSet<std::uint64_t, UInt64Hash> registered;
   // 本批首次计算的区块（“未计算” → “完整”）。
   FlatSet<std::uint64_t, UInt64Hash> computed;
+  FlatSet<std::uint64_t, UInt64Hash> skyOnlyCompute;
   FlatSet<std::uint64_t, UInt64Hash> affected;
   std::vector<LightPos> changedPositions;
   std::uint64_t maxGeneration = 0;
@@ -775,7 +578,7 @@ struct LightEngineHost {
       LightLayer layer, std::uint64_t key) const;
 
 private:
-  mutable std::array<DirectSectionCacheEntry, 64> directSectionCache_{};
+  mutable std::array<DirectSectionCacheEntry, 512> directSectionCache_{};
 };
 
 } // namespace redstone::light_internal

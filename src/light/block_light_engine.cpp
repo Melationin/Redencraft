@@ -1,6 +1,7 @@
 #include "light/block_light_engine.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <utility>
 
 namespace redstone::light_internal {
@@ -47,7 +48,8 @@ BlockLightPropagator::BlockLightPropagator(
       currentDecreaseQueue(scratchBuffers.currentDecreaseQueue),
       currentIncreaseQueue(scratchBuffers.currentIncreaseQueue),
       lightValues(scratchBuffers.lightValues),
-      dirtySections(scratchBuffers.dirtySections) {
+      dirtySectionMasks(scratchBuffers.dirtySectionMasks),
+      dirtySectionsOverflow(scratchBuffers.dirtySectionsOverflow) {
   scratchBuffers.clear();
 }
 
@@ -66,45 +68,120 @@ void BlockLightPropagator::seedChunk(std::uint64_t key) {
     const LightSectionSnapshot *data = chunk->section(sectionY);
     if (!data)
       continue;
+    const auto &blockLayer =
+        data->layers[static_cast<std::size_t>(LightLayer::Block)];
+    const bool hasStoredLight =
+        !blockLayer.isMissing() &&
+        !(blockLayer.isUniform() && blockLayer.uniformValue() == 0);
     const bool inBlockRange =
         sectionY >= chunk->minBlockSectionY &&
         sectionY < chunk->minBlockSectionY + chunk->blockSectionCount;
+    if (!inBlockRange) {
+      if (!hasStoredLight)
+        continue;
+      const auto &empty = emptyLightProperties();
+      for (int index = 0; index < kLightVolume; ++index) {
+        const int x = index & 15;
+        const int z = (index >> 4) & 15;
+        const int y = (index >> 8) & 15;
+        const std::uint8_t stored = data->light(LightLayer::Block, x, y, z);
+        if (stored > 0)
+          enqueueIncrease({chunk->chunkX * 16 + x, sectionY * 16 + y,
+                           chunk->chunkZ * 16 + z},
+                          stored, 63, emptyShape(empty), false);
+      }
+      continue;
+    }
+
     const std::optional<LightSectionView> direct =
-        inBlockRange ? owner.directSectionView(key, sectionY) : std::nullopt;
-    const BlockLightProperties *singleDirectProps =
-        (direct && direct->bits == 0)
-            ? &owner.propertiesForState(direct->single)
-            : nullptr;
+        owner.directSectionView(key, sectionY);
+    if (!direct) {
+      incomplete = true;
+      if (!hasStoredLight)
+        continue;
+      for (int index = 0; index < kLightVolume; ++index) {
+        const int x = index & 15;
+        const int z = (index >> 4) & 15;
+        const int y = (index >> 8) & 15;
+        const std::uint8_t stored = data->light(LightLayer::Block, x, y, z);
+        if (stored > 0)
+          enqueueIncrease({chunk->chunkX * 16 + x, sectionY * 16 + y,
+                           chunk->chunkZ * 16 + z},
+                          stored, 63, true, false);
+      }
+      continue;
+    }
+
+    if (direct->bits == 0) {
+      const BlockLightProperties &props = owner.propertiesForState(direct->single);
+      if (!props.supported)
+        incomplete = true;
+      const bool emits = props.supported && props.emission > 0;
+      if (!emits && !hasStoredLight)
+        continue;
+      const bool isEmptyShape = emptyShape(props);
+      for (int index = 0; index < kLightVolume; ++index) {
+        const int x = index & 15;
+        const int z = (index >> 4) & 15;
+        const int y = (index >> 8) & 15;
+        const LightPos position{chunk->chunkX * 16 + x, sectionY * 16 + y,
+                                chunk->chunkZ * 16 + z};
+        if (emits)
+          enqueueIncrease(position, props.emission, 63, isEmptyShape, true);
+        if (hasStoredLight) {
+          const std::uint8_t stored = data->light(LightLayer::Block, x, y, z);
+          if (stored > 0)
+            enqueueIncrease(position, stored, 63, isEmptyShape, false);
+        }
+      }
+      continue;
+    }
+
+    if (direct->empty && !hasStoredLight)
+      continue;
+
+    bool anyEmission = false;
+    bool anyUnsupported = false;
+    for (BlockState::Id sid : direct->palette) {
+      const auto &props = owner.propertiesForState(sid);
+      if (!props.supported)
+        anyUnsupported = true;
+      else if (props.emission > 0)
+        anyEmission = true;
+      if (anyEmission && anyUnsupported)
+        break;
+    }
+    if (!anyEmission && !anyUnsupported && !hasStoredLight)
+      continue;
+
     for (int index = 0; index < kLightVolume; ++index) {
       const int x = index & 15;
       const int z = (index >> 4) & 15;
       const int y = (index >> 8) & 15;
-      const BlockLightProperties &properties =
-          inBlockRange
-              ? (singleDirectProps
-                     ? *singleDirectProps
-                     : (direct ? owner.propertiesForState(direct->atomicStateAt(
-                                     static_cast<std::size_t>(index)))
-                               : unsupportedLightProperties()))
-              : emptyLightProperties();
-      if (inBlockRange && !properties.supported)
+      const BlockLightProperties &properties = owner.propertiesForState(
+          direct->atomicStateAt(static_cast<std::size_t>(index)));
+      if (!properties.supported)
         incomplete = true;
       const LightPos position{chunk->chunkX * 16 + x, sectionY * 16 + y,
                               chunk->chunkZ * 16 + z};
-      if (inBlockRange && properties.supported && properties.emission > 0)
+      if (properties.supported && properties.emission > 0)
         enqueueIncrease(position, properties.emission, 63,
                         emptyShape(properties), true);
-      const std::uint8_t stored = data->light(LightLayer::Block, x, y, z);
-      if (stored > 0)
-        enqueueIncrease(position, stored, 63, emptyShape(properties), false);
+      if (hasStoredLight) {
+        const std::uint8_t stored = data->light(LightLayer::Block, x, y, z);
+        if (stored > 0)
+          enqueueIncrease(position, stored, 63, emptyShape(properties), false);
+      }
     }
   }
 }
 
 void BlockLightPropagator::seedIncoming(std::uint64_t key,
                                         std::uint8_t directionMask) {
-  const int chunkX = static_cast<int>(key >> 32);
+  const int chunkX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
   const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+  const int minLightY = owner.minBlockSectionY - 1;
+  const int maxLightY = owner.minBlockSectionY + owner.blockSectionCount;
   for (int direction = 2; direction < 6; ++direction) {
     if ((directionMask & (1u << direction)) == 0)
       continue;
@@ -114,15 +191,58 @@ void BlockLightPropagator::seedIncoming(std::uint64_t key,
     const LightChunkSnapshot *neighbor = stateFor(neighborKey);
     if (!neighbor)
       continue;
-    forEachFaceCell(owner, neighbor, direction ^ 1, [&](LightPos position) {
-      const int level = storedLevel(position);
-      if (level > 1) {
-        const auto &properties = stateAt(position);
-        enqueueIncrease(position, static_cast<std::uint8_t>(level),
-                        static_cast<std::uint8_t>(1u << (direction ^ 1)),
-                        emptyShape(properties), false);
+    const int nChunkX = neighbor->chunkX;
+    const int nChunkZ = neighbor->chunkZ;
+    const int nMinX = nChunkX * 16;
+    const int nMinZ = nChunkZ * 16;
+    const int faceDir = direction ^ 1;
+    const std::uint8_t outMask = static_cast<std::uint8_t>(1u << faceDir);
+    for (int sectionY = minLightY; sectionY <= maxLightY; ++sectionY) {
+      const LightSectionSnapshot *sec = neighbor->section(sectionY);
+      if (!sec)
+        continue;
+      const auto lvIt =
+          lightValues.find(SectionPos3{nChunkX, sectionY, nChunkZ});
+      const LightValues *lv =
+          (lvIt != lightValues.end()) ? &lvIt->second : nullptr;
+      const auto &layer =
+          sec->layers[static_cast<std::size_t>(LightLayer::Block)];
+      if (!lv && (layer.isMissing() ||
+                  (layer.isUniform() && layer.uniformValue() <= 1)))
+        continue;
+      const int baseY = sectionY * 16;
+      if (faceDir == 2 || faceDir == 3) {
+        const int localZ = (faceDir == 2) ? 0 : 15;
+        const int worldZ = nMinZ + localZ;
+        for (int y = 0; y < 16; ++y) {
+          for (int x = 0; x < 16; ++x) {
+            const int level =
+                lv ? (*lv)[lightIndex(x, y, localZ)]
+                   : layer.get(x, y, localZ);
+            if (level > 1) {
+              const LightPos pos{nMinX + x, baseY + y, worldZ};
+              enqueueIncrease(pos, static_cast<std::uint8_t>(level), outMask,
+                              emptyShape(stateAt(pos)), false);
+            }
+          }
+        }
+      } else {
+        const int localX = (faceDir == 4) ? 0 : 15;
+        const int worldX = nMinX + localX;
+        for (int y = 0; y < 16; ++y) {
+          for (int z = 0; z < 16; ++z) {
+            const int level =
+                lv ? (*lv)[lightIndex(localX, y, z)]
+                   : layer.get(localX, y, z);
+            if (level > 1) {
+              const LightPos pos{worldX, baseY + y, nMinZ + z};
+              enqueueIncrease(pos, static_cast<std::uint8_t>(level), outMask,
+                              emptyShape(stateAt(pos)), false);
+            }
+          }
+        }
       }
-    });
+    }
   }
 }
 
@@ -205,17 +325,16 @@ void BlockLightPropagator::run() {
 }
 
 void BlockLightPropagator::commitLayers() {
-  for (const SectionPos3 &position : dirtySections) {
-    const std::uint64_t key = chunkKey(position.x, position.z);
+  const auto commitOne = [&](const SectionPos3 &position, std::uint64_t key) {
     WorkingChunk *chunk = ensureWorking(key);
     if (!chunk)
-      continue;
+      return;
     const LightSectionSnapshot *current = chunk->snapshot->section(position.y);
     if (!current)
-      continue;
+      return;
     const auto found = lightValues.find(position);
     if (found == lightValues.end())
-      continue;
+      return;
     const LightValues &values = found->second;
     const auto uniform = values.uniformValue();
     const LightLayerRef payload =
@@ -230,7 +349,20 @@ void BlockLightPropagator::commitLayers() {
     chunk->dirtySections.push_back(position.y);
     chunk->dirty = true;
     chunk->propagated = true;
+  };
+  const int minLightY = owner.minBlockSectionY - 1;
+  for (const auto &[key, mask] : dirtySectionMasks) {
+    const int chunkX = static_cast<int>(static_cast<std::int32_t>(key >> 32));
+    const int chunkZ = static_cast<int>(static_cast<std::uint32_t>(key));
+    std::uint64_t m = mask;
+    while (m != 0) {
+      const int idx = std::countr_zero(m);
+      m &= m - 1;
+      commitOne({chunkX, minLightY + idx, chunkZ}, key);
+    }
   }
+  for (const SectionPos3 &position : dirtySectionsOverflow)
+    commitOne(position, chunkKey(position.x, position.z));
 }
 
 const LightChunkSnapshot *
@@ -306,6 +438,16 @@ BlockLightPropagator::lookupSection(LightPos position) const {
   return entry;
 }
 
+const BlockLightPropagator::SectionCacheEntry &
+BlockLightPropagator::lookupNeighborSection(
+    const SectionCacheEntry &fromEntry, SectionPos3 fromSec,
+    LightPos to) const {
+  if ((to.x >> 4) == fromSec.x && (to.y >> 4) == fromSec.y &&
+      (to.z >> 4) == fromSec.z)
+    return fromEntry;
+  return lookupSection(to);
+}
+
 const LightSectionSnapshot *
 BlockLightPropagator::sectionAt(LightPos position) const {
   return lookupSection(position).snapshot;
@@ -317,8 +459,8 @@ BlockLightPropagator::stateAt(LightPos position) const {
                                  incomplete);
 }
 
-int BlockLightPropagator::storedLevel(LightPos position) const {
-  const SectionCacheEntry &entry = lookupSection(position);
+int BlockLightPropagator::storedLevelInEntry(const SectionCacheEntry &entry,
+                                             LightPos position) const {
   if (!entry.snapshot)
     return 0;
   if (entry.values)
@@ -327,8 +469,30 @@ int BlockLightPropagator::storedLevel(LightPos position) const {
                                position.y & 15, position.z & 15);
 }
 
-bool BlockLightPropagator::setStoredLevel(LightPos position, int level) {
-  const SectionCacheEntry &entry = lookupSection(position);
+int BlockLightPropagator::storedLevel(LightPos position) const {
+  return storedLevelInEntry(lookupSection(position), position);
+}
+
+void BlockLightPropagator::markSectionDirty(SectionPos3 section) {
+  const int idx = section.y - (owner.minBlockSectionY - 1);
+  if (idx >= 0 && idx < 64) {
+    const std::uint64_t cKey = chunkKey(section.x, section.z);
+    if (lastDirtyEpoch_ != dirtySectionMasks.rehashEpoch() ||
+        lastDirtyKey_ != cKey || !lastDirtyMask_) {
+      lastDirtyMask_ = &dirtySectionMasks[cKey];
+      lastDirtyKey_ = cKey;
+      lastDirtyEpoch_ = dirtySectionMasks.rehashEpoch();
+    }
+    *lastDirtyMask_ |= (std::uint64_t{1} << idx);
+  } else {
+    dirtySectionsOverflow.insert(section);
+  }
+}
+
+bool BlockLightPropagator::setStoredLevelInEntry(const SectionCacheEntry &entry,
+                                                 LightPos position, int level,
+                                                 bool &insertedSection) {
+  insertedSection = false;
   if (!entry.snapshot)
     return false;
   const SectionPos3 key{position.x >> 4, position.y >> 4, position.z >> 4};
@@ -344,13 +508,20 @@ bool BlockLightPropagator::setStoredLevel(LightPos position, int level) {
     slot.epoch = cacheEpoch();
     slot.snapshot = entry.snapshot;
     slot.values = values;
+    insertedSection = true;
   }
   const auto index = lightIndex(position.x, position.y, position.z);
   if ((*values)[index] == level)
     return false;
   (*values)[index] = static_cast<std::uint8_t>(level);
-  dirtySections.insert(key);
+  markSectionDirty(key);
   return true;
+}
+
+bool BlockLightPropagator::setStoredLevel(LightPos position, int level) {
+  bool insertedSection = false;
+  return setStoredLevelInEntry(lookupSection(position), position, level,
+                               insertedSection);
 }
 
 void BlockLightPropagator::checkNode(LightPos position) {
@@ -371,11 +542,17 @@ void BlockLightPropagator::checkNode(LightPos position) {
 }
 
 void BlockLightPropagator::propagateIncrease(const IncreaseTask &task) {
-  int fromLevel = storedLevel(task.position);
+  const SectionPos3 fromSec = sectionOf(task.position);
+  const SectionCacheEntry *fromEntry = &lookupSection(task.position);
+  int fromLevel = storedLevelInEntry(*fromEntry, task.position);
   const int targetLevel = task.level;
   if (task.fromEmission) {
     if (fromLevel < targetLevel) {
-      setStoredLevel(task.position, targetLevel);
+      bool insertedSection = false;
+      setStoredLevelInEntry(*fromEntry, task.position, targetLevel,
+                            insertedSection);
+      if (insertedSection)
+        fromEntry = &lookupSection(task.position);
       fromLevel = targetLevel;
     }
   }
@@ -390,10 +567,10 @@ void BlockLightPropagator::propagateIncrease(const IncreaseTask &task) {
     if ((task.directions & (1u << direction)) == 0)
       continue;
     const LightPos to = offset(task.position, direction);
-    const LightSectionSnapshot *toSection = sectionAt(to);
-    if (!toSection) {
-      if ((to.x >> 4) != (task.position.x >> 4) ||
-          (to.z >> 4) != (task.position.z >> 4)) {
+    const SectionCacheEntry &toEntry =
+        lookupNeighborSection(*fromEntry, fromSec, to);
+    if (!toEntry.snapshot) {
+      if ((to.x >> 4) != fromSec.x || (to.z >> 4) != fromSec.z) {
         // 目标区块还没算过（“未计算”）：把它记进收件箱，等它计算时再应用，
         // 而不是丢掉这次传播后靠 seedIncoming 重新推导。
         const auto &toState = stateAt(to);
@@ -406,7 +583,7 @@ void BlockLightPropagator::propagateIncrease(const IncreaseTask &task) {
       }
       continue;
     }
-    const int toLevel = storedLevel(to);
+    const int toLevel = storedLevelInEntry(toEntry, to);
     if (fromLevel - 1 <= toLevel)
       continue;
     const auto &toState = stateAt(to);
@@ -415,7 +592,10 @@ void BlockLightPropagator::propagateIncrease(const IncreaseTask &task) {
       continue;
     if (faceShapesOcclude(fromQueued, toState, direction))
       continue;
-    setStoredLevel(to, newLevel);
+    bool insertedSection = false;
+    setStoredLevelInEntry(toEntry, to, newLevel, insertedSection);
+    if (insertedSection)
+      fromEntry = &lookupSection(task.position);
     if (newLevel > 1) {
       enqueueIncrease(to, static_cast<std::uint8_t>(newLevel),
                       static_cast<std::uint8_t>(63u & ~(1u << (direction ^ 1))),
@@ -425,19 +605,26 @@ void BlockLightPropagator::propagateIncrease(const IncreaseTask &task) {
 }
 
 void BlockLightPropagator::propagateDecrease(const DecreaseTask &task) {
+  const SectionPos3 fromSec = sectionOf(task.position);
+  const SectionCacheEntry *fromEntry = &lookupSection(task.position);
   for (int direction = 0; direction < 6; ++direction) {
     if ((task.directions & (1u << direction)) == 0)
       continue;
     const LightPos to = offset(task.position, direction);
-    if (!sectionAt(to))
+    const SectionCacheEntry &toEntry =
+        lookupNeighborSection(*fromEntry, fromSec, to);
+    if (!toEntry.snapshot)
       continue;
-    const int toLevel = storedLevel(to);
+    const int toLevel = storedLevelInEntry(toEntry, to);
     if (toLevel == 0)
       continue;
     if (toLevel <= int(task.level) - 1) {
       const auto &toState = stateAt(to);
       const int emission = toState.supported ? toState.emission : 0;
-      setStoredLevel(to, 0);
+      bool insertedSection = false;
+      setStoredLevelInEntry(toEntry, to, 0, insertedSection);
+      if (insertedSection)
+        fromEntry = &lookupSection(task.position);
       if (emission < toLevel)
         enqueueDecrease(
             to, static_cast<std::uint8_t>(toLevel),

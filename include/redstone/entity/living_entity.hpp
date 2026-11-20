@@ -7,11 +7,11 @@
 
 #include "redstone/entity/attributes.hpp"
 #include "redstone/entity/mob_effects.hpp"
+#include "redstone/hash.hpp"
 
 #include <array>
 #include <cstdint>
 #include <optional>
-#include <unordered_map>
 
 namespace redstone {
 
@@ -118,7 +118,7 @@ public:
   bool removeAllEffects();
   bool hasEffect(MobEffectId id) const { return activeEffects_.contains(id); }
   const MobEffectInstance *getEffect(MobEffectId id) const;
-  const std::unordered_map<MobEffectId, MobEffectInstance> &
+  const phmap::flat_hash_map<MobEffectId, MobEffectInstance> &
   activeEffects() const noexcept {
     return activeEffects_;
   }
@@ -224,7 +224,7 @@ protected:
   void jumpInLiquid(bool isWater);
 
   AttributeMap attributes_;
-  std::unordered_map<MobEffectId, MobEffectInstance> activeEffects_;
+  phmap::flat_hash_map<MobEffectId, MobEffectInstance> activeEffects_;
   std::array<ItemStack, static_cast<std::size_t>(EquipmentSlot::Count)>
       equipment_{};
   std::optional<Pos> lastClimbablePos_;

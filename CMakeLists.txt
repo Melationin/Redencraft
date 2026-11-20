@@ -60,6 +60,7 @@ add_library(redstone_core
   src/fluid_flow.cpp
   src/light/optical.cpp
   src/light/chunk_input.cpp
+  src/light/initial_chunk_lighter.cpp
   src/light/snapshot.cpp
   src/light/common.cpp
   src/light/block_light_engine.cpp
@@ -75,6 +76,7 @@ add_library(redstone_core
   src/engine/types.cpp
   src/engine/level_ticks.cpp
   src/engine/chunk_storage.cpp
+  src/chunk_map.cpp
   src/engine/block_updates.cpp
   src/engine/random_tick_world.cpp
   src/engine/block_behaviours.cpp
@@ -143,7 +145,7 @@ set_source_files_properties(src/items.cpp PROPERTIES
   OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/redstone/items_decl.inc;${CMAKE_CURRENT_SOURCE_DIR}/src/items_registry.inc")
 set_source_files_properties(src/item_tags.cpp PROPERTIES
   OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/item_tags.inc")
-target_include_directories(redstone_core PUBLIC include PRIVATE src vendor)
+target_include_directories(redstone_core PUBLIC include vendor PRIVATE src)
 target_include_directories(redstone_core PUBLIC vendor/lz4)
 target_link_libraries(redstone_core PUBLIC ZLIB::ZLIB Threads::Threads)
 if(MSVC)
@@ -328,7 +330,7 @@ if(BUILD_TESTING)
       --faces "${CMAKE_CURRENT_SOURCE_DIR}/assets/light26_1/block_light_faces.tsv"
       --faces-source "${CMAKE_CURRENT_SOURCE_DIR}/src/light_occlusion.inc")
   endif()
-  foreach(name dimension poi portal engine periodic_cleanup entity entity_core entity_stage2 living_entity player_entity item piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap tickets region terrain_codec entity_codec chunk_lifecycle world_chunk_manager chunk_generation world_clock worldgen_g0 worldgen_g1_noise worldgen_g1_router worldgen_g2_biome worldgen_g2_terrain worldgen_carver worldgen_g3_structures worldgen_g3_features worldgen_scheduler redstone_components containers item_registry item_use entity_movement entity_simple entity_vehicle entity_projectile entity_living entity_nbt)
+  foreach(name dimension poi portal engine chunk_map periodic_cleanup entity entity_core entity_stage2 living_entity player_entity item piston storage litematic allocator shapes client_inventory command fluid_tick fluid_flow fluid_params fluid_block heightmap tickets region terrain_codec entity_codec chunk_lifecycle world_chunk_manager chunk_generation world_clock worldgen_g0 worldgen_g1_noise worldgen_g1_router worldgen_g2_biome worldgen_g2_terrain worldgen_carver worldgen_g3_structures worldgen_g3_features worldgen_scheduler redstone_components containers item_registry item_use entity_movement entity_simple entity_vehicle entity_projectile entity_living entity_nbt)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_tests.cpp")
       add_executable(${name}_tests tests/${name}_tests.cpp)
       target_link_libraries(${name}_tests PRIVATE redstone_core redstone_allocator)
